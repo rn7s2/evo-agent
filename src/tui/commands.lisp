@@ -316,8 +316,7 @@ keys: enter send · shift+enter/alt+enter/ctrl+j newline · esc interrupt ·
 (defun start-tui (agent &key resumed-p)
   "Run the interactive TUI until quit.  Returns an exit code."
   (let ((tui (make-tui :agent agent
-                       :stdin (sb-sys:make-fd-stream 0 :input t :buffering :none
-                                                       :element-type '(unsigned-byte 8)))))
+                       :stdin (evo.port:make-fd-input-stream 0))))
     (setf *tui* tui)
     (setf (agent-events-cb agent) (lambda (event) (push-event tui event)))
     (evo:on :todo-changed

@@ -67,15 +67,15 @@ fatal — a corrupted runtime is repaired by fixing/removing a source file."
             (warn "Replaying :load of ~a failed: ~a" path e)))))))
 
 (defparameter *kernel-packages*
-  '(:evo.util :evo.journal :evo.provider :evo.kernel :evo.cli :evo
+  '(:evo.port :evo.util :evo.journal :evo.provider :evo.kernel :evo.cli :evo
     :evo.todo :evo.tui))
 
 (defun lock-kernel-packages ()
   "Package locks: permissive but not suicidal — touching the kernel
-requires an explicit, auditable sb-ext:unlock-package."
+requires an explicit, auditable evo.port:unlock-package."
   (dolist (name *kernel-packages*)
     (let ((pkg (find-package name)))
-      (when pkg (sb-ext:lock-package pkg)))))
+      (when pkg (evo.port:lock-package pkg)))))
 
 ;;; The public API (EVO package).
 

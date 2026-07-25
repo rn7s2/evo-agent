@@ -5,6 +5,17 @@
 ;;;; agent-written code lives there.  EVO is the public extension API surface —
 ;;;; both core and user extensions build on it, nothing bypasses it.
 
+;; Implementation portability layer: the only package that may touch
+;; sb-* / ext: / si: symbols.  See src/port.lisp.
+(defpackage :evo.port
+  (:use :cl)
+  (:export #:exit-lisp #:argv #:runtime-pathname #:environ #:setenv
+           #:launch-child #:process-alive-p #:process-kill #:process-wait
+           #:lock-package #:unlock-package #:add-package-local-nickname
+           #:make-fd-output-stream #:make-fd-input-stream
+           #:install-signal-handler #:+sigwinch+
+           #:tty-p #:disable-debugger #:ensure-in-image-compiler))
+
 (defpackage :evo.util
   (:use :cl)
   (:export #:getenv #:iso8601-now #:gen-id #:pget #:pput #:plist-merge
@@ -79,4 +90,4 @@
 
 (defpackage :evo.cli
   (:use :cl :evo.util :evo.journal :evo.provider :evo.kernel)
-  (:export #:main #:setup-agent))
+  (:export #:main #:setup-agent #:toplevel))

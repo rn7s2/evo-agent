@@ -38,7 +38,7 @@ design; this README covers what is implemented and how to run it.
   crash-restart-resume, and boot-failure quarantine (`--no-userspace`).
 - **Self-extension** — `load_extension` tool: the agent writes Lisp
   into `EVO.USER`, loads it into its own runtime, journaled as `:load` and
-  replayed on resume; SBCL package locks on the kernel; seed corpus:
+  replayed on resume; package locks on the kernel; seed corpus:
   [docs/](docs/) (extension API, journal format, self-extension guide) and
   example extensions — [plan-mode](extensions/plan-mode.lisp) (shipped
   active: `/plan` `/auto` via tool gating + hidden `:custom-message` +
@@ -58,7 +58,7 @@ quarantines repeated boot failures with `--no-userspace`. Exit codes:
 `--no-supervisor` (or `EVO_NO_SUPERVISOR=1`) runs the session in-process.
 
 ```sh
-make build                # requires SBCL + Quicklisp
+make build                # requires SBCL + Quicklisp (or: make build LISP=ecl)
 make install              # copies to /usr/local/bin/evo (PREFIX=…)
 make install-home         # seeds ~/.evo with docs + example extensions
 

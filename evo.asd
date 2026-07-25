@@ -10,6 +10,7 @@
   :components ((:module "src"
                 :serial t
                 :components ((:file "packages")
+                             (:file "port")
                              (:file "util")
                              (:file "journal")
                              (:file "model-table")

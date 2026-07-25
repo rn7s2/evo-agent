@@ -129,7 +129,7 @@ Settings: ~/.evo/settings.sexp and <cwd>/.evo/settings.sexp (project wins), e.g.
   ((text :initarg :text :reader usage-error-text))
   (:report (lambda (c s) (format s "~a" (usage-error-text c)))))
 
-(defun main (&optional (argv (rest sb-ext:*posix-argv*)))
+(defun main (&optional (argv (evo.port:argv)))
   "Exit codes are supervisor protocol: 0 done, 1 error (restart-eligible),
 2 goal blocked, 3 budget-limited, 64 usage error (never restart)."
   (let ((opts (handler-case (parse-args argv)
@@ -151,6 +151,13 @@ Settings: ~/.evo/settings.sexp and <cwd>/.evo/settings.sexp (project wins), e.g.
       (error (e)
         (format *error-output* "evo: ~a~%" e)
         1))))
+
+(defun toplevel ()
+  "Entry point of the built binary (SBCL image toplevel / ECL epilogue):
+debugger off, in-image compiler on, exit code from MAIN."
+  (evo.port:disable-debugger)
+  (evo.port:ensure-in-image-compiler)
+  (evo.port:exit-lisp (main)))
 
 (defun setup-agent (opts &key events-cb)
   "Shared session bring-up for every frontend.  Returns (values agent resumed-p)."
@@ -183,8 +190,7 @@ Settings: ~/.evo/settings.sexp and <cwd>/.evo/settings.sexp (project wins), e.g.
     (values agent resumed-p)))
 
 (defun tty-p ()
-  (and (plusp (sb-unix:unix-isatty 0))
-       (plusp (sb-unix:unix-isatty 1))))
+  (evo.port:tty-p))
 
 (defun run-cli (opts)
   (if (and (tty-p)

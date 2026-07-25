@@ -26,9 +26,10 @@
         (t 1)))
 
 (defun decode-utf8 (bytes)
-  (handler-case (sb-ext:octets-to-string (coerce bytes '(vector (unsigned-byte 8)))
-                                         :external-format :utf-8)
-    (error () (string #\Replacement_Character))))
+  (handler-case (flexi-streams:octets-to-string
+                 (coerce bytes '(vector (unsigned-byte 8)))
+                 :external-format :utf-8)
+    (error () (string (code-char #xFFFD)))))   ; U+FFFD replacement character
 
 (defparameter *paste-end* #(27 91 50 48 49 126)) ; ESC [ 2 0 1 ~
 

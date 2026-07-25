@@ -14,7 +14,7 @@
   (evo.journal:state-goal (fold-state (agent-journal agent))))
 
 (defparameter *default-token-budget* 2000000
-  "Runaway-cost brake when the user sets no budget."
+  "Runaway-cost brake when the user sets no budget.")
 
 (defun create-goal-entry (agent objective &key token-budget done-when)
   (append-entry (agent-journal agent)

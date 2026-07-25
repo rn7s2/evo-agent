@@ -1,19 +1,33 @@
-SBCL ?= sbcl
+LISP ?= sbcl
 EVO_HOME ?= $(HOME)/.evo
 PREFIX ?= /usr/local
-# Heap for the built binary — baked in via :save-runtime-options (D10).
+# Heap for the SBCL-built binary — baked in via :save-runtime-options (D10).
+# ECL's heap grows on demand; no build-time size there.
 HEAP_MB ?= 4096
+
+# Per-implementation "load a script non-interactively" invocations.  The
+# scripts themselves exit explicitly, so ECL only needs stdin closed to
+# guarantee no REPL is left behind on error.
+ifeq ($(LISP),ecl)
+RUN_SCRIPT = $(LISP) -q --load
+BUILD_SCRIPT = $(LISP) -q --load
+STDIN_GUARD = < /dev/null
+else
+RUN_SCRIPT = $(LISP) --non-interactive --load
+BUILD_SCRIPT = $(LISP) --dynamic-space-size $(HEAP_MB) --non-interactive --load
+STDIN_GUARD =
+endif
 
 .PHONY: build test integration tui-test clean install install-home
 
 build:
-	$(SBCL) --dynamic-space-size $(HEAP_MB) --non-interactive --load build.lisp
+	$(BUILD_SCRIPT) build.lisp $(STDIN_GUARD)
 
 install: build
 	install -m 755 build/evo $(PREFIX)/bin/evo
 
 test:
-	$(SBCL) --non-interactive --load tests/run-unit.lisp
+	$(RUN_SCRIPT) tests/run-unit.lisp $(STDIN_GUARD)
 
 integration: build
 	tests/integration.sh

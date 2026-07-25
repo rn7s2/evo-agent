@@ -8,7 +8,7 @@
 (in-package :evo.kernel)
 
 (eval-when (:compile-toplevel :load-toplevel :execute)
-  (sb-ext:add-package-local-nickname :jzon :com.inuoe.jzon :evo.kernel))
+  (evo.port:add-package-local-nickname :jzon :com.inuoe.jzon :evo.kernel))
 
 (defstruct tool
   name          ; string

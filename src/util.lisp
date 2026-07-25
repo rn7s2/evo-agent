@@ -4,7 +4,7 @@
 (in-package :evo.util)
 
 (defun getenv (name)
-  (sb-ext:posix-getenv name))
+  (uiop:getenv name))
 
 (defun iso8601-now ()
   "Current UTC time as an ISO-8601 string."

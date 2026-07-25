@@ -60,7 +60,7 @@ yourself, at a moment when you had no victory to declare.
 ## Debugging the live image
 
 - `describe`, `apropos`, `inspect` work on the running runtime — via a
-  quick `bash` + a fresh `sbcl`? No: you ARE the image. Write a tiny tool
+  quick `bash` + a fresh Lisp? No: you ARE the image. Write a tiny tool
   that calls them if you need programmatic introspection.
 - The condition system is your error feedback: tool errors carry the
   condition's report string. Read it; it usually names the exact problem.

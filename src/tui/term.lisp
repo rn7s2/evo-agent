@@ -1,10 +1,10 @@
 ;;;; term.lisp — terminal control for the tui core extension.
 ;;;;
 ;;;; Raw mode + size via /bin/stty (no curses, no FFI: variadic ioctl is not
-;;;; safely callable through sb-alien on arm64 Darwin, and stty is exercised
-;;;; only at startup/exit/resize).  Output is ANSI escapes on a dedicated
-;;;; fd-stream.  SIGWINCH sets a flag the main loop polls (mandatory live
-;;;; resize).
+;;;; safely callable through implementation FFIs on arm64 Darwin, and stty is
+;;;; exercised only at startup/exit/resize).  Output is ANSI escapes on a
+;;;; dedicated fd-stream.  SIGWINCH sets a flag the main loop polls
+;;;; (mandatory live resize).
 
 (in-package :evo.tui)
 
@@ -32,11 +32,8 @@
   (values *rows* *cols*))
 
 (defun install-sigwinch ()
-  (sb-sys:enable-interrupt
-   sb-unix:sigwinch
-   (lambda (signal info context)
-     (declare (ignore signal info context))
-     (setf *resized* t))))
+  (evo.port:install-signal-handler evo.port:+sigwinch+
+                                   (lambda () (setf *resized* t))))
 
 (defun wr (&rest strings)
   (dolist (s strings)
@@ -66,8 +63,7 @@
 (defun term-setup ()
   "Enter raw mode; enable bracketed paste, kitty key disambiguation and
 xterm modifyOtherKeys (Shift+Enter detection); returns t on a tty."
-  (setf *tty-out* (sb-sys:make-fd-stream 1 :output t :buffering :full
-                                           :external-format :utf-8))
+  (setf *tty-out* (evo.port:make-fd-output-stream 1))
   (setf *saved-stty* (stty "-g"))
   (stty "raw" "-echo")
   (refresh-size)

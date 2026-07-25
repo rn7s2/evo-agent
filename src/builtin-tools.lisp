@@ -61,26 +61,22 @@
     (unless (and (stringp command) (plusp (length command)))
       (error "command must be a non-empty string"))
     (unwind-protect
-         (let ((process (sb-ext:run-program
+         ;; The child inherits our environment and working directory.
+         (let ((process (evo.port:launch-child
                          "/bin/sh" (list "-c" command)
-                         :output out-file :error :output
-                         :if-output-exists :supersede
-                         :directory (uiop:getcwd)
-                         :environment (sb-ext:posix-environ)
-                         :wait nil)))
+                         :input nil :output out-file :error-output :output)))
            (loop with deadline = (+ (get-internal-real-time)
                                     (* timeout internal-time-units-per-second))
-                 while (sb-ext:process-alive-p process)
+                 while (evo.port:process-alive-p process)
                  when (> (get-internal-real-time) deadline)
-                   do (sb-ext:process-kill process sb-unix:sigkill)
-                      (sb-ext:process-wait process)
+                   do (evo.port:process-kill process)
+                      (evo.port:process-wait process)
                       (error "Command timed out after ~ds. Partial output:~%~a"
                              timeout (truncate-string
                                       (or (ignore-errors (read-file-string out-file)) "")
                                       10000))
                  do (sleep 0.05))
-           (sb-ext:process-wait process)
-           (let ((code (sb-ext:process-exit-code process))
+           (let ((code (nth-value 1 (evo.port:process-wait process)))
                  (output (or (ignore-errors (read-file-string out-file)) "")))
              (values
               (format nil "~a~@[~%(exit code ~d)~]"

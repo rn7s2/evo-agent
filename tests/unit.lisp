@@ -245,7 +245,7 @@ event: message_stop~%data: {\"type\":\"message_stop\"}~%~%"))
   (check "lone esc flushes" (equal (feed-bytes '(27) :flush-escape t) '(:escape)))
   ;; UTF-8 across the boundary.
   (let ((state (evo.tui::make-input-state))
-        (bytes (sb-ext:string-to-octets "é" :external-format :utf-8)))
+        (bytes (flexi-streams:string-to-octets "é" :external-format :utf-8)))
     (evo.tui::in-push-bytes state (subseq bytes 0 1))
     (check "split utf8 waits" (null (evo.tui::parse-keys state)))
     (evo.tui::in-push-bytes state (subseq bytes 1))
@@ -314,7 +314,7 @@ event: message_stop~%data: {\"type\":\"message_stop\"}~%~%"))
 (defun test-lore ()
   (let* ((home (uiop:ensure-directory-pathname
                 (format nil "~a/evo-lore-~a/" (uiop:getenv "TMPDIR") (gen-id)))))
-    (sb-posix:setenv "EVO_HOME" (namestring home) 1)
+    (evo.port:setenv "EVO_HOME" (namestring home))
     (unwind-protect
          (progn
            (add-lore "always run tests" :scope :global)
@@ -325,10 +325,9 @@ event: message_stop~%data: {\"type\":\"message_stop\"}~%~%"))
            (let ((prompt (build-system-prompt nil :lore (all-lore))))
              (check "lore injected into prompt"
                     (search "prefer rg over grep" prompt))))
-      (sb-posix:setenv "EVO_HOME"
+      (evo.port:setenv "EVO_HOME"
                        (namestring (uiop:ensure-directory-pathname
-                                    (format nil "~a/evo-unit-home" (or (uiop:getenv "TMPDIR") "/tmp"))))
-                       1))))
+                                    (format nil "~a/evo-unit-home" (or (uiop:getenv "TMPDIR") "/tmp"))))))))
 
 ;;; Plan-mode extension (seed corpus): the :tool-call gate and the
 ;;; transform-context filter, exercised directly at the hook level.

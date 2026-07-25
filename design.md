@@ -38,22 +38,22 @@ References:
 | # | Decision | Rationale (short) |
 |---|---|---|
 | D1 | Sessions are an append-only entry **tree** in a journal file; state = fold over root→leaf path. Pi's model. | Branching/rewind/resume/pause fall out free; write-ahead = crash-safe. |
-| D2 | **No image-based session persistence.** Journal is the only source of truth. SBCL images are build/packaging artifacts only. | Both target APIs are stateless (full replay) so transcript-as-data is mandatory anyway; images are opaque, undiffable, and propagate corruption. |
+| D2 | **No image-based session persistence.** Journal is the only source of truth. Lisp images are build/packaging artifacts only. | Both target APIs are stateless (full replay) so transcript-as-data is mandatory anyway; images are opaque, undiffable, and propagate corruption. |
 | D3 | **Journal format is native sexprs** (one form per line), and sexprs are the default for every data format we control (settings, lore, goal state). | Human-readable, `read`-able from Lisp with zero external serialization deps. |
 | D4 | **Interface is a CLI** with an adaptive TUI (mandatory: adapts to console resize). Not Emacs/Swank-first. | Approachable for newcomers; CLI adapts to the most contexts. Swank remains a developer side-door, not the product. |
 | D5 | **Supervisor architecture: yes.** A tiny outer process owns launch, crash detection, restart, resume. | Long-running goal pursuit requires surviving self-inflicted death. |
 | D6 | Providers: **Anthropic Messages API now; OpenAI Responses API post-v1.** The unified message model is designed for both from day one. | Scope control; one provider suffices until the harness is real. Still skips ~90% of pi-ai's multi-provider sprawl. |
 | D7 | Goal system follows **codex's design**: persisted goal + idle-continuation steering + explicit audited completion + budgets. Optional Lisp acceptance predicate as kernel-side verifier. | See §8. |
-| D8 | Kernel/userspace split enforced with **SBCL package locks**. | Permissive but not suicidal: touching the kernel requires an explicit, auditable unlock. |
+| D8 | Kernel/userspace split enforced with **package locks** (SBCL native, ECL `si:package-lock`, behind `evo.port`). | Permissive but not suicidal: touching the kernel requires an explicit, auditable unlock. |
 | D9 | Tool execution is **sequential** in v1. | Parallel is where pi's thread-discipline complexity lives; revisit later. |
-| D10 | **SBCL-only.** No portability layer. The launcher always passes an explicit `--dynamic-space-size` (settings-overridable, generous default e.g. 4096). | Package locks, signal handling, image dumping are all SBCL-flavored; portability buys nothing now. SBCL's default heap is not sized for a long-running agent. |
+| D10 | **SBCL and ECL**, through a single portability layer (`evo.port` — the only package allowed to touch `sb-*`/`ext:`/`si:` symbols). On SBCL the launcher always passes an explicit `--dynamic-space-size` (settings-overridable, generous default e.g. 4096); ECL's heap grows on demand. | Originally SBCL-only; portability was added once the impl-specific surface proved small (env/argv/exit, processes, locks, fd streams, signals). Everything else is portable CL + uiop + the existing deps. SBCL's default heap is not sized for a long-running agent. |
 | D11 | Naming locked: binary `evo`, dirs `~/.evo/` + `<project>/.evo/`, package prefix `EVO.`. | As assumed throughout this doc; settled to stop revisiting. |
 | D12 | v1 TUI editor is a **plain multi-line text editor**: Enter sends, Shift+Enter inserts a newline, pastes >3 lines collapse to a placeholder (re-pasting the same content right after it expands it inline). No completions or highlighting yet. | Multi-line editing is crucial UX; editor sophistication beyond that isn't where the novelty is. |
 | D13 | **Slim core; everything outside the core loop ships as a core extension** — bundled, built on the same extension API with the same level of control as user extensions; essential ones (tui) cannot be disabled. | Dogfooding proves the API depth; keeps the kernel small and honest. See §11. |
 | D14 | **Todo checklists: yes**, shipped as a core extension. | Long-running goal work needs user-visible progress; the one deliberate deviation from pi's omit-list. |
 | D15 | `:done-when` predicates are **agent-authored, not user-written**: named userspace functions journaled via `:load`, referenced by name in the `:goal` entry. | Users state objectives in prose; the agent formalizes them. Named+journaled functions survive restart; closures don't round-trip through sexprs. |
 | D16 | **No sub-agents in v1.** Revisit after M5. | The journal-tree model extends naturally (child session = forked journal) when we want them. |
-| D17 | **One binary total.** No shell launcher, no separate supervisor executable: the `evo` binary invoked plainly IS the supervisor parent (D5's "tiny outer process"), re-spawning itself (`sb-ext:*runtime-pathname*`, `EVO_SUPERVISED_CHILD=1`, inherited stdio) as the session child. Heap is baked at build time (`--dynamic-space-size` + `:save-runtime-options`), refining D10's launcher-passes-it rule. `--no-supervisor` runs the session in-process. | User decision. A wrapper script is one more artifact to install, breaks TTY inheritance under POSIX background rules, and buys nothing the binary can't do itself. |
+| D17 | **One binary total.** No shell launcher, no separate supervisor executable: the `evo` binary invoked plainly IS the supervisor parent (D5's "tiny outer process"), re-spawning itself (`evo.port:runtime-pathname`, `EVO_SUPERVISED_CHILD=1`, inherited stdio) as the session child. On SBCL the heap is baked at build time (`--dynamic-space-size` + `:save-runtime-options`), refining D10's launcher-passes-it rule. `--no-supervisor` runs the session in-process. | User decision. A wrapper script is one more artifact to install, breaks TTY inheritance under POSIX background rules, and buys nothing the binary can't do itself. |
 
 ## 3. Architecture overview
 
@@ -61,7 +61,7 @@ References:
 evo-supervisor (tiny: shell or ~100 lines of CL)
   │  spawn (explicit --dynamic-space-size) / monitor / restart / resume policy
   ▼
-evo image (SBCL process)
+evo image (SBCL or ECL process)
 ├─ KERNEL  (locked packages: EVO.KERNEL, EVO.PROVIDER, EVO.JOURNAL, …)
 │    turn loop            errors-as-data, steering queues, save points
 │    journal              append-only sexpr entry tree + leaf pointer
@@ -398,7 +398,7 @@ The four requirements (pi's anatomy, research §2.6), in CL:
    mitigations.
 
 Safety rails:
-- **Package locks (D8)**: kernel packages locked via `sb-ext:lock-package`;
+- **Package locks (D8)**: kernel packages locked via `evo.port:lock-package`;
   userspace unlocked. The agent *can* unlock the kernel — permissive — but
   only as an explicit, journaled, deliberate act.
 - Reload discipline: redefinition affects the next call, not running frames
@@ -470,7 +470,7 @@ user must be able to see structure and progress at a glance.
 
 The supervisor is deliberately dumb (shell script or ~100 lines of CL):
 
-1. Spawn the agent process (SBCL with an explicit `--dynamic-space-size`
+1. Spawn the agent process (on SBCL with an explicit `--dynamic-space-size`
    from settings (D10) — the default heap is not sized for a long-running
    agent — loading kernel + core extensions, replaying the session's
    `:load` entries, resuming the journal leaf).
@@ -498,7 +498,7 @@ Approach (pi-tui is the reference design, `~/Projects/pi/packages/tui`):
 - Render into normal terminal scrollback (no ncurses alternate screen —
   scrollback history is part of the UX) + a managed bottom region (editor,
   status line, goal/budget indicator) repainted differentially.
-- Resize: SIGWINCH (via SBCL signal handling) → re-query size (`TIOCGWINSZ`)
+- Resize: SIGWINCH (via `evo.port` signal handling) → re-query size (`TIOCGWINSZ`)
   → reflow the managed region; long content wraps, wide content truncates
   with indicators.
 - Raw mode + ANSI escapes directly via a thin CFFI termios layer — avoiding a

@@ -91,7 +91,7 @@ evo:*agent*                       ; the live agent
 
 - Kernel packages (`EVO.KERNEL`, `EVO.JOURNAL`, `EVO.PROVIDER`, …) are
   **locked**. You can read their exported functions; redefining them
-  requires an explicit `sb-ext:unlock-package` — allowed, journaled by your
+  requires an explicit `evo.port:unlock-package` — allowed, journaled by your
   own actions, and on your head.
 - Extension files live in `~/.evo/extensions/` (global) and
   `<project>/.evo/extensions/` — loaded at boot alphabetically, each load

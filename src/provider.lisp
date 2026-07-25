@@ -8,7 +8,7 @@
 (in-package :evo.provider)
 
 (eval-when (:compile-toplevel :load-toplevel :execute)
-  (sb-ext:add-package-local-nickname :jzon :com.inuoe.jzon :evo.provider))
+  (evo.port:add-package-local-nickname :jzon :com.inuoe.jzon :evo.provider))
 
 (define-condition provider-error (error)
   ((message :initarg :message :reader provider-error-message)

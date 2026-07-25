@@ -1,7 +1,7 @@
 ;;;; supervisor.lisp — the supervisor, in-binary.
 ;;;;
 ;;;; One binary total: invoked normally, evo IS the tiny supervisor parent —
-;;;; it re-spawns itself (sb-ext:*runtime-pathname*) as the supervised child
+;;;; it re-spawns itself (evo.port:runtime-pathname) as the supervised child
 ;;;; with EVO_SUPERVISED_CHILD=1 and inherited stdio (the TTY passes
 ;;;; straight through), then monitors process exit and the heartbeat file,
 ;;;; restarts with --resume on crashes and hangs, and quarantines repeated
@@ -24,33 +24,29 @@
      (or (ignore-errors (file-write-date path)) start-time)))
 
 (defun spawn-child (args heartbeat-file)
-  (sb-ext:run-program
-   (namestring sb-ext:*runtime-pathname*) args
-   :input t :output t :error t :wait nil
+  (evo.port:launch-child
+   (namestring (evo.port:runtime-pathname)) args
    :environment (list* "EVO_SUPERVISED_CHILD=1"
                        (format nil "EVO_HEARTBEAT_FILE=~a" heartbeat-file)
                        (remove-if (lambda (e)
                                     (or (string-prefix-p "EVO_SUPERVISED_CHILD=" e)
                                         (string-prefix-p "EVO_HEARTBEAT_FILE=" e)))
-                                  (sb-ext:posix-environ)))))
+                                  (evo.port:environ)))))
 
 (defun monitor-child (process heartbeat-file start-time hang-timeout)
   "Poll until PROCESS exits; kill -9 on a stale heartbeat.
 Returns (values exit-code hung-p)."
   (let ((hung nil))
-    (loop while (sb-ext:process-alive-p process)
+    (loop while (evo.port:process-alive-p process)
           do (sleep 2)
              ;; Only judge staleness once the child has had time to boot.
              (when (and (> (- (get-universal-time) start-time) 30)
                         (> (heartbeat-age heartbeat-file start-time) hang-timeout))
                (format *error-output* "~&evo: heartbeat stale — killing hung child~%")
                (setf hung t)
-               (ignore-errors (sb-ext:process-kill process sb-unix:sigkill))))
-    (sb-ext:process-wait process)
-    (values (if (eq (sb-ext:process-status process) :signaled)
-                :crashed
-                (sb-ext:process-exit-code process))
-            hung)))
+               (ignore-errors (evo.port:process-kill process))))
+    (multiple-value-bind (status code) (evo.port:process-wait process)
+      (values (if (eq status :signaled) :crashed code) hung))))
 
 (defun supervise (argv)
   "The supervisor loop.  Returns the final exit code."
