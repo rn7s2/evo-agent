@@ -1,5 +1,10 @@
-;;;; build.lisp — build the evo executable (D2: images are build artifacts only).
-;;;; Run: sbcl --non-interactive --load build.lisp
+;;;; build.lisp — build the single evo executable (D2: images are build
+;;;; artifacts only).  Run via: make build
+;;;;
+;;;; The Makefile invokes sbcl with --dynamic-space-size 4096 and we save
+;;;; with :save-runtime-options t, so the heap size is baked into the binary
+;;;; (D10) and ALL argv goes to evo's own main — no launcher, no
+;;;; --end-runtime-options.
 
 (require :asdf)
 (push (uiop:getcwd) asdf:*central-registry*)
@@ -10,6 +15,7 @@
   (sb-ext:exit :code (evo.cli:main)))
 
 (ensure-directories-exist "build/")
-(sb-ext:save-lisp-and-die "build/evo-core"
+(sb-ext:save-lisp-and-die "build/evo"
                           :executable t
+                          :save-runtime-options t
                           :toplevel #'evo-toplevel)

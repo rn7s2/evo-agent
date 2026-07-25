@@ -172,8 +172,13 @@ user message in <summary> tags, then the retained tail."
           (:message
            (push (pget entry :message) (state-messages state)))
           (:custom-message
-           ;; Extension-injected content, visible to the LLM.
-           (push (pget entry :message) (state-messages state)))
+           ;; Extension-injected content, visible to the LLM.  Tagged with
+           ;; the entry's :key so a transform-context hook can filter it
+           ;; back out (e.g. plan mode turning off, §12).
+           (push (if (pget entry :key)
+                     (pput (pget entry :message) :meta (list :key (pget entry :key)))
+                     (pget entry :message))
+                 (state-messages state)))
           (:custom                      ; state for extensions; invisible to LLM
            (let ((key (pget entry :key)))
              (when key

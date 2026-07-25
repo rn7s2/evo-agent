@@ -363,7 +363,10 @@ while the run thread is appending to it."
       ;; 1. extension commands
       ((gethash name evo::*commands*)
        (let ((fn (pget (gethash name evo::*commands*) :fn)))
-         (handler-case (funcall fn (list :agent (tui-agent tui) :args args :tui tui))
+         (handler-case
+             (let ((result (funcall fn (list :agent (tui-agent tui) :args args :tui tui))))
+               (when (stringp result) (scroll tui result))
+               (refresh-goal tui))
            (error (e) (scroll tui (red (format nil "✗ /~a: ~a" name e)))))))
       ;; 2. builtins
       ((builtin-command tui name args))

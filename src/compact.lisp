@@ -47,7 +47,10 @@ the tail after it is estimated."
   (let ((messages (evo.journal:state-messages state)))
     (and messages
          (> (estimate-context-tokens messages)
-            (- (model-context-window model) *compact-reserve-tokens*)))))
+            (- (model-context-window model)
+               (setting :compact-reserve *compact-reserve-tokens*)))
+         ;; A compaction that would drop nothing is not a compaction.
+         (plusp (select-cut messages)))))
 
 ;;; Cut-point selection: retain a recent tail worth ~keep-recent tokens,
 ;;; then extend backwards so the tail never starts at a tool result (§7).
@@ -55,11 +58,12 @@ the tail after it is estimated."
 (defun select-cut (messages)
   "Index of the first retained message."
   (let ((cut (length messages))
-        (acc 0))
+        (acc 0)
+        (keep (setting :compact-keep-recent *compact-keep-recent-tokens*)))
     (loop for i from (1- (length messages)) downto 0
           do (incf acc (estimate-message-tokens (nth i messages)))
              (setf cut i)
-          while (< acc *compact-keep-recent-tokens*))
+          while (< acc keep))
     ;; Never start the tail at a tool result (its call must stay adjacent).
     (loop while (and (< cut (length messages))
                      (eq (message-role (nth cut messages)) :tool-result))
@@ -159,11 +163,14 @@ retain the tail on the :compaction entry.  Returns the entry."
          (dropped (subseq messages 0 cut))
          (tail (subseq messages cut))
          (previous (previous-compaction journal))
-         (summary (summarize model
-                             (or (evo.journal:state-thinking state) :low)
-                             dropped
-                             (and previous (pget previous :summary))
-                             (and (plusp (length (or hint ""))) hint))))
+         (summary (progn
+                    (unless dropped
+                      (error "Nothing to compact: the whole context is within the keep-recent tail"))
+                    (summarize model
+                               (or (evo.journal:state-thinking state) :low)
+                               dropped
+                               (and previous (pget previous :summary))
+                               (and (plusp (length (or hint ""))) hint)))))
     (multiple-value-bind (read-files modified) (collect-file-sets dropped)
       (let ((all-read (union (coerce (or (and previous (pget previous :files-read)) #()) 'list)
                              read-files :test #'equal))

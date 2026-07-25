@@ -61,7 +61,8 @@
 (defpackage :evo
   (:use :cl)
   (:export #:register-tool #:register-command #:on #:load-extension
-           #:set-active-tools #:*agent* #:current-goal))
+           #:set-active-tools #:all-tools #:*agent* #:current-goal
+           #:steer #:inject-context #:custom-state #:set-custom-state))
 
 ;; Userspace: all agent-written tools and code live here.  Unlocked.
 (defpackage :evo.user

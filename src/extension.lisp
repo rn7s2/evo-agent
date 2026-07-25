@@ -56,6 +56,9 @@ fatal — a corrupted runtime is repaired by fixing/removing a source file."
   (dolist (entry (evo.journal:state-loads state))
     (let ((path (pget entry :path)))
       (unless (member path *loaded-extension-paths* :test #'equal)
+        ;; Progress goes to stderr so a supervisor quarantining a failed
+        ;; boot can report which :load entry was reached (§13).
+        (format *error-output* "~&evo: replaying :load ~a~%" path)
         (handler-case
             (if (probe-file path)
                 (load-extension* path :reason "replay" :record nil)
@@ -107,10 +110,41 @@ A :tool-call hook may return (:block t :reason ...) or (:arguments ...)."
   (evo.kernel:load-extension* path :reason reason))
 
 (defun set-active-tools (agent names)
-  "Journal a :tools-change entry; takes effect at the next save point."
+  "Journal a :tools-change entry; takes effect at the next save point.
+NAMES nil restores the full registered tool set."
   (evo.journal:append-entry (evo.kernel:agent-journal agent)
                             (list :type :tools-change
-                                  :tools (coerce names 'vector))))
+                                  :tools (coerce (or names (evo.kernel:all-tool-names))
+                                                 'vector))))
+
+(defun all-tools ()
+  (evo.kernel:all-tool-names))
 
 (defun current-goal (&optional (agent *agent*))
   (evo.kernel:current-goal agent))
+
+(defun steer (text &optional (agent *agent*))
+  "Queue a steering message; picked up at the next turn boundary (§6)."
+  (evo.kernel:queue-steering agent text))
+
+(defun inject-context (text &key key (agent *agent*))
+  "Append a :custom-message entry — content visible to the LLM.  With KEY, a
+:transform-context hook can filter it back out later (mode discipline, §12)."
+  (evo.journal:append-entry
+   (evo.kernel:agent-journal agent)
+   (append (list :type :custom-message
+                 :message (list :role :user
+                                :content (list (list :type :text :text text))))
+           (when key (list :key key)))))
+
+(defun custom-state (key &optional (agent *agent*))
+  "Current value of extension state KEY (fold over :custom entries, §4.2)."
+  (evo.journal:custom-state
+   (evo.journal:fold-state (evo.kernel:agent-journal agent)) key))
+
+(defun set-custom-state (key data &optional (agent *agent*))
+  "Persist extension state: appends a :custom entry (invisible to the LLM;
+survives restart and compaction untouched)."
+  (evo.journal:append-entry (evo.kernel:agent-journal agent)
+                            (list :type :custom :key key :data data))
+  data)

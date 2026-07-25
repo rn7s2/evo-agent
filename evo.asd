@@ -31,7 +31,8 @@
                                            (:file "render")
                                            (:file "tui")
                                            (:file "commands")))
-                             (:file "cli")))))
+                             (:file "cli")
+                             (:file "supervisor")))))
 
 (asdf:defsystem "evo/tests"
   :description "Unit tests for evo."

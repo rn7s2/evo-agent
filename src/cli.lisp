@@ -10,9 +10,10 @@
 (in-package :evo.cli)
 
 (defparameter *usage*
-  "evo — a goal-oriented, self-evolving agent (MVP)
+  "evo — a goal-oriented, self-evolving agent
 
 Usage:
+  evo                            interactive TUI (on a terminal)
   evo -p \"prompt\"              run one task in print mode, stream text to stdout
   evo --goal \"objective\" [-p \"first prompt\"]
                                  create a goal and run until complete/blocked/budget
@@ -22,8 +23,13 @@ Usage:
   evo --list-sessions            list sessions for this cwd
   evo --model <id>               model id (default from settings, else claude-sonnet-5)
   evo --thinking <level>         off|low|medium|high|xhigh (default medium)
-  evo --no-userspace             boot without extensions (quarantine mode, §13)
+  evo --no-userspace             boot without extensions (quarantine mode)
+  evo --no-supervisor            run the session in-process, no crash-restart parent
   evo --help
+
+evo supervises itself: crashes and hangs restart the session with --resume;
+a goal that was active picks itself back up.  Exit codes: 0 done, 1 error,
+2 goal blocked, 3 budget-limited, 64 usage error.
 
 Settings: ~/.evo/settings.sexp and <cwd>/.evo/settings.sexp (project wins), e.g.
   (:model \"ark-deepseek-v4-pro\" :thinking :xhigh
@@ -53,6 +59,7 @@ Settings: ~/.evo/settings.sexp and <cwd>/.evo/settings.sexp (project wins), e.g.
                       (intern (string-upcase (or (pop argv) (error "--thinking needs a level")))
                               :keyword)))
                ((string= arg "--no-userspace") (setf (getf opts :no-userspace) t))
+               ((string= arg "--no-supervisor") (setf (getf opts :no-supervisor) t))
                ((member arg '("-h" "--help") :test #'string=) (setf (getf opts :help) t))
                ((string= arg "--version") (setf (getf opts :version) t))
                (t (error "Unknown argument: ~a (try --help)" arg))))
@@ -118,17 +125,32 @@ Settings: ~/.evo/settings.sexp and <cwd>/.evo/settings.sexp (project wins), e.g.
          (open-journal path)))
       (t (open-journal resume)))))
 
+(define-condition usage-error (error)
+  ((text :initarg :text :reader usage-error-text))
+  (:report (lambda (c s) (format s "~a" (usage-error-text c)))))
+
 (defun main (&optional (argv (rest sb-ext:*posix-argv*)))
-  (handler-case
-      (let ((opts (parse-args argv)))
+  "Exit codes are supervisor protocol: 0 done, 1 error (restart-eligible),
+2 goal blocked, 3 budget-limited, 64 usage error (never restart)."
+  (let ((opts (handler-case (parse-args argv)
+                (error (e)
+                  (format *error-output* "evo: ~a~%" e)
+                  (return-from main 64)))))
+    (handler-case
         (cond
           ((getf opts :help) (write-line *usage*) 0)
           ((getf opts :version) (write-line "evo 0.1.0") 0)
           ((getf opts :list-sessions) (load-settings) (cmd-list-sessions) 0)
-          (t (run-cli opts))))
-    (error (e)
-      (format *error-output* "evo: ~a~%" e)
-      1)))
+          ;; One binary, two roles (§13): the plain invocation is the
+          ;; supervisor parent; it re-spawns this same binary as the child.
+          ((supervised-run-p opts) (supervise argv))
+          (t (run-cli opts)))
+      (usage-error (e)
+        (format *error-output* "evo: ~a~%" e)
+        64)
+      (error (e)
+        (format *error-output* "evo: ~a~%" e)
+        1))))
 
 (defun setup-agent (opts &key events-cb)
   "Shared session bring-up for every frontend.  Returns (values agent resumed-p)."
@@ -187,7 +209,7 @@ Settings: ~/.evo/settings.sexp and <cwd>/.evo/settings.sexp (project wins), e.g.
           (prompt (queue-steering agent prompt))
           ((and goal (eq (pget goal :status) :active))
            (queue-steering agent (evo.kernel:goal-continuation-for agent goal)))
-          (t (error "Nothing to do headless: give -p \"prompt\", --goal, or --resume a session with an active goal"))))
+          (t (error 'usage-error :text "Nothing to do headless: give -p \"prompt\", --goal, or --resume a session with an active goal"))))
       (let* ((outcome (run-until-settled agent))
              (goal (evo.kernel:current-goal agent)))
         (when (journal-started-p journal)
@@ -195,6 +217,12 @@ Settings: ~/.evo/settings.sexp and <cwd>/.evo/settings.sexp (project wins), e.g.
         (when goal
           (format *error-output* "goal ~a: ~a~%"
                   (pget goal :goal-id) (string-downcase (pget goal :status))))
+        ;; Exit codes are supervisor protocol (§13): 0 done, 1 error
+        ;; (restart-eligible), 2 blocked by model, 3 budget-limited —
+        ;; 2 and 3 need a human, the supervisor must NOT restart them.
         (cond ((and goal (eq (pget goal :status) :complete)) 0)
+              ((and goal (eq (pget goal :status) :blocked))
+               (if (equal (pget goal :blocked-reason) "turn-error") 1 2))
+              ((and goal (eq (pget goal :status) :budget-limited)) 3)
               ((eq outcome :stop) 0)
               (t 1))))))

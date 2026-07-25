@@ -1,99 +1,124 @@
 # evo-agent
 
 `evo` is an agent who self-evolves. See [design.md](design.md) for the full
-design; this README covers the implemented MVP and how to run it.
+design; this README covers what is implemented and how to run it.
 
-## MVP status
-
-Implemented (design milestones M0 + M1, plus the day-one pieces of later
-milestones):
+## Status: v1 scope implemented (M0–M5)
 
 - **Provider core (M0)** — unified message model; Anthropic Messages adapter
   with hand-rolled SSE streaming, thinking blocks (chunked signatures),
-  tolerant tool-argument accumulation, prompt-cache breakpoints, errors-as-data
-  (`:stop-reason :error`, never a signal into the loop), status-classified
-  retries with backoff + retry-after; hand-written model table with rational
-  cost accounting.
+  handoff pass (errored turns elided, cross-model thinking dropped, orphaned
+  tool calls given synthetic results), errors-as-data, status-classified
+  retries with backoff/retry-after, prompt-cache breakpoints; model table
+  with rational cost accounting.
 - **Kernel loop + journal (M1)** — append-only sexpr entry **tree** per
-  session (write-ahead, one form per line, `*read-eval*` nil, restricted
-  sexpr-JSON vocabulary); all state a fold over the root→leaf path; branching
-  by leaf move; turn loop with steering queues, save points (context rebuilt
-  wholesale from the journal every turn), truncation guard, sequential
+  session (write-ahead; `*read-eval*` nil; restricted sexpr-JSON vocabulary;
+  form-based reading); all state a fold over the root→leaf path; turn loop
+  with steering queues, save points, truncation guard; sequential
   read/write/edit/bash tools; run-until-settled driver; kill -9 mid-task
   resumes cleanly.
-- **CLI (print + event modes)** — `evo -p "prompt"` streams text to stdout
-  (trace on stderr); `--events` emits line-delimited sexpr events; `--resume`
-  reopens the latest (or a named) session.
-- **Goal system** — `--goal` creates a persisted `:goal` entry; idle
-  continuation re-steers the agent with budgets and completion/blocked audits;
-  `get_goal`/`create_goal`/`update_goal` tools; optional agent-authored
-  `done_when` predicate that the kernel **runs** before accepting completion
-  (§8.4) — premature completion claims are mechanically rejected.
-- **Extension API + self-extension seed** — `evo:register-tool`,
-  `evo:register-command`, `evo:on` event hooks (including `:tool-call`
-  interception with block/mutate), `load_extension` tool: the agent writes a
-  `.lisp` file into `EVO.USER`, loads it into its own runtime, the load is
-  journaled as a `:load` entry and replayed on resume. Kernel packages are
-  locked (SBCL package locks, D8); `--no-userspace` boots quarantined (§13).
+- **TUI + core extensions (M2)** — adaptive renderer in normal scrollback +
+  managed bottom region, SIGWINCH live reflow; multi-line editor (D12:
+  Enter sends, Shift+Enter newline, paste >3 lines collapses to a
+  placeholder, paste-to-expand); slash commands with the §12 resolution
+  order (extension commands → builtins → skills → prompt templates → agent);
+  `/tree` `/resume` `/fork`, double-escape rewind, ESC aborts; todo
+  checklist core extension (D14) rendered in the panel; skills (Agent
+  Skills standard, progressive disclosure) and `$1`/`$@` prompt templates.
+- **Context management (M3)** — compaction (threshold at save points,
+  manual `/compact`, overflow-error compact+retry-once), usage-anchored
+  token accounting, cut points never at a tool result, structured + iterative
+  UPDATE summary prompts, accumulated file sets, `:compaction` entries with
+  materialized retained tails; lore (`/lore`, global/project/session scopes)
+  injected into the system prompt every turn.
+- **Goals + supervisor (M4)** — persisted `:goal` entries; idle-continuation
+  steering with budgets, anti-scope-shrinking fidelity rules, completion and
+  blocked audits; kernel-verified agent-authored `done_when` predicates
+  (§8.4); built-in supervision (see below) with heartbeat hang detection,
+  crash-restart-resume, and boot-failure quarantine (`--no-userspace`).
+- **Self-extension (M5)** — `load_extension` tool: the agent writes Lisp
+  into `EVO.USER`, loads it into its own runtime, journaled as `:load` and
+  replayed on resume; SBCL package locks on the kernel (D8); seed corpus:
+  [docs/](docs/) (extension API, journal format, self-extension guide) and
+  example extensions — [plan-mode](extensions/plan-mode.lisp) (shipped
+  active: `/plan` `/auto` via tool gating + hidden `:custom-message` +
+  transform-context filtering), git-checkpoint and permission-gate
+  ([extensions/examples/](extensions/examples/)).
 
-Deferred (per the design's own staging): the TUI (M2), compaction + lore
-(M3), the supervisor process (M4), the full seed corpus (M5).
+Post-v1 by design: OpenAI Responses adapter (D6), sub-agents (D16).
 
-## Build & run
+## One binary (D17)
 
-Requires SBCL (tested with 2.6.6) and Quicklisp (deps: dexador,
-com.inuoe.jzon, flexi-streams, bordeaux-threads).
+`make build` produces a single executable, `build/evo`. Invoked plainly it
+is its own supervisor: the parent process re-spawns the same binary as a
+supervised child (inherited stdio, so the TUI just works), monitors a
+heartbeat file, restarts with `--resume` after crashes and hangs, and
+quarantines repeated boot failures with `--no-userspace`. Exit codes:
+0 done · 1 error · 2 goal blocked · 3 budget-limited · 64 usage error.
+`--no-supervisor` (or `EVO_NO_SUPERVISOR=1`) runs the session in-process.
 
 ```sh
-make build          # builds build/evo-core, run it via bin/evo
-bin/evo -p "run ls with the bash tool and summarize"
-bin/evo --goal "make ./test.sh pass"
-bin/evo --resume                 # continue latest session for this cwd
-bin/evo --events -p "..."        # sexpr event stream on stdout
-bin/evo --list-sessions
-bin/evo --help
-```
+make build                # requires SBCL + Quicklisp
+make install              # copies to /usr/local/bin/evo (PREFIX=…)
+make install-home         # seeds ~/.evo with docs + example extensions
 
-The launcher always passes `--dynamic-space-size` (default 4096, override
-with `EVO_DYNAMIC_SPACE_SIZE`, D10).
+evo                       # interactive TUI (on a tty)
+evo -p "run ls and summarize"          # print mode: text on stdout
+evo --events -p "..."                  # line-delimited sexpr events
+evo --goal "make ./test.sh pass"       # goal run; survives its own death
+evo --resume                           # reopen the latest session here
+evo --list-sessions
+```
 
 ## Settings
 
 Sexpr plists (D3): global `~/.evo/settings.sexp`, project
-`<cwd>/.evo/settings.sexp` (project wins). `EVO_HOME` overrides `~/.evo` (used
-by the tests). Example pointing at a local Anthropic-compatible proxy:
+`<cwd>/.evo/settings.sexp` (project wins). `EVO_HOME` overrides `~/.evo`.
 
 ```lisp
 (:model "ark-deepseek-v4-pro"
- :thinking :xhigh
+ :thinking :xhigh               ; off low medium high xhigh
+ :goal-token-budget 2000000
  :providers (:anthropic (:base-url "http://127.0.0.1:8787"
                          :api-key "sk-...")))
 ```
 
-Against the real API, set `:providers (:anthropic (:api-key-env
-"ANTHROPIC_API_KEY"))` or omit — the env var is the default.
+Against the real API omit `:base-url`/`:api-key` — `ANTHROPIC_API_KEY` is
+the default source. `:compact-reserve` / `:compact-keep-recent` tune
+compaction.
 
 ## Tests
 
 ```sh
-make test           # unit: sexpr IO, journal tree/fold, schema, SSE, handoff
-make integration    # live, needs the proxy on 127.0.0.1:8787:
-                    #   M0/M1 tool round-trip, kill -9 + resume, goal run
+make test           # unit: sexpr IO, journal, schema, SSE, handoff, editor,
+                    #       input parser, templates, compaction, lore, plan-mode
+make integration    # live (needs the proxy): M0/M1 round-trip, kill -9 +
+                    #       manual resume, goal completion, induced-crash
+                    #       supervision, mid-task compaction
+make tui-test       # expect-driven TUI under a pty
+tests/plan-mode.exp # plan/auto mode wiring e2e
 ```
 
 ## Layout
 
-```
-src/packages.lisp     package graph (kernel locked, EVO.USER open, EVO = public API)
-src/util.lisp         safe sexpr IO, settings, ids (reseeded per process)
-src/journal.lisp      entry tree, write-ahead append, fold, sessions
-src/model-table.lisp  models, costs, thinking budgets
-src/provider.lisp     Anthropic adapter: request build, handoff pass, SSE, retries
-src/tools.lisp        tool registry, sexpr schema -> JSON Schema
-src/prompt.lisp       system prompt assembly
-src/loop.lisp         agent struct, turn loop, run-until-settled, event hooks
-src/extension.lisp    load-extension, boot/replay, package locks, EVO public API
+```text
+src/packages.lisp      package graph (kernel locked; EVO.USER open; EVO = public API)
+src/util.lisp          safe sexpr IO, settings, ids
+src/journal.lisp       entry tree, write-ahead append, fold, fork, sessions
+src/model-table.lisp   models, costs, thinking budgets
+src/provider.lisp      Anthropic adapter: handoff, SSE, retries, cost
+src/tools.lisp         tool registry, sexpr schema -> JSON Schema
+src/prompt.lisp        system prompt assembly, skills, templates
+src/loop.lisp          agent, turn loop, run-until-settled, hooks, heartbeat
+src/lore.lisp          lore stores (M3)
+src/compact.lisp       compaction (M3)
+src/extension.lisp     load-extension, boot/replay, locks, EVO public API
 src/builtin-tools.lisp read / write / edit / bash
-src/goal.lisp         goal entries, continuation steering, audited tools, done-when
-src/cli.lisp          arg parsing, print/event modes, session lifecycle
+src/todo.lisp          todo core extension (D14)
+src/goal.lisp          goal driver, audited tools, done-when (§8)
+src/tui/               term, input, editor, render, tui, commands (M2)
+src/cli.lisp           arg parsing, print/event modes, session bring-up
+src/supervisor.lisp    in-binary supervision (§13, D17)
+docs/                  seed corpus (also installed to ~/.evo/docs)
+extensions/            plan-mode (shipped) + examples/
 ```

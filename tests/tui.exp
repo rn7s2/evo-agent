@@ -28,7 +28,7 @@ proc fail {name} {
     puts "\nFAIL: $name"
 }
 
-spawn "$repo/bin/evo"
+spawn "$repo/build/evo"
 
 # 1. banner appears
 expect {

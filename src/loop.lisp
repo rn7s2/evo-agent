@@ -49,7 +49,27 @@ plugs in here.")
   ;; queue access is the one cross-thread seam.
   (lock (bt:make-lock "agent-queues")))
 
+;; Heartbeat (§13): the kernel touches a file on every event so the
+;; supervisor can distinguish long tool calls from a hung process.
+;; Throttled to 1/sec; enabled by the EVO_HEARTBEAT_FILE env var.
+
+(defvar *heartbeat-file* :uninitialized)
+(defvar *heartbeat-last* 0)
+
+(defun heartbeat-touch ()
+  (when (eq *heartbeat-file* :uninitialized)
+    (setf *heartbeat-file* (getenv "EVO_HEARTBEAT_FILE")))
+  (let ((path *heartbeat-file*)
+        (now (get-universal-time)))
+    (when (and path (> now *heartbeat-last*))
+      (setf *heartbeat-last* now)
+      (ignore-errors
+       (with-open-file (out path :direction :output :if-exists :supersede
+                                 :if-does-not-exist :create)
+         (princ now out))))))
+
 (defun emit-event (agent &rest event)
+  (heartbeat-touch)
   (let ((cb (agent-events-cb agent)))
     (when cb
       (funcall cb (append event (list :run-id (agent-run-id agent)
@@ -95,11 +115,22 @@ plugs in here.")
          (thinking (or (evo.journal:state-thinking state)
                        (agent-thinking-override agent)
                        (setting :thinking :medium))))
-    (list :state state
-          :tools tools
-          :model (find-model model-id)
-          :thinking thinking
-          :system (build-system-prompt tools :lore (all-lore :state state)))))
+    ;; Projection pipeline (§7): journal entries -> agent messages ->
+    ;; (transform-context) -> provider messages.  Extensions hook the
+    ;; middle stage; output is never written back.
+    (let ((messages (evo.journal:state-messages state)))
+      (dolist (hook (gethash :transform-context *event-hooks*))
+        (let ((result (handler-case (funcall hook messages)
+                        (error (e)
+                          (warn "transform-context hook failed: ~a" e)
+                          messages))))
+          (when (listp result) (setf messages result))))
+      (list :state state
+            :tools tools
+            :messages messages
+            :model (find-model model-id)
+            :thinking thinking
+            :system (build-system-prompt tools :lore (all-lore :state state))))))
 
 ;;; Tool batch execution (sequential, D9) with :tool-call interception —
 ;;; the one point permission gates / plan mode / sandboxing build on.
@@ -188,12 +219,11 @@ Returns :stop :length :error :aborted."
                   (error (e) (warn "Compaction failed, continuing uncompacted: ~a" e)))
                 (emit-event agent :type :compaction-end)))
             (let* ((ctx (prepare-next-turn agent))
-                   (state (pget ctx :state))
                    (assistant
                      (call-provider
                       :model (pget ctx :model)
                       :system (pget ctx :system)
-                      :messages (evo.journal:state-messages state)
+                      :messages (pget ctx :messages)
                       :tools (mapcar #'tool->provider-spec (pget ctx :tools))
                       :thinking-level (pget ctx :thinking)
                       :abort-flag (lambda () (agent-abort-flag agent))

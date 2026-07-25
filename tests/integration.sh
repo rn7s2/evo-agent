@@ -9,7 +9,7 @@
 set -u
 
 repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-evo="$repo/bin/evo"
+evo="$repo/build/evo"
 scratch=$(mktemp -d /tmp/evo-integration.XXXXXX)
 export EVO_HOME="$scratch/home"
 work="$scratch/work"
@@ -39,9 +39,11 @@ t1=$?
 report $? "print-mode multi-turn tool round-trip (M0/M1)"
 
 # --- Test 2 (M1 exit): kill -9 mid-task, resume cleanly -----------------------
+# --no-supervisor: this test wants the raw process killed and a MANUAL
+# resume; supervised auto-restart is test 4's subject.
 (
     cd "$work"
-    "$evo" -p "First run 'sleep 20 && echo slept' with the bash tool (do not shorten the sleep). After it finishes, use the write tool to create killed-task.txt with content: task-finished" \
+    "$evo" --no-supervisor -p "First run 'sleep 20 && echo slept' with the bash tool (do not shorten the sleep). After it finishes, use the write tool to create killed-task.txt with content: task-finished" \
         >/dev/null 2>"$scratch/t2.err" &
     pid=$!
     # Wait until the session journal exists (first assistant message flushed),
@@ -54,7 +56,7 @@ report $? "print-mode multi-turn tool round-trip (M0/M1)"
     kill -9 "$pid" 2>/dev/null
     wait "$pid" 2>/dev/null
     # The journal must be intact on disk (write-ahead), and resumable.
-    "$evo" --resume -p "Continue the task you were doing; the process was killed mid-way. Finish the remaining steps." \
+    "$evo" --no-supervisor --resume -p "Continue the task you were doing; the process was killed mid-way. Finish the remaining steps." \
         >/dev/null 2>>"$scratch/t2.err"
 )
 t2=$?
@@ -71,6 +73,36 @@ t3=$?
 [ $t3 -eq 0 ] && grep -q "goal-done" "$work/goal-proof.txt" 2>/dev/null \
     && grep -q "goal .*: complete" "$scratch/t3.err"
 report $? "goal run terminates via update_goal complete"
+
+# --- Test 4 (M4): built-in supervision survives an induced crash --------------
+work4="$scratch/work4"
+mkdir -p "$work4"
+(
+    cd "$work4"
+    "$evo" --goal "Two-step goal. Step 1: use the bash tool to run exactly: kill -9 \$PPID — this kills your own process; that is EXPECTED and required. Run it ONLY ONCE: if the session already shows an interrupted kill attempt, do NOT run it again. Step 2 (after you are restarted): create crash-proof.txt containing the single word survived, verify it exists with bash, then declare the goal complete." \
+        >/dev/null 2>"$scratch/t4.err"
+)
+t4=$?
+[ $t4 -eq 0 ] && grep -q "survived" "$work4/crash-proof.txt" 2>/dev/null \
+    && grep -q "restarting with --resume" "$scratch/t4.err"
+report $? "supervisor: induced crash -> restart -> resume -> goal complete (M4)"
+
+# --- Test 5 (M3): compaction fires mid-task and the task still finishes -------
+work5="$scratch/work5"
+mkdir -p "$work5/.evo"
+cat > "$work5/.evo/settings.sexp" <<'EOF'
+(:compact-reserve 999999 :compact-keep-recent 100)
+EOF
+(
+    cd "$work5"
+    "$evo" -p "Do these steps one at a time, each as its own tool call: run bash 'echo step-one', then run bash 'echo step-two', then run bash 'echo step-three', then write compact-proof.txt containing compact-done." \
+        >/dev/null 2>"$scratch/t5.err"
+)
+t5=$?
+session5=$(ls -t "$EVO_HOME"/sessions/*work5*/*.sexp 2>/dev/null | head -1)
+[ $t5 -eq 0 ] && grep -q "compact-done" "$work5/compact-proof.txt" 2>/dev/null \
+    && [ -n "$session5" ] && grep -q "(:type :compaction" "$session5"
+report $? "compaction fires mid-task, task completes (M3)"
 
 echo
 echo "$pass passed, $fail failed (scratch: $scratch)"

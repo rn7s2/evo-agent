@@ -275,6 +275,9 @@ keys: enter send · shift+enter/alt+enter/ctrl+j newline · esc interrupt ·
 
 (defun tick (tui)
   (incf (tui-tick tui))
+  ;; Keep the supervisor's hang detector fed even while idle at the editor
+  ;; (throttled internally to 1/sec).
+  (evo.kernel::heartbeat-touch)
   ;; Live resize (D4).
   (when *resized*
     (setf *resized* nil)

@@ -330,6 +330,51 @@ event: message_stop~%data: {\"type\":\"message_stop\"}~%~%"))
                                     (format nil "~a/evo-unit-home" (or (uiop:getenv "TMPDIR") "/tmp"))))
                        1))))
 
+;;; Plan-mode extension (seed corpus): the :tool-call gate and the
+;;; transform-context filter, exercised directly at the hook level.
+
+(defun test-plan-mode ()
+  (let* ((dir (uiop:ensure-directory-pathname
+               (format nil "~a/evo-plan-~a/" (uiop:getenv "TMPDIR") (gen-id))))
+         (journal (progn (ensure-directories-exist dir) (make-session-journal dir)))
+         (agent (make-agent :journal journal))
+         (evo:*agent* agent))
+    (evo.kernel:load-extension*
+     (merge-pathnames "extensions/plan-mode.lisp" (uiop:getcwd))
+     :record nil)
+    ;; auto (default): write passes, context untouched.
+    (multiple-value-bind (args blocked-p)
+        (evo.kernel::intercept-tool-call "write" '(:path "x" :content "y"))
+      (declare (ignore args))
+      (check "auto mode allows write" (not blocked-p)))
+    ;; plan: write blocked, bash allowlisted.
+    (evo:set-custom-state "mode" "plan" agent)
+    (multiple-value-bind (args blocked-p reason)
+        (evo.kernel::intercept-tool-call "write" '(:path "x" :content "y"))
+      (declare (ignore args))
+      (check "plan mode blocks write" blocked-p)
+      (check "plan mode reason" (search "plan mode" reason)))
+    (multiple-value-bind (args blocked-p)
+        (evo.kernel::intercept-tool-call "bash" '(:command "git status"))
+      (declare (ignore args))
+      (check "plan mode allows git status" (not blocked-p)))
+    (multiple-value-bind (args blocked-p)
+        (evo.kernel::intercept-tool-call "bash" '(:command "rm -rf build"))
+      (declare (ignore args))
+      (check "plan mode blocks rm" blocked-p))
+    ;; transform-context: plan-mode injections filtered out when mode is off.
+    (let ((messages (list '(:role :user :content ((:type :text :text "hi")))
+                          '(:role :user :meta (:key "plan-mode")
+                            :content ((:type :text :text "PLAN MODE"))))))
+      (flet ((run-transforms (msgs)
+               (dolist (hook (gethash :transform-context evo.kernel::*event-hooks*) msgs)
+                 (setf msgs (funcall hook msgs)))))
+        (check "plan messages kept while planning"
+               (= 2 (length (run-transforms messages))))
+        (evo:set-custom-state "mode" "auto" agent)
+        (check "plan messages filtered in auto"
+               (= 1 (length (run-transforms messages))))))))
+
 (defun run-all ()
   (let ((*pass* 0) (*fail* 0))
     (test-sexpr-io)
@@ -342,5 +387,6 @@ event: message_stop~%data: {\"type\":\"message_stop\"}~%~%"))
     (test-templates)
     (test-compaction)
     (test-lore)
+    (test-plan-mode)
     (format t "~%~d passed, ~d failed~%" *pass* *fail*)
     (if (zerop *fail*) 0 1)))

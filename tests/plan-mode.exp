@@ -1,0 +1,51 @@
+#!/usr/bin/expect -f
+# plan-mode.exp — e2e wiring of the plan-mode extension in the TUI:
+# /plan and /auto commands respond, and the journal records the mode state
+# and tool gating.  (The gate itself is unit-tested — model behavior under
+# plan instructions is nondeterministic.)
+set timeout 180
+
+set repo [file dirname [file dirname [file normalize $argv0]]]
+set scratch [exec mktemp -d /tmp/evo-plan.XXXXXX]
+set env(EVO_HOME) "$scratch/home"
+file mkdir $env(EVO_HOME)/extensions
+exec cp "$repo/extensions/plan-mode.lisp" "$env(EVO_HOME)/extensions/plan-mode.lisp"
+set f [open "$env(EVO_HOME)/settings.sexp" w]
+puts $f {(:model "ark-deepseek-v4-pro" :thinking :low :providers (:anthropic (:base-url "http://127.0.0.1:8787" :api-key "sk-evo-default-dd196a205a364d844b67b52a9c418c8e")))}
+close $f
+file mkdir "$scratch/work"
+cd "$scratch/work"
+
+set bad 0
+proc check {ok name} {
+    global bad
+    if {!$ok} { incr bad }
+    puts "\nRESULT [expr {$ok ? "PASS" : "FAIL"}] $name"
+}
+
+spawn "$repo/build/evo"
+expect { -re {enter sends} { check 1 banner } timeout { check 0 banner; exit 1 } }
+
+# One real turn so the journal flushes to disk.
+send "Reply with exactly the word: zebra-fig\r"
+expect { -re {zebra-fig} {} timeout { check 0 first-turn; exit 1 } }
+expect { -re {zebra-fig} { check 1 first-turn } timeout { check 0 first-turn } }
+sleep 2
+
+send "/plan\r"
+expect { -re {plan mode} { check 1 plan-cmd } timeout { check 0 plan-cmd } }
+sleep 1
+send "/auto\r"
+expect { -re {auto mode} { check 1 auto-cmd } timeout { check 0 auto-cmd } }
+sleep 1
+send "/quit\r"
+expect eof
+
+set session [exec sh -c "ls -t $env(EVO_HOME)/sessions/*/*.sexp | head -1"]
+check [expr {![catch {exec grep -q {:key "mode" :data "plan"} $session}]}] journal-plan-state
+check [expr {![catch {exec grep -q {:key "mode" :data "auto"} $session}]}] journal-auto-state
+check [expr {![catch {exec grep -q {:type :tools-change} $session}]}] journal-tools-gated
+check [expr {![catch {exec grep -q {:key "plan-mode"} $session}]}] journal-injection
+
+puts "\nSUMMARY: $bad failures ($scratch)"
+exit [expr {$bad > 0 ? 1 : 0}]

@@ -53,6 +53,7 @@ References:
 | D14 | **Todo checklists: yes**, shipped as a core extension. | Long-running goal work needs user-visible progress; the one deliberate deviation from pi's omit-list. |
 | D15 | `:done-when` predicates are **agent-authored, not user-written**: named userspace functions journaled via `:load`, referenced by name in the `:goal` entry. | Users state objectives in prose; the agent formalizes them. Named+journaled functions survive restart; closures don't round-trip through sexprs. |
 | D16 | **No sub-agents in v1.** Revisit after M5. | The journal-tree model extends naturally (child session = forked journal) when we want them. |
+| D17 | **One binary total.** No shell launcher, no separate supervisor executable: the `evo` binary invoked plainly IS the supervisor parent (D5's "tiny outer process"), re-spawning itself (`sb-ext:*runtime-pathname*`, `EVO_SUPERVISED_CHILD=1`, inherited stdio) as the session child. Heap is baked at build time (`--dynamic-space-size` + `:save-runtime-options`), refining D10's launcher-passes-it rule. `--no-supervisor` runs the session in-process. | User decision. A wrapper script is one more artifact to install, breaks TTY inheritance under POSIX background rules, and buys nothing the binary can't do itself. |
 
 ## 3. Architecture overview
 
