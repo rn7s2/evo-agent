@@ -1,4 +1,4 @@
-;;;; compact.lisp — context compaction (§7, M3).
+;;;; compact.lisp — context compaction.
 ;;;;
 ;;;; Trigger: estimated context tokens > context-window - reserve (defaults:
 ;;;; reserve 16k, keep-recent 20k), plus overflow-error recovery and manual
@@ -16,7 +16,7 @@
 (defparameter *compact-keep-recent-tokens* 20000)
 
 (defun estimate-message-tokens (message)
-  "chars/4; images flat ~4800 (§7)."
+  "chars/4; images flat ~4800."
   (let ((chars 0) (images 0))
     (dolist (block (message-content message))
       (case (pget block :type)
@@ -53,7 +53,7 @@ the tail after it is estimated."
          (plusp (select-cut messages)))))
 
 ;;; Cut-point selection: retain a recent tail worth ~keep-recent tokens,
-;;; then extend backwards so the tail never starts at a tool result (§7).
+;;; then extend backwards so the tail never starts at a tool result.
 
 (defun select-cut (messages)
   "Index of the first retained message."
@@ -71,7 +71,7 @@ the tail after it is estimated."
     (max 0 cut)))
 
 ;;; Deterministic facts: read/modified file sets accumulate across
-;;; compactions (§7).
+;;; compactions.
 
 (defun collect-file-sets (messages)
   (let ((read-files nil) (modified nil))
@@ -87,7 +87,7 @@ the tail after it is estimated."
                        (pushnew path modified :test #'equal)))))))))
     (values (nreverse read-files) (nreverse modified))))
 
-;;; Summarization prompts (§7): structured summary; a separate iterative
+;;; Summarization prompts: structured summary; a separate iterative
 ;;; UPDATE prompt fed the previous summary.
 
 (defparameter *summary-structure*
@@ -185,7 +185,7 @@ retain the tail on the :compaction entry.  Returns the entry."
                             :dropped-messages (length dropped)))))))
 
 (defun overflow-error-p (message)
-  "Context-overflow classification for compact+retry-once recovery (§7)."
+  "Context-overflow classification for compact+retry-once recovery."
   (let ((text (or (pget message :error-message) "")))
     (and (eq (message-stop-reason message) :error)
          (or (search "prompt is too long" text)

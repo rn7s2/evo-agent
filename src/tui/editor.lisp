@@ -1,4 +1,4 @@
-;;;; editor.lisp — the plain multi-line editor (D12).
+;;;; editor.lisp — the plain multi-line editor.
 ;;;;
 ;;;; Enter sends, Shift+Enter (or Alt+Enter fallback) inserts a newline.
 ;;;; Pastes of more than 3 lines collapse to a placeholder token; the content
@@ -146,7 +146,7 @@
         (setf (eb-current-line eb) (subseq line 0 (eb-col eb)))
         (eb-delete eb))))
 
-;;; Paste placeholders (D12).
+;;; Paste placeholders.
 
 (defun paste-placeholder (id line-count)
   (format nil "[paste #~d: ~d lines]" id line-count))

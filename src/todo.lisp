@@ -1,4 +1,4 @@
-;;;; todo.lisp — todo checklists, a core extension (D14, §11.1).
+;;;; todo.lisp — todo checklists, a core extension.
 ;;;;
 ;;;; The model replaces the whole list per call; items = text + status.
 ;;;; State rides :custom entries (invisible to the LLM as entries — the tool

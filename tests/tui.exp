@@ -1,5 +1,5 @@
 #!/usr/bin/expect -f
-# tui.exp — drive the TUI under a pty: banner, /help, D12 paste collapse,
+# tui.exp — drive the TUI under a pty: banner, /help, paste collapse,
 # a live model round-trip, todo panel, and /quit.
 set timeout 180
 
@@ -43,7 +43,7 @@ expect {
     timeout { fail "/help output" }
 }
 
-# 3. paste collapse (D12): 5-line bracketed paste becomes a placeholder
+# 3. paste collapse: 5-line bracketed paste becomes a placeholder
 send "\x1b\[200~alpha\nbravo\ncharlie\ndelta\necho\x1b\[201~"
 expect {
     -re {\[paste #1: 5 lines\]} { check "paste collapse placeholder" }

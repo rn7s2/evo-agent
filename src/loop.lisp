@@ -1,4 +1,4 @@
-;;;; loop.lisp — the kernel turn loop (§6).
+;;;; loop.lisp — the kernel turn loop.
 ;;;;
 ;;;; A run = many turns; a turn = one assistant message + its tool batch.
 ;;;; Loop: poll steering -> LLM call -> execute tools -> save point -> repeat
@@ -9,7 +9,7 @@
 
 (in-package :evo.kernel)
 
-;;; Event hooks (extension API §10 builds on these).
+;;; Event hooks (the extension API builds on these).
 
 (defvar *event-hooks* (make-hash-table))  ; event-keyword -> list of fns
 
@@ -28,7 +28,7 @@
 
 (defvar *settled-hooks* nil
   "Functions (agent last-outcome) -> t if they queued more work.
-Run-until-settled consults them when a run goes idle; the goal driver (§8)
+Run-until-settled consults them when a run goes idle; the goal driver
 plugs in here.")
 
 ;;; The agent.
@@ -44,12 +44,12 @@ plugs in here.")
   model-override          ; CLI/default model id when the fold has none
   thinking-override
   (retry-count 0)
-  (compact-retried nil)   ; overflow-recovery guard: compact + retry ONCE (§7)
-  ;; The TUI steers from its input thread while a run thread drains (§6);
+  (compact-retried nil)   ; overflow-recovery guard: compact + retry ONCE
+  ;; The TUI steers from its input thread while a run thread drains;
   ;; queue access is the one cross-thread seam.
   (lock (bt:make-lock "agent-queues")))
 
-;; Heartbeat (§13): the kernel touches a file on every event so the
+;; Heartbeat: the kernel touches a file on every event so the
 ;; supervisor can distinguish long tool calls from a hung process.
 ;; Throttled to 1/sec; enabled by the EVO_HEARTBEAT_FILE env var.
 
@@ -104,7 +104,7 @@ plugs in here.")
       (emit-event agent :type :steering :text text))
     (length texts)))
 
-;;; Save point (§6): the whole context snapshot is rebuilt between turns.
+;;; Save point: the whole context snapshot is rebuilt between turns.
 
 (defun prepare-next-turn (agent)
   (let* ((state (fold-state (agent-journal agent)))
@@ -115,7 +115,7 @@ plugs in here.")
          (thinking (or (evo.journal:state-thinking state)
                        (agent-thinking-override agent)
                        (setting :thinking :medium))))
-    ;; Projection pipeline (§7): journal entries -> agent messages ->
+    ;; Projection pipeline: journal entries -> agent messages ->
     ;; (transform-context) -> provider messages.  Extensions hook the
     ;; middle stage; output is never written back.
     (let ((messages (evo.journal:state-messages state)))
@@ -132,7 +132,7 @@ plugs in here.")
             :thinking thinking
             :system (build-system-prompt tools :lore (all-lore :state state))))))
 
-;;; Tool batch execution (sequential, D9) with :tool-call interception —
+;;; Tool batch execution (sequential) with :tool-call interception —
 ;;; the one point permission gates / plan mode / sandboxing build on.
 
 (defun intercept-tool-call (name args)
@@ -186,7 +186,7 @@ plugs in here.")
                  (message-content message)))
 
 (defun synthesize-truncation-results (agent message)
-  "Truncation guard (§6): on :length, tool calls are NOT executed — salvaged
+  "Truncation guard: on :length, tool calls are NOT executed — salvaged
 JSON can validate yet be incomplete.  Each gets an error result."
   (dolist (call (message-tool-calls message))
     (append-entry (agent-journal agent)
@@ -208,7 +208,7 @@ Returns :stop :length :error :aborted."
               (return :aborted))
             (drain-steering agent)
             (emit-event agent :type :turn-start)
-            ;; Threshold compaction check at the save point (§7).
+            ;; Threshold compaction check at the save point.
             (let ((state (fold-state (agent-journal agent))))
               (when (compaction-needed-p state (find-model
                                                 (or (evo.journal:state-model state)
@@ -258,7 +258,7 @@ Returns :stop :length :error :aborted."
 (defparameter *max-turn-retries* 2)
 
 (defun run-until-settled (agent)
-  "Outer driver (§6): run -> post-run check (retryable error? queued
+  "Outer driver: run -> post-run check (retryable error? queued
 messages? active goal?) -> continue.  Returns the final outcome."
   (loop
     (let ((outcome (run agent)))
@@ -267,7 +267,7 @@ messages? active goal?) -> continue.  Returns the final outcome."
         ((eq outcome :error)
          (let ((msg (last-assistant-message agent)))
            (cond
-             ;; Overflow recovery: compact + retry once (§7).
+             ;; Overflow recovery: compact + retry once.
              ((and (overflow-error-p msg) (not (agent-compact-retried agent)))
               (setf (agent-compact-retried agent) t)
               (handler-case (compact-now agent)

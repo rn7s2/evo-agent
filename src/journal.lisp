@@ -1,4 +1,4 @@
-;;;; journal.lisp — the append-only entry tree (§4).
+;;;; journal.lisp — the append-only entry tree.
 ;;;;
 ;;;; One file per session; line 1 is a header form, every other line one entry
 ;;;; form with :id/:parent-id/:timestamp.  The file is a tree: branching =
@@ -134,7 +134,7 @@ Assigns :id/:parent-id/:timestamp.  Returns the completed entry."
   (bt:with-lock-held ((journal-lock journal))
     (%entry-path journal leaf-id)))
 
-;;; State fold (§4.1): context, model, thinking, tools, goal — everything is a
+;;; State fold: context, model, thinking, tools, goal — everything is a
 ;;; fold over the root→leaf path.  No mutable fields.
 
 (defstruct state
@@ -174,7 +174,7 @@ user message in <summary> tags, then the retained tail."
           (:custom-message
            ;; Extension-injected content, visible to the LLM.  Tagged with
            ;; the entry's :key so a transform-context hook can filter it
-           ;; back out (e.g. plan mode turning off, §12).
+           ;; back out (e.g. plan mode turning off).
            (push (if (pget entry :key)
                      (pput (pget entry :message) :meta (list :key (pget entry :key)))
                      (pget entry :message))
@@ -204,7 +204,7 @@ user message in <summary> tags, then the retained tail."
            (when (pget entry :name)
              (setf (state-name state) (pget entry :name))))
           (:compaction
-           ;; Self-contained checkpoint (§7): context rebuild restarts here as
+           ;; Self-contained checkpoint: context rebuild restarts here as
            ;; [summary, ...retained-tail]; no walk past the compaction.
            (setf (state-messages state)
                  (reverse (compaction-entry->messages entry))))
@@ -220,7 +220,7 @@ user message in <summary> tags, then the retained tail."
     (setf (state-messages state) (nreverse (state-messages state)))
     state))
 
-;;; Fork (§4.4): copy the root→entry path into a new session file.
+;;; Fork: copy the root→entry path into a new session file.
 
 (defun fork-session (journal &optional (leaf-id (journal-leaf-id journal)))
   "Write the root→LEAF-ID path as a fresh session file.  Returns its path.
@@ -243,7 +243,7 @@ Entry ids are preserved (the parent chain must stay intact)."
         (write-sexpr-line entry out)))
     file))
 
-;;; Session listing (§4.4) — bounded header scan.
+;;; Session listing — bounded header scan.
 
 (defun list-sessions (&optional (cwd (uiop:getcwd)))
   "List sessions for CWD, newest first: plists of :path + header fields."

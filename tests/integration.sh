@@ -2,9 +2,9 @@
 # integration.sh — live tests against the local Anthropic-compatible proxy
 # (ark-deepseek-v4-pro, thinking xhigh, per tests config).
 #
-# Covers the milestone exit criteria in scope for the MVP:
-#   M0: streamed tool-call round-trip
-#   M1: multi-turn task in print mode; kill -9 mid-task; resume cleanly
+# Covers the exit criteria in scope:
+#   streamed tool-call round-trip
+#   multi-turn task in print mode; kill -9 mid-task; resume cleanly
 #   goals: a goal run that terminates via audited update_goal :complete
 set -u
 
@@ -28,7 +28,7 @@ report() {
     else fail=$((fail+1)); echo "FAIL: $2"; fi
 }
 
-# --- Test 1 (M0/M1): multi-turn tool round-trip in print mode -----------------
+# --- Test 1: multi-turn tool round-trip in print mode -----------------
 (
     cd "$work"
     "$evo" -p "Run 'echo evo-integration-marker' with the bash tool, then use the write tool to create round-trip.txt containing exactly that command's output, then read it back to verify." \
@@ -36,9 +36,9 @@ report() {
 )
 t1=$?
 [ $t1 -eq 0 ] && grep -q "evo-integration-marker" "$work/round-trip.txt" 2>/dev/null
-report $? "print-mode multi-turn tool round-trip (M0/M1)"
+report $? "print-mode multi-turn tool round-trip"
 
-# --- Test 2 (M1 exit): kill -9 mid-task, resume cleanly -----------------------
+# --- Test 2: kill -9 mid-task, resume cleanly -----------------------
 # --no-supervisor: this test wants the raw process killed and a MANUAL
 # resume; supervised auto-restart is test 4's subject.
 (
@@ -61,7 +61,7 @@ report $? "print-mode multi-turn tool round-trip (M0/M1)"
 )
 t2=$?
 [ $t2 -eq 0 ] && grep -q "task-finished" "$work/killed-task.txt" 2>/dev/null
-report $? "kill -9 mid-task, resume cleanly (M1 exit)"
+report $? "kill -9 mid-task, resume cleanly"
 
 # --- Test 3: goal run with audited completion ---------------------------------
 (
@@ -74,7 +74,7 @@ t3=$?
     && grep -q "goal .*: complete" "$scratch/t3.err"
 report $? "goal run terminates via update_goal complete"
 
-# --- Test 4 (M4): built-in supervision survives an induced crash --------------
+# --- Test 4: built-in supervision survives an induced crash --------------
 work4="$scratch/work4"
 mkdir -p "$work4"
 (
@@ -85,9 +85,9 @@ mkdir -p "$work4"
 t4=$?
 [ $t4 -eq 0 ] && grep -q "survived" "$work4/crash-proof.txt" 2>/dev/null \
     && grep -q "restarting with --resume" "$scratch/t4.err"
-report $? "supervisor: induced crash -> restart -> resume -> goal complete (M4)"
+report $? "supervisor: induced crash -> restart -> resume -> goal complete"
 
-# --- Test 5 (M3): compaction fires mid-task and the task still finishes -------
+# --- Test 5: compaction fires mid-task and the task still finishes -------
 work5="$scratch/work5"
 mkdir -p "$work5/.evo"
 cat > "$work5/.evo/settings.sexp" <<'EOF'
@@ -102,7 +102,7 @@ t5=$?
 session5=$(ls -t "$EVO_HOME"/sessions/*work5*/*.sexp 2>/dev/null | head -1)
 [ $t5 -eq 0 ] && grep -q "compact-done" "$work5/compact-proof.txt" 2>/dev/null \
     && [ -n "$session5" ] && grep -q "(:type :compaction" "$session5"
-report $? "compaction fires mid-task, task completes (M3)"
+report $? "compaction fires mid-task, task completes"
 
 echo
 echo "$pass passed, $fail failed (scratch: $scratch)"

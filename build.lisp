@@ -1,9 +1,9 @@
-;;;; build.lisp — build the single evo executable (D2: images are build
+;;;; build.lisp — build the single evo executable (images are build
 ;;;; artifacts only).  Run via: make build
 ;;;;
 ;;;; The Makefile invokes sbcl with --dynamic-space-size 4096 and we save
 ;;;; with :save-runtime-options t, so the heap size is baked into the binary
-;;;; (D10) and ALL argv goes to evo's own main — no launcher, no
+;;;; and ALL argv goes to evo's own main — no launcher, no
 ;;;; --end-runtime-options.
 
 (require :asdf)

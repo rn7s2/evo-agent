@@ -3,51 +3,51 @@
 `evo` is an agent who self-evolves. See [design.md](design.md) for the full
 design; this README covers what is implemented and how to run it.
 
-## Status: v1 scope implemented (M0–M5)
+## Status: v1 scope implemented
 
-- **Provider core (M0)** — unified message model; Anthropic Messages adapter
+- **Provider core** — unified message model; Anthropic Messages adapter
   with hand-rolled SSE streaming, thinking blocks (chunked signatures),
   handoff pass (errored turns elided, cross-model thinking dropped, orphaned
   tool calls given synthetic results), errors-as-data, status-classified
   retries with backoff/retry-after, prompt-cache breakpoints; model table
   with rational cost accounting.
-- **Kernel loop + journal (M1)** — append-only sexpr entry **tree** per
+- **Kernel loop + journal** — append-only sexpr entry **tree** per
   session (write-ahead; `*read-eval*` nil; restricted sexpr-JSON vocabulary;
   form-based reading); all state a fold over the root→leaf path; turn loop
   with steering queues, save points, truncation guard; sequential
   read/write/edit/bash tools; run-until-settled driver; kill -9 mid-task
   resumes cleanly.
-- **TUI + core extensions (M2)** — adaptive renderer in normal scrollback +
-  managed bottom region, SIGWINCH live reflow; multi-line editor (D12:
-  Enter sends, Shift+Enter newline, paste >3 lines collapses to a
-  placeholder, paste-to-expand); slash commands with the §12 resolution
+- **TUI + core extensions** — adaptive renderer in normal scrollback +
+  managed bottom region, SIGWINCH live reflow; multi-line editor (Enter sends,
+  Shift+Enter newline, paste >3 lines collapses to a
+  placeholder, paste-to-expand); slash commands with the resolution
   order (extension commands → builtins → skills → prompt templates → agent);
   `/tree` `/resume` `/fork`, double-escape rewind, ESC aborts; todo
-  checklist core extension (D14) rendered in the panel; skills (Agent
+  checklist core extension rendered in the panel; skills (Agent
   Skills standard, progressive disclosure) and `$1`/`$@` prompt templates.
-- **Context management (M3)** — compaction (threshold at save points,
+- **Context management** — compaction (threshold at save points,
   manual `/compact`, overflow-error compact+retry-once), usage-anchored
   token accounting, cut points never at a tool result, structured + iterative
   UPDATE summary prompts, accumulated file sets, `:compaction` entries with
   materialized retained tails; lore (`/lore`, global/project/session scopes)
   injected into the system prompt every turn.
-- **Goals + supervisor (M4)** — persisted `:goal` entries; idle-continuation
+- **Goals + supervisor** — persisted `:goal` entries; idle-continuation
   steering with budgets, anti-scope-shrinking fidelity rules, completion and
-  blocked audits; kernel-verified agent-authored `done_when` predicates
-  (§8.4); built-in supervision (see below) with heartbeat hang detection,
+  blocked audits; kernel-verified agent-authored `done_when` predicates;
+  built-in supervision (see below) with heartbeat hang detection,
   crash-restart-resume, and boot-failure quarantine (`--no-userspace`).
-- **Self-extension (M5)** — `load_extension` tool: the agent writes Lisp
+- **Self-extension** — `load_extension` tool: the agent writes Lisp
   into `EVO.USER`, loads it into its own runtime, journaled as `:load` and
-  replayed on resume; SBCL package locks on the kernel (D8); seed corpus:
+  replayed on resume; SBCL package locks on the kernel; seed corpus:
   [docs/](docs/) (extension API, journal format, self-extension guide) and
   example extensions — [plan-mode](extensions/plan-mode.lisp) (shipped
   active: `/plan` `/auto` via tool gating + hidden `:custom-message` +
   transform-context filtering), git-checkpoint and permission-gate
   ([extensions/examples/](extensions/examples/)).
 
-Post-v1 by design: OpenAI Responses adapter (D6), sub-agents (D16).
+Post-v1 by design: OpenAI Responses adapter, sub-agents.
 
-## One binary (D17)
+## One binary
 
 `make build` produces a single executable, `build/evo`. Invoked plainly it
 is its own supervisor: the parent process re-spawns the same binary as a
@@ -72,7 +72,7 @@ evo --list-sessions
 
 ## Settings
 
-Sexpr plists (D3): global `~/.evo/settings.sexp`, project
+Sexpr plists: global `~/.evo/settings.sexp`, project
 `<cwd>/.evo/settings.sexp` (project wins). `EVO_HOME` overrides `~/.evo`.
 
 ```lisp
@@ -92,7 +92,7 @@ compaction.
 ```sh
 make test           # unit: sexpr IO, journal, schema, SSE, handoff, editor,
                     #       input parser, templates, compaction, lore, plan-mode
-make integration    # live (needs the proxy): M0/M1 round-trip, kill -9 +
+make integration    # live (needs the proxy): tool round-trip, kill -9 +
                     #       manual resume, goal completion, induced-crash
                     #       supervision, mid-task compaction
 make tui-test       # expect-driven TUI under a pty
@@ -110,15 +110,15 @@ src/provider.lisp      Anthropic adapter: handoff, SSE, retries, cost
 src/tools.lisp         tool registry, sexpr schema -> JSON Schema
 src/prompt.lisp        system prompt assembly, skills, templates
 src/loop.lisp          agent, turn loop, run-until-settled, hooks, heartbeat
-src/lore.lisp          lore stores (M3)
-src/compact.lisp       compaction (M3)
+src/lore.lisp          lore stores
+src/compact.lisp       compaction
 src/extension.lisp     load-extension, boot/replay, locks, EVO public API
 src/builtin-tools.lisp read / write / edit / bash
-src/todo.lisp          todo core extension (D14)
-src/goal.lisp          goal driver, audited tools, done-when (§8)
-src/tui/               term, input, editor, render, tui, commands (M2)
+src/todo.lisp          todo core extension
+src/goal.lisp          goal driver, audited tools, done-when
+src/tui/               term, input, editor, render, tui, commands
 src/cli.lisp           arg parsing, print/event modes, session bring-up
-src/supervisor.lisp    in-binary supervision (§13, D17)
+src/supervisor.lisp    in-binary supervision
 docs/                  seed corpus (also installed to ~/.evo/docs)
 extensions/            plan-mode (shipped) + examples/
 ```

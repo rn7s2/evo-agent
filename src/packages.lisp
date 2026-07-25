@@ -1,9 +1,9 @@
 ;;;; packages.lisp — package definitions for evo.
 ;;;;
 ;;;; Kernel packages (EVO.UTIL, EVO.JOURNAL, EVO.PROVIDER, EVO.KERNEL, EVO.CLI)
-;;;; are locked at boot (D8).  Userspace (EVO.USER) is unlocked; all
+;;;; are locked at boot.  Userspace (EVO.USER) is unlocked; all
 ;;;; agent-written code lives there.  EVO is the public extension API surface —
-;;;; both core and user extensions build on it, nothing bypasses it (D13).
+;;;; both core and user extensions build on it, nothing bypasses it.
 
 (defpackage :evo.util
   (:use :cl)
@@ -52,7 +52,7 @@
            ;; goal
            #:current-goal #:goal-continuation-message #:goal-continuation-for
            #:register-goal-tools #:create-goal-entry #:goal-tokens-used
-           ;; lore + compaction (M3)
+           ;; lore + compaction
            #:add-lore #:add-session-lore #:all-lore
            #:compact-now #:compaction-needed-p #:estimate-context-tokens
            #:overflow-error-p #:select-cut))
@@ -68,7 +68,7 @@
 (defpackage :evo.user
   (:use :cl :evo))
 
-;; Core extensions (D13): bundled, built on the same extension API.
+;; Core extensions: bundled, built on the same extension API.
 (defpackage :evo.todo
   (:use :cl :evo.util :evo.journal :evo.kernel)
   (:export #:current-todos #:format-todos))

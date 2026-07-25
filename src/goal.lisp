@@ -1,11 +1,11 @@
-;;;; goal.lisp — the goal system (§8, codex-derived, D7).
+;;;; goal.lisp — the goal system, codex-derived.
 ;;;;
 ;;;; A goal is journal state (:goal entries; current goal = fold).  The driver
 ;;;; is an idle-continuation loop: whenever the agent settles and the goal is
 ;;;; :active, a continuation steering prompt re-seeds the run.  "Doing
 ;;;; nothing" is NOT completion — termination is explicit (update-goal
 ;;;; :complete/:blocked under audit rules), a budget trip, or a user pause.
-;;;; The Lisp addition (§8.4): an optional agent-authored :done-when predicate
+;;;; The Lisp addition: an optional agent-authored :done-when predicate
 ;;;; the kernel runs before accepting completion.
 
 (in-package :evo.kernel)
@@ -14,7 +14,7 @@
   (evo.journal:state-goal (fold-state (agent-journal agent))))
 
 (defparameter *default-token-budget* 2000000
-  "Runaway-cost brake when the user sets no budget (§8.2).")
+  "Runaway-cost brake when the user sets no budget."
 
 (defun create-goal-entry (agent objective &key token-budget done-when)
   (append-entry (agent-journal agent)
@@ -52,7 +52,7 @@
              (incf total (usage-total-tokens
                           (pget (pget entry :message) :usage))))))))
 
-;;; Continuation steering (§8.2).
+;;; Continuation steering.
 
 (defun goal-continuation-message (goal used &key todo-text)
   (let ((budget (pget goal :token-budget))
@@ -77,7 +77,7 @@ Rules:
 
 (defun goal-continuation-for (agent goal)
   "Build the continuation steering prompt, embedding the todo snapshot
-(§11.1) so a re-steered run after crash or compaction knows where it was."
+so a re-steered run after crash or compaction knows where it was."
   (let* ((used (goal-tokens-used agent goal))
          (todos (custom-state (fold-state (agent-journal agent)) "todo"))
          (todo-text (and todos (plusp (length todos))
@@ -91,7 +91,7 @@ Summarize: (1) progress so far, (2) work remaining, (3) the single next step
 a future session should take. Goal objective: ~a"
           used (pget goal :token-budget) (pget goal :objective)))
 
-;;; The settled hook: plugs into run-until-settled (§6).
+;;; The settled hook: plugs into run-until-settled.
 
 (defun goal-settled-hook (agent outcome)
   (let ((goal (current-goal agent)))
@@ -99,7 +99,7 @@ a future session should take. Goal objective: ~a"
       (cond
         ((eq outcome :error)
          ;; Turn error -> goal :blocked (codex behavior); the supervisor hook —
-         ;; a goal blocked by turn-error is eligible for auto-resume (§13).
+         ;; a goal blocked by turn-error is eligible for auto-resume.
          (update-goal-entry agent goal :status :blocked :blocked-reason "turn-error")
          nil)
         (t
@@ -117,7 +117,7 @@ a future session should take. Goal objective: ~a"
 
 (pushnew 'goal-settled-hook *settled-hooks*)
 
-;;; Model-facing tools (§8.3).
+;;; Model-facing tools.
 
 (defun run-done-when (name)
   "Run the named userspace predicate.  Returns (values done-p output)."
@@ -168,7 +168,7 @@ a future session should take. Goal objective: ~a"
          (when done-when
            (multiple-value-bind (done-p output) (run-done-when done-when)
              (unless done-p
-               ;; The model's completion claim is a checked assertion (§8.4).
+               ;; The model's completion claim is a checked assertion.
                (error "Completion rejected: the goal's done-when predicate did not pass.~%~a~%The goal stays active — keep working."
                       output))))
          (update-goal-entry agent goal :status :complete

@@ -1,8 +1,8 @@
-;;;; tools.lisp — tool registry + sexpr schema -> JSON Schema (§6).
+;;;; tools.lisp — tool registry + sexpr schema -> JSON Schema.
 ;;;;
 ;;;; Tool interface: name, description, sexpr schema, execute function,
 ;;;; :content (model-visible) vs :details (host-visible) in the result.
-;;;; Execution is sequential (D9).  Tools signal conditions; the loop
+;;;; Execution is sequential.  Tools signal conditions; the loop
 ;;;; converts them to error tool-results.
 
 (in-package :evo.kernel)

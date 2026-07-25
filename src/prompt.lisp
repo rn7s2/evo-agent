@@ -1,4 +1,4 @@
-;;;; prompt.lisp — system prompt assembly (§12).
+;;;; prompt.lisp — system prompt assembly.
 ;;;;
 ;;;; Order: base -> tool one-liners -> guidelines -> own-docs paths -> lore
 ;;;; (post-MVP) -> project context files -> cwd.  Rebuilt on any tool-set
@@ -35,7 +35,7 @@ to ask permission for routine steps.")
                        for path = (probe-file (merge-pathnames name d))
                        when path collect path))))
 
-;;; Skills (§12): Agent Skills standard — SKILL.md + frontmatter, progressive
+;;; Skills: Agent Skills standard — SKILL.md + frontmatter, progressive
 ;;; disclosure: only name/description/path go into the prompt; the model
 ;;; reads the file on demand.
 
@@ -74,7 +74,7 @@ to ask permission for routine steps.")
   (find name (available-skills cwd)
         :key (lambda (s) (pget s :name)) :test #'equal))
 
-;;; Prompt templates (§12): .md files, filename = command, purely textual
+;;; Prompt templates: .md files, filename = command, purely textual
 ;;; $1..$9 / $@ substitution.
 
 (defun template-directories (&optional (cwd (uiop:getcwd)))
@@ -110,7 +110,7 @@ to ask permission for routine steps.")
       (when docs
         (format out "~%Your own documentation lives at: ~a~%" (namestring docs))))
     (when lore
-      ;; Lore (§9): injected every turn, immune to summarization.
+      ;; Lore: injected every turn, immune to summarization.
       (format out "~%## Lore (durable user guidance — always applies)~%")
       (dolist (item lore)
         (format out "- ~a~%" item)))

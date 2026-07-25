@@ -1,9 +1,9 @@
-;;;; tui.lisp — the interactive frontend, a core extension (D13, §14).
+;;;; tui.lisp — the interactive frontend, a core extension.
 ;;;;
 ;;;; Single cooperative main loop: poll raw stdin bytes -> key events; drain
 ;;;; the agent event queue (the run executes on a worker thread and steering
-;;;; queues carry mid-run input, §6); recompose and repaint the managed
-;;;; region.  Slash command resolution (§12): extension commands ->
+;;;; queues carry mid-run input); recompose and repaint the managed
+;;;; region.  Slash command resolution: extension commands ->
 ;;;; builtins -> skills -> prompt templates -> send to the agent.
 
 (in-package :evo.tui)
@@ -248,7 +248,7 @@ while the run thread is appending to it."
                                              (pget block :name)))))))
         (t nil)))))
 
-;;; Rewind (double-escape, §4.4).
+;;; Rewind (double-escape).
 
 (defun rewind-to-last-user (tui)
   (let* ((agent (tui-agent tui))
@@ -342,7 +342,7 @@ while the run thread is appending to it."
         (tui-mode tui) :select
         (tui-dirty tui) t))
 
-;;; Submit + slash command resolution (§12).
+;;; Submit + slash command resolution.
 
 (defun submit (tui)
   (let ((text (string-trim '(#\Space #\Newline)

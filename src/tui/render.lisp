@@ -1,4 +1,4 @@
-;;;; render.lisp — scrollback + managed bottom region (§14).
+;;;; render.lisp — scrollback + managed bottom region.
 ;;;;
 ;;;; Content renders into normal terminal scrollback (history is part of the
 ;;;; UX — no alternate screen); the bottom region (streaming tail, todo

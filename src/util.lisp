@@ -121,7 +121,7 @@ would reuse ids already in its journal, corrupting the parent tree."
   (let ((s (string-right-trim "/" (namestring (uiop:ensure-directory-pathname cwd)))))
     (substitute #\- #\/ s)))
 
-;;; Safe sexpr IO (journal format rules, §4.3)
+;;; Safe sexpr IO (journal format rules)
 ;;;
 ;;; Journals are data, not code: read with *read-eval* nil into a sandbox
 ;;; package, and reject anything outside the "sexpr-JSON" vocabulary —
@@ -194,7 +194,7 @@ the validated vocabulary, plain prin1 output re-reads exactly."
 
 ;;; Settings
 ;;;
-;;; Sexpr plists (D3): global ~/.evo/settings.sexp merged with project
+;;; Sexpr plists: global ~/.evo/settings.sexp merged with project
 ;;; .evo/settings.sexp (project wins, shallow merge).
 
 (defvar *settings* nil)

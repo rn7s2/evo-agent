@@ -1,4 +1,4 @@
-;;;; provider.lisp — the Anthropic Messages adapter (§5, M0).
+;;;; provider.lisp — the Anthropic Messages adapter.
 ;;;;
 ;;;; One unified message model; stateless replay (full history each request);
 ;;;; hand-rolled SSE; errors are data — this layer never signals into the
@@ -61,7 +61,7 @@
     (dolist (k keys v)
       (setf v (and (hash-table-p v) (gethash k v))))))
 
-;;; Handoff pass (§5): run at request build time.
+;;; Handoff pass: run at request build time.
 ;;;  - errored/aborted assistant turns are elided
 ;;;  - same-model thinking replays verbatim; cross-model thinking is dropped
 ;;;  - orphaned tool calls get synthetic error results
@@ -192,7 +192,7 @@ Consecutive user/tool-result messages merge into a single user message."
             (jobj "type" "enabled" "budget_tokens" budget)))
     (jzon:stringify req)))
 
-;;; SSE parsing (§5): hand-rolled; a stream ending without message_stop is a
+;;; SSE parsing: hand-rolled; a stream ending without message_stop is a
 ;;; retryable error.  Tool arguments accumulate as partial JSON and are parsed
 ;;; at content_block_stop.
 
@@ -371,7 +371,7 @@ content wins (some proxies report end_turn alongside tool_use blocks)."
   (+ (pget usage :input 0) (pget usage :output 0)
      (pget usage :cache-read 0) (pget usage :cache-write 0)))
 
-;;; HTTP + retry (§5): in-request retry honoring retry-after, exponential
+;;; HTTP + retry: in-request retry honoring retry-after, exponential
 ;;; backoff with jitter; classification on HTTP status, not string matching.
 
 (defun provider-config (provider-key)

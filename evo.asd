@@ -1,7 +1,7 @@
 ;;;; evo.asd — system definition for evo, the self-evolving agent.
 
 (asdf:defsystem "evo"
-  :description "evo — a goal-oriented, self-evolving agent (MVP: M0 provider core + M1 kernel loop/journal + print/event modes + basic goal driver)."
+  :description "evo — a goal-oriented, self-evolving agent."
   :author "evo-agent"
   :license "MIT"
   :version "0.1.0"

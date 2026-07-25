@@ -178,7 +178,7 @@ event: message_stop~%data: {\"type\":\"message_stop\"}~%~%"))
                    :key (lambda (b) (pget b :type))))
       (check "handoff no spurious synthesis" (= 3 (length out2))))))
 
-;;; Editor (D12)
+;;; Editor
 
 (defun test-editor ()
   (let ((eb (evo.tui::make-edit-buffer)))
@@ -193,7 +193,7 @@ event: message_stop~%data: {\"type\":\"message_stop\"}~%~%"))
     (evo.tui::eb-move eb :home)
     (evo.tui::eb-backspace eb)          ; join lines
     (check "editor join" (equal (evo.tui::eb-text eb) "helloworl")))
-  ;; Paste collapse + submit substitution (D12).
+  ;; Paste collapse + submit substitution.
   (let ((eb (evo.tui::make-edit-buffer))
         (big (format nil "l1~%l2~%l3~%l4~%l5")))
     (evo.tui::eb-paste eb big)
@@ -264,7 +264,7 @@ event: message_stop~%data: {\"type\":\"message_stop\"}~%~%"))
            (and (equal (cdr (assoc "name" front :test #'equal)) "demo")
                 (equal (cdr (assoc "description" front :test #'equal)) "a demo skill")))))
 
-;;; Compaction (M3)
+;;; Compaction
 
 (defun test-compaction ()
   ;; select-cut never starts the tail at a tool result.
@@ -309,7 +309,7 @@ event: message_stop~%data: {\"type\":\"message_stop\"}~%~%"))
          (not (overflow-error-p '(:role :assistant :stop-reason :error
                                   :error-message "HTTP 500: boom")))))
 
-;;; Lore (M3)
+;;; Lore
 
 (defun test-lore ()
   (let* ((home (uiop:ensure-directory-pathname

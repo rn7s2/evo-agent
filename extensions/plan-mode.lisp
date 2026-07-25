@@ -1,4 +1,4 @@
-;;;; plan-mode.lisp — the plan/auto modes, as a userspace extension (§12).
+;;;; plan-mode.lisp — the plan/auto modes, as a userspace extension.
 ;;;;
 ;;;; Modes are policy in userspace, not kernel features: /plan gates the
 ;;;; tool set to read-only (+ allowlisted bash), injects instructions via a
@@ -6,7 +6,7 @@
 ;;;; instructions are filtered back out of context by a transform-context
 ;;;; hook when the mode is off.
 ;;;;
-;;;; State discipline (§10): no in-memory mode flag — the mode lives in
+;;;; State discipline: no in-memory mode flag — the mode lives in
 ;;;; :custom journal state under "mode", so it survives restart untouched.
 
 (in-package :evo.user)

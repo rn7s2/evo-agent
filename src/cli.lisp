@@ -1,8 +1,8 @@
-;;;; cli.lisp — the evo CLI (§14, non-TUI modes).
+;;;; cli.lisp — the evo CLI (non-TUI modes).
 ;;;;
 ;;;; The MVP ships the two scriptable frontends the design wants from day
 ;;;; one: print mode (`evo -p "prompt"`) and event-stream mode (`--events`,
-;;;; line-delimited sexprs on stdout).  The TUI is M2.
+;;;; line-delimited sexprs on stdout).  The TUI is the interactive frontend.
 ;;;;
 ;;;; stdout carries assistant text (print mode) or event sexprs (event mode);
 ;;;; the tool/turn trace goes to stderr.
@@ -141,7 +141,7 @@ Settings: ~/.evo/settings.sexp and <cwd>/.evo/settings.sexp (project wins), e.g.
           ((getf opts :help) (write-line *usage*) 0)
           ((getf opts :version) (write-line "evo 0.1.0") 0)
           ((getf opts :list-sessions) (load-settings) (cmd-list-sessions) 0)
-          ;; One binary, two roles (§13): the plain invocation is the
+          ;; One binary, two roles: the plain invocation is the
           ;; supervisor parent; it re-spawns this same binary as the child.
           ((supervised-run-p opts) (supervise argv))
           (t (run-cli opts)))
@@ -190,7 +190,7 @@ Settings: ~/.evo/settings.sexp and <cwd>/.evo/settings.sexp (project wins), e.g.
   (if (and (tty-p)
            (not (getf opts :prompt))
            (not (getf opts :events)))
-      ;; Interactive: the tui core extension (§14).
+      ;; Interactive: the tui core extension.
       (multiple-value-bind (agent resumed-p) (setup-agent opts)
         (evo.tui:start-tui agent :resumed-p resumed-p))
       (run-headless opts)))
@@ -217,7 +217,7 @@ Settings: ~/.evo/settings.sexp and <cwd>/.evo/settings.sexp (project wins), e.g.
         (when goal
           (format *error-output* "goal ~a: ~a~%"
                   (pget goal :goal-id) (string-downcase (pget goal :status))))
-        ;; Exit codes are supervisor protocol (§13): 0 done, 1 error
+        ;; Exit codes are supervisor protocol: 0 done, 1 error
         ;; (restart-eligible), 2 blocked by model, 3 budget-limited —
         ;; 2 and 3 need a human, the supervisor must NOT restart them.
         (cond ((and goal (eq (pget goal :status) :complete)) 0)

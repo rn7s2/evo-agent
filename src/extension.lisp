@@ -1,9 +1,9 @@
-;;;; extension.lisp — self-extension (§10) and the public API (D13).
+;;;; extension.lisp — self-extension and the public API.
 ;;;;
 ;;;; The EVO package is the whole public surface: register-tool,
 ;;;; register-command, event hooks, load-extension.  Core and user extensions
 ;;;; build on it; nothing bypasses it.  Userspace code lives in EVO.USER and
-;;;; is rebuilt from source on every boot (D2): boot = load kernel, then
+;;;; is rebuilt from source on every boot: boot = load kernel, then
 ;;;; replay the path's :load entries against the source files on disk.
 
 (in-package :evo.kernel)
@@ -39,7 +39,7 @@ CL redefinition semantics: new definitions apply from the next call."
         #'string< :key #'namestring))
 
 (defun boot-extensions (&key journal (cwd (uiop:getcwd)))
-  "Load global then project extension directories (§10.3), journaling each."
+  "Load global then project extension directories, journaling each."
   (dolist (dir (list (merge-pathnames "extensions/" (evo-home))
                      (merge-pathnames "extensions/" (project-evo-dir cwd))))
     (dolist (file (extension-files dir))
@@ -49,7 +49,7 @@ CL redefinition semantics: new definitions apply from the next call."
           (warn "Skipping extension ~a: ~a" file e))))))
 
 (defun replay-loads (state &key journal)
-  "Replay a resumed session's :load entries (§4.2) against the files on disk.
+  "Replay a resumed session's :load entries against the files on disk.
 Files already loaded this boot are skipped; missing files are reported, not
 fatal — a corrupted runtime is repaired by fixing/removing a source file."
   (declare (ignore journal))
@@ -57,7 +57,7 @@ fatal — a corrupted runtime is repaired by fixing/removing a source file."
     (let ((path (pget entry :path)))
       (unless (member path *loaded-extension-paths* :test #'equal)
         ;; Progress goes to stderr so a supervisor quarantining a failed
-        ;; boot can report which :load entry was reached (§13).
+        ;; boot can report which :load entry was reached.
         (format *error-output* "~&evo: replaying :load ~a~%" path)
         (handler-case
             (if (probe-file path)
@@ -71,7 +71,7 @@ fatal — a corrupted runtime is repaired by fixing/removing a source file."
     :evo.todo :evo.tui))
 
 (defun lock-kernel-packages ()
-  "Package locks (D8): permissive but not suicidal — touching the kernel
+  "Package locks: permissive but not suicidal — touching the kernel
 requires an explicit, auditable sb-ext:unlock-package."
   (dolist (name *kernel-packages*)
     (let ((pkg (find-package name)))
@@ -94,7 +94,7 @@ content string (optionally (values content details))."
                               :source :extension))
 
 (defvar *commands* (make-hash-table :test #'equal)
-  "Slash commands (§12).  The MVP has no TUI; commands registered here are
+  "Slash commands.  The MVP has no TUI; commands registered here are
 resolved by the CLI's --command flag and by future frontends.")
 
 (defun register-command (name fn &key description)
@@ -124,12 +124,12 @@ NAMES nil restores the full registered tool set."
   (evo.kernel:current-goal agent))
 
 (defun steer (text &optional (agent *agent*))
-  "Queue a steering message; picked up at the next turn boundary (§6)."
+  "Queue a steering message; picked up at the next turn boundary."
   (evo.kernel:queue-steering agent text))
 
 (defun inject-context (text &key key (agent *agent*))
   "Append a :custom-message entry — content visible to the LLM.  With KEY, a
-:transform-context hook can filter it back out later (mode discipline, §12)."
+:transform-context hook can filter it back out later (mode discipline)."
   (evo.journal:append-entry
    (evo.kernel:agent-journal agent)
    (append (list :type :custom-message
@@ -138,7 +138,7 @@ NAMES nil restores the full registered tool set."
            (when key (list :key key)))))
 
 (defun custom-state (key &optional (agent *agent*))
-  "Current value of extension state KEY (fold over :custom entries, §4.2)."
+  "Current value of extension state KEY (fold over :custom entries)."
   (evo.journal:custom-state
    (evo.journal:fold-state (evo.kernel:agent-journal agent)) key))
 

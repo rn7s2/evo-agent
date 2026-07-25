@@ -1,4 +1,4 @@
-;;;; model-table.lisp — hand-written model table (§5).
+;;;; model-table.lisp — hand-written model table.
 ;;;;
 ;;;; Costs are per million tokens, as rationals so journal accounting stays
 ;;;; exact.  :provider names a provider config in settings

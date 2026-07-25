@@ -1,5 +1,5 @@
 ;;;; commands.lisp — TUI builtin slash commands + skills/templates resolution
-;;;; (§12) + the main loop / entry point.
+;;;; + the main loop / entry point.
 
 (in-package :evo.tui)
 
@@ -38,7 +38,7 @@ keys: enter send · shift+enter/alt+enter/ctrl+j newline · esc interrupt ·
                                (pget goal :done-when))
                        (dim "no goal — /goal <objective> to set one"))))
       ((and goal (eq (pget goal :status) :active))
-       ;; Refine: new :goal entry, same id; steer if a run is active (§8.2).
+       ;; Refine: new :goal entry, same id; steer if a run is active.
        (append-entry (agent-journal agent)
                      (list* :type :goal (evo.util:pput
                                          (evo.util:pput goal :objective args)
@@ -78,7 +78,7 @@ keys: enter send · shift+enter/alt+enter/ctrl+j newline · esc interrupt ·
              (switch-journal tui (open-journal path)
                              :note (format nil "resumed ~a" path))
              (show-history-tail tui)
-             ;; An active goal in a resumed session picks itself back up (§8).
+             ;; An active goal in a resumed session picks itself back up.
              (let ((goal (current-goal (tui-agent tui))))
                (when (and goal (eq (pget goal :status) :active))
                  (queue-steering (tui-agent tui)
@@ -131,7 +131,7 @@ keys: enter send · shift+enter/alt+enter/ctrl+j newline · esc interrupt ·
                  ((and (eq (pget entry :type) :message)
                        (eq (pget (pget entry :message) :role) :user))
                   ;; Selecting a user message: leaf -> its parent, text into
-                  ;; the editor (edit-and-resubmit = new branch, §4.4).
+                  ;; the editor (edit-and-resubmit = new branch).
                   (setf (journal-leaf-id journal) (pget entry :parent-id))
                   (let ((text (pget (find :text (pget (pget entry :message) :content)
                                           :key (lambda (b) (pget b :type)))
@@ -238,7 +238,7 @@ keys: enter send · shift+enter/alt+enter/ctrl+j newline · esc interrupt ·
          t)
         (t nil)))))
 
-;;; Skills + templates as commands (§12 resolution order).
+;;; Skills + templates as commands (resolution order).
 
 (defun command-as-skill (tui name args)
   (let* ((skill-name (if (string-prefix-p "skill:" name)
@@ -278,7 +278,7 @@ keys: enter send · shift+enter/alt+enter/ctrl+j newline · esc interrupt ·
   ;; Keep the supervisor's hang detector fed even while idle at the editor
   ;; (throttled internally to 1/sec).
   (evo.kernel::heartbeat-touch)
-  ;; Live resize (D4).
+  ;; Live resize.
   (when *resized*
     (setf *resized* nil)
     (refresh-size)
@@ -330,7 +330,7 @@ keys: enter send · shift+enter/alt+enter/ctrl+j newline · esc interrupt ·
            (banner tui :resumed-p resumed-p)
            (when resumed-p (show-history-tail tui))
            (refresh-goal tui)
-           ;; An idle active goal always gets re-steered (§8.2).
+           ;; An idle active goal always gets re-steered.
            (let ((goal (tui-goal tui)))
              (when (and goal (eq (pget goal :status) :active))
                (queue-steering agent (goal-continuation-for agent goal))

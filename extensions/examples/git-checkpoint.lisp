@@ -1,10 +1,10 @@
-;;;; git-checkpoint.lisp — example extension (seed corpus, §10.4).
+;;;; git-checkpoint.lisp — example extension (seed corpus).
 ;;;;
 ;;;; File-state undo via `git stash create`, keyed by turn: after every turn
 ;;;; a stash commit captures the working tree without touching the index or
 ;;;; the stash list; /undo restores the tree of an earlier checkpoint.
 ;;;; Checkpoint records ride :custom journal state (rebuilt from the fold,
-;;;; never from memory).  This is evo's answer to built-in file undo (§4.4).
+;;;; never from memory).  This is evo's answer to built-in file undo.
 
 (in-package :evo.user)
 

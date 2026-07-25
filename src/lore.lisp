@@ -1,4 +1,4 @@
-;;;; lore.lisp — the lore system (§9, M3).
+;;;; lore.lisp — the lore system.
 ;;;;
 ;;;; Human knowledge, guidance, and constraints, durable across the whole
 ;;;; session and immune to summarization: lore is injected into the

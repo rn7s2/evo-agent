@@ -1,4 +1,4 @@
-;;;; builtin-tools.lisp — the sequential v1 tool set (M1): read/write/edit/bash.
+;;;; builtin-tools.lisp — the sequential tool set: read/write/edit/bash.
 
 (in-package :evo.kernel)
 

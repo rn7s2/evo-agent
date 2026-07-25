@@ -1,4 +1,4 @@
-;;;; supervisor.lisp — the supervisor (§13), in-binary.
+;;;; supervisor.lisp — the supervisor, in-binary.
 ;;;;
 ;;;; One binary total: invoked normally, evo IS the tiny supervisor parent —
 ;;;; it re-spawns itself (sb-ext:*runtime-pathname*) as the supervised child
@@ -86,7 +86,7 @@ Returns (values exit-code hung-p)."
               (64 (return 64)))         ; usage error: restarting won't help
             (when hung
               (format *error-output* "~&evo: child was hung (killed)~%"))
-            ;; Boot-failure quarantine (§13.4).
+            ;; Boot-failure quarantine.
             (if (< duration boot-grace)
                 (incf boot-failures)
                 (setf boot-failures 0))
