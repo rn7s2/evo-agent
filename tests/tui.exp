@@ -1,0 +1,90 @@
+#!/usr/bin/expect -f
+# tui.exp — drive the TUI under a pty: banner, /help, D12 paste collapse,
+# a live model round-trip, todo panel, and /quit.
+set timeout 180
+
+set repo [file dirname [file dirname [file normalize $argv0]]]
+set scratch [exec mktemp -d /tmp/evo-tui.XXXXXX]
+set env(EVO_HOME) "$scratch/home"
+file mkdir $env(EVO_HOME)
+set f [open "$env(EVO_HOME)/settings.sexp" w]
+puts $f {(:model "ark-deepseek-v4-pro" :thinking :xhigh :providers (:anthropic (:base-url "http://127.0.0.1:8787" :api-key "sk-evo-default-dd196a205a364d844b67b52a9c418c8e")))}
+close $f
+
+set workdir "$scratch/work"
+file mkdir $workdir
+cd $workdir
+
+set pass 0
+set failures {}
+proc check {name} {
+    global pass
+    incr pass
+    puts "\nPASS: $name"
+}
+proc fail {name} {
+    global failures
+    lappend failures $name
+    puts "\nFAIL: $name"
+}
+
+spawn "$repo/bin/evo"
+
+# 1. banner appears
+expect {
+    -re {enter sends} { check "banner" }
+    timeout { fail "banner"; exit 1 }
+}
+
+# 2. /help lists commands
+send "/help\r"
+expect {
+    -re {/tree} { check "/help output" }
+    timeout { fail "/help output" }
+}
+
+# 3. paste collapse (D12): 5-line bracketed paste becomes a placeholder
+send "\x1b\[200~alpha\nbravo\ncharlie\ndelta\necho\x1b\[201~"
+expect {
+    -re {\[paste #1: 5 lines\]} { check "paste collapse placeholder" }
+    timeout { fail "paste collapse placeholder" }
+}
+# clear the editor
+send "\x03"
+sleep 0.3
+
+# 4. live round trip through the model
+send "Reply with exactly the word: tui-marker-747\r"
+expect {
+    -re {tui-marker-747} {
+        # first match may be our own echo line; wait for the model's reply
+        expect {
+            -re {tui-marker-747} { check "model round-trip" }
+            timeout { fail "model round-trip" }
+        }
+    }
+    timeout { fail "model round-trip" }
+}
+
+# 5. todo tool drives the panel
+send "Use the todo tool to create a two-item checklist: first item 'demo-item-one' pending, second 'demo-item-two' in-progress. Then say done.\r"
+expect {
+    -re {demo-item-one} { check "todo panel renders" }
+    timeout { fail "todo panel renders" }
+}
+# wait for the run to settle
+expect {
+    -re {done|Done} {}
+    timeout {}
+}
+
+# 6. quit cleanly
+send "/quit\r"
+expect {
+    eof { check "clean quit" }
+    timeout { fail "clean quit"; catch {close} }
+}
+
+puts "\n$pass checks passed, [llength $failures] failed ($scratch)"
+if {[llength $failures] > 0} { exit 1 }
+exit 0

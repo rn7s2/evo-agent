@@ -65,6 +65,24 @@ would reuse ids already in its journal, corrupting the parent tree."
       string
       (concatenate 'string (subseq string 0 max-chars) marker)))
 
+(defun count-substring (needle haystack)
+  (loop with n = 0 with start = 0
+        for pos = (search needle haystack :start2 start)
+        while pos
+        do (incf n) (setf start (1+ pos))
+        finally (return n)))
+
+(defun string-replace (needle replacement haystack &key all)
+  (with-output-to-string (out)
+    (loop with start = 0
+          for pos = (search needle haystack :start2 start)
+          while pos
+          do (write-string haystack out :start start :end pos)
+             (write-string replacement out)
+             (setf start (+ pos (length needle)))
+             (unless all (loop-finish))
+          finally (write-string haystack out :start start))))
+
 ;;; Files & directories
 
 (defun ensure-directory (pathname)

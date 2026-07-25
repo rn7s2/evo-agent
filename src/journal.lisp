@@ -17,7 +17,10 @@
   (index (make-hash-table :test #'equal))  ; id -> entry
   leaf-id         ; current leaf entry id (nil for empty journal)
   started-p       ; t once the file exists on disk
-  (pending nil))  ; entries buffered before first flush (reverse order)
+  (pending nil)   ; entries buffered before first flush (reverse order)
+  ;; The run thread appends while a frontend folds state: one lock guards
+  ;; entries/index/leaf.
+  (lock (bt:make-lock "journal")))
 
 (defun sessions-directory (&optional (cwd (uiop:getcwd)))
   (merge-pathnames (format nil "sessions/~a/" (encode-cwd cwd)) (evo-home)))
@@ -85,37 +88,39 @@
 (defun append-entry (journal plist &key parent-id)
   "Append PLIST as a new entry at the leaf (or under PARENT-ID: branching).
 Assigns :id/:parent-id/:timestamp.  Returns the completed entry."
-  (let* ((id (loop for candidate = (gen-id)
-                   unless (find-entry journal candidate) return candidate))
-         (entry (append (list :type (pget plist :type)
-                              :id id
-                              :parent-id (or parent-id (journal-leaf-id journal))
-                              :timestamp (iso8601-now))
-                        (loop for (k v) on plist by #'cddr
-                              unless (member k '(:type :id :parent-id :timestamp))
-                                append (list k v)))))
-    (validate-journal-value entry)   ; fail loudly now, not at deferred flush
-    (journal-add journal entry)
-    (setf (journal-leaf-id journal) (pget entry :id))
-    (cond ((journal-started-p journal)
-           (write-entry journal entry))
-          (t
-           (push entry (journal-pending journal))
-           ;; Nothing is written until the first assistant message exists.
-           (when (assistant-message-entry-p entry)
-             (flush-pending journal))))
-    entry))
+  (bt:with-lock-held ((journal-lock journal))
+    (let* ((id (loop for candidate = (gen-id)
+                     unless (gethash candidate (journal-index journal))
+                       return candidate))
+           (entry (append (list :type (pget plist :type)
+                                :id id
+                                :parent-id (or parent-id (journal-leaf-id journal))
+                                :timestamp (iso8601-now))
+                          (loop for (k v) on plist by #'cddr
+                                unless (member k '(:type :id :parent-id :timestamp))
+                                  append (list k v)))))
+      (validate-journal-value entry) ; fail loudly now, not at deferred flush
+      (journal-add journal entry)
+      (setf (journal-leaf-id journal) (pget entry :id))
+      (cond ((journal-started-p journal)
+             (write-entry journal entry))
+            (t
+             (push entry (journal-pending journal))
+             ;; Nothing is written until the first assistant message exists.
+             (when (assistant-message-entry-p entry)
+               (flush-pending journal))))
+      entry)))
 
 (defun find-entry (journal id)
-  (gethash id (journal-index journal)))
+  (bt:with-lock-held ((journal-lock journal))
+    (gethash id (journal-index journal))))
 
-(defun entry-path (journal &optional (leaf-id (journal-leaf-id journal)))
-  "Root→leaf list of entries."
+(defun %entry-path (journal leaf-id)
   (let ((path nil)
         (seen (make-hash-table :test #'equal)))
     (loop for id = leaf-id then (pget entry :parent-id)
           while id
-          for entry = (or (find-entry journal id)
+          for entry = (or (gethash id (journal-index journal))
                           (error "Broken parent chain: no entry ~s" id))
           do (when (gethash id seen)
                (error "Cycle in journal parent chain at ~s — corrupt journal ~a"
@@ -123,6 +128,11 @@ Assigns :id/:parent-id/:timestamp.  Returns the completed entry."
              (setf (gethash id seen) t)
              (push entry path))
     path))
+
+(defun entry-path (journal &optional (leaf-id (journal-leaf-id journal)))
+  "Root→leaf list of entries."
+  (bt:with-lock-held ((journal-lock journal))
+    (%entry-path journal leaf-id)))
 
 ;;; State fold (§4.1): context, model, thinking, tools, goal — everything is a
 ;;; fold over the root→leaf path.  No mutable fields.
@@ -134,11 +144,29 @@ Assigns :id/:parent-id/:timestamp.  Returns the completed entry."
   tools            ; list of active tool name strings, nil = default set
   goal             ; current goal plist or nil
   (loads nil)      ; list of :load entry plists, chronological
+  (custom nil)     ; alist key-string -> data (last :custom entry wins)
   name)
 
+(defun custom-state (state key)
+  "Extension state from :custom entries (invisible to the LLM)."
+  (cdr (assoc key (state-custom state) :test #'equal)))
+
+(defun compaction-entry->messages (entry)
+  "Messages a :compaction checkpoint contributes: the summary as an ordinary
+user message in <summary> tags, then the retained tail."
+  (cons (list :role :user
+              :content (list (list :type :text
+                                   :text (format nil "<summary>~%This session was compacted; the conversation so far is summarized below. Continue seamlessly from it.~2%~a~@[~2%Files read so far: ~{~a~^, ~}~]~@[~%Files modified so far: ~{~a~^, ~}~]~%</summary>"
+                                                 (pget entry :summary)
+                                                 (coerce (or (pget entry :files-read) #()) 'list)
+                                                 (coerce (or (pget entry :files-modified) #()) 'list)))))
+        (coerce (or (pget entry :retained-tail) #()) 'list)))
+
 (defun fold-state (journal &optional (leaf-id (journal-leaf-id journal)))
-  (let ((state (make-state)))
-    (dolist (entry (and leaf-id (entry-path journal leaf-id)))
+  (let ((state (make-state))
+        (path (bt:with-lock-held ((journal-lock journal))
+                (and leaf-id (%entry-path journal leaf-id)))))
+    (dolist (entry path)
       (let ((type (pget entry :type)))
         (case type
           (:message
@@ -146,7 +174,13 @@ Assigns :id/:parent-id/:timestamp.  Returns the completed entry."
           (:custom-message
            ;; Extension-injected content, visible to the LLM.
            (push (pget entry :message) (state-messages state)))
-          (:custom)                     ; state for extensions; invisible to LLM
+          (:custom                      ; state for extensions; invisible to LLM
+           (let ((key (pget entry :key)))
+             (when key
+               (setf (state-custom state)
+                     (cons (cons key (pget entry :data))
+                           (remove key (state-custom state)
+                                   :key #'car :test #'equal))))))
           (:model-change
            (setf (state-model state) (pget entry :model)))
           (:thinking-change
@@ -164,10 +198,45 @@ Assigns :id/:parent-id/:timestamp.  Returns the completed entry."
           (:session-info
            (when (pget entry :name)
              (setf (state-name state) (pget entry :name))))
-          ((:label :branch-summary :compaction))
+          (:compaction
+           ;; Self-contained checkpoint (§7): context rebuild restarts here as
+           ;; [summary, ...retained-tail]; no walk past the compaction.
+           (setf (state-messages state)
+                 (reverse (compaction-entry->messages entry))))
+          (:branch-summary
+           (when (pget entry :summary)
+             (push (list :role :user
+                         :content (list (list :type :text
+                                              :text (format nil "<abandoned-branch-summary>~%~a~%</abandoned-branch-summary>"
+                                                            (pget entry :summary)))))
+                   (state-messages state))))
+          (:label)
           (t nil))))
     (setf (state-messages state) (nreverse (state-messages state)))
     state))
+
+;;; Fork (§4.4): copy the root→entry path into a new session file.
+
+(defun fork-session (journal &optional (leaf-id (journal-leaf-id journal)))
+  "Write the root→LEAF-ID path as a fresh session file.  Returns its path.
+Entry ids are preserved (the parent chain must stay intact)."
+  (let* ((path (entry-path journal leaf-id))
+         (id (gen-id 16))
+         (header (let ((h (copy-list (journal-header journal))))
+                   (setf (getf h :id) id
+                         (getf h :timestamp) (iso8601-now))
+                   h))
+         (file (merge-pathnames
+                (format nil "~a_~a.sexp" (session-file-timestamp) id)
+                (make-pathname :name nil :type nil
+                               :defaults (journal-path journal)))))
+    (ensure-directories-exist file)
+    (with-open-file (out file :direction :output :external-format :utf-8
+                              :if-exists :error :if-does-not-exist :create)
+      (write-sexpr-line header out)
+      (dolist (entry path)
+        (write-sexpr-line entry out)))
+    file))
 
 ;;; Session listing (§4.4) — bounded header scan.
 

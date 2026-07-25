@@ -178,6 +178,158 @@ event: message_stop~%data: {\"type\":\"message_stop\"}~%~%"))
                    :key (lambda (b) (pget b :type))))
       (check "handoff no spurious synthesis" (= 3 (length out2))))))
 
+;;; Editor (D12)
+
+(defun test-editor ()
+  (let ((eb (evo.tui::make-edit-buffer)))
+    (evo.tui::eb-insert-text eb "hello")
+    (evo.tui::eb-newline eb)
+    (evo.tui::eb-insert-text eb "world")
+    (check "editor two lines" (equal (evo.tui::eb-text eb)
+                                     (format nil "hello~%world")))
+    (evo.tui::eb-backspace eb)
+    (check "editor backspace" (equal (evo.tui::eb-text eb)
+                                     (format nil "hello~%worl")))
+    (evo.tui::eb-move eb :home)
+    (evo.tui::eb-backspace eb)          ; join lines
+    (check "editor join" (equal (evo.tui::eb-text eb) "helloworl")))
+  ;; Paste collapse + submit substitution (D12).
+  (let ((eb (evo.tui::make-edit-buffer))
+        (big (format nil "l1~%l2~%l3~%l4~%l5")))
+    (evo.tui::eb-paste eb big)
+    (check "paste collapses" (search "[paste #1: 5 lines]" (evo.tui::eb-text eb)))
+    (check "submit substitutes" (equal (evo.tui::eb-submit-text eb) big))
+    ;; paste-to-expand: same content right after the placeholder
+    (evo.tui::eb-paste eb big)
+    (check "paste-to-expand inlines" (equal (evo.tui::eb-text eb) big))
+    (check "expand clears side buffer" (null (evo.tui::eb-pastes eb))))
+  ;; Small pastes insert literally.
+  (let ((eb (evo.tui::make-edit-buffer)))
+    (evo.tui::eb-paste eb (format nil "a~%b"))
+    (check "small paste literal" (equal (evo.tui::eb-text eb) (format nil "a~%b"))))
+  ;; Wrapping math.
+  (let ((eb (evo.tui::make-edit-buffer)))
+    (evo.tui::eb-insert-text eb "0123456789")
+    (multiple-value-bind (rows crow ccol) (evo.tui::eb-display-rows eb 4)
+      (check "wrap rows" (equal rows '("0123" "4567" "89")))
+      (check "wrap cursor" (and (= crow 2) (= ccol 2))))))
+
+;;; Input parser
+
+(defun feed-bytes (bytes &key flush-escape)
+  (let ((state (evo.tui::make-input-state)))
+    (evo.tui::in-push-bytes state (coerce bytes 'vector))
+    (evo.tui::parse-keys state :flush-escape flush-escape)))
+
+(defun test-input ()
+  (check "plain chars" (equal (feed-bytes '(104 105)) '((:char #\h) (:char #\i))))
+  (check "enter" (equal (feed-bytes '(13)) '(:enter)))
+  (check "arrow up" (equal (feed-bytes '(27 91 65)) '(:up)))
+  (check "shift-enter csi-u" (equal (feed-bytes '(27 91 49 51 59 50 117)) '(:shift-enter)))
+  (check "modifyOtherKeys shift-enter"
+         (equal (feed-bytes '(27 91 50 55 59 50 59 49 51 126)) '(:shift-enter)))
+  (check "alt-enter fallback" (equal (feed-bytes '(27 13)) '(:newline)))
+  (check "ctrl-c" (equal (feed-bytes '(3)) '((:ctrl #\c))))
+  (check "bracketed paste"
+         (equal (feed-bytes (append '(27 91 50 48 48 126)
+                                    (map 'list #'char-code "x")
+                                    '(27 91 50 48 49 126)))
+                '((:paste "x"))))
+  ;; Incomplete sequences wait...
+  (let ((state (evo.tui::make-input-state)))
+    (evo.tui::in-push-bytes state #(27 91))
+    (check "incomplete csi waits" (null (evo.tui::parse-keys state)))
+    (evo.tui::in-push-bytes state #(66))
+    (check "csi completes later" (equal (evo.tui::parse-keys state) '(:down))))
+  ;; ...but a lone ESC flushes after quiet ticks.
+  (check "lone esc flushes" (equal (feed-bytes '(27) :flush-escape t) '(:escape)))
+  ;; UTF-8 across the boundary.
+  (let ((state (evo.tui::make-input-state))
+        (bytes (sb-ext:string-to-octets "é" :external-format :utf-8)))
+    (evo.tui::in-push-bytes state (subseq bytes 0 1))
+    (check "split utf8 waits" (null (evo.tui::parse-keys state)))
+    (evo.tui::in-push-bytes state (subseq bytes 1))
+    (check "split utf8 completes" (equal (evo.tui::parse-keys state) '((:char #\é))))))
+
+;;; Templates + skills
+
+(defun test-templates ()
+  (check "template $1 $@"
+         (equal (expand-template "fix $1 in $2 ($@)" "a b")
+                "fix a in b (a b)"))
+  (check "template missing args" (equal (expand-template "$1-$3" "x") "x-"))
+  (let ((front (evo.kernel::parse-frontmatter
+                (format nil "---~%name: demo~%description: a demo skill~%---~%body"))))
+    (check "frontmatter parse"
+           (and (equal (cdr (assoc "name" front :test #'equal)) "demo")
+                (equal (cdr (assoc "description" front :test #'equal)) "a demo skill")))))
+
+;;; Compaction (M3)
+
+(defun test-compaction ()
+  ;; select-cut never starts the tail at a tool result.
+  (let* ((mk-user '(:role :user :content ((:type :text :text "u"))))
+         (mk-asst '(:role :assistant :stop-reason :tool-use :model "m"
+                    :usage (:input 1 :output 1 :cache-read 0 :cache-write 0)
+                    :content ((:type :tool-call :id "t1" :name "bash"
+                               :arguments (:command "ls")))))
+         (mk-result '(:role :tool-result :tool-call-id "t1" :tool-name "bash"
+                      :is-error nil :content ((:type :text :text "out"))))
+         (messages (list mk-user mk-asst mk-result mk-user mk-asst mk-result)))
+    (let ((evo.kernel::*compact-keep-recent-tokens* 2))
+      (let ((cut (select-cut messages)))
+        (check "cut not at tool result"
+               (not (eq (evo.provider:message-role (nth cut messages)) :tool-result))))))
+  ;; :compaction fold: summary + retained tail + entries after.
+  (let* ((dir (uiop:ensure-directory-pathname
+               (format nil "~a/evo-test-~a/" (uiop:getenv "TMPDIR") (gen-id))))
+         (journal (progn (ensure-directories-exist dir) (make-session-journal dir))))
+    (append-entry journal '(:type :message :message (:role :user :content ((:type :text :text "old")))))
+    (append-entry journal
+                  '(:type :compaction :summary "the summary"
+                    :retained-tail #((:role :user :content ((:type :text :text "tail-msg"))))
+                    :files-read #("a.txt") :files-modified #() :dropped-messages 1))
+    (append-entry journal '(:type :message :message (:role :user :content ((:type :text :text "after")))))
+    (let ((messages (evo.journal:state-messages (fold-state journal))))
+      (check "compaction fold count" (= 3 (length messages)))
+      (check "compaction summary first"
+             (search "the summary"
+                     (evo.util:pget (first (evo.provider:message-content (first messages))) :text)))
+      (check "compaction retains tail"
+             (equal "tail-msg"
+                    (evo.util:pget (first (evo.provider:message-content (second messages))) :text)))
+      (check "compaction keeps later entries"
+             (equal "after"
+                    (evo.util:pget (first (evo.provider:message-content (third messages))) :text)))))
+  ;; Overflow classification.
+  (check "overflow detected"
+         (overflow-error-p '(:role :assistant :stop-reason :error
+                             :error-message "HTTP 400: prompt is too long: 250000 tokens")))
+  (check "overflow not confused with 500"
+         (not (overflow-error-p '(:role :assistant :stop-reason :error
+                                  :error-message "HTTP 500: boom")))))
+
+;;; Lore (M3)
+
+(defun test-lore ()
+  (let* ((home (uiop:ensure-directory-pathname
+                (format nil "~a/evo-lore-~a/" (uiop:getenv "TMPDIR") (gen-id)))))
+    (sb-posix:setenv "EVO_HOME" (namestring home) 1)
+    (unwind-protect
+         (progn
+           (add-lore "always run tests" :scope :global)
+           (add-lore "prefer rg over grep" :scope :global)
+           (let ((lore (all-lore)))
+             (check "lore round trip"
+                    (equal lore '("always run tests" "prefer rg over grep"))))
+           (let ((prompt (build-system-prompt nil :lore (all-lore))))
+             (check "lore injected into prompt"
+                    (search "prefer rg over grep" prompt))))
+      (sb-posix:setenv "EVO_HOME"
+                       (namestring (uiop:ensure-directory-pathname
+                                    (format nil "~a/evo-unit-home" (or (uiop:getenv "TMPDIR") "/tmp"))))
+                       1))))
+
 (defun run-all ()
   (let ((*pass* 0) (*fail* 0))
     (test-sexpr-io)
@@ -185,5 +337,10 @@ event: message_stop~%data: {\"type\":\"message_stop\"}~%~%"))
     (test-schema)
     (test-sse)
     (test-handoff)
+    (test-editor)
+    (test-input)
+    (test-templates)
+    (test-compaction)
+    (test-lore)
     (format t "~%~d passed, ~d failed~%" *pass* *fail*)
     (if (zerop *fail*) 0 1)))

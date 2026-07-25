@@ -17,9 +17,20 @@
                              (:file "tools")
                              (:file "prompt")
                              (:file "loop")
+                             (:file "lore")
+                             (:file "compact")
                              (:file "extension")
                              (:file "builtin-tools")
+                             (:file "todo")
                              (:file "goal")
+                             (:module "tui"
+                              :serial t
+                              :components ((:file "term")
+                                           (:file "input")
+                                           (:file "editor")
+                                           (:file "render")
+                                           (:file "tui")
+                                           (:file "commands")))
                              (:file "cli")))))
 
 (asdf:defsystem "evo/tests"

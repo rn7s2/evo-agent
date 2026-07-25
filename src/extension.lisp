@@ -64,7 +64,8 @@ fatal — a corrupted runtime is repaired by fixing/removing a source file."
             (warn "Replaying :load of ~a failed: ~a" path e)))))))
 
 (defparameter *kernel-packages*
-  '(:evo.util :evo.journal :evo.provider :evo.kernel :evo.cli :evo))
+  '(:evo.util :evo.journal :evo.provider :evo.kernel :evo.cli :evo
+    :evo.todo :evo.tui))
 
 (defun lock-kernel-packages ()
   "Package locks (D8): permissive but not suicidal — touching the kernel

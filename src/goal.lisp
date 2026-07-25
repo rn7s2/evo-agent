@@ -54,7 +54,7 @@
 
 ;;; Continuation steering (§8.2).
 
-(defun goal-continuation-message (goal used)
+(defun goal-continuation-message (goal used &key todo-text)
   (let ((budget (pget goal :token-budget))
         (objective (pget goal :objective)))
     (format nil
@@ -65,13 +65,24 @@
 </goal>
 
 Budget: ~:d tokens used of ~:d (~:d remaining).
-
+~@[
+Your current todo list (update it with the todo tool as you go):
+~a~]
 Rules:
 - Do not shrink the scope: the objective means what it says, requirement by requirement. Partial delivery is not completion.
 - Completion must be PROVEN from current evidence — files on disk, test output, runtime behavior — checked requirement by requirement right now, not from memory or intent. Only then call update-goal with status \"complete\".
 - If you are stuck, try a different approach first. Declare the goal blocked (update-goal status \"blocked\") only after the SAME blocker has defeated you in 3 consecutive goal turns, and say what the blocker is.
 - Otherwise: take the next concrete step toward the objective."
-            objective used budget (max 0 (- budget used)))))
+            objective used budget (max 0 (- budget used)) todo-text)))
+
+(defun goal-continuation-for (agent goal)
+  "Build the continuation steering prompt, embedding the todo snapshot
+(§11.1) so a re-steered run after crash or compaction knows where it was."
+  (let* ((used (goal-tokens-used agent goal))
+         (todos (custom-state (fold-state (agent-journal agent)) "todo"))
+         (todo-text (and todos (plusp (length todos))
+                         (evo.todo:format-todos todos))))
+    (goal-continuation-message goal used :todo-text todo-text)))
 
 (defun goal-wrapup-message (goal used)
   (format nil
@@ -101,7 +112,7 @@ a future session should take. Goal objective: ~a"
               t)
              (t
               (update-goal-entry agent goal :tokens-used used)
-              (queue-steering agent (goal-continuation-message goal used))
+              (queue-steering agent (goal-continuation-for agent goal))
               t))))))))
 
 (pushnew 'goal-settled-hook *settled-hooks*)

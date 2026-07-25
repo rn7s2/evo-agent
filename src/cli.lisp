@@ -130,19 +130,18 @@ Settings: ~/.evo/settings.sexp and <cwd>/.evo/settings.sexp (project wins), e.g.
       (format *error-output* "evo: ~a~%" e)
       1)))
 
-(defun run-cli (opts)
+(defun setup-agent (opts &key events-cb)
+  "Shared session bring-up for every frontend.  Returns (values agent resumed-p)."
   (load-settings)
   (let* ((journal (resolve-journal opts))
          (resumed-p (journal-started-p journal))
          (agent (make-agent
                  :journal journal
-                 :events-cb (if (getf opts :events)
-                                #'event-mode-handler
-                                #'print-mode-event-handler)
+                 :events-cb events-cb
                  :model-override (getf opts :model)
                  :thinking-override (getf opts :thinking))))
     (setf evo:*agent* agent)
-    (evo.kernel::lock-kernel-packages)
+    (evo.kernel:lock-kernel-packages)
     ;; Userspace: boot extension dirs, then replay the session's :load entries.
     (unless (getf opts :no-userspace)
       (let ((evo.kernel::*current-journal* journal))
@@ -159,22 +158,43 @@ Settings: ~/.evo/settings.sexp and <cwd>/.evo/settings.sexp (project wins), e.g.
                                   :thinking (getf opts :thinking))))
     (when (getf opts :goal)
       (evo.kernel:create-goal-entry agent (getf opts :goal)))
-    ;; Seed the run.
-    (let ((prompt (getf opts :prompt))
-          (goal (evo.kernel:current-goal agent)))
-      (cond
-        (prompt (queue-steering agent prompt))
-        ((and goal (eq (pget goal :status) :active))
-         (queue-steering agent (evo.kernel:goal-continuation-message
-                                goal (evo.kernel::goal-tokens-used agent goal))))
-        (t (error "Nothing to do: give -p \"prompt\", --goal, or --resume a session with an active goal (the TUI is post-MVP)"))))
-    (let* ((outcome (run-until-settled agent))
-           (goal (evo.kernel:current-goal agent)))
-      (when (journal-started-p journal)
-        (format *error-output* "~&session: ~a~%" (namestring (journal-path journal))))
-      (when goal
-        (format *error-output* "goal ~a: ~a~%"
-                (pget goal :goal-id) (string-downcase (pget goal :status))))
-      (cond ((and goal (eq (pget goal :status) :complete)) 0)
-            ((eq outcome :stop) 0)
-            (t 1)))))
+    (values agent resumed-p)))
+
+(defun tty-p ()
+  (and (plusp (sb-unix:unix-isatty 0))
+       (plusp (sb-unix:unix-isatty 1))))
+
+(defun run-cli (opts)
+  (if (and (tty-p)
+           (not (getf opts :prompt))
+           (not (getf opts :events)))
+      ;; Interactive: the tui core extension (§14).
+      (multiple-value-bind (agent resumed-p) (setup-agent opts)
+        (evo.tui:start-tui agent :resumed-p resumed-p))
+      (run-headless opts)))
+
+(defun run-headless (opts)
+  (multiple-value-bind (agent resumed-p)
+      (setup-agent opts :events-cb (if (getf opts :events)
+                                       #'event-mode-handler
+                                       #'print-mode-event-handler))
+    (declare (ignore resumed-p))
+    (let ((journal (agent-journal agent)))
+      ;; Seed the run.
+      (let ((prompt (getf opts :prompt))
+            (goal (evo.kernel:current-goal agent)))
+        (cond
+          (prompt (queue-steering agent prompt))
+          ((and goal (eq (pget goal :status) :active))
+           (queue-steering agent (evo.kernel:goal-continuation-for agent goal)))
+          (t (error "Nothing to do headless: give -p \"prompt\", --goal, or --resume a session with an active goal"))))
+      (let* ((outcome (run-until-settled agent))
+             (goal (evo.kernel:current-goal agent)))
+        (when (journal-started-p journal)
+          (format *error-output* "~&session: ~a~%" (namestring (journal-path journal))))
+        (when goal
+          (format *error-output* "goal ~a: ~a~%"
+                  (pget goal :goal-id) (string-downcase (pget goal :status))))
+        (cond ((and goal (eq (pget goal :status) :complete)) 0)
+              ((eq outcome :stop) 0)
+              (t 1))))))

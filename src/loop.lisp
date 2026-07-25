@@ -43,7 +43,11 @@ plugs in here.")
   (turn-index 0)
   model-override          ; CLI/default model id when the fold has none
   thinking-override
-  (retry-count 0))
+  (retry-count 0)
+  (compact-retried nil)   ; overflow-recovery guard: compact + retry ONCE (§7)
+  ;; The TUI steers from its input thread while a run thread drains (§6);
+  ;; queue access is the one cross-thread seam.
+  (lock (bt:make-lock "agent-queues")))
 
 (defun emit-event (agent &rest event)
   (let ((cb (agent-events-cb agent)))
@@ -52,15 +56,26 @@ plugs in here.")
                                       :turn (agent-turn-index agent)))))))
 
 (defun queue-steering (agent text)
-  (setf (agent-steering agent) (append (agent-steering agent) (list text))))
+  (bt:with-lock-held ((agent-lock agent))
+    (setf (agent-steering agent) (append (agent-steering agent) (list text)))))
 
 (defun queue-followup (agent text)
-  (setf (agent-followups agent) (append (agent-followups agent) (list text))))
+  (bt:with-lock-held ((agent-lock agent))
+    (setf (agent-followups agent) (append (agent-followups agent) (list text)))))
+
+(defun steering-pending-p (agent)
+  (bt:with-lock-held ((agent-lock agent))
+    (and (agent-steering agent) t)))
+
+(defun pop-followup (agent)
+  (bt:with-lock-held ((agent-lock agent))
+    (pop (agent-followups agent))))
 
 (defun drain-steering (agent)
   "Append queued steering texts as user message entries.  Returns count."
-  (let ((texts (agent-steering agent)))
-    (setf (agent-steering agent) nil)
+  (let ((texts (bt:with-lock-held ((agent-lock agent))
+                 (prog1 (agent-steering agent)
+                   (setf (agent-steering agent) nil)))))
     (dolist (text texts)
       (append-entry (agent-journal agent)
                     (list :type :message
@@ -84,7 +99,7 @@ plugs in here.")
           :tools tools
           :model (find-model model-id)
           :thinking thinking
-          :system (build-system-prompt tools))))
+          :system (build-system-prompt tools :lore (all-lore :state state)))))
 
 ;;; Tool batch execution (sequential, D9) with :tool-call interception —
 ;;; the one point permission gates / plan mode / sandboxing build on.
@@ -162,6 +177,16 @@ Returns :stop :length :error :aborted."
               (return :aborted))
             (drain-steering agent)
             (emit-event agent :type :turn-start)
+            ;; Threshold compaction check at the save point (§7).
+            (let ((state (fold-state (agent-journal agent))))
+              (when (compaction-needed-p state (find-model
+                                                (or (evo.journal:state-model state)
+                                                    (agent-model-override agent)
+                                                    (setting :model "claude-sonnet-5"))))
+                (emit-event agent :type :compaction-start)
+                (handler-case (compact-now agent)
+                  (error (e) (warn "Compaction failed, continuing uncompacted: ~a" e)))
+                (emit-event agent :type :compaction-end)))
             (let* ((ctx (prepare-next-turn agent))
                    (state (pget ctx :state))
                    (assistant
@@ -191,7 +216,7 @@ Returns :stop :length :error :aborted."
                 (:error (return :error))
                 (:aborted (return :aborted))
                 (:stop
-                 (unless (agent-steering agent)
+                 (unless (steering-pending-p agent)
                    (return :stop))))))))
     (emit-event agent :type :run-end :outcome outcome)
     outcome))
@@ -211,15 +236,25 @@ messages? active goal?) -> continue.  Returns the final outcome."
         ((eq outcome :aborted) (return outcome))
         ((eq outcome :error)
          (let ((msg (last-assistant-message agent)))
-           (if (and (pget msg :retryable)
-                    (< (agent-retry-count agent) *max-turn-retries*))
-               (incf (agent-retry-count agent))
-               (return outcome))))
+           (cond
+             ;; Overflow recovery: compact + retry once (§7).
+             ((and (overflow-error-p msg) (not (agent-compact-retried agent)))
+              (setf (agent-compact-retried agent) t)
+              (handler-case (compact-now agent)
+                (error (e)
+                  (warn "Overflow-recovery compaction failed: ~a" e)
+                  (return outcome))))
+             ((and (pget msg :retryable)
+                   (< (agent-retry-count agent) *max-turn-retries*))
+              (incf (agent-retry-count agent)))
+             (t (return outcome)))))
         (t
          (setf (agent-retry-count agent) 0)
-         (cond
-           ((agent-followups agent)
-            (queue-steering agent (pop (agent-followups agent))))
-           ((loop for fn in *settled-hooks*
-                    thereis (funcall fn agent outcome)))
-           (t (return outcome))))))))
+         (setf (agent-compact-retried agent) nil)
+         (let ((followup (pop-followup agent)))
+           (cond
+             (followup (queue-steering agent followup))
+             ((steering-pending-p agent))   ; steered while settling: go again
+             ((loop for fn in *settled-hooks*
+                      thereis (funcall fn agent outcome)))
+             (t (return outcome)))))))))
