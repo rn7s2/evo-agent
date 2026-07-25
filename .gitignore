@@ -3,3 +3,5 @@
 /lisp-references/
 
 .env
+/build/
+*.fasl

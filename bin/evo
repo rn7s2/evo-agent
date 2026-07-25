@@ -1,0 +1,10 @@
+#!/bin/sh
+# evo launcher (D10): always passes an explicit --dynamic-space-size —
+# SBCL's default heap is not sized for a long-running agent.
+dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+core="$dir/../build/evo-core"
+if [ ! -x "$core" ]; then
+    echo "evo: no built image at $core — run 'make build' first" >&2
+    exit 1
+fi
+exec "$core" --dynamic-space-size "${EVO_DYNAMIC_SPACE_SIZE:-4096}" --end-runtime-options "$@"
