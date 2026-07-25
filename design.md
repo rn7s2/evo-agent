@@ -2,14 +2,16 @@
 
 `evo-agent` is an agent who self-evolves.
 
-This is the living design document. It converges `plan/init.md`, the pi-agent
-research (`plan/research.md`), and the codex goal-system research. Decisions
-get recorded in §2 as we make them; everything else is current-best design and
-open to revision.
+This is the living design document. Decisions get recorded in §2 as we make them; everything else
+is current-best design and open to revision.
 
 References:
-- `~/Projects/pi` — pi-mono: agent loop, session tree, compaction, self-extension. Evidence in `plan/research.md`.
+- `~/Projects/pi` — pi-mono: agent loop, session tree, compaction, self-extension.
 - `~/Projects/codex` — codex: goal system (`codex-rs/ext/goal/`).
+- `lisp-references/` (repo root) — Common Lisp / SBCL reference material for
+  whoever (human or agent) is implementing evo. **If you lack CL/SBCL knowledge
+  for a task, read here before guessing.** Browse the folder fresh each time —
+  its contents vary by developer, so don't assume any particular structure.
 
 ---
 
@@ -17,8 +19,9 @@ References:
 
 - **Minimalist harness.** Core functionality of a real agent, nothing
   ceremonial. Pi proves the omit-list works: no permission popups, no MCP, no
-  sub-agents, no to-dos. One interception point + tool-set control covers what
-  a permission subsystem would.
+  sub-agents. One interception point + tool-set control covers what a
+  permission subsystem would. (One deliberate deviation from pi's omit-list:
+  todo checklists — goal-length runs need visible progress; §11.)
 - **Goal-oriented.** You define what "done" means; the agent decides how.
   Long-running tasks are the norm, not the exception.
 - **Self-extending.** If it lacks a tool, it writes one, loads it into its own
@@ -39,38 +42,50 @@ References:
 | D3 | **Journal format is native sexprs** (one form per line), and sexprs are the default for every data format we control (settings, lore, goal state). | Human-readable, `read`-able from Lisp with zero external serialization deps. |
 | D4 | **Interface is a CLI** with an adaptive TUI (mandatory: adapts to console resize). Not Emacs/Swank-first. | Approachable for newcomers; CLI adapts to the most contexts. Swank remains a developer side-door, not the product. |
 | D5 | **Supervisor architecture: yes.** A tiny outer process owns launch, crash detection, restart, resume. | Long-running goal pursuit requires surviving self-inflicted death. |
-| D6 | Providers: **Anthropic Messages API + OpenAI Responses API only.** | Scope control; skips ~90% of pi-ai's multi-provider sprawl. |
+| D6 | Providers: **Anthropic Messages API now; OpenAI Responses API post-v1.** The unified message model is designed for both from day one. | Scope control; one provider suffices until the harness is real. Still skips ~90% of pi-ai's multi-provider sprawl. |
 | D7 | Goal system follows **codex's design**: persisted goal + idle-continuation steering + explicit audited completion + budgets. Optional Lisp acceptance predicate as kernel-side verifier. | See §8. |
 | D8 | Kernel/userspace split enforced with **SBCL package locks**. | Permissive but not suicidal: touching the kernel requires an explicit, auditable unlock. |
 | D9 | Tool execution is **sequential** in v1. | Parallel is where pi's thread-discipline complexity lives; revisit later. |
+| D10 | **SBCL-only.** No portability layer. The launcher always passes an explicit `--dynamic-space-size` (settings-overridable, generous default e.g. 4096). | Package locks, signal handling, image dumping are all SBCL-flavored; portability buys nothing now. SBCL's default heap is not sized for a long-running agent. |
+| D11 | Naming locked: binary `evo`, dirs `~/.evo/` + `<project>/.evo/`, package prefix `EVO.`. | As assumed throughout this doc; settled to stop revisiting. |
+| D12 | v1 TUI editor is a **plain multi-line text editor**: Enter sends, Shift+Enter inserts a newline, pastes >3 lines collapse to a placeholder (re-pasting the same content right after it expands it inline). No completions or highlighting yet. | Multi-line editing is crucial UX; editor sophistication beyond that isn't where the novelty is. |
+| D13 | **Slim core; everything outside the core loop ships as a core extension** — bundled, built on the same extension API with the same level of control as user extensions; essential ones (tui) cannot be disabled. | Dogfooding proves the API depth; keeps the kernel small and honest. See §11. |
+| D14 | **Todo checklists: yes**, shipped as a core extension. | Long-running goal work needs user-visible progress; the one deliberate deviation from pi's omit-list. |
+| D15 | `:done-when` predicates are **agent-authored, not user-written**: named userspace functions journaled via `:load`, referenced by name in the `:goal` entry. | Users state objectives in prose; the agent formalizes them. Named+journaled functions survive restart; closures don't round-trip through sexprs. |
+| D16 | **No sub-agents in v1.** Revisit after M5. | The journal-tree model extends naturally (child session = forked journal) when we want them. |
 
 ## 3. Architecture overview
 
 ```
 evo-supervisor (tiny: shell or ~100 lines of CL)
-  │  spawn / monitor / restart / resume policy
+  │  spawn (explicit --dynamic-space-size) / monitor / restart / resume policy
   ▼
 evo image (SBCL process)
 ├─ KERNEL  (locked packages: EVO.KERNEL, EVO.PROVIDER, EVO.JOURNAL, …)
 │    turn loop            errors-as-data, steering queues, save points
 │    journal              append-only sexpr entry tree + leaf pointer
-│    provider adapters    anthropic-messages, openai-responses
+│    provider adapter     anthropic-messages (openai-responses post-v1)
 │    tool registry        register/activate/refresh, system-prompt rebuild
+│    extension API        register-tool/-command, event hooks — both
+│                         extension tiers build on this, nothing bypasses it
 │    goal driver          idle-continuation loop, budgets, audits
 │    compactor            usage-anchored, self-contained checkpoints
 │    budget guard         per-goal + per-session hard stops
-│    extension loader     load userspace source, journal the load
+│    extension loader     load extension source, journal the load
+├─ CORE EXTENSIONS  (bundled; same API & privileges as user extensions;
+│                    shipped by us, loaded first, essential ones not disableable)
+│    tui    adaptive renderer (scrollback + managed bottom region, SIGWINCH
+│           reflow), multi-line editor, slash commands: /goal /lore /plan
+│           /auto /compact /tree /resume /todo …
+│           optional Swank listener for the developer
+│    todo   checklist tool + :custom state, rendered by the tui
 ├─ USERSPACE  (unlocked packages: EVO.USER, …)
 │    all agent-written tools & code — persisted as source files
 │    + journal load-entries; rebuilt from source on every boot
-├─ RESOURCES
-│    skills/ (progressive disclosure)   prompts/ (templates)
-│    lore store (out-of-band, injected every turn)
-│    docs corpus (evo's own docs, paths named in system prompt)
-└─ INTERFACE
-     adaptive TUI (scrollback + managed bottom region, SIGWINCH reflow)
-     slash commands: /goal /lore /plan /auto /compact /tree /resume …
-     optional Swank listener for the developer
+└─ RESOURCES
+     skills/ (progressive disclosure)   prompts/ (templates)
+     lore store (out-of-band, injected every turn)
+     docs corpus (evo's own docs, paths named in system prompt)
 ```
 
 Directory conventions (mirroring pi's `.pi`):
@@ -166,8 +181,10 @@ by surgery on opaque state.
 
 ## 5. Provider layer
 
-Two adapters, one unified model. Everything here is pi-validated
-(research §2.5); deltas from pi noted.
+One unified model. Only the Anthropic Messages adapter ships in v1; OpenAI
+Responses is post-v1 (D6). The OpenAI-facing rules below are recorded anyway
+so the unified model doesn't drift somewhere the second adapter can't follow.
+Everything here is pi-validated (research §2.5); deltas from pi noted.
 
 - **Message model**: 4 content blocks (`:text`, `:thinking`, `:image`,
   `:tool-call`), 3 roles (`:user`, `:assistant`, `:tool-result` as a top-level
@@ -199,7 +216,7 @@ Two adapters, one unified model. Everything here is pi-validated
   necessity).
 - **Caching**: Anthropic — 4 breakpoints (system prompt, last tool def, last
   user message); OpenAI — `prompt_cache_key` = session id. The whole design
-  protects the prompt-cache prefix (see progressive disclosure, §10).
+  protects the prompt-cache prefix (see progressive disclosure, §12).
 - **Model table**: hand-written sexpr table of ~10–20 models (id, context
   window, max output, costs, thinking config). No models.dev pipeline.
 - CL stack: `dexador` (`:want-stream t`) + `cl+ssl`, explicit read timeouts;
@@ -276,7 +293,7 @@ A goal is journal state (`:goal` entries; current goal = fold):
 ```lisp
 (:goal-id "g-01" :objective "..." :status :active
  :token-budget 500000 :tokens-used 123456 :time-used-seconds 840
- :done-when nil)          ; optional: name of a userspace predicate
+ :done-when nil)          ; optional: name of an agent-authored userspace predicate (D15)
 ```
 
 Statuses: `:active :paused :blocked :budget-limited :complete`.
@@ -307,7 +324,7 @@ to the user/system only.
   the kernel's runaway-cost brake; a session-level budget exists too.
 - Turn error → goal `:blocked` (codex behavior) — and this is the supervisor
   hook: on restart, a goal blocked by `turn-error` (not by model decision) is
-  eligible for auto-resume (§12).
+  eligible for auto-resume (§13).
 
 ### 8.3 Model-facing tools
 
@@ -318,13 +335,24 @@ good; adapt them.
 
 ### 8.4 The Lisp addition: verified completion
 
-If the goal carries `:done-when` (a userspace predicate, e.g.
-`(lambda () (zerop (sh "./test.sh")))`), then `update-goal :complete` is not
-taken at its word: the kernel **runs the predicate**. Failure → the tool call
-returns an error carrying the predicate's output, and the goal stays
-`:active`. The model's completion claim becomes a checked assertion.
-Optional — `/goal` works fine without it — but it closes the
-premature-victory hole with ~20 lines of kernel code.
+`:done-when` is designed for the **agent to fill, not the user** (D15). Users
+state objectives in prose; when the objective is mechanically checkable, the
+agent formalizes it — writes a *named* predicate function into userspace
+(e.g. `(defun goal-done-p () (zerop (sh "./test.sh")))` in a source file,
+journaled via `:load`, so it survives restart — closures don't round-trip
+through sexprs) and references it by name in the `:goal` entry. The goal
+creation flow steers the agent to derive the predicate from the objective up
+front, at goal start, not at completion time.
+
+Then `update-goal :complete` is not taken at its word: the kernel **runs the
+predicate**. Failure → the tool call returns an error carrying the
+predicate's output, and the goal stays `:active`. The model's completion
+claim becomes a checked assertion it wrote against itself. A lazy
+`(defun goal-done-p () t)` is possible in principle; the mitigation is that
+the predicate is a journaled, user-visible artifact written before the work,
+when the model has no victory to declare yet. Optional — `/goal` works fine
+without it — but it closes the premature-victory hole with ~20 lines of
+kernel code.
 
 ## 9. Lore system (`/lore`)
 
@@ -377,7 +405,46 @@ Safety rails:
 - Extension in-memory state does not survive restart; extensions rebuild it
   from `:custom` journal entries on `session-start` (pi's discipline).
 
-## 11. Skills, prompt templates, slash commands, modes
+## 11. Core extensions (slim-core discipline)
+
+The kernel owns the core loop and nothing else (D13). Everything outside it —
+**including the TUI** — ships as a *core extension*: bundled with evo, written
+against the same extension API (§10) with the same level of control as user
+extensions. Only three things distinguish them: we ship them, they load first,
+and the essential ones (tui) cannot be disabled.
+
+Why this discipline: dogfooding. If the TUI and the todo list can be built on
+`register-tool` / `register-command` / event hooks / `:custom` entries, the
+API is proven deep enough for the agent's own self-extensions. Anything a core
+extension needs but can't get through the public API is an API gap to fix,
+never a private kernel hook to add.
+
+Mechanically, core extensions are compiled into the image at build time (they
+are part of the ship, not runtime loads) but register through the same API.
+The runtime loader (§10) is for user/agent extensions only. Sequencing
+consequence: the registration/event API must exist by M2, because the TUI
+needs it (§15).
+
+### 11.1 Todo lists (D14)
+
+Long-running goal work needs a user-visible checklist — pi omits to-dos, but
+pi's sessions are interactive; here multi-hour goal runs are the norm, and the
+user must be able to see structure and progress at a glance.
+
+- A `todo` tool: the model replaces the whole list per call (items = text +
+  `:pending` / `:in-progress` / `:done`). Whole-list replacement keeps the
+  schema and the state fold trivial.
+- State rides `:custom` entries (invisible to the LLM as entries — the tool
+  call/result already put it in context when it mattered), so the current
+  list = fold over the path; it survives restart and is untouched by
+  compaction.
+- The tui renders the current list in the managed bottom region; `/todo`
+  toggles the panel; print/event modes emit it as events.
+- Goal-driver tie-in: the continuation steering prompt embeds the current
+  todo snapshot, so a re-steered run after crash or compaction knows where
+  it left off.
+
+## 12. Skills, prompt templates, slash commands, modes
 
 - **Skills**: Agent Skills standard (SKILL.md + frontmatter), progressive
   disclosure — only name/description/path in the prompt inside
@@ -398,11 +465,13 @@ Safety rails:
   guidelines → own-docs paths → lore → project context files → skills → cwd.
   Rebuilt on any tool-set change.
 
-## 12. Supervisor & self-healing
+## 13. Supervisor & self-healing
 
 The supervisor is deliberately dumb (shell script or ~100 lines of CL):
 
-1. Spawn the agent process (SBCL loading kernel, replaying the session's
+1. Spawn the agent process (SBCL with an explicit `--dynamic-space-size`
+   from settings (D10) — the default heap is not sized for a long-running
+   agent — loading kernel + core extensions, replaying the session's
    `:load` entries, resuming the journal leaf).
 2. Monitor: process exit + a heartbeat file the kernel touches on every event
    (configurable hang timeout, generous default — tool calls can be long).
@@ -411,17 +480,18 @@ The supervisor is deliberately dumb (shell script or ~100 lines of CL):
    driver's idle-continuation picks it up automatically — crash → reboot →
    re-steer toward the goal, no human needed.
 4. **Boot-failure quarantine**: if boot fails N times, retry with
-   `--no-userspace` (kernel only) and report which `:load` entry was reached —
+   `--no-userspace` (kernel + core extensions only) and report which `:load` entry was reached —
    the journal makes the culprit bisectable. The agent (or the user) then
    fixes the offending source file. This is the answer to "the agent bricked
    itself": recovery is editing a source file, never surgery on opaque state.
 5. Write-ahead journaling means a crash mid-turn loses at most the in-flight
    provider stream; the transcript up to it is on disk.
 
-## 13. Interface (CLI / TUI)
+## 14. Interface (CLI / TUI)
 
 Requirements: newcomer-friendly CLI; **adaptive to console size, including
-live resize — mandatory** (D4).
+live resize — mandatory** (D4). The tui is itself a core extension (§11):
+built entirely on the public extension API, shipped by us, not disableable.
 
 Approach (pi-tui is the reference design, `~/Projects/pi/packages/tui`):
 - Render into normal terminal scrollback (no ncurses alternate screen —
@@ -433,8 +503,25 @@ Approach (pi-tui is the reference design, `~/Projects/pi/packages/tui`):
 - Raw mode + ANSI escapes directly via a thin CFFI termios layer — avoiding a
   curses dependency keeps the binary self-contained and the renderer
   debuggable. (This is a real chunk of work — pi's TUI is a whole package —
-  but a modest subset suffices: no windowing, no widgets beyond editor +
+  but a modest subset suffices: no windowing, no widgets beyond the editor +
   list-select + confirm.)
+- **Editor** (D12): a pure text editor for now — no completions, no
+  highlighting — but genuinely **multi-line**, because multi-line editing is
+  crucial UX:
+  - normal text input; the editor region grows and reflows with content
+    (it's part of the managed bottom region);
+  - **Enter sends**; **Shift+Enter inserts a newline**;
+  - **paste collapse**: a paste of more than 3 lines becomes a placeholder
+    token (e.g. `[paste #1: 42 lines]`); the content lives in a side buffer
+    and is substituted back in full when the message is sent;
+  - **paste-to-expand**: pasting the *exact same content* again with the
+    cursor right after the placeholder replaces it with the real lines,
+    editable in place — paste once to keep it compact, paste twice to edit.
+  - Implementation notes: paste detection requires bracketed paste mode
+    (`CSI ?2004h`). Shift+Enter is indistinguishable from Enter in legacy
+    terminals; use the kitty keyboard protocol / `modifyOtherKeys` (CSI-u)
+    where the terminal supports it, with a documented fallback (Alt+Enter
+    or `\`-then-Enter) elsewhere.
 - Non-interactive modes from day one: `evo -p "prompt"` (print mode) and an
   event-stream mode (line-delimited sexprs on stdout) — they're nearly free,
   make evo scriptable, and give the supervisor/tests a UI-less harness.
@@ -443,42 +530,35 @@ Approach (pi-tui is the reference design, `~/Projects/pi/packages/tui`):
 - Optional `--swank <port>` for developers: the live-image inspection
   side-door, off by default.
 
-## 14. Milestones
+## 15. Milestones
 
 - **M0 — provider core**: unified message model, Anthropic adapter (SSE,
   thinking, caching, retries), model table, cost tracking. Exit: streamed
   tool-call round-trip from a REPL.
 - **M1 — kernel loop + journal**: turn loop, sequential tools
   (read/write/edit/bash), journal tree + resume, save points, run-until-
-  settled driver. Exit: multi-turn task in print mode, kill -9 mid-task,
-  resume cleanly.
-- **M2 — CLI/TUI**: adaptive renderer, editor, slash commands, skills +
-  prompt templates, `/tree` `/resume` `/fork`.
+  settled driver, registration/event API (core extensions build on it in
+  M2). Exit: multi-turn task in print mode, kill -9 mid-task, resume
+  cleanly.
+- **M2 — core extensions: CLI/TUI + todo**: adaptive renderer, multi-line
+  editor (D12: Enter/Shift+Enter, paste placeholders), slash commands,
+  skills + prompt templates, `/tree` `/resume` `/fork`, todo extension —
+  all built on the M1 extension API.
 - **M3 — context management**: compaction (threshold/overflow/manual),
   branch summaries, lore system.
 - **M4 — goals + supervisor**: goal driver (continuation steering, budgets,
   audits, `:done-when`), supervisor with crash-resume + quarantine. Exit:
   overnight goal run that survives an induced crash and a context overflow.
-- **M5 — self-extension**: OpenAI Responses adapter, loader + registration
-  API, package-lock rails, seed corpus (docs + example extensions incl. plan
-  mode). Exit: evo writes, loads, and uses a novel tool to satisfy a goal.
+- **M5 — self-extension**: runtime loader (`load-extension` + `:load`
+  replay), package-lock rails, seed corpus (docs + example extensions incl.
+  plan mode). Exit: evo writes, loads, and uses a novel tool to satisfy a
+  goal.
 
-(M5's OpenAI adapter placement is pragmatic: one provider suffices until the
-harness is real; the unified model keeps the door open from M0.)
+(The OpenAI Responses adapter is out of the milestones entirely — post-v1,
+D6. The unified message model keeps the door open from M0.)
 
-## 15. Open questions
+## 16. Open questions
 
-1. **TUI depth in v1** — full editor with history/completions (pi-level) vs a
-   minimal line editor first? Recommendation: minimal editor in M2, grow it.
-2. **Naming** — binary `evo`? Config dir `~/.evo/`? Package prefix `EVO.`?
-   (Assumed throughout this doc; cheap to change now, expensive later.)
-3. **CL implementation policy** — SBCL-only (package locks, signals, save-
-   lisp are all SBCL-flavored) or keep a portability layer? Recommendation:
-   SBCL-only, explicitly.
-4. **`:done-when` ergonomics** — where do predicates live so they survive
-   restart? (Current thought: named userspace functions journaled via
-   `:load`, referenced by name in the `:goal` entry — closures don't
-   round-trip through sexprs.)
-5. **Sub-agents** — out of scope for now (pi omits them too). Revisit after
-   M5; the journal-tree model extends naturally (child session = forked
-   journal) when we want them.
+All five questions from the previous revision are resolved into decisions:
+TUI depth → D12, naming → D11, CL policy → D10, `:done-when` ergonomics →
+D15, sub-agents → D16. New questions get added here as they come up.
