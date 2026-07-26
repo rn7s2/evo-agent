@@ -534,13 +534,18 @@ esc.  Outside a /command word, Tab stays a literal tab character."
       (t (eb-insert-char (tui-editor tui) #\Tab)))))
 
 ;;; Input history: up/down recall previous submissions when the cursor
-;;; cannot move further within the buffer's own lines.
+;;; cannot move further within the buffer's own lines.  /commands are not
+;;; recorded: recalling one would put a bare command word in the buffer,
+;;; re-opening the completion popup, which then captures the next up/down
+;;; press ("//" submissions are literal text and recall normally).
 
 (defun history-reset-browse (tui)
   (setf (tui-history-index tui) nil (tui-history-draft tui) nil))
 
 (defun history-remember (tui text)
-  (unless (equal text (first (tui-history tui)))
+  (unless (or (equal text (first (tui-history tui)))
+              (and (string-prefix-p "/" text)
+                   (not (string-prefix-p "//" text))))
     (push text (tui-history tui)))
   (history-reset-browse tui))
 

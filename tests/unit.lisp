@@ -492,7 +492,14 @@ event: message_stop~%data: {\"type\":\"message_stop\"}~%~%"))
                                                  (format nil "line1~%line2")))
     (evo.tui::edit-up tui)
     (check "up from first line recalls history"
-           (equal (evo.tui::eb-text eb) "second message"))))
+           (equal (evo.tui::eb-text eb) "second message"))
+    ;; /commands never enter history, so recall can't re-open the popup.
+    (evo.tui::history-remember tui "/plan")
+    (check "slash command not recorded"
+           (= 2 (length (evo.tui::tui-history tui))))
+    (evo.tui::history-remember tui "//not a command")
+    (check "escaped slash text recorded"
+           (equal "//not a command" (first (evo.tui::tui-history tui))))))
 
 ;;; Plan/auto mode switching (shift+tab, /mode, status indicator)
 
