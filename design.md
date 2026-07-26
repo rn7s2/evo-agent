@@ -207,7 +207,9 @@ below is pi-validated (research §2.5); deltas from pi noted.
   `:stop :length :tool-use :error :aborted`; usage buckets
   `:input/:output/:cache-read/:cache-write` with `:input` excluding
   cached/cache-written tokens; events `:message-start :text-delta
-  :thinking-delta :tool-call-start`. Runtime errors are data;
+  :thinking-delta` (`:tool-call-start` moved to the kernel: it fires from
+  `run-tool-call` with the fully-parsed `:arguments`, which do not exist
+  yet when a stream block opens). Runtime errors are data;
   config-resolution errors signal (caught by preflight).
 
 - **Message model**: 4 content blocks (`:text`, `:thinking`, `:image`,

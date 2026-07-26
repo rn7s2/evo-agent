@@ -143,12 +143,21 @@ they will switch you back to auto mode (shift+tab or /mode) to execute.")
     (setf (tui-worker tui)
           (bt:make-thread
            (lambda ()
-             (let ((outcome (handler-case (run-until-settled (tui-agent tui))
-                              (error (e)
-                                (push-event tui (list :type :worker-error
-                                                      :text (format nil "~a" e)))
-                                :error))))
-               (push-event tui (list :type :worker-done :outcome outcome))))
+             ;; Self-heal invariant: :worker-done ALWAYS arrives.  The
+             ;; handler catches SERIOUS-CONDITION (not just ERROR — think
+             ;; storage exhaustion), and the unwind-protect covers exits
+             ;; handler-case cannot see (thread interrupts, implementation
+             ;; aborts): a lost :worker-done leaves the TUI "running"
+             ;; forever with no worker behind it — the frozen-TUI bug.
+             (let ((outcome :error))
+               (unwind-protect
+                    (setf outcome
+                          (handler-case (run-until-settled (tui-agent tui))
+                            (serious-condition (e)
+                              (push-event tui (list :type :worker-error
+                                                    :text (format nil "~a" e)))
+                              :error)))
+                 (push-event tui (list :type :worker-done :outcome outcome)))))
            :name "evo-run"))))
 
 (defun user-prompt-block (text)
@@ -161,6 +170,62 @@ editbox they were typed in — so they stand out when scanning history."
   (scroll tui (user-prompt-block text))
   (queue-steering (tui-agent tui) text)
   (start-worker tui))
+
+;;; Tool call display formatting.
+
+(defparameter *tool-call-max-width* 80
+  "Max rendered width for a tool-call line before truncation.")
+
+(defparameter *tool-key-args*
+  '(("bash" . ("command"))
+    ("read" . ("path"))
+    ("write" . ("path"))
+    ("edit" . ("path" "old_string"))
+    ("create_goal" . ("objective"))
+    ("update_goal" . ("status"))
+    ("todo" . ("items"))
+    ("load_extension" . ("path")))
+  "Alist mapping tool name -> list of key argument names to show.")
+
+(defun tool-arg-value (arguments name)
+  "Value for argument NAME in an arguments plist.  Provider JSON keys
+land as hyphenated keywords (\"old_string\" -> :OLD-STRING), while
+*tool-key-args* names keep the schema's underscores — fold case and _/-
+so both spellings match."
+  (flet ((canon (s) (substitute #\- #\_ (string-upcase s))))
+    (loop for (k v) on arguments by #'cddr
+          when (and (symbolp k) (equal (canon (string k)) (canon name)))
+            return v)))
+
+(defun format-tool-call-plain (name arguments)
+  "Format a tool call as one line, no ANSI: ⏺ name(key=\"val\", ...),
+truncated at *tool-call-max-width*.  Total by construction: this renders
+inside the TUI tick loop and on session resume, so malformed ARGUMENTS
+(non-list, dotted, odd-length) degrade to the bare name — never signal."
+  (or (ignore-errors
+        (let* ((arguments (and (listp arguments) arguments))
+               (keys (or (cdr (assoc name *tool-key-args* :test #'equal))
+                         (loop for k in arguments by #'cddr
+                               when (symbolp k)
+                                 collect (substitute #\_ #\-
+                                                     (string-downcase (string k))))))
+               (arg-strs
+                 (loop for key in keys
+                       for val = (tool-arg-value arguments key)
+                       when val
+                         collect (format nil "~a=~a" (string-downcase key)
+                                         (substitute #\Space #\Newline
+                                                     (format nil "~s" val))))))
+          (truncate-string
+           (if arg-strs
+               (format nil "⏺ ~a(~{~a~^, ~})" name arg-strs)
+               (format nil "⏺ ~a" name))
+           *tool-call-max-width* "…")))
+      (format nil "⏺ ~a" name)))
+
+(defun format-tool-call (name arguments)
+  "FORMAT-TOOL-CALL-PLAIN in scrollback colors."
+  (cyan (format-tool-call-plain name arguments)))
 
 ;;; Agent event handling (events arrive from the worker thread via the queue).
 
@@ -183,7 +248,8 @@ editbox they were typed in — so they stand out when scanning history."
        (setf (tui-dirty tui) t)))
     (:tool-call-start
      (flush-partial tui)
-     (scroll tui (format nil "~a~a" (cyan "⏺ ") (or (pget event :name) "?"))))
+     (scroll tui (format-tool-call (or (pget event :name) "?")
+                                   (pget event :arguments))))
     (:tool-result
      ;; Tool results enter the next request's context: grow the live
      ;; estimate (chars/4, same rule as compaction accounting).
@@ -213,9 +279,12 @@ editbox they were typed in — so they stand out when scanning history."
     (:worker-error
      (scroll tui (red (format nil "✗ internal error in run: ~a" (pget event :text)))))
     (:worker-done
+     ;; Reset the run state FIRST: if any of the rendering below signals,
+     ;; the TUI must already know the worker is gone (a stuck running=t
+     ;; with no worker means no run can ever start again).
+     (setf (tui-running tui) nil (tui-worker tui) nil (tui-thinking-tail tui) "")
      (flush-partial tui)
      (setf (tui-md tui) (make-md))
-     (setf (tui-running tui) nil (tui-worker tui) nil (tui-thinking-tail tui) "")
      (refresh-goal tui)
      (let ((goal (tui-goal tui)))
        (when (and goal (member (pget goal :status) '(:complete :blocked :budget-limited)))
@@ -398,8 +467,8 @@ wrapped between two rules, and the model status line under the editbox."
            (case (pget block :type)
              (:text (scroll tui (md-render-text
                                  (truncate-string (pget block :text) 2000))))
-             (:tool-call (scroll tui (format nil "~a~a" (cyan "⏺ ")
-                                             (pget block :name)))))))
+             (:tool-call (scroll tui (format-tool-call (pget block :name)
+                                                         (pget block :arguments)))))))
         (t nil)))))
 
 ;;; Rewind (double-escape).

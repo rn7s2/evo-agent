@@ -221,10 +221,12 @@ event: response.completed~%data: {\"type\":\"response.completed\",\"response\":{
                   (equal (pget (third blocks) :item-id) "fc_1")))
       (check "oai sse tool args across chunks"
              (equal (pget (pget (third blocks) :arguments) :command) "ls")))
-    (check "oai sse tool-call-start event carries call_id"
-           (let ((ev (find :tool-call-start events
-                           :key (lambda (e) (pget e :type)))))
-             (equal (pget ev :id) "call_1"))))
+    ;; The stream parser must NOT emit :tool-call-start — arguments are
+    ;; still streaming when the block opens.  The kernel emits it from
+    ;; run-tool-call, fully parsed, just before execution.
+    (check "oai sse leaves tool-call-start to the kernel"
+           (not (find :tool-call-start events
+                      :key (lambda (e) (pget e :type))))))
   ;; A stream without a terminal response event is truncation (retry material).
   (let ((result (with-input-from-string
                     (in (format nil "event: response.created~%data: {\"type\":\"response.created\",\"response\":{}}~%~%"))
@@ -953,6 +955,56 @@ event: response.completed~%data: {\"type\":\"response.completed\",\"response\":{
 ;;; Plan-mode extension (seed corpus): the :tool-call gate and the
 ;;; transform-context filter, exercised directly at the hook level.
 
+;;; Tool-call event contract: the kernel announces the call — parsed
+;;; arguments included — BEFORE executing it, then reports the result.
+
+(defun test-tool-call-events ()
+  (let* ((dir (uiop:ensure-directory-pathname
+               (format nil "~a/evo-toolev-~a/" (uiop:getenv "TMPDIR") (gen-id))))
+         (journal (progn (ensure-directories-exist dir) (make-session-journal dir)))
+         (events nil)
+         (agent (make-agent :journal journal
+                            :events-cb (lambda (ev) (push ev events)))))
+    (evo.kernel::run-tool-call agent '(:name "no-such-tool" :id "call_x"
+                                       :arguments (:command "ls -la")))
+    (let ((events (nreverse events)))
+      (check "tool-call-start emitted before tool-result"
+             (and (eq (pget (first events) :type) :tool-call-start)
+                  (eq (pget (second events) :type) :tool-result)))
+      (check "tool-call-start carries parsed arguments"
+             (equal (pget (pget (first events) :arguments) :command) "ls -la"))
+      (check "unknown tool reports an error result"
+             (pget (second events) :is-error)))))
+
+;;; Tool-call display: one line, key arguments only, and total — malformed
+;;; arguments must degrade, never signal (this renders in the tick loop).
+
+(defun test-tool-call-display ()
+  (check "known tool shows its key arg"
+         (equal (evo.tui::format-tool-call-plain "bash" '(:command "ls -la"))
+                "⏺ bash(command=\"ls -la\")"))
+  (check "schema underscores match hyphenated keywords"
+         (equal (evo.tui::format-tool-call-plain
+                 "edit" '(:path "f.lisp" :old-string "a" :new-string "b"))
+                "⏺ edit(path=\"f.lisp\", old_string=\"a\")"))
+  (check "unknown tool shows every arg"
+         (equal (evo.tui::format-tool-call-plain "mystery" '(:foo-bar "x"))
+                "⏺ mystery(foo_bar=\"x\")"))
+  (check "no arguments degrades to bare name"
+         (equal (evo.tui::format-tool-call-plain "bash" nil) "⏺ bash"))
+  (check "long call truncated with marker"
+         (let ((line (evo.tui::format-tool-call-plain
+                      "bash" (list :command (make-string 200 :initial-element #\x)))))
+           (and (<= (length line) (+ evo.tui::*tool-call-max-width* 1))
+                (char= (char line (1- (length line))) #\…))))
+  (check "newlines flattened to one line"
+         (not (find #\Newline (evo.tui::format-tool-call-plain
+                               "bash" (list :command (format nil "a~%b"))))))
+  (check "non-list arguments degrade to bare name"
+         (equal (evo.tui::format-tool-call-plain "bash" "not-a-plist") "⏺ bash"))
+  (check "dotted plist degrades instead of signaling"
+         (stringp (evo.tui::format-tool-call-plain "mystery" '(:a . "b")))))
+
 (defun test-plan-mode ()
   (let* ((dir (uiop:ensure-directory-pathname
                (format nil "~a/evo-plan-~a/" (uiop:getenv "TMPDIR") (gen-id))))
@@ -1257,6 +1309,8 @@ event: response.completed~%data: {\"type\":\"response.completed\",\"response\":{
     (test-templates)
     (test-compaction)
     (test-lore)
+    (test-tool-call-events)
+    (test-tool-call-display)
     (test-plan-mode)
     (format t "~%~d passed, ~d failed~%" *pass* *fail*)
     (if (zerop *fail*) 0 1)))

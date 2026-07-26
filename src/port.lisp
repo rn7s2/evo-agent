@@ -173,12 +173,39 @@ toolchain at runtime."
   #+sbcl nil
   #+ecl (ext:install-bytecodes-compiler))
 
+#+ecl
+(defvar *main-process* nil
+  "The main thread, captured by DISABLE-DEBUGGER: fatal exits must be
+routed through it (see below).")
+
 (defun disable-debugger ()
-  "No interactive debugger in the shipped binary: print and die instead."
+  "No interactive debugger in the shipped binary: print and die instead.
+
+ECL needs two things beyond *DEBUGGER-HOOK*.  First, unhandled conditions
+in secondary threads consult only EXT:*INVOKE-DEBUGGER-HOOK* — with just
+*DEBUGGER-HOOK* set, a crashed worker drops into the interactive debugger
+and reads stdin, which under the TUI's raw mode means a silently hung
+session the supervisor cannot detect (the main loop keeps feeding the
+heartbeat).  Second, EXT:QUIT from a secondary thread loses the exit code
+(the process reports 0), which the supervisor protocol reads as a clean
+exit and stops — so a non-main thread must exit by interrupting the main
+thread instead."
   #+sbcl (sb-ext:disable-debugger)
-  #+ecl (setf *debugger-hook*
-              (lambda (condition hook)
-                (declare (ignore hook))
-                (format *error-output* "~&evo: fatal: ~a~%" condition)
-                (finish-output *error-output*)
-                (ext:quit 1))))
+  #+ecl
+  (progn
+    (setf *main-process* mp:*current-process*)
+    (flet ((fatal-hook (condition hook)
+             (declare (ignore hook))
+             (format *error-output* "~&evo: fatal [~a]: ~a~%"
+                     (mp:process-name mp:*current-process*) condition)
+             (finish-output *error-output*)
+             (if (or (null *main-process*)
+                     (eq mp:*current-process* *main-process*))
+                 (ext:quit 1)
+                 (progn
+                   (mp:interrupt-process *main-process*
+                                         (lambda () (ext:quit 1)))
+                   (sleep 5)            ; last resort if main never unwinds:
+                   (ext:quit 1)))))    ; exit code degrades to 0, but we exit
+      (setf *debugger-hook* #'fatal-hook
+            ext:*invoke-debugger-hook* #'fatal-hook))))

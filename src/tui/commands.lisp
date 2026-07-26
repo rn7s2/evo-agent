@@ -106,7 +106,7 @@ keys: enter send · shift+enter/alt+enter/ctrl+j newline · shift+tab auto/plan 
             (let ((call (find :tool-call (pget m :content)
                               :key (lambda (b) (pget b :type)))))
               (if call
-                  (format nil "⏺ ~a" (pget call :name))
+                  (format-tool-call-plain (pget call :name) (pget call :arguments))
                   (format nil "· ~a" (truncate-string
                                       (or (pget (find :text (pget m :content)
                                                       :key (lambda (b) (pget b :type)))
@@ -338,9 +338,14 @@ keys: enter send · shift+enter/alt+enter/ctrl+j newline · shift+tab auto/plan 
         (case (tui-mode tui)
           (:select (handle-key-select tui event))
           (t (handle-key-edit tui event))))))
-  ;; Agent events.
+  ;; Agent events.  Each event is contained on its own: one malformed
+  ;; event must not lose the ones drained behind it (:worker-done in
+  ;; particular — dropping it wedges the run state).
   (dolist (event (drain-events tui))
-    (handle-agent-event tui event))
+    (handler-case (handle-agent-event tui event)
+      (serious-condition (e)
+        (ignore-errors
+          (scroll tui (red (format nil "✗ event render error: ~a" e)))))))
   ;; Spinner.
   (when (and (tui-running tui) (zerop (mod (tui-tick tui) 4)))
     (incf (tui-spinner tui))
@@ -369,9 +374,21 @@ keys: enter send · shift+enter/alt+enter/ctrl+j newline · shift+tab auto/plan 
                (queue-steering agent (goal-continuation-for agent goal))
                (start-worker tui)))
            (repaint tui)
-           (loop until (tui-quit tui)
-                 do (tick tui)
-                    (sleep 0.02))
+           ;; Self-heal, innermost layer: a bug in input parsing or
+           ;; repainting must not take the session down — report it and
+           ;; keep serving keys.  Only a persistent failure (every tick
+           ;; failing) escalates: re-signal so the supervisor restarts
+           ;; the session with --resume.
+           (let ((tick-errors 0))
+             (loop until (tui-quit tui)
+                   do (handler-case
+                          (progn (tick tui) (setf tick-errors 0))
+                        (serious-condition (e)
+                          (incf tick-errors)
+                          (when (> tick-errors 5) (error e))
+                          (ignore-errors
+                            (scroll tui (red (format nil "✗ tui error: ~a" e))))))
+                      (sleep 0.02)))
            ;; Shut down: interrupt any in-flight run cooperatively.
            (when (tui-running tui)
              (setf (agent-abort-flag agent) t)

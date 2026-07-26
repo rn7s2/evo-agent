@@ -33,6 +33,15 @@
                                         (string-prefix-p "EVO_HEARTBEAT_FILE=" e)))
                                   (evo.port:environ)))))
 
+(defun reset-tty ()
+  "Best-effort cooked-mode restore.  A child that dies abnormally can die
+inside the TUI's raw mode; without this the next child's stty snapshot
+captures raw as the state to \"restore\", and the user's shell inherits a
+raw terminal when the supervisor finally exits."
+  (ignore-errors
+   (uiop:run-program '("/bin/stty" "sane")
+                     :input :interactive :ignore-error-status t)))
+
 (defun monitor-child (process heartbeat-file start-time hang-timeout)
   "Poll until PROCESS exits; kill -9 on a stale heartbeat.
 Returns (values exit-code hung-p)."
@@ -71,6 +80,10 @@ Returns (values exit-code hung-p)."
         (multiple-value-bind (code hung)
             (monitor-child (spawn-child args heartbeat) heartbeat start hang-timeout)
           (ignore-errors (delete-file heartbeat))
+          ;; Clean exits (0/2/3/64) ran their own terminal teardown; the
+          ;; abnormal ones may have died in raw mode.
+          (when (or hung (not (member code '(0 2 3 64))))
+            (reset-tty))
           (let ((duration (- (get-universal-time) start)))
             (setf first nil)
             (case code

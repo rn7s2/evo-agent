@@ -166,10 +166,7 @@ Consecutive user/tool-result messages merge into a single user message."
                                      :id (jget cb "id")
                                      :name (jget cb "name"))))
                         (setf (gethash idx blocks) block
-                              max-index (max max-index idx))
-                        (when (eq (sse-block-type block) :tool-call)
-                          (emit :type :tool-call-start :name (sse-block-name block)
-                                :id (sse-block-id block)))))
+                              max-index (max max-index idx))))
                      ((equal type "content_block_delta")
                       (let* ((idx (jget obj "index"))
                              (block (gethash idx blocks))

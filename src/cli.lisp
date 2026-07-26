@@ -91,7 +91,14 @@ later calls override).  evo ships no built-in model table, e.g.
        (when *printed-text-p*
          (terpri *standard-output*) (force-output *standard-output*)
          (setf *printed-text-p* nil))
-       (format *error-output* "~&⏺ ~a~%" (pget event :name))
+       (let ((args (pget event :arguments)))
+         (if args
+             ;; One bounded line: a write call carries whole files in :content.
+             (format *error-output* "~&⏺ ~a ~a~%" (pget event :name)
+                     (evo.util:truncate-string
+                      (substitute #\Space #\Newline (format nil "~s" args))
+                      200 "…"))
+             (format *error-output* "~&⏺ ~a~%" (pget event :name))))
        (force-output *error-output*))
       (:tool-result
        (when (pget event :is-error)

@@ -162,6 +162,10 @@ guaranteed by the CLI preflight)."
          (id (pget call :id))
          (tool (find-tool name))
          content details is-error)
+    ;; Announce the call up front, with the fully-parsed arguments: the
+    ;; display must show what is running while it runs, not after.
+    (emit-event agent :type :tool-call-start :name name :id id
+                      :arguments (pget call :arguments))
     (cond
       ((pget call :arguments-error)
        (setf content (format nil "Tool arguments were not valid JSON: ~a"
@@ -295,5 +299,8 @@ messages? active goal?) -> continue.  Returns the final outcome."
              (followup (queue-steering agent followup))
              ((steering-pending-p agent))   ; steered while settling: go again
              ((loop for fn in *settled-hooks*
-                      thereis (funcall fn agent outcome)))
+                      thereis (handler-case (funcall fn agent outcome)
+                                (error (e)
+                                  (warn "Settled hook failed: ~a" e)
+                                  nil))))
              (t (return outcome)))))))))

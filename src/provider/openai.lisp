@@ -242,10 +242,7 @@ model exposes it) into display text."
                                     :name (jget jitem "name"))))
                         (when (integerp idx)
                           (setf (gethash idx items) item
-                                max-index (max max-index idx)))
-                        (when (eq (oai-item-type item) :tool-call)
-                          (emit :type :tool-call-start :name (oai-item-name item)
-                                :id (oai-item-call-id item)))))
+                                max-index (max max-index idx)))))
                      ((or (equal type "response.output_text.delta")
                           (equal type "response.refusal.delta"))
                       (let ((item (item-at obj))

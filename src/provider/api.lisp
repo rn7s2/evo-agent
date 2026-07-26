@@ -19,7 +19,10 @@
 ;;;;                      — :input EXCLUDES cached/cache-written tokens
 ;;;;      :aborted-p      true when the abort flag fired mid-stream
 ;;;;  - Events emitted via :on-event (a plist per event):
-;;;;      :message-start · :text-delta · :thinking-delta · :tool-call-start
+;;;;      :message-start · :text-delta · :thinking-delta
+;;;;    (:tool-call-start is NOT a stream event: arguments are still
+;;;;    streaming when a tool block opens, so the kernel emits it from
+;;;;    run-tool-call once the parsed :arguments plist exists)
 ;;;;  - Errors are data at runtime: call-provider converts stream errors and
 ;;;;    HTTP failures into assistant messages, never signals into the loop.
 ;;;;    Config-resolution errors (unknown model/API/provider) DO signal —
