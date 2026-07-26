@@ -255,12 +255,23 @@ inside the TUI tick loop and on session resume, so malformed ARGUMENTS
      ;; estimate (chars/4, same rule as compaction accounting).
      (incf (tui-context-tokens tui)
            (ceiling (or (pget event :content-chars) 0) 4))
-     (let* ((content (or (pget event :content) ""))
-            (first-line (subseq content 0 (or (position #\Newline content)
-                                              (length content)))))
-       (scroll tui (if (pget event :is-error)
-                       (red (format nil "  ⎿ ~a" first-line))
-                       (dim (format nil "  ⎿ ~a" first-line))))))
+     (let* ((content (string-right-trim '(#\Newline)
+                                        (or (pget event :content) "")))
+            (lines (or (uiop:split-string content :separator '(#\Newline))
+                       (list "")))
+            (shown (subseq lines 0 (min 3 (length lines))))
+            (hidden (- (length lines) (length shown)))
+            (paint (if (pget event :is-error) #'red #'dim)))
+       (scroll tui
+               (format nil "~{~a~^~%~}"
+                       (append
+                        (loop for line in shown
+                              for prefix = "  ⎿ " then "    "
+                              collect (funcall paint
+                                               (concatenate 'string prefix line)))
+                        (when (plusp hidden)
+                          (list (funcall paint
+                                         (format nil "    … +~d line~:p" hidden)))))))))
     (:message-end
      (flush-partial tui)
      (setf (tui-md tui) (make-md))      ; fences don't leak across messages

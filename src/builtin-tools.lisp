@@ -19,7 +19,7 @@
        (with-output-to-string (out)
          (loop for line in selected
                for n from (1+ start)
-               do (format out "~6d\t~a~%" n line)))
+               do (format out "~6d~c~a~%" n #\Tab line)))
        *read-max-chars*
        (format nil "~%... [truncated at ~d chars; use offset/limit to read more]"
                *read-max-chars*)))))
