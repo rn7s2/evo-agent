@@ -9,8 +9,8 @@ design; this README covers what is implemented and how to run it.
   with hand-rolled SSE streaming, thinking blocks (chunked signatures),
   handoff pass (errored turns elided, cross-model thinking dropped, orphaned
   tool calls given synthetic results), errors-as-data, status-classified
-  retries with backoff/retry-after, prompt-cache breakpoints; model table
-  with rational cost accounting.
+  retries with backoff/retry-after, prompt-cache breakpoints; per-message
+  token accounting.
 - **Kernel loop + journal** — append-only sexpr entry **tree** per
   session (write-ahead; `*read-eval*` nil; restricted sexpr-JSON vocabulary;
   form-based reading); all state a fold over the root→leaf path; turn loop
@@ -74,28 +74,45 @@ evo --resume                           # reopen the latest session here
 evo --list-sessions
 ```
 
-## Settings
+## Configuration
 
-Sexpr plists: global `~/.evo/settings.sexp`, project
-`<cwd>/.evo/settings.sexp` (project wins). `EVO_HOME` overrides `~/.evo`.
+Config is code: global `~/.evo/init.lisp`, then project
+`<cwd>/.evo/init.lisp`, evaluated in that order on every boot — an
+override is just a later call. `EVO_HOME` overrides `~/.evo`.
+`--no-userspace` skips config and extensions.
+
+evo ships **no built-in model table**: at minimum register one model and
+pick it. Without that, evo exits with a pointer to the sample at
+[docs/examples/init.lisp](docs/examples/init.lisp).
 
 ```lisp
-(:model "ark-deepseek-v4-pro"
- :thinking :xhigh               ; off low medium high xhigh
- :goal-token-budget 2000000     ; per-goal token cap; omit for no limit (default)
- :providers (:anthropic (:base-url "http://127.0.0.1:8787"
-                         :api-key "sk-...")))
+(evo:register-model "claude-sonnet-5"
+  :provider :anthropic :api :anthropic-messages   ; :api = wire protocol
+  :context-window 200000 :max-output 64000 :thinking t)
+(evo:set-setting :model "claude-sonnet-5")
+
+;; Optional (kernel defaults exist for all of these):
+(evo:set-setting :thinking :medium)          ; off low medium high xhigh
+(evo:set-setting :goal-token-budget 2000000) ; per-goal token cap; omit = no limit
+;; :compact-reserve / :compact-keep-recent tune compaction.
+
+;; Endpoints: :anthropic/:openai are pre-seeded (ANTHROPIC_API_KEY /
+;; OPENAI_API_KEY); register-provider overrides field-wise, e.g. a proxy:
+(evo:register-provider :anthropic :base-url "http://127.0.0.1:8787" :api-key "sk-...")
 ```
 
-Against the real API omit `:base-url`/`:api-key` — `ANTHROPIC_API_KEY` is
-the default source. `:compact-reserve` / `:compact-keep-recent` tune
-compaction.
+Dialects (`:anthropic-messages`, `:openai-responses`) are kernel-curated;
+models and providers are yours. Config runs in userspace with the full
+extension API, so `register-tool`, hooks, and `load-extension` work here
+too.
 
 ## Tests
 
 ```sh
-make test           # unit: sexpr IO, journal, schema, SSE, handoff, editor,
-                    #       input parser, templates, compaction, lore, plan-mode
+make test           # unit: sexpr IO, journal, schema, registries, provider
+                    #       APIs, SSE + transport, request builders, handoff,
+                    #       init files, preflight, editor, input parser,
+                    #       templates, compaction, lore, plan-mode
 make integration    # live (needs the proxy): tool round-trip, kill -9 +
                     #       manual resume, goal completion, induced-crash
                     #       supervision, mid-task compaction
@@ -107,10 +124,13 @@ tests/plan-mode.exp # plan/auto mode wiring e2e
 
 ```text
 src/packages.lisp      package graph (kernel locked; EVO.USER open; EVO = public API)
-src/util.lisp          safe sexpr IO, settings, ids
+src/util.lisp          safe sexpr IO, settings store, ids
 src/journal.lisp       entry tree, write-ahead append, fold, fork, sessions
-src/model-table.lisp   models, costs, thinking budgets
-src/provider.lisp      Anthropic adapter: handoff, SSE, retries, cost
+src/provider/api.lisp       provider-API protocol (CLOS) + API registry
+src/provider/registry.lisp  model + provider registries (populated from init.lisp)
+src/provider/core.lisp      shared provider core: handoff, SSE transport, retries
+src/provider/anthropic.lisp Anthropic Messages API
+src/provider/openai.lisp    OpenAI Responses API
 src/tools.lisp         tool registry, sexpr schema -> JSON Schema
 src/prompt.lisp        system prompt assembly, skills, templates
 src/loop.lisp          agent, turn loop, run-until-settled, hooks, heartbeat

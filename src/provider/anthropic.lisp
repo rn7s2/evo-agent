@@ -1,0 +1,277 @@
+;;;; anthropic.lisp — the Anthropic Messages API.
+;;;;
+;;;; Stateless replay (full history each request); prompt caching via
+;;;; cache_control breakpoints (system prompt, last tool def, last user
+;;;; message); same-model thinking replays verbatim with its signature.
+;;;; See api.lisp for the adapter contract.
+
+(in-package :evo.provider)
+
+(defclass anthropic-messages-api (provider-api) ())
+
+(defmethod endpoint-path ((api anthropic-messages-api))
+  "/v1/messages")
+
+(defmethod auth-headers ((api anthropic-messages-api) config)
+  `(("x-api-key" . ,(pget config :api-key))
+    ("anthropic-version" . "2023-06-01")))
+
+(defmethod default-provider-key ((api anthropic-messages-api)) :anthropic)
+(defmethod default-base-url ((api anthropic-messages-api)) "https://api.anthropic.com")
+(defmethod default-api-key-env ((api anthropic-messages-api)) "ANTHROPIC_API_KEY")
+
+;;; Thinking levels -> budget_tokens.
+
+(defun thinking-budget (level)
+  (case level
+    ((nil :off) nil)
+    (:low 2048)
+    (:medium 8192)
+    (:high 16384)
+    (:xhigh 32768)
+    (t nil)))
+
+(defmethod thinking-param ((api anthropic-messages-api) level)
+  (thinking-budget level))
+
+;;; Request building.
+
+(defun content-block->json (block)
+  (case (pget block :type)
+    (:text (jobj "type" "text" "text" (pget block :text)))
+    (:thinking (jobj "type" "thinking"
+                     "thinking" (pget block :thinking)
+                     "signature" (or (pget block :signature) "")))
+    (:tool-call (jobj "type" "tool_use"
+                      "id" (pget block :id)
+                      "name" (pget block :name)
+                      "input" (let ((args (pget block :arguments)))
+                                (if args (sexpr->json args) (jobj)))))
+    (:image (jobj "type" "text" "text" "[image omitted]"))
+    (t (error 'provider-error :message (format nil "Unknown content block type ~s" (pget block :type))))))
+
+(defun tool-result->json-block (m)
+  (jobj "type" "tool_result"
+        "tool_use_id" (pget m :tool-call-id)
+        "is_error" (if (pget m :is-error) t nil)
+        "content" (map 'vector #'content-block->json (message-content m))))
+
+(defun messages->json (messages)
+  "Convert unified messages to Anthropic wire messages.
+Consecutive user/tool-result messages merge into a single user message."
+  (let ((out nil))     ; list of (role . blocks-list), reversed
+    (dolist (m messages)
+      (ecase (message-role m)
+        (:assistant
+         (push (cons "assistant" (map 'list #'content-block->json (message-content m)))
+               out))
+        ((:user :tool-result)
+         (let ((blocks (if (eq (message-role m) :tool-result)
+                           (list (tool-result->json-block m))
+                           (map 'list #'content-block->json (message-content m)))))
+           (if (and out (equal (caar out) "user"))
+               (setf (cdr (car out)) (append (cdr (car out)) blocks))
+               (push (cons "user" blocks) out))))))
+    (map 'vector
+         (lambda (pair)
+           (jobj "role" (car pair) "content" (coerce (cdr pair) 'vector)))
+         (nreverse out))))
+
+(defun add-cache-control (json-messages)
+  "Mark the last block of the last message as a cache breakpoint."
+  (let ((last-msg (and (plusp (length json-messages))
+                       (aref json-messages (1- (length json-messages))))))
+    (when last-msg
+      (let ((content (gethash "content" last-msg)))
+        (when (plusp (length content))
+          (setf (gethash "cache_control" (aref content (1- (length content))))
+                (jobj "type" "ephemeral"))))))
+  json-messages)
+
+(defun tools->json (tools)
+  "TOOLS: list of (:name s :description s :input-schema hash-table)."
+  (when tools
+    (let ((v (map 'vector
+                  (lambda (tl)
+                    (jobj "name" (pget tl :name)
+                          "description" (pget tl :description)
+                          "input_schema" (pget tl :input-schema)))
+                  tools)))
+      (setf (gethash "cache_control" (aref v (1- (length v)))) (jobj "type" "ephemeral"))
+      v)))
+
+(defun build-request-json (&key model system messages tools thinking-level)
+  (let* ((model-id (pget model :id))
+         (budget (and (pget model :thinking) (thinking-budget thinking-level)))
+         (req (jobj "model" model-id
+                    "max_tokens" (model-max-output model)
+                    "stream" t
+                    "messages" (add-cache-control
+                                (messages->json (handoff-pass messages model-id))))))
+    (when system
+      (setf (gethash "system" req)
+            (vector (let ((b (jobj "type" "text" "text" system)))
+                      (setf (gethash "cache_control" b) (jobj "type" "ephemeral"))
+                      b))))
+    (let ((jt (tools->json tools)))
+      (when jt (setf (gethash "tools" req) jt)))
+    (when budget
+      (setf (gethash "thinking" req)
+            (jobj "type" "enabled" "budget_tokens" budget)))
+    (jzon:stringify req)))
+
+(defmethod build-request ((api anthropic-messages-api)
+                          &key model system messages tools thinking-level cache-key)
+  (declare (ignore cache-key))          ; caching is cache_control breakpoints
+  (build-request-json :model model :system system :messages messages
+                      :tools tools :thinking-level thinking-level))
+
+;;; SSE parsing: a stream ending without message_stop is a retryable error.
+;;; Tool arguments accumulate as partial JSON and are parsed at
+;;; content_block_stop.
+
+(defstruct sse-block type text thinking signature id name (input-json ""))
+
+(defun parse-sse-stream (char-stream &key on-event abort-flag)
+  "Parse an Anthropic Messages SSE stream into the adapter result plist."
+  (let ((blocks (make-hash-table))     ; index -> sse-block
+        (max-index -1)
+        (raw-stop nil) (model nil) (stopped-p nil) (error-message nil)
+        (in-tokens 0) (out-tokens 0) (cache-read 0) (cache-write 0))
+    (labels ((emit (&rest ev) (when on-event (funcall on-event ev)))
+             (handle (event-type data)
+               (let* ((obj (ignore-errors (jzon:parse data)))
+                      (type (or event-type (and obj (jget obj "type")))))
+                 (when obj
+                   (cond
+                     ((equal type "message_start")
+                      (let ((usage (jget obj "message" "usage")))
+                        (when usage
+                          (setf in-tokens (or (jget usage "input_tokens") 0)
+                                cache-read (or (jget usage "cache_read_input_tokens") 0)
+                                cache-write (or (jget usage "cache_creation_input_tokens") 0))))
+                      (setf model (jget obj "message" "model"))
+                      (emit :type :message-start))
+                     ((equal type "content_block_start")
+                      (let* ((idx (jget obj "index"))
+                             (cb (jget obj "content_block"))
+                             (cbtype (jget cb "type"))
+                             (block (make-sse-block
+                                     :type (cond ((equal cbtype "text") :text)
+                                                 ((equal cbtype "thinking") :thinking)
+                                                 ((equal cbtype "tool_use") :tool-call)
+                                                 (t :unknown))
+                                     :text "" :thinking ""
+                                     :signature (or (jget cb "signature") "")
+                                     :id (jget cb "id")
+                                     :name (jget cb "name"))))
+                        (setf (gethash idx blocks) block
+                              max-index (max max-index idx))
+                        (when (eq (sse-block-type block) :tool-call)
+                          (emit :type :tool-call-start :name (sse-block-name block)
+                                :id (sse-block-id block)))))
+                     ((equal type "content_block_delta")
+                      (let* ((idx (jget obj "index"))
+                             (block (gethash idx blocks))
+                             (delta (jget obj "delta"))
+                             (dtype (jget delta "type")))
+                        (when block
+                          (cond
+                            ((equal dtype "text_delta")
+                             (let ((s (jget delta "text")))
+                               (setf (sse-block-text block)
+                                     (concatenate 'string (sse-block-text block) s))
+                               (emit :type :text-delta :text s)))
+                            ((equal dtype "thinking_delta")
+                             (let ((s (jget delta "thinking")))
+                               (setf (sse-block-thinking block)
+                                     (concatenate 'string (sse-block-thinking block) s))
+                               (emit :type :thinking-delta :text s)))
+                            ((equal dtype "signature_delta")
+                             ;; chunked; must append
+                             (setf (sse-block-signature block)
+                                   (concatenate 'string (sse-block-signature block)
+                                                (or (jget delta "signature") ""))))
+                            ((equal dtype "input_json_delta")
+                             (setf (sse-block-input-json block)
+                                   (concatenate 'string (sse-block-input-json block)
+                                                (or (jget delta "partial_json") ""))))))))
+                     ((equal type "message_delta")
+                      (let ((sr (jget obj "delta" "stop_reason"))
+                            (usage (jget obj "usage")))
+                        (when (stringp sr) (setf raw-stop sr))
+                        (when usage
+                          ;; Some backends only report full usage here.
+                          (setf out-tokens (or (jget usage "output_tokens") out-tokens))
+                          (let ((in (jget usage "input_tokens")))
+                            (when (and (integerp in) (plusp in)) (setf in-tokens in)))
+                          (let ((cr (jget usage "cache_read_input_tokens")))
+                            (when (integerp cr) (setf cache-read (max cache-read cr))))
+                          (let ((cw (jget usage "cache_creation_input_tokens")))
+                            (when (integerp cw) (setf cache-write (max cache-write cw)))))))
+                     ((equal type "message_stop")
+                      (setf stopped-p t))
+                     ((equal type "error")
+                      (setf error-message
+                            (format nil "~a: ~a"
+                                    (or (jget obj "error" "type") "error")
+                                    (or (jget obj "error" "message") data))))
+                     (t nil)))
+                 (when (or stopped-p error-message) :stop))))
+      (when (eq (map-sse-events char-stream #'handle :abort-flag abort-flag)
+                :aborted)
+        (return-from parse-sse-stream
+          (list :aborted-p t :content nil :stop-reason :aborted
+                :usage (list :input in-tokens :output out-tokens
+                             :cache-read cache-read :cache-write cache-write))))
+      ;; Materialize blocks in index order.
+      (let ((content
+              (loop for i from 0 to max-index
+                    for block = (gethash i blocks)
+                    when block
+                      collect (ecase (sse-block-type block)
+                                (:text (list :type :text :text (sse-block-text block)))
+                                (:thinking (list :type :thinking
+                                                 :thinking (sse-block-thinking block)
+                                                 :signature (sse-block-signature block)))
+                                (:tool-call
+                                 (let* ((raw (sse-block-input-json block))
+                                        (args (cond ((zerop (length raw)) nil)
+                                                    (t (handler-case
+                                                           (json->sexpr (jzon:parse raw))
+                                                         (error () :parse-error))))))
+                                   (append (list :type :tool-call
+                                                 :id (sse-block-id block)
+                                                 :name (sse-block-name block))
+                                           (if (eq args :parse-error)
+                                               (list :arguments nil :arguments-error
+                                                     (truncate-string raw 2000))
+                                               (list :arguments args)))))
+                                (:unknown (list :type :text :text ""))))))
+        (list :content content
+              :model model
+              :stopped-p stopped-p
+              :error-message error-message
+              :stop-reason (normalize-stop-reason raw-stop content)
+              :usage (list :input in-tokens :output out-tokens
+                           :cache-read cache-read :cache-write cache-write))))))
+
+(defun normalize-stop-reason (raw content)
+  "Normalize to :stop :length :tool-use :error :aborted.  Tool-use presence in
+content wins (some proxies report end_turn alongside tool_use blocks)."
+  (cond ((find :tool-call content :key (lambda (b) (pget b :type))) :tool-use)
+        ((null raw) :stop)
+        ((equal raw "end_turn") :stop)
+        ((equal raw "stop_sequence") :stop)
+        ((equal raw "pause_turn") :stop)
+        ((equal raw "max_tokens") :length)
+        ((equal raw "tool_use") :tool-use)
+        ((equal raw "refusal") :error)
+        (t (error 'provider-error
+                  :message (format nil "Unknown stop reason ~s" raw)))))
+
+(defmethod parse-stream ((api anthropic-messages-api) char-stream
+                         &key on-event abort-flag)
+  (parse-sse-stream char-stream :on-event on-event :abort-flag abort-flag))
+
+(register-api :anthropic-messages (make-instance 'anthropic-messages-api))

@@ -198,22 +198,24 @@ the validated vocabulary, plain prin1 output re-reads exactly."
 
 ;;; Settings
 ;;;
-;;; Sexpr plists: global ~/.evo/settings.sexp merged with project
-;;; .evo/settings.sexp (project wins, shallow merge).
+;;; A keyword→value plist mutated by config code (init.lisp) through
+;;; set-setting; reset before each userspace boot, so project init
+;;; overriding global init is just a later call.
 
 (defvar *settings* nil)
 
-(defun load-settings-file (path)
-  (when (probe-file path)
-    (handler-case (read-sexpr (read-file-string path))
-      (error (e)
-        (warn "Ignoring unreadable settings file ~a: ~a" path e)
-        nil))))
-
-(defun load-settings (&optional (cwd (uiop:getcwd)))
-  (let ((global (load-settings-file (merge-pathnames "settings.sexp" (evo-home))))
-        (project (load-settings-file (merge-pathnames "settings.sexp" (project-evo-dir cwd)))))
-    (setf *settings* (plist-merge global project))))
-
 (defun setting (key &optional default)
   (pget *settings* key default))
+
+(defun set-setting (key value)
+  (unless (keywordp key)
+    (error "set-setting: key must be a keyword, got ~s" key))
+  (setf (getf *settings* key) value)
+  value)
+
+(defun (setf setting) (value key &optional default)
+  (declare (ignore default))
+  (set-setting key value))
+
+(defun reset-settings ()
+  (setf *settings* nil))

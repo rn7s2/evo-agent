@@ -22,7 +22,7 @@ form-by-form, not line-by-line.
 | type | meaning |
 |---|---|
 | `:message` | payload `:message` is a message plist (in LLM context) |
-| `:model-change` | `:provider` + `:model` (state fold) |
+| `:model-change` | `:model` id (state fold); older journals may add `:provider` — ignored |
 | `:thinking-change` | `:thinking` level (state fold) |
 | `:tools-change` | `:tools` vector of active tool names (state fold) |
 | `:compaction` | `:summary` + `:retained-tail` — self-contained checkpoint; context rebuild = [summary, …tail, …entries-after] |
@@ -43,7 +43,7 @@ Every entry carries `:id` (short random hex), `:parent-id` (nil for a root),
 (:role :user :content ((:type :text :text "...")))
 (:role :assistant :api :anthropic-messages :provider :anthropic :model "..."
  :stop-reason :tool-use   ; :stop :length :tool-use :error :aborted
- :usage (:input i :output o :cache-read r :cache-write w :cost-usd rational)
+ :usage (:input i :output o :cache-read r :cache-write w)  ; older journals may add :cost-usd — ignored
  :content ((:type :thinking :thinking "..." :signature "...")
            (:type :text :text "...")
            (:type :tool-call :id "..." :name "bash" :arguments (:command "ls"))))

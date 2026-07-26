@@ -106,12 +106,19 @@ plugs in here.")
 
 ;;; Save point: the whole context snapshot is rebuilt between turns.
 
+(defun effective-model-id (state agent)
+  "The session's model id: journaled choice, else CLI override, else the
+:model setting.  No kernel default — config must name a model (normally
+guaranteed by the CLI preflight)."
+  (or (evo.journal:state-model state)
+      (agent-model-override agent)
+      (setting :model)
+      (error "No model is configured — set one in init.lisp: (evo:set-setting :model \"...\")")))
+
 (defun prepare-next-turn (agent)
   (let* ((state (fold-state (agent-journal agent)))
          (tools (active-tools state))
-         (model-id (or (evo.journal:state-model state)
-                       (agent-model-override agent)
-                       (setting :model "claude-sonnet-5")))
+         (model-id (effective-model-id state agent))
          (thinking (or (evo.journal:state-thinking state)
                        (agent-thinking-override agent)
                        (setting :thinking :medium))))
@@ -214,9 +221,7 @@ Returns :stop :length :error :aborted."
             ;; Threshold compaction check at the save point.
             (let ((state (fold-state (agent-journal agent))))
               (when (compaction-needed-p state (find-model
-                                                (or (evo.journal:state-model state)
-                                                    (agent-model-override agent)
-                                                    (setting :model "claude-sonnet-5"))))
+                                                (effective-model-id state agent)))
                 (emit-event agent :type :compaction-start)
                 (handler-case (compact-now agent)
                   (error (e) (warn "Compaction failed, continuing uncompacted: ~a" e)))

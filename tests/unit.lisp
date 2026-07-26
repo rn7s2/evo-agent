@@ -88,7 +88,7 @@ line2")))
         (check "reopen: leaf preserved" (equal (journal-leaf-id reopened)
                                                (journal-leaf-id journal)))
         (check "reopen: fold equal" (= (length (state-messages state)) 2))))
-    (append-entry journal '(:type :model-change :provider :anthropic :model "m2"))
+    (append-entry journal '(:type :model-change :model "m2"))
     (append-entry journal '(:type :tools-change :tools #("bash")))
     (let ((state (fold-state journal)))
       (check "model fold" (equal (state-model state) "m2"))
@@ -876,16 +876,255 @@ event: response.completed~%data: {\"type\":\"response.completed\",\"response\":{
         (check "plan messages filtered in auto"
                (= 1 (length (run-transforms messages))))))))
 
+;;; Model/provider registries + provider-API protocol
+
+(defun test-registry ()
+  (reset-user-registries)
+  (register-model* "reg-a" :provider :anthropic :api :anthropic-messages
+                   :context-window 1000 :max-output 100)
+  (register-model* "reg-b" :provider :openai :api :openai-responses
+                   :context-window 2000 :max-output 200)
+  (check "registration order preserved"
+         (equal '("reg-a" "reg-b")
+                (mapcar (lambda (m) (pget m :id)) (all-models))))
+  (register-model* "reg-a" :provider :anthropic :api :anthropic-messages
+                   :context-window 5000 :max-output 100)
+  (check "re-register replaces in place"
+         (and (= 2 (length (all-models)))
+              (equal "reg-a" (pget (first (all-models)) :id))
+              (= 5000 (pget (find-model "reg-a") :context-window))))
+  (check "find-model passes plists through"
+         (equal "x" (pget (find-model '(:id "x")) :id)))
+  (check-signals "unknown model id signals" (find-model "no-such-model"))
+  (check "unknown model error names register-model"
+         (handler-case (progn (find-model "no-such-model") nil)
+           (error (e) (search "register-model" (format nil "~a" e)))))
+  (check-signals "unknown :api signals at registration"
+                 (register-model* "bad" :provider :x :api :no-such-api
+                                  :context-window 1 :max-output 1))
+  (check "providers seeded from API defaults"
+         (equal "https://api.anthropic.com"
+                (pget (provider-config :anthropic) :base-url)))
+  (register-provider* :anthropic :base-url "http://127.0.0.1:1")
+  (check "provider re-register merges field-wise"
+         (equal "http://127.0.0.1:1" (pget (provider-config :anthropic) :base-url)))
+  (register-provider* :custom :base-url "http://x" :api-key "k")
+  (check "custom provider literal api-key"
+         (equal "k" (pget (provider-config :custom) :api-key)))
+  (check-signals "unregistered provider signals" (provider-config :no-such-provider))
+  (check-signals "provider without base-url signals"
+                 (progn (register-provider* :keyless :api-key "k")
+                        (provider-config :keyless)))
+  (reset-user-registries)
+  (check "reset clears models" (null (all-models)))
+  (check "reset re-seeds anthropic"
+         (equal "https://api.anthropic.com"
+                (pget (provider-config :anthropic) :base-url)))
+  (check "reset re-seeds openai"
+         (equal "https://api.openai.com"
+                (pget (provider-config :openai) :base-url))))
+
+(defun test-apis ()
+  (check "find-api anthropic" (find-api :anthropic-messages))
+  (check "find-api openai" (find-api :openai-responses))
+  (check-signals "unknown api signals" (find-api :no-such-api))
+  (check "anthropic thinking-param is a budget"
+         (= 8192 (thinking-param (find-api :anthropic-messages) :medium)))
+  (check "anthropic thinking off"
+         (null (thinking-param (find-api :anthropic-messages) :off)))
+  (check "openai thinking-param is an effort string"
+         (equal "medium" (thinking-param (find-api :openai-responses) :medium)))
+  (check "openai thinking off"
+         (null (thinking-param (find-api :openai-responses) :off)))
+  (check "endpoint paths"
+         (and (equal "/v1/messages" (endpoint-path (find-api :anthropic-messages)))
+              (equal "/v1/responses" (endpoint-path (find-api :openai-responses))))))
+
+(defun register-fixture-models ()
+  "The unit suite's stand-in for init.lisp: the model registry ships empty."
+  (register-model* "gpt-5.6-luna" :provider :openai :api :openai-responses
+                   :context-window 272000 :max-output 128000 :thinking t)
+  (register-model* "gpt-5.6-sol" :provider :openai :api :openai-responses
+                   :context-window 272000 :max-output 128000 :thinking t))
+
+;;; SSE transport framing
+
+(defun test-sse-transport ()
+  (let ((events nil))
+    (with-input-from-string
+        (in (format nil "event: a~%data: 1~%data: 2~%~%data: {\"x\":1}~%~%"))
+      (check "transport: done at eof"
+             (eq :done (map-sse-events
+                        in (lambda (type data) (push (list type data) events))))))
+    (let ((events (nreverse events)))
+      (check "transport: multi-line data joined"
+             (equal (first events) (list "a" (format nil "1~%2"))))
+      (check "transport: typeless event"
+             (equal (second events) (list nil "{\"x\":1}")))))
+  (with-input-from-string (in (format nil "data: a~c~%~%data: b~%~%" #\Return))
+    (let ((seen nil))
+      (check "transport: :stop ends the loop"
+             (eq :done (map-sse-events in (lambda (type data)
+                                            (declare (ignore type))
+                                            (push data seen)
+                                            :stop))))
+      (check "transport: CR trimmed, later events unread" (equal seen '("a")))))
+  (with-input-from-string (in "data: tail")
+    (let ((seen nil))
+      (map-sse-events in (lambda (type data) (declare (ignore type)) (push data seen)))
+      (check "transport: flush at eof without blank line" (equal seen '("tail")))))
+  (with-input-from-string (in (format nil "data: x~%~%"))
+    (check "transport: abort flag"
+           (eq :aborted (map-sse-events in (lambda (type data)
+                                             (declare (ignore type data)))
+                                        :abort-flag (lambda () t))))))
+
+;;; Anthropic request building
+
+(defun test-anthropic-request ()
+  (let* ((model '(:id "fixture-claude" :provider :anthropic :api :anthropic-messages
+                  :context-window 200000 :max-output 64000 :thinking t))
+         (history
+           (list '(:role :user :content ((:type :text :text "go")))
+                 ;; errored turn: elided by the handoff pass
+                 '(:role :assistant :model "fixture-claude" :stop-reason :error
+                   :usage (:input 0 :output 0 :cache-read 0 :cache-write 0)
+                   :content ((:type :text :text "half")))
+                 '(:role :assistant :model "fixture-claude" :stop-reason :tool-use
+                   :usage (:input 1 :output 1 :cache-read 0 :cache-write 0)
+                   :content ((:type :tool-call :id "tc_1" :name "bash"
+                              :arguments (:command "ls"))))
+                 '(:role :tool-result :tool-call-id "tc_1" :tool-name "bash"
+                   :is-error nil :content ((:type :text :text "ok")))
+                 '(:role :user :content ((:type :text :text "next")))))
+         (tools (list (list :name "bash" :description "run"
+                            :input-schema (schema->json-schema
+                                           '(:object (:command :type :string :description "c"))))))
+         (raw (build-request (find-api :anthropic-messages)
+                             :model model :system "sys" :messages history
+                             :tools tools :thinking-level :high))
+         (req (com.inuoe.jzon:parse raw)))
+    (flet ((jget (&rest keys) (apply #'evo.provider::jget req keys)))
+      (check "anth req model + max_tokens"
+             (and (equal (jget "model") "fixture-claude")
+                  (= (jget "max_tokens") 64000)))
+      (check "anth req streams" (eq (jget "stream") t))
+      (check "anth req system block cached"
+             (let ((sys (aref (jget "system") 0)))
+               (and (equal (evo.provider::jget sys "text") "sys")
+                    (evo.provider::jget sys "cache_control"))))
+      (check "anth req thinking budget"
+             (= (jget "thinking" "budget_tokens") 16384))
+      (check "anth req tools cached on last"
+             (let ((tl (aref (jget "tools") 0)))
+               (and (equal (evo.provider::jget tl "name") "bash")
+                    (evo.provider::jget tl "cache_control"))))
+      (let ((messages (jget "messages")))
+        (check "anth req errored turn elided, merged tail"
+               (equal (map 'list (lambda (m) (evo.provider::jget m "role")) messages)
+                      '("user" "assistant" "user")))
+        (let ((blocks (evo.provider::jget (aref messages 2) "content")))
+          (check "anth req tool-result + user merged"
+                 (and (= 2 (length blocks))
+                      (equal (evo.provider::jget (aref blocks 0) "type") "tool_result")
+                      (equal (evo.provider::jget (aref blocks 1) "type") "text")))
+          (check "anth req cache breakpoint on last block"
+                 (evo.provider::jget (aref blocks (1- (length blocks)))
+                                     "cache_control")))))
+    (let ((raw2 (build-request (find-api :anthropic-messages)
+                               :model model :system nil :messages history
+                               :tools nil :thinking-level :off)))
+      (check "anth req no thinking at :off" (not (search "budget_tokens" raw2))))))
+
+;;; Init files (config-as-code) + CLI preflight
+
+(defun test-init-files ()
+  (let* ((home (evo-home))
+         (global-init (merge-pathnames "init.lisp" home))
+         (cwd (merge-pathnames "init-test-project/" home))
+         (project-init (merge-pathnames ".evo/init.lisp" cwd)))
+    (ensure-directory home)
+    (ensure-directory (merge-pathnames ".evo/" cwd))
+    (write-file-string
+     global-init
+     "(evo:register-model \"init-a\" :provider :anthropic :api :anthropic-messages
+   :context-window 1000 :max-output 100)
+(evo:set-setting :model \"init-a\")")
+    (write-file-string
+     project-init
+     "(evo:register-model \"init-b\" :provider :openai :api :openai-responses
+   :context-window 2000 :max-output 200)
+(evo:set-setting :model \"init-b\")")
+    (unwind-protect
+         (progn
+           (evo.kernel:boot-userspace :cwd cwd)
+           (check "init: project setting overrides global"
+                  (equal "init-b" (setting :model)))
+           (check "init: global-then-project registration order"
+                  (equal '("init-a" "init-b")
+                         (mapcar (lambda (m) (pget m :id)) (all-models))))
+           (evo.kernel:boot-userspace :cwd cwd)
+           (check "init: re-boot is idempotent" (= 2 (length (all-models))))
+           ;; A broken init file warns to stderr but doesn't abort the boot.
+           (write-file-string project-init "(error \"boom\")")
+           (let ((*error-output* (make-broadcast-stream)))
+             (evo.kernel:boot-userspace :cwd cwd))
+           (check "init: broken project init keeps global config"
+                  (and (equal "init-a" (setting :model))
+                       (equal '("init-a")
+                              (mapcar (lambda (m) (pget m :id)) (all-models))))))
+      (ignore-errors (delete-file global-init))
+      (ignore-errors (delete-file project-init))
+      (reset-user-registries)
+      (reset-settings)
+      (register-fixture-models))))
+
+(defun test-preflight ()
+  (reset-user-registries)
+  (reset-settings)
+  (let* ((journal (make-session-journal))
+         (agent (make-agent :journal journal)))
+    (check-signals "preflight: no model configured"
+                   (evo.cli::preflight-model agent journal nil))
+    (check "preflight error mentions init.lisp"
+           (handler-case (progn (evo.cli::preflight-model agent journal nil) nil)
+             (error (e) (search "init.lisp" (format nil "~a" e)))))
+    (register-fixture-models)
+    (set-setting :model "gpt-5.6-luna")
+    (check "preflight passes with configured model"
+           (progn (evo.cli::preflight-model agent journal nil) t))
+    (set-setting :model "gone-model")
+    (check-signals "preflight: unknown model id"
+                   (evo.cli::preflight-model agent journal nil)))
+  (reset-settings)
+  (reset-user-registries)
+  (register-fixture-models))
+
+(defun test-parse-args ()
+  (check "parse: thinking level keyword"
+         (eq :high (getf (evo.cli::parse-args '("--thinking" "high")) :thinking)))
+  (check-signals "parse: bogus thinking level"
+                 (evo.cli::parse-args '("--thinking" "bogus")))
+  (check-signals "parse: unknown flag" (evo.cli::parse-args '("--wat"))))
+
 (defun run-all ()
   (let ((*pass* 0) (*fail* 0))
     (test-sexpr-io)
     (test-journal)
     (test-schema)
+    (test-registry)
+    (test-apis)
+    (register-fixture-models)
     (test-sse)
+    (test-sse-transport)
     (test-handoff)
+    (test-anthropic-request)
     (test-openai-sse)
     (test-openai-request)
     (test-env-proxy)
+    (test-init-files)
+    (test-preflight)
+    (test-parse-args)
     (test-editor)
     (test-input)
     (test-tui-compose)

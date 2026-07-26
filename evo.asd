@@ -13,9 +13,13 @@
                              (:file "port")
                              (:file "util")
                              (:file "journal")
-                             (:file "model-table")
-                             (:file "provider")
-                             (:file "provider-openai")
+                             (:module "provider"
+                              :serial t
+                              :components ((:file "api")
+                                           (:file "registry")
+                                           (:file "core")
+                                           (:file "anthropic")
+                                           (:file "openai")))
                              (:file "tools")
                              (:file "prompt")
                              (:file "loop")

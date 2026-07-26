@@ -10,8 +10,11 @@ set scratch [exec mktemp -d /tmp/evo-plan.XXXXXX]
 set env(EVO_HOME) "$scratch/home"
 file mkdir $env(EVO_HOME)/extensions
 exec cp "$repo/extensions/plan-mode.lisp" "$env(EVO_HOME)/extensions/plan-mode.lisp"
-set f [open "$env(EVO_HOME)/settings.sexp" w]
-puts $f {(:model "ark-deepseek-v4-pro" :thinking :low :providers (:anthropic (:base-url "http://127.0.0.1:8787" :api-key "sk-evo-default-dd196a205a364d844b67b52a9c418c8e")))}
+set f [open "$env(EVO_HOME)/init.lisp" w]
+puts $f {(evo:register-model "ark-deepseek-v4-pro" :provider :anthropic :api :anthropic-messages :context-window 1000000 :max-output 64000 :thinking t)}
+puts $f {(evo:set-setting :model "ark-deepseek-v4-pro")}
+puts $f {(evo:set-setting :thinking :low)}
+puts $f {(evo:register-provider :anthropic :base-url "http://127.0.0.1:8787" :api-key "sk-evo-default-dd196a205a364d844b67b52a9c418c8e")}
 close $f
 file mkdir "$scratch/work"
 cd "$scratch/work"

@@ -21,9 +21,9 @@ Usage:
                                  with an active goal and no -p, continues the goal
   evo --events ...               emit line-delimited sexpr events instead of text
   evo --list-sessions            list sessions for this cwd
-  evo --model <id>               model id (default from settings, else claude-sonnet-5)
+  evo --model <id>               model id (default: the :model setting from init.lisp)
   evo --thinking <level>         off|low|medium|high|xhigh (default medium)
-  evo --no-userspace             boot without extensions (quarantine mode)
+  evo --no-userspace             boot without init.lisp or extensions (quarantine mode)
   evo --no-supervisor            run the session in-process, no crash-restart parent
   evo --help
 
@@ -31,10 +31,13 @@ evo supervises itself: crashes and hangs restart the session with --resume;
 a goal that was active picks itself back up.  Exit codes: 0 done, 1 error,
 2 goal blocked, 3 budget-limited, 64 usage error.
 
-Settings: ~/.evo/settings.sexp and <cwd>/.evo/settings.sexp (project wins), e.g.
-  (:model \"ark-deepseek-v4-pro\" :thinking :xhigh
-   :providers (:anthropic (:base-url \"http://127.0.0.1:8787\" :api-key \"sk-...\")
-               :openai (:api-key-env \"OPENAI_API_KEY\")))")
+Config: ~/.evo/init.lisp then <cwd>/.evo/init.lisp (Lisp, evaluated in order;
+later calls override).  evo ships no built-in model table, e.g.
+  (evo:register-model \"claude-sonnet-5\"
+    :provider :anthropic :api :anthropic-messages
+    :context-window 200000 :max-output 64000 :thinking t)
+  (evo:set-setting :model \"claude-sonnet-5\")
+  (evo:register-provider :anthropic :base-url \"http://127.0.0.1:8787\")")
 
 (defun parse-args (argv)
   "Parse ARGV into a plist.  Signals on unknown flags."
@@ -56,9 +59,12 @@ Settings: ~/.evo/settings.sexp and <cwd>/.evo/settings.sexp (project wins), e.g.
                ((string= arg "--model")
                 (setf (getf opts :model) (or (pop argv) (error "--model needs an id"))))
                ((string= arg "--thinking")
-                (setf (getf opts :thinking)
-                      (intern (string-upcase (or (pop argv) (error "--thinking needs a level")))
-                              :keyword)))
+                (let ((level (intern (string-upcase
+                                      (or (pop argv) (error "--thinking needs a level")))
+                                     :keyword)))
+                  (unless (member level '(:off :low :medium :high :xhigh))
+                    (error "--thinking must be one of off|low|medium|high|xhigh"))
+                  (setf (getf opts :thinking) level)))
                ((string= arg "--no-userspace") (setf (getf opts :no-userspace) t))
                ((string= arg "--no-supervisor") (setf (getf opts :no-supervisor) t))
                ((member arg '("-h" "--help") :test #'string=) (setf (getf opts :help) t))
@@ -141,7 +147,7 @@ Settings: ~/.evo/settings.sexp and <cwd>/.evo/settings.sexp (project wins), e.g.
         (cond
           ((getf opts :help) (write-line *usage*) 0)
           ((getf opts :version) (write-line "evo 0.1.0") 0)
-          ((getf opts :list-sessions) (load-settings) (cmd-list-sessions) 0)
+          ((getf opts :list-sessions) (cmd-list-sessions) 0)
           ;; One binary, two roles: the plain invocation is the
           ;; supervisor parent; it re-spawns this same binary as the child.
           ((supervised-run-p opts) (supervise argv))
@@ -165,9 +171,39 @@ repeat across processes."
   (evo.port:ensure-in-image-compiler)
   (evo.port:exit-lisp (main)))
 
+(defun no-model-message (opts)
+  (format nil "No model is configured. evo ships no built-in model table: create~%~
+~a~%(or <project>/.evo/init.lisp) and register the models you use, then pick a default:~%~%  ~
+(evo:register-model \"claude-sonnet-5\"~%    ~
+:provider :anthropic :api :anthropic-messages~%    ~
+:context-window 200000 :max-output 64000 :thinking t)~%  ~
+(evo:set-setting :model \"claude-sonnet-5\")~%~%~
+A commented sample is at docs/examples/init.lisp (installed to~%~
+~a by `make install-home`).~
+~@[~%~%~a~]"
+          (namestring (merge-pathnames "init.lisp" (evo.util:evo-home)))
+          (namestring (merge-pathnames "docs/examples/init.lisp" (evo.util:evo-home)))
+          (and (getf opts :no-userspace)
+               "Note: --no-userspace skips init files, so no models are registered in this mode.")))
+
+(defun preflight-model (agent journal opts)
+  "Single choke point for the missing/unknown-model config error, raised
+as usage-error: exit 64 is the one code the supervisor never restarts, so
+a config problem cannot enter the restart/quarantine loop."
+  (let ((id (or (evo.journal:state-model (fold-state journal))
+                (evo.kernel:agent-model-override agent)
+                (setting :model))))
+    (unless id
+      (error 'usage-error :text (no-model-message opts)))
+    (handler-case (find-model id)
+      (error (e)
+        (error 'usage-error
+               :text (format nil "~a~@[~%~%~a~]" e
+                             (and (getf opts :no-userspace)
+                                  "Note: --no-userspace skips init files, so no models are registered in this mode.")))))))
+
 (defun setup-agent (opts &key events-cb)
   "Shared session bring-up for every frontend.  Returns (values agent resumed-p)."
-  (load-settings)
   (let* ((journal (resolve-journal opts))
          (resumed-p (journal-started-p journal))
          (agent (make-agent
@@ -177,17 +213,21 @@ repeat across processes."
                  :thinking-override (getf opts :thinking))))
     (setf evo:*agent* agent)
     (evo.kernel:lock-kernel-packages)
-    ;; Userspace: boot extension dirs, then replay the session's :load entries.
-    (unless (getf opts :no-userspace)
-      (let ((evo.kernel::*current-journal* journal))
-        (boot-extensions :journal (and (not resumed-p) journal))
-        (when resumed-p
-          (replay-loads (fold-state journal)))))
+    ;; Userspace: init files (config), extension dirs, then replay the
+    ;; session's :load entries.
+    (if (getf opts :no-userspace)
+        (progn                        ; kernel registries still need seeding
+          (evo.util:reset-settings)
+          (evo.provider:reset-user-registries))
+        (let ((evo.kernel::*current-journal* journal))
+          (evo.kernel:boot-userspace :journal (and (not resumed-p) journal))
+          (when resumed-p
+            (replay-loads (fold-state journal)))))
+    (preflight-model agent journal opts)
     (run-hooks :session-start (list :agent agent :resumed resumed-p))
     ;; Journal explicit model/thinking choices so resume preserves them.
     (when (getf opts :model)
-      (append-entry journal (list :type :model-change
-                                  :provider :anthropic :model (getf opts :model))))
+      (append-entry journal (list :type :model-change :model (getf opts :model))))
     (when (getf opts :thinking)
       (append-entry journal (list :type :thinking-change
                                   :thinking (getf opts :thinking))))

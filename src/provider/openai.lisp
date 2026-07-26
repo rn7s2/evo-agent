@@ -1,6 +1,6 @@
-;;;; provider-openai.lisp — the OpenAI Responses adapter.
+;;;; openai.lisp — the OpenAI Responses API.
 ;;;;
-;;;; Same contract as the Anthropic adapter in provider.lisp: stateless
+;;;; Same contract as the Anthropic adapter (see api.lisp): stateless
 ;;;; replay (`store` false, no previous_response_id — the whole history is
 ;;;; `input` items each request), hand-rolled SSE, errors are data.
 ;;;; Reasoning replays as the whole reasoning item (with encrypted_content)
@@ -10,6 +10,33 @@
 ;;;; pairing, and a model switch would trip it.
 
 (in-package :evo.provider)
+
+(defclass openai-responses-api (provider-api) ())
+
+(defmethod endpoint-path ((api openai-responses-api))
+  "/v1/responses")
+
+(defmethod auth-headers ((api openai-responses-api) config)
+  `(("authorization" . ,(concatenate 'string "Bearer " (pget config :api-key)))))
+
+(defmethod default-provider-key ((api openai-responses-api)) :openai)
+(defmethod default-base-url ((api openai-responses-api)) "https://api.openai.com")
+(defmethod default-api-key-env ((api openai-responses-api)) "OPENAI_API_KEY")
+
+;;; Thinking levels -> reasoning effort.  NIL = reasoning off (the adapter
+;;; then sends an explicit effort "none").
+
+(defun reasoning-effort (level)
+  (case level
+    ((nil :off) nil)
+    (:low "low")
+    (:medium "medium")
+    (:high "high")
+    (:xhigh "xhigh")
+    (t nil)))
+
+(defmethod thinking-param ((api openai-responses-api) level)
+  (reasoning-effort level))
 
 ;;; Request building.
 ;;;
@@ -131,6 +158,12 @@ level, not nested under \"function\"."
       (setf (gethash "prompt_cache_key" req) cache-key))
     (jzon:stringify req)))
 
+(defmethod build-request ((api openai-responses-api)
+                          &key model system messages tools thinking-level cache-key)
+  (build-responses-request-json :model model :system system :messages messages
+                                :tools tools :thinking-level thinking-level
+                                :cache-key cache-key))
+
 ;;; SSE parsing.  Output items accumulate keyed by output_index; a stream
 ;;; ending without a terminal response.* event is a retryable error.
 ;;; Tool arguments accumulate as partial JSON deltas, with the complete
@@ -140,7 +173,7 @@ level, not nested under \"function\"."
 
 (defun oai-usage (resp)
   "Responses usage counts cached (and explicit-cache-write) tokens inside
-input_tokens; unbundle them so cost accounting can price each bucket."
+input_tokens; unbundle them so each bucket is attributed separately."
   (let* ((usage (jget resp "usage"))
          (input (or (jget usage "input_tokens") 0))
          (cached (or (jget usage "input_tokens_details" "cached_tokens") 0))
@@ -169,14 +202,12 @@ model exposes it) into display text."
                  collect (or (jget p "text") (jget p "refusal") "")))))
 
 (defun parse-responses-sse-stream (char-stream &key on-event abort-flag)
-  "Parse an OpenAI Responses SSE stream.  Returns the same result plist
-shape as parse-sse-stream."
+  "Parse an OpenAI Responses SSE stream into the adapter result plist."
   (let ((items (make-hash-table))       ; output_index -> oai-item
         (max-index -1)
         (status nil) (incomplete-reason nil) (model nil)
         (stopped-p nil) (error-message nil)
-        (usage nil)
-        (event-type nil) (data-lines nil))
+        (usage nil))
     (labels ((emit (&rest ev) (when on-event (funcall on-event ev)))
              (item-at (obj)
                (let ((idx (jget obj "output_index")))
@@ -188,137 +219,126 @@ shape as parse-sse-stream."
                        model (or (jget resp "model") model)
                        usage (or (oai-usage resp) usage)
                        incomplete-reason (jget resp "incomplete_details" "reason"))))
-             (dispatch ()
-               (when data-lines
-                 (let* ((data (string-join (string #\Newline) (nreverse data-lines)))
-                        (obj (ignore-errors (jzon:parse data)))
-                        (type (or event-type (and obj (jget obj "type")))))
-                   (setf event-type nil data-lines nil)
-                   (when obj
-                     (cond
-                       ((equal type "response.created")
-                        (setf model (or (jget obj "response" "model") model))
-                        (emit :type :message-start))
-                       ((equal type "response.output_item.added")
-                        (let* ((idx (jget obj "output_index"))
-                               (jitem (jget obj "item"))
-                               (itype (jget jitem "type"))
-                               (item (make-oai-item
-                                      :type (cond ((equal itype "message") :text)
-                                                  ((equal itype "reasoning") :thinking)
-                                                  ((equal itype "function_call") :tool-call)
-                                                  (t :unknown))
-                                      :text ""
-                                      :call-id (jget jitem "call_id")
-                                      :item-id (jget jitem "id")
-                                      :name (jget jitem "name"))))
-                          (when (integerp idx)
-                            (setf (gethash idx items) item
-                                  max-index (max max-index idx)))
-                          (when (eq (oai-item-type item) :tool-call)
-                            (emit :type :tool-call-start :name (oai-item-name item)
-                                  :id (oai-item-call-id item)))))
-                       ((or (equal type "response.output_text.delta")
-                            (equal type "response.refusal.delta"))
-                        (let ((item (item-at obj))
-                              (s (or (jget obj "delta") "")))
-                          (when item
-                            (setf (oai-item-text item)
-                                  (concatenate 'string (oai-item-text item) s))
-                            (emit :type :text-delta :text s))))
-                       ((or (equal type "response.reasoning_summary_text.delta")
-                            (equal type "response.reasoning_text.delta"))
-                        (let ((item (item-at obj))
-                              (s (or (jget obj "delta") "")))
-                          (when item
-                            (setf (oai-item-summary item)
-                                  (concatenate 'string (oai-item-summary item) s))
-                            (emit :type :thinking-delta :text s))))
-                       ((equal type "response.reasoning_summary_part.done")
-                        ;; Separate summary parts; a trailing separator is
-                        ;; trimmed at materialization.
-                        (let ((item (item-at obj)))
-                          (when item
-                            (setf (oai-item-summary item)
-                                  (concatenate 'string (oai-item-summary item)
-                                               (format nil "~2%")))
-                            (emit :type :thinking-delta :text (format nil "~2%")))))
-                       ((equal type "response.function_call_arguments.delta")
-                        (let ((item (item-at obj)))
-                          (when item
-                            (setf (oai-item-args-json item)
-                                  (concatenate 'string (oai-item-args-json item)
-                                               (or (jget obj "delta") ""))))))
-                       ((equal type "response.function_call_arguments.done")
-                        (let ((item (item-at obj))
-                              (args (jget obj "arguments")))
-                          (when (and item (stringp args))
-                            (setf (oai-item-args-json item) args))))
-                       ((equal type "response.output_item.done")
-                        (let* ((idx (jget obj "output_index"))
-                               (jitem (jget obj "item"))
-                               (item (or (and (integerp idx) (gethash idx items))
-                                         ;; done without added still counts
-                                         (let ((new (make-oai-item :type :unknown :text "")))
-                                           (when (integerp idx)
-                                             (setf (gethash idx items) new
-                                                   max-index (max max-index idx)))
-                                           new))))
-                          (when (eq (oai-item-type item) :unknown)
-                            (setf (oai-item-type item)
-                                  (let ((itype (jget jitem "type")))
-                                    (cond ((equal itype "message") :text)
-                                          ((equal itype "reasoning") :thinking)
-                                          ((equal itype "function_call") :tool-call)
-                                          (t :unknown)))))
-                          (setf (oai-item-item-id item)
-                                (or (jget jitem "id") (oai-item-item-id item)))
-                          (case (oai-item-type item)
-                            (:thinking
-                             (setf (oai-item-item item) (json->sexpr jitem))
-                             (when (zerop (length (oai-item-summary item)))
-                               (setf (oai-item-summary item) (summary-item-text jitem))))
-                            (:text
-                             (let ((text (message-item-text jitem)))
-                               (when (plusp (length text))
-                                 (setf (oai-item-text item) text))))
-                            (:tool-call
-                             (let ((args (jget jitem "arguments")))
-                               (when (and (stringp args) (plusp (length args)))
-                                 (setf (oai-item-args-json item) args)))
-                             (setf (oai-item-call-id item)
-                                   (or (jget jitem "call_id") (oai-item-call-id item))
-                                   (oai-item-name item)
-                                   (or (jget jitem "name") (oai-item-name item)))))))
-                       ((equal type "response.completed") (terminal obj "completed"))
-                       ((equal type "response.incomplete") (terminal obj "incomplete"))
-                       ((equal type "response.failed")
-                        (let ((err (jget obj "response" "error")))
-                          (setf error-message
-                                (format nil "~a: ~a"
-                                        (or (jget err "code") "response.failed")
-                                        (or (jget err "message") data)))))
-                       ((equal type "error")
+             (handle (event-type data)
+               (let* ((obj (ignore-errors (jzon:parse data)))
+                      (type (or event-type (and obj (jget obj "type")))))
+                 (when obj
+                   (cond
+                     ((equal type "response.created")
+                      (setf model (or (jget obj "response" "model") model))
+                      (emit :type :message-start))
+                     ((equal type "response.output_item.added")
+                      (let* ((idx (jget obj "output_index"))
+                             (jitem (jget obj "item"))
+                             (itype (jget jitem "type"))
+                             (item (make-oai-item
+                                    :type (cond ((equal itype "message") :text)
+                                                ((equal itype "reasoning") :thinking)
+                                                ((equal itype "function_call") :tool-call)
+                                                (t :unknown))
+                                    :text ""
+                                    :call-id (jget jitem "call_id")
+                                    :item-id (jget jitem "id")
+                                    :name (jget jitem "name"))))
+                        (when (integerp idx)
+                          (setf (gethash idx items) item
+                                max-index (max max-index idx)))
+                        (when (eq (oai-item-type item) :tool-call)
+                          (emit :type :tool-call-start :name (oai-item-name item)
+                                :id (oai-item-call-id item)))))
+                     ((or (equal type "response.output_text.delta")
+                          (equal type "response.refusal.delta"))
+                      (let ((item (item-at obj))
+                            (s (or (jget obj "delta") "")))
+                        (when item
+                          (setf (oai-item-text item)
+                                (concatenate 'string (oai-item-text item) s))
+                          (emit :type :text-delta :text s))))
+                     ((or (equal type "response.reasoning_summary_text.delta")
+                          (equal type "response.reasoning_text.delta"))
+                      (let ((item (item-at obj))
+                            (s (or (jget obj "delta") "")))
+                        (when item
+                          (setf (oai-item-summary item)
+                                (concatenate 'string (oai-item-summary item) s))
+                          (emit :type :thinking-delta :text s))))
+                     ((equal type "response.reasoning_summary_part.done")
+                      ;; Separate summary parts; a trailing separator is
+                      ;; trimmed at materialization.
+                      (let ((item (item-at obj)))
+                        (when item
+                          (setf (oai-item-summary item)
+                                (concatenate 'string (oai-item-summary item)
+                                             (format nil "~2%")))
+                          (emit :type :thinking-delta :text (format nil "~2%")))))
+                     ((equal type "response.function_call_arguments.delta")
+                      (let ((item (item-at obj)))
+                        (when item
+                          (setf (oai-item-args-json item)
+                                (concatenate 'string (oai-item-args-json item)
+                                             (or (jget obj "delta") ""))))))
+                     ((equal type "response.function_call_arguments.done")
+                      (let ((item (item-at obj))
+                            (args (jget obj "arguments")))
+                        (when (and item (stringp args))
+                          (setf (oai-item-args-json item) args))))
+                     ((equal type "response.output_item.done")
+                      (let* ((idx (jget obj "output_index"))
+                             (jitem (jget obj "item"))
+                             (item (or (and (integerp idx) (gethash idx items))
+                                       ;; done without added still counts
+                                       (let ((new (make-oai-item :type :unknown :text "")))
+                                         (when (integerp idx)
+                                           (setf (gethash idx items) new
+                                                 max-index (max max-index idx)))
+                                         new))))
+                        (when (eq (oai-item-type item) :unknown)
+                          (setf (oai-item-type item)
+                                (let ((itype (jget jitem "type")))
+                                  (cond ((equal itype "message") :text)
+                                        ((equal itype "reasoning") :thinking)
+                                        ((equal itype "function_call") :tool-call)
+                                        (t :unknown)))))
+                        (setf (oai-item-item-id item)
+                              (or (jget jitem "id") (oai-item-item-id item)))
+                        (case (oai-item-type item)
+                          (:thinking
+                           (setf (oai-item-item item) (json->sexpr jitem))
+                           (when (zerop (length (oai-item-summary item)))
+                             (setf (oai-item-summary item) (summary-item-text jitem))))
+                          (:text
+                           (let ((text (message-item-text jitem)))
+                             (when (plusp (length text))
+                               (setf (oai-item-text item) text))))
+                          (:tool-call
+                           (let ((args (jget jitem "arguments")))
+                             (when (and (stringp args) (plusp (length args)))
+                               (setf (oai-item-args-json item) args)))
+                           (setf (oai-item-call-id item)
+                                 (or (jget jitem "call_id") (oai-item-call-id item))
+                                 (oai-item-name item)
+                                 (or (jget jitem "name") (oai-item-name item)))))))
+                     ((equal type "response.completed") (terminal obj "completed"))
+                     ((equal type "response.incomplete") (terminal obj "incomplete"))
+                     ((equal type "response.failed")
+                      (let ((err (jget obj "response" "error")))
                         (setf error-message
                               (format nil "~a: ~a"
-                                      (or (jget obj "code") "error")
-                                      (or (jget obj "message") data))))
-                       (t nil)))))))
-      (loop for line = (read-line char-stream nil :eof)
-            until (or (eq line :eof) stopped-p error-message)
-            do (when (and abort-flag (funcall abort-flag))
-                 (return-from parse-responses-sse-stream
-                   (list :aborted-p t :content nil :stop-reason :aborted
-                         :usage (or usage (list :input 0 :output 0
-                                                :cache-read 0 :cache-write 0)))))
-               (let ((line (string-right-trim '(#\Return) line)))
-                 (cond ((zerop (length line)) (dispatch))
-                       ((string-prefix-p "event:" line)
-                        (setf event-type (string-trim " " (subseq line 6))))
-                       ((string-prefix-p "data:" line)
-                        (push (string-trim " " (subseq line 5)) data-lines))
-                       (t nil))))
-      (dispatch)
+                                      (or (jget err "code") "response.failed")
+                                      (or (jget err "message") data)))))
+                     ((equal type "error")
+                      (setf error-message
+                            (format nil "~a: ~a"
+                                    (or (jget obj "code") "error")
+                                    (or (jget obj "message") data))))
+                     (t nil)))
+                 (when (or stopped-p error-message) :stop))))
+      (when (eq (map-sse-events char-stream #'handle :abort-flag abort-flag)
+                :aborted)
+        (return-from parse-responses-sse-stream
+          (list :aborted-p t :content nil :stop-reason :aborted
+                :usage (or usage (list :input 0 :output 0
+                                       :cache-read 0 :cache-write 0)))))
       ;; Materialize items in output order.
       (let ((content
               (loop for i from 0 to max-index
@@ -377,3 +397,9 @@ Unknown statuses and incomplete reasons are loud errors (design rule)."
                                           incomplete-reason)))))
         (t (error 'provider-error
                   :message (format nil "Unknown response status ~s" status)))))
+
+(defmethod parse-stream ((api openai-responses-api) char-stream
+                         &key on-event abort-flag)
+  (parse-responses-sse-stream char-stream :on-event on-event :abort-flag abort-flag))
+
+(register-api :openai-responses (make-instance 'openai-responses-api))

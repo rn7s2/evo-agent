@@ -79,14 +79,18 @@ Compose-region uses only these caches: repaints must not fold the journal
 while the run thread is appending to it."
   (let* ((agent (tui-agent tui))
          (state (fold-state (agent-journal agent)))
-         (model-id (or (evo.journal:state-model state)
-                       (agent-model-override agent)
-                       (setting :model "claude-sonnet-5"))))
+         ;; Defensive: a missing/unregistered model (e.g. /reload removed
+         ;; it) must not kill the render thread — /model is the recovery.
+         (model-id (handler-case (evo.kernel:effective-model-id state agent)
+                     (error () nil))))
     (setf (tui-goal tui) (evo.journal:state-goal state)
           (tui-todos tui) (custom-state state "todo")
           (tui-agent-mode tui) (or (custom-state state "mode") "auto")
-          (tui-model-label tui) model-id
-          (tui-context-window tui) (model-context-window (find-model model-id))
+          (tui-model-label tui) (or model-id "(no model)")
+          (tui-context-window tui) (and model-id
+                                        (handler-case
+                                            (model-context-window (find-model model-id))
+                                          (error () nil)))
           (tui-context-tokens tui) (evo.kernel:estimate-context-tokens
                                     (evo.journal:state-messages state))
           (tui-goal-run-tokens tui) 0
