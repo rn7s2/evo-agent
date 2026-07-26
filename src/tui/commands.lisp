@@ -20,7 +20,7 @@
   /fork                fork this session at the current leaf
   /new                 start a fresh session
   /export [path]       export the transcript as markdown
-  /reload              reload extension directories
+  /reload              re-evaluate init.lisp + extension directories
   /quit /exit          exit (ctrl+c ctrl+c, ctrl+d)
 keys: enter send · shift+enter/alt+enter/ctrl+j newline · shift+tab auto/plan mode ·
       tab complete /command · up/down input history (at buffer edge) ·
@@ -163,26 +163,28 @@ keys: enter send · shift+enter/alt+enter/ctrl+j newline · shift+tab auto/plan 
   t)
 
 (defun set-model (tui id)
+  (handler-case (find-model id)
+    (error (e)
+      (scroll tui (dim (format nil "~a" e)))
+      (return-from set-model)))
   (append-entry (agent-journal (tui-agent tui))
-                (list :type :model-change
-                      :provider (pget (find-model id) :provider :anthropic)
-                      :model id))
+                (list :type :model-change :model id))
   (refresh-goal tui)
   (scroll tui (dim (format nil "model → ~a (next turn)" id))))
 
 (defun model-select-command (tui)
-  "Choose box: pick the model from the table, current one preselected."
+  "Choose box: pick the model from the registry, current one preselected."
   (let ((current (tui-model-label tui)))
     (enter-select
      tui "model:"
-     (loop for m in *models*
+     (loop for m in (all-models)
            for id = (pget m :id)
            collect (list id id
                          (format nil "~dk ctx~:[~; · current~]"
                                  (round (pget m :context-window 0) 1000)
                                  (equal id current))))
      (lambda (id) (set-model tui id))
-     :index (or (position current *models*
+     :index (or (position current (all-models)
                           :key (lambda (m) (pget m :id)) :test #'equal)
                 0))
     t))
@@ -272,8 +274,9 @@ keys: enter send · shift+enter/alt+enter/ctrl+j newline · shift+tab auto/plan 
          t)
         ((cmd "export") (export-command tui args))
         ((cmd "reload")
-         (boot-extensions :journal (agent-journal agent))
-         (scroll tui (dim "extension directories reloaded"))
+         (boot-userspace :journal (agent-journal agent))
+         (refresh-goal tui)             ; model registry may have changed
+         (scroll tui (dim "userspace reloaded (init + extensions)"))
          t)
         (t nil)))))
 

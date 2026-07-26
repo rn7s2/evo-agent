@@ -106,12 +106,19 @@ plugs in here.")
 
 ;;; Save point: the whole context snapshot is rebuilt between turns.
 
+(defun effective-model-id (state agent)
+  "The session's model id: journaled choice, else CLI override, else the
+:model setting.  No kernel default — config must name a model (normally
+guaranteed by the CLI preflight)."
+  (or (evo.journal:state-model state)
+      (agent-model-override agent)
+      (setting :model)
+      (error "No model is configured — set one in init.lisp: (evo:set-setting :model \"...\")")))
+
 (defun prepare-next-turn (agent)
   (let* ((state (fold-state (agent-journal agent)))
          (tools (active-tools state))
-         (model-id (or (evo.journal:state-model state)
-                       (agent-model-override agent)
-                       (setting :model "claude-sonnet-5")))
+         (model-id (effective-model-id state agent))
          (thinking (or (evo.journal:state-thinking state)
                        (agent-thinking-override agent)
                        (setting :thinking :medium))))
@@ -130,6 +137,8 @@ plugs in here.")
             :messages messages
             :model (find-model model-id)
             :thinking thinking
+            ;; Session id = OpenAI prompt_cache_key (cache affinity).
+            :cache-key (pget (evo.journal:journal-header (agent-journal agent)) :id)
             :system (build-system-prompt tools :lore (all-lore :state state))))))
 
 ;;; Tool batch execution (sequential) with :tool-call interception —
@@ -212,9 +221,7 @@ Returns :stop :length :error :aborted."
             ;; Threshold compaction check at the save point.
             (let ((state (fold-state (agent-journal agent))))
               (when (compaction-needed-p state (find-model
-                                                (or (evo.journal:state-model state)
-                                                    (agent-model-override agent)
-                                                    (setting :model "claude-sonnet-5"))))
+                                                (effective-model-id state agent)))
                 (emit-event agent :type :compaction-start)
                 (handler-case (compact-now agent)
                   (error (e) (warn "Compaction failed, continuing uncompacted: ~a" e)))
@@ -227,6 +234,7 @@ Returns :stop :length :error :aborted."
                       :messages (pget ctx :messages)
                       :tools (mapcar #'tool->provider-spec (pget ctx :tools))
                       :thinking-level (pget ctx :thinking)
+                      :cache-key (pget ctx :cache-key)
                       :abort-flag (lambda () (agent-abort-flag agent))
                       :on-event (lambda (ev) (apply #'emit-event agent ev)))))
               (append-entry (agent-journal agent) (list :type :message :message assistant))

@@ -15,11 +15,15 @@ export EVO_HOME="$scratch/home"
 work="$scratch/work"
 mkdir -p "$EVO_HOME" "$work"
 
-cat > "$EVO_HOME/settings.sexp" <<'EOF'
-(:model "ark-deepseek-v4-pro"
- :thinking :xhigh
- :providers (:anthropic (:base-url "http://127.0.0.1:8787"
-                         :api-key "sk-evo-default-dd196a205a364d844b67b52a9c418c8e")))
+cat > "$EVO_HOME/init.lisp" <<'EOF'
+(evo:register-model "ark-deepseek-v4-pro"
+  :provider :anthropic :api :anthropic-messages
+  :context-window 1000000 :max-output 64000 :thinking t)
+(evo:set-setting :model "ark-deepseek-v4-pro")
+(evo:set-setting :thinking :xhigh)
+(evo:register-provider :anthropic
+  :base-url "http://127.0.0.1:8787"
+  :api-key "sk-evo-default-dd196a205a364d844b67b52a9c418c8e")
 EOF
 
 pass=0; fail=0
@@ -90,8 +94,9 @@ report $? "supervisor: induced crash -> restart -> resume -> goal complete"
 # --- Test 5: compaction fires mid-task and the task still finishes -------
 work5="$scratch/work5"
 mkdir -p "$work5/.evo"
-cat > "$work5/.evo/settings.sexp" <<'EOF'
-(:compact-reserve 999999 :compact-keep-recent 100)
+cat > "$work5/.evo/init.lisp" <<'EOF'
+(evo:set-setting :compact-reserve 999999)
+(evo:set-setting :compact-keep-recent 100)
 EOF
 (
     cd "$work5"
@@ -107,8 +112,10 @@ report $? "compaction fires mid-task, task completes"
 # --- Test 6: two separately launched agents mint distinct ids ------------
 # A save-lisp-and-die image bakes its load-time random state, so this can
 # only be caught against the built binary — in-process tests reseed per
-# process and always pass.  No model needed: the ids are minted before the
-# first provider call, so an unreachable base-url still proves the point.
+# process and always pass.  The ids are minted before the first provider
+# call, so an unreachable base-url still proves the point.  (Config is
+# required now, so this can't run --no-userspace: a probe model is
+# registered per home instead.)
 ids_of() {   # $1 = EVO_HOME -> "<session-id> <goal-id>"
     sed -n 's/.*:id "\([0-9a-f]\{16\}\)".*/\1/p;s/.*:goal-id "\([^"]*\)".*/\1/p' \
         "$1"/sessions/*/*.sexp 2>/dev/null | head -2 | tr '\n' ' '
@@ -120,10 +127,15 @@ mkdir -p "$work6"
 pids6=""
 for h in a b; do
     mkdir -p "$scratch/home6$h"
-    echo '(:providers (:anthropic (:base-url "http://127.0.0.1:9" :api-key "sk-x")))' \
-        > "$scratch/home6$h/settings.sexp"
+    cat > "$scratch/home6$h/init.lisp" <<'EOF'
+(evo:register-model "id-probe"
+  :provider :anthropic :api :anthropic-messages
+  :context-window 100000 :max-output 1000 :thinking t)
+(evo:set-setting :model "id-probe")
+(evo:register-provider :anthropic :base-url "http://127.0.0.1:9" :api-key "sk-x")
+EOF
     (cd "$work6" && EVO_HOME="$scratch/home6$h" "$evo" --goal "id collision probe" \
-        -p "hi" --no-supervisor --no-userspace) >/dev/null 2>&1 &
+        -p "hi" --no-supervisor) >/dev/null 2>&1 &
     pids6="$pids6 $!"
 done
 # Both journals land once the first (failed) provider turn is recorded; poll

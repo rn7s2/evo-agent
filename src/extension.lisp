@@ -48,6 +48,28 @@ CL redefinition semantics: new definitions apply from the next call."
         (error (e)
           (warn "Skipping extension ~a: ~a" file e))))))
 
+(defun load-init-file (path)
+  "Evaluate a config file in userspace.  Plain load, no compile-file: no
+fasl litter next to config, and ECL evaluates it without the compiler."
+  (when (probe-file path)
+    (let ((*package* (find-package :evo.user)))
+      (handler-case (load path :verbose nil :print nil)
+        (error (e)
+          (format *error-output* "~&evo: error in init file ~a: ~a~%" path e)))))
+  path)
+
+(defun boot-userspace (&key journal (cwd (uiop:getcwd)))
+  "Reset user registries and settings, evaluate init files (global then
+project — an override is just a later call), then load extension
+directories.  Init files are environment, not history: re-evaluated every
+boot, never journaled (unlike extension :load entries), so the reset makes
+this idempotent for /reload and repeated boots."
+  (evo.util:reset-settings)
+  (evo.provider:reset-user-registries)
+  (load-init-file (merge-pathnames "init.lisp" (evo-home)))
+  (load-init-file (merge-pathnames "init.lisp" (project-evo-dir cwd)))
+  (boot-extensions :journal journal :cwd cwd))
+
 (defun replay-loads (state &key journal)
   "Replay a resumed session's :load entries against the files on disk.
 Files already loaded this boot are skipped; missing files are reported, not
@@ -108,6 +130,31 @@ A :tool-call hook may return (:block t :reason ...) or (:arguments ...)."
 
 (defun load-extension (path &key (reason "requested"))
   (evo.kernel:load-extension* path :reason reason))
+
+;;; Config (init.lisp) API: models, providers, settings.
+
+(defun register-model (id &rest args)
+  "Register a model in init.lisp:
+ (evo:register-model \"claude-sonnet-5\" :provider :anthropic
+   :api :anthropic-messages :context-window 200000 :max-output 64000
+   :thinking t)
+Re-registering an id replaces it in place; evo ships no built-in models."
+  (apply #'evo.provider:register-model* id args))
+
+(defun register-provider (key &rest args)
+  "Register or override a provider endpoint in init.lisp:
+ (evo:register-provider :anthropic :base-url \"http://127.0.0.1:8787\"
+   :api-key \"sk-...\")   ; or :api-key-env \"ANTHROPIC_API_KEY\"
+Stock endpoints for the kernel APIs are pre-seeded; overriding merges
+field-wise."
+  (apply #'evo.provider:register-provider* key args))
+
+(defun set-setting (key value)
+  "Set a setting from init.lisp, e.g. (evo:set-setting :model \"...\")."
+  (evo.util:set-setting key value))
+
+(defun setting (key &optional default)
+  (evo.util:setting key default))
 
 (defun set-active-tools (agent names)
   "Journal a :tools-change entry; takes effect at the next save point.

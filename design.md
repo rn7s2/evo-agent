@@ -39,10 +39,10 @@ References:
 |---|---|---|
 | D1 | Sessions are an append-only entry **tree** in a journal file; state = fold over root→leaf path. Pi's model. | Branching/rewind/resume/pause fall out free; write-ahead = crash-safe. |
 | D2 | **No image-based session persistence.** Journal is the only source of truth. Lisp images are build/packaging artifacts only. | Both target APIs are stateless (full replay) so transcript-as-data is mandatory anyway; images are opaque, undiffable, and propagate corruption. |
-| D3 | **Journal format is native sexprs** (one form per line), and sexprs are the default for every data format we control (settings, lore, goal state). | Human-readable, `read`-able from Lisp with zero external serialization deps. |
+| D3 | **Journal format is native sexprs** (one form per line), and sexprs are the default for every data format we control (lore, goal state). Config is not data: init.lisp is evaluated Lisp (see D6). | Human-readable, `read`-able from Lisp with zero external serialization deps. |
 | D4 | **Interface is a CLI** with an adaptive TUI (mandatory: adapts to console resize). Not Emacs/Swank-first. | Approachable for newcomers; CLI adapts to the most contexts. Swank remains a developer side-door, not the product. |
 | D5 | **Supervisor architecture: yes.** A tiny outer process owns launch, crash detection, restart, resume. | Long-running goal pursuit requires surviving self-inflicted death. |
-| D6 | Providers: **Anthropic Messages API now; OpenAI Responses API post-v1.** The unified message model is designed for both from day one. | Scope control; one provider suffices until the harness is real. Still skips ~90% of pi-ai's multi-provider sprawl. |
+| D6 | Providers: **both adapters ship** (Anthropic Messages, OpenAI Responses) as kernel-curated CLOS *provider APIs*; **models and endpoint configs are user-registered from init.lisp** (config-as-code, no built-in model table, no settings.sexp). One unified message model for all APIs. | Historically Anthropic-only-then-OpenAI-post-v1 for scope control. The API/registry split keeps new wire protocols a kernel concern while models/providers stay config — still skips pi-ai's 40-provider sprawl. |
 | D7 | Goal system follows **codex's design**: persisted goal + idle-continuation steering + explicit audited completion + budgets. Optional Lisp acceptance predicate as kernel-side verifier. | See §8. |
 | D8 | Kernel/userspace split enforced with **package locks** (SBCL native, ECL `si:package-lock`, behind `evo.port`). | Permissive but not suicidal: touching the kernel requires an explicit, auditable unlock. |
 | D9 | Tool execution is **sequential** in v1. | Parallel is where pi's thread-discipline complexity lives; revisit later. |
@@ -65,7 +65,9 @@ evo image (SBCL or ECL process)
 ├─ KERNEL  (locked packages: EVO.KERNEL, EVO.PROVIDER, EVO.JOURNAL, …)
 │    turn loop            errors-as-data, steering queues, save points
 │    journal              append-only sexpr entry tree + leaf pointer
-│    provider adapter     anthropic-messages (openai-responses post-v1)
+│    provider APIs        anthropic-messages + openai-responses (CLOS protocol);
+│                         model/provider registries fed by init.lisp through
+│                         exported kernel functions (locks unaffected)
 │    tool registry        register/activate/refresh, system-prompt rebuild
 │    extension API        register-tool/-command, event hooks — both
 │                         extension tiers build on this, nothing bypasses it
@@ -90,9 +92,9 @@ evo image (SBCL or ECL process)
 ```
 
 Directory conventions (mirroring pi's `.pi`):
-- Global: `~/.evo/` — `settings.sexp`, `sessions/`, `extensions/`, `skills/`,
+- Global: `~/.evo/` — `init.lisp`, `sessions/`, `extensions/`, `skills/`,
   `prompts/`, `lore.sexp`, `docs/` (the shipped corpus)
-- Project: `<cwd>/.evo/` — `settings.sexp`, `extensions/`, `skills/`, `prompts/`
+- Project: `<cwd>/.evo/` — `init.lisp`, `extensions/`, `skills/`, `prompts/`
 
 ## 4. The journal (sessions)
 
@@ -182,15 +184,36 @@ by surgery on opaque state.
 
 ## 5. Provider layer
 
-One unified model. Only the Anthropic Messages adapter ships in v1; OpenAI
-Responses is post-v1 (D6). The OpenAI-facing rules below are recorded anyway
-so the unified model doesn't drift somewhere the second adapter can't follow.
-Everything here is pi-validated (research §2.5); deltas from pi noted.
+One unified model, two shipped adapters (D6), one architecture:
+**provider APIs** — kernel-curated CLOS classes (`src/provider/` module,
+one file per API) implementing `endpoint-path` / `auth-headers` /
+`build-request` / `parse-stream` / `thinking-param` / `perform-request` —
+dispatched from `call-provider` via the model's `:api` tag. Everything
+below is pi-validated (research §2.5); deltas from pi noted.
+
+- **APIs are kernel, models are config.** A new wire protocol is a new
+  file in `src/provider/` implementing the generics (registered at load
+  time, not user-extensible — replay/caching correctness is curated).
+  Models and provider endpoints come from init.lisp via ordered registries
+  (`provider/registry.lisp`): `register-model` (re-register replaces in
+  place), `register-provider` (field-wise merge; stock endpoints
+  pre-seeded from each API's defaults, so an env API key alone works). No
+  built-in model table; a missing/unknown model is a loud config error at
+  CLI preflight (usage-error, exit 64 — never enters the supervisor
+  restart loop).
+- **The adapter contract** (written down in `provider/api.lisp`'s header):
+  `parse-stream` returns `(:content :model :stopped-p :error-message
+  :stop-reason :usage [:aborted-p])`; stop reasons
+  `:stop :length :tool-use :error :aborted`; usage buckets
+  `:input/:output/:cache-read/:cache-write` with `:input` excluding
+  cached/cache-written tokens; events `:message-start :text-delta
+  :thinking-delta :tool-call-start`. Runtime errors are data;
+  config-resolution errors signal (caught by preflight).
 
 - **Message model**: 4 content blocks (`:text`, `:thinking`, `:image`,
   `:tool-call`), 3 roles (`:user`, `:assistant`, `:tool-result` as a top-level
   role — history stays a flat list). Assistant messages self-identify:
-  `:api :provider :model` triple. Usage + cost tracked per message.
+  `:api :provider :model` triple. Token usage tracked per message.
 - **Provider artifacts are a typed variant, not stringly-typed** (unlike pi):
   Anthropic thinking signature = base64 scalar (chunked `signature_delta`,
   must append); OpenAI = the whole reasoning item with `encrypted_content`.
@@ -201,10 +224,13 @@ Everything here is pi-validated (research §2.5); deltas from pi noted.
   results; errored/aborted assistant turns elided; on any model switch drop
   OpenAI `fc_*` item ids (server validates `fc_*`↔`rs_*` same-response
   pairing).
-- **Streaming**: hand-rolled SSE parser (pi hand-rolls Anthropic SSE by
-  choice); terminal-event guards — a stream ending without `message_stop` /
-  terminal response event is an error and retryable. Tolerant partial-JSON
-  parsing of tool arguments on every delta.
+- **Streaming**: hand-rolled SSE with one shared framing loop
+  (`map-sse-events`: event/data accumulation, CR trim, abort flag) —
+  APIs supply only per-event dispatchers; terminal-event guards — a
+  stream ending without `message_stop` / terminal response event is an
+  error and retryable. Tolerant partial-JSON parsing of tool arguments on
+  every delta. `perform-request` has a default SSE-over-dexador method;
+  a future non-SSE framing overrides it.
 - **Errors are data**: the provider layer never signals into the loop;
   failures become an assistant message with `:stop-reason :error`/`:aborted`
   plus `:error-message`. Stop reasons normalized to
@@ -218,8 +244,10 @@ Everything here is pi-validated (research §2.5); deltas from pi noted.
 - **Caching**: Anthropic — 4 breakpoints (system prompt, last tool def, last
   user message); OpenAI — `prompt_cache_key` = session id. The whole design
   protects the prompt-cache prefix (see progressive disclosure, §12).
-- **Model table**: hand-written sexpr table of ~10–20 models (id, context
-  window, max output, costs, thinking config). No models.dev pipeline.
+- **Model registry**: user-registered plists (id, context window, max
+  output, thinking flag) from init.lisp, registration-ordered for the
+  /model picker. No models.dev pipeline, no dollar-cost table — token
+  accounting only.
 - CL stack: `dexador` (`:want-stream t`) + `cl+ssl`, explicit read timeouts;
   `com.inuoe.jzon` for the JSON wire; abort = cooperative flag + close the
   socket from another thread (no `interrupt-thread`).
@@ -535,7 +563,7 @@ Approach (pi-tui is the reference design, `~/Projects/pi/packages/tui`):
 ## 15. Milestones
 
 - **M0 — provider core**: unified message model, Anthropic adapter (SSE,
-  thinking, caching, retries), model table, cost tracking. Exit: streamed
+  thinking, caching, retries), model table. Exit: streamed
   tool-call round-trip from a REPL.
 - **M1 — kernel loop + journal**: turn loop, sequential tools
   (read/write/edit/bash), journal tree + resume, save points, run-until-

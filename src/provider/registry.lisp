@@ -1,0 +1,102 @@
+;;;; registry.lisp — user-registrable model and provider registries.
+;;;;
+;;;; evo ships no built-in model table: models and provider overrides are
+;;;; registered from init.lisp (config-as-code) through the public EVO API.
+;;;; Both registries preserve registration order (the /model picker shows
+;;;; models in order) and are reset before each userspace boot so config
+;;;; re-evaluation is idempotent.  Providers are re-seeded from the kernel
+;;;; APIs' defaults (base-url + canonical api-key env var), so an env key
+;;;; alone is enough to talk to a stock endpoint.
+
+(in-package :evo.provider)
+
+;;; Models.
+
+(defvar *models* nil
+  "Registered model plists, in registration order.")
+
+(defun register-model* (id &key provider api context-window max-output (thinking t))
+  "Register (or replace, keeping position) a model.  Validates eagerly so
+a typo errors at init-load time, not mid-run."
+  (unless (and (stringp id) (plusp (length id)))
+    (error "register-model: id must be a non-empty string, got ~s" id))
+  (find-api api)                        ; unknown :api errors here
+  (unless (keywordp provider)
+    (error "register-model ~a: :provider must be a keyword, got ~s" id provider))
+  (unless (and (integerp context-window) (plusp context-window))
+    (error "register-model ~a: :context-window must be a positive integer, got ~s"
+           id context-window))
+  (unless (and (integerp max-output) (plusp max-output))
+    (error "register-model ~a: :max-output must be a positive integer, got ~s"
+           id max-output))
+  (let ((model (list :id id :provider provider :api api
+                     :context-window context-window :max-output max-output
+                     :thinking (and thinking t)))
+        (tail (member id *models* :key (lambda (m) (pget m :id)) :test #'string=)))
+    (if tail
+        (setf (car tail) model)         ; replace in place: picker position stable
+        (setf *models* (append *models* (list model))))
+    id))
+
+(defun all-models () *models*)
+
+(defun find-model (id)
+  "Resolve a model id to its registered plist.  Plists pass through
+\(call-provider convenience).  No fallback: an unknown id is a config error."
+  (cond ((consp id) id)
+        ((find id *models* :key (lambda (m) (pget m :id)) :test #'string=))
+        (t (error "Unknown model ~s: no registered model has that id.~%~
+                   Registered models: ~:[none — is your init.lisp missing?~;~:*~{~a~^, ~}~]~%~
+                   Register it in init.lisp:~%  ~
+                   (evo:register-model ~s~%    ~
+                   :provider :anthropic :api :anthropic-messages~%    ~
+                   :context-window 200000 :max-output 64000 :thinking t)"
+                  id (mapcar (lambda (m) (pget m :id)) *models*) id))))
+
+(defun model-context-window (model) (pget model :context-window))
+(defun model-max-output (model) (pget model :max-output))
+
+;;; Providers: endpoint + credential config.  Re-registration merges
+;;; field-wise, so a later init file overrides only the keys it gives.
+
+(defvar *providers* nil
+  "Ordered alist of (provider-key . (:base-url s :api-key s :api-key-env s)).")
+
+(defun register-provider* (key &rest kvs &key base-url api-key api-key-env)
+  (declare (ignore base-url api-key api-key-env))
+  (unless (keywordp key)
+    (error "register-provider: key must be a keyword, got ~s" key))
+  (let ((entry (assoc key *providers*)))
+    (if entry
+        (setf (cdr entry) (plist-merge (cdr entry) kvs))
+        (setf *providers* (append *providers* (list (cons key kvs))))))
+  key)
+
+(defun provider-config (key)
+  "Resolved config for provider KEY: (:base-url ... :api-key ...).
+Key resolution: explicit :api-key, else the :api-key-env variable, else
+empty (some proxies need none)."
+  (let ((conf (cdr (or (assoc key *providers*)
+                       (error "No provider ~s is registered — add~%  ~
+                               (evo:register-provider ~s :base-url \"https://...\" :api-key-env \"...\")~%~
+                               to your init.lisp."
+                              key key)))))
+    (let ((base-url (pget conf :base-url)))
+      (unless base-url
+        (error "Provider ~s has no :base-url — pass one to register-provider in your init.lisp."
+               key))
+      (list :base-url base-url
+            :api-key (or (pget conf :api-key)
+                         (let ((env (pget conf :api-key-env)))
+                           (and env (getenv env)))
+                         "")))))
+
+(defun reset-user-registries ()
+  "Clear models; re-seed providers from the kernel APIs' defaults.
+Called before each userspace boot so config re-evaluation is idempotent."
+  (setf *models* nil *providers* nil)
+  (loop for (nil . api) in *apis*
+        do (register-provider* (default-provider-key api)
+                               :base-url (default-base-url api)
+                               :api-key-env (default-api-key-env api)))
+  nil)

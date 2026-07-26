@@ -21,7 +21,7 @@
   (:export #:getenv #:iso8601-now #:gen-id #:reseed-ids #:pget #:pput #:plist-merge
            #:evo-home #:project-evo-dir #:encode-cwd #:ensure-directory
            #:write-sexpr-line #:read-sexpr #:read-sexpr-stream #:validate-journal-value
-           #:load-settings #:setting #:*settings*
+           #:setting #:set-setting #:reset-settings #:*settings*
            #:string-join #:string-prefix-p #:truncate-string
            #:count-substring #:string-replace
            #:read-file-string #:write-file-string))
@@ -37,11 +37,17 @@
 
 (defpackage :evo.provider
   (:use :cl :evo.util)
-  (:export #:find-model #:*models* #:model-context-window #:model-max-output
+  (:export #:find-model #:all-models #:model-context-window #:model-max-output
+           #:register-model* #:register-provider* #:provider-config
+           #:reset-user-registries
            #:call-provider #:provider-error
-           #:parse-sse-stream #:thinking-budget
+           #:parse-sse-stream #:parse-responses-sse-stream
+           ;; provider-API protocol
+           #:provider-api #:find-api #:endpoint-path #:auth-headers
+           #:build-request #:parse-stream #:thinking-param #:perform-request
+           #:map-sse-events
            #:message-role #:message-content #:message-stop-reason
-           #:usage-total-tokens #:message-usage #:message-cost))
+           #:usage-total-tokens #:message-usage))
 
 (defpackage :evo.kernel
   (:use :cl :evo.util :evo.journal :evo.provider)
@@ -59,7 +65,8 @@
            #:find-template #:expand-template
            ;; extension api internals
            #:run-hooks #:add-hook #:load-extension* #:boot-extensions
-           #:replay-loads #:lock-kernel-packages
+           #:boot-userspace #:load-init-file
+           #:replay-loads #:lock-kernel-packages #:effective-model-id
            ;; goal
            #:current-goal #:goal-continuation-message #:goal-continuation-for
            #:register-goal-tools #:create-goal-entry #:goal-tokens-used
@@ -68,10 +75,11 @@
            #:compact-now #:compaction-needed-p #:estimate-context-tokens
            #:overflow-error-p #:select-cut))
 
-;; Public API for extensions and userspace code.
+;; Public API for extensions, config (init.lisp), and userspace code.
 (defpackage :evo
   (:use :cl)
   (:export #:register-tool #:register-command #:on #:load-extension
+           #:register-model #:register-provider #:set-setting #:setting
            #:set-active-tools #:all-tools #:*agent* #:current-goal
            #:steer #:inject-context #:custom-state #:set-custom-state))
 

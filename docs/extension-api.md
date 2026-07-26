@@ -76,6 +76,30 @@ State values must stay inside the journal vocabulary: plists, keywords,
 strings, numbers, `t`/`nil`, vectors. No raw symbols, no objects, no
 closures.
 
+## Configuration (init.lisp)
+
+Config is the same userspace code, evaluated from `~/.evo/init.lisp` then
+`<project>/.evo/init.lisp` before the extension directories load. Unlike
+extension `:load` entries, init files are **not journaled**: they are
+environment, re-evaluated fresh on every boot (and `/reload`), with the
+model/provider/settings registries reset first — so re-running them is
+idempotent and an override is just a later call.
+
+```lisp
+(evo:register-model "claude-sonnet-5"       ; evo has NO built-in models
+  :provider :anthropic :api :anthropic-messages
+  :context-window 200000 :max-output 64000 :thinking t)
+(evo:register-provider :anthropic           ; stock endpoints pre-seeded;
+  :base-url "http://127.0.0.1:8787")        ; re-register merges field-wise
+(evo:set-setting :model "claude-sonnet-5")  ; required — no default model
+(evo:setting :model)                        ; read a setting
+```
+
+`:api` names a kernel provider API (`:anthropic-messages`,
+`:openai-responses`); API implementations are curated kernel code, not
+user-registrable. Tools, commands, and hooks may be registered from init
+files too.
+
 ## Other API
 
 ```lisp
