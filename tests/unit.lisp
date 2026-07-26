@@ -615,11 +615,22 @@ event: response.completed~%data: {\"type\":\"response.completed\",\"response\":{
       (evo.tui::handle-key-select tui :enter)
       (check "select 3-element item passes value" (eql got 1)))))
 
+(defun %expected-local-timestamp-prefix (timestamp)
+  (multiple-value-bind (sec min hour day month year)
+      (decode-universal-time
+       (local-time:timestamp-to-universal
+        (local-time:parse-timestring timestamp)))
+    (declare (ignore sec))
+    (format nil "~4,'0d-~2,'0d-~2,'0d ~2,'0d:~2,'0d"
+            year month day hour min)))
+
 (defun test-resume-picker ()
-  (let ((formatted (format-local-timestamp "2024-01-01T16:30:00Z"
-                                           :timezone-name "Asia/Shanghai")))
-    (check "local timestamp converts to timezone"
-           (search "2024-01-02 00:30" formatted))
+  (let* ((timestamp "2024-01-01T16:30:00Z")
+         (expected (%expected-local-timestamp-prefix timestamp))
+         (formatted (format-local-timestamp timestamp
+                                            :timezone-name "Asia/Shanghai")))
+    (check "local timestamp uses host local time"
+           (search expected formatted))
     (check "local timestamp names timezone"
            (search "Asia/Shanghai" formatted)))
   (check "resume summary collapses whitespace"
@@ -645,7 +656,9 @@ event: response.completed~%data: {\"type\":\"response.completed\",\"response\":{
                                       :usage (:input 1 :output 1 :cache-read 0 :cache-write 0)
                                       :content ((:type :text :text "ok")))))
     (let* ((path (namestring (journal-path journal)))
-           (session (list :path path :timestamp "2024-01-01T16:30:00Z"))
+           (timestamp "2024-01-01T16:30:00Z")
+           (expected (%expected-local-timestamp-prefix timestamp))
+           (session (list :path path :timestamp timestamp))
            (item (first (evo.tui::resume-select-items
                          (list session) :timezone-name "Asia/Shanghai")))
            (label (first item))
@@ -654,7 +667,7 @@ event: response.completed~%data: {\"type\":\"response.completed\",\"response\":{
       (check "resume item is label value description"
              (= (length item) 3))
       (check "resume label shows local timestamp"
-             (and (search "2024-01-02 00:30" label)
+             (and (search expected label)
                   (search "Asia/Shanghai" label)))
       (check "resume item value is session path"
              (equal value path))
