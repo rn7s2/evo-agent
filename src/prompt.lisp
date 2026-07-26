@@ -15,6 +15,11 @@ to ask permission for routine steps.")
 
 (defparameter *guidelines*
   "Guidelines:
+- Write every user-facing reply in strict Markdown — the terminal renders
+  it: `##`/`###` headings for sections, `-` bullet lists, **bold** for
+  key points, `inline code` for identifiers, paths, and commands, and
+  fenced code blocks tagged with a language for all code, diffs, or
+  command output.  Never emit raw HTML.
 - Prefer tools over guessing: read files before editing them, verify with
   bash after changing things.
 - Tool calls run sequentially; results come back as tool results.

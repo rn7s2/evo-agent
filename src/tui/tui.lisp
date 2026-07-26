@@ -17,6 +17,7 @@
   worker
   (running nil)
   (partial "")
+  (md (make-md))        ; markdown fence state for the streaming text
   (thinking-tail "")
   (spinner 0)
   (tick 0)
@@ -70,7 +71,7 @@
 
 (defun flush-partial (tui)
   (when (plusp (length (tui-partial tui)))
-    (scroll tui (tui-partial tui))
+    (scroll tui (md-render-line (tui-partial tui) (tui-md tui)))
     (setf (tui-partial tui) "")))
 
 (defun refresh-goal (tui)
@@ -150,8 +151,14 @@ they will switch you back to auto mode (shift+tab or /mode) to execute.")
                (push-event tui (list :type :worker-done :outcome outcome))))
            :name "evo-run"))))
 
+(defun user-prompt-block (text)
+  "User prompts sit between two rules in scrollback — mirroring the
+editbox they were typed in — so they stand out when scanning history."
+  (let ((sep (separator-line)))
+    (format nil "~a~%~a~a~%~a" sep (bold (cyan "❯ ")) text sep)))
+
 (defun submit-to-agent (tui text)
-  (scroll tui (format nil "~a~a" (bold (cyan "❯ ")) text))
+  (scroll tui (user-prompt-block text))
   (queue-steering (tui-agent tui) text)
   (start-worker tui))
 
@@ -164,7 +171,8 @@ they will switch you back to auto mode (shift+tab or /mode) to execute.")
            (concatenate 'string (tui-partial tui) (pget event :text)))
      (loop for pos = (position #\Newline (tui-partial tui))
            while pos
-           do (scroll tui (subseq (tui-partial tui) 0 pos))
+           do (scroll tui (md-render-line (subseq (tui-partial tui) 0 pos)
+                                          (tui-md tui)))
               (setf (tui-partial tui) (subseq (tui-partial tui) (1+ pos))))
      (setf (tui-dirty tui) t))
     (:thinking-delta
@@ -189,6 +197,7 @@ they will switch you back to auto mode (shift+tab or /mode) to execute.")
                        (dim (format nil "  ⎿ ~a" first-line))))))
     (:message-end
      (flush-partial tui)
+     (setf (tui-md tui) (make-md))      ; fences don't leak across messages
      (setf (tui-thinking-tail tui) "")
      ;; Provider-reported usage re-anchors the live context estimate and
      ;; advances the goal's token count for this run.
@@ -205,6 +214,7 @@ they will switch you back to auto mode (shift+tab or /mode) to execute.")
      (scroll tui (red (format nil "✗ internal error in run: ~a" (pget event :text)))))
     (:worker-done
      (flush-partial tui)
+     (setf (tui-md tui) (make-md))
      (setf (tui-running tui) nil (tui-worker tui) nil (tui-thinking-tail tui) "")
      (refresh-goal tui)
      (let ((goal (tui-goal tui)))
@@ -291,7 +301,7 @@ wrapped between two rules, and the model status line under the editbox."
   (let ((lines nil) (cursor-row 0) (cursor-col 0)
         (sep (separator-line)))
     (when (and (tui-running tui) (plusp (length (tui-partial tui))))
-      (push (tui-partial tui) lines))
+      (push (md-render-preview (tui-partial tui) (tui-md tui)) lines))
     (push sep lines)
     (push (activity-line tui) lines)
     (when (and (tui-todo-visible tui) (tui-todos tui)
@@ -382,12 +392,12 @@ wrapped between two rules, and the model status line under the editbox."
                                        :key (lambda (b) (pget b :type)))
                                  :text)))
                  (when text
-                   (scroll tui (format nil "~a~a" (bold (cyan "❯ "))
-                                       (truncate-string text 500))))))
+                   (scroll tui (user-prompt-block (truncate-string text 500))))))
         (:assistant
          (dolist (block (message-content m))
            (case (pget block :type)
-             (:text (scroll tui (truncate-string (pget block :text) 2000)))
+             (:text (scroll tui (md-render-text
+                                 (truncate-string (pget block :text) 2000))))
              (:tool-call (scroll tui (format nil "~a~a" (cyan "⏺ ")
                                              (pget block :name)))))))
         (t nil)))))

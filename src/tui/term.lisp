@@ -85,8 +85,41 @@ xterm modifyOtherKeys (Shift+Enter detection); returns t on a tty."
     (stty *saved-stty*))
   (setf *saved-stty* nil))
 
+(defun char-display-width (c)
+  "Terminal columns C occupies (wcwidth approximation).  The region's
+cursor math assumes every painted line is exactly one terminal row, so
+this must not under-count: a wide char counted as 1 makes the line wrap
+and every later repaint then strands a copy of it in scrollback.  Tabs
+are 4 (the painter expands them to 4 spaces), other control characters 0
+(the painter drops them)."
+  (let ((cp (char-code c)))
+    (cond
+      ((char= c #\Tab) 4)
+      ((or (< cp 32) (= cp 127)) 0)
+      ((< cp #x0300) 1)                       ; fast path: latin-1 and friends
+      ((<= #x0300 cp #x036F) 0)               ; combining marks
+      ((or (<= #x200B cp #x200F) (= cp #x2060)
+           (<= #x20D0 cp #x20FF) (<= #xFE00 cp #xFE0F))
+       0)                                     ; zero-width, variation selectors
+      ((or (<= #x1100 cp #x115F)              ; Hangul jamo
+           (<= #x2E80 cp #x303E)              ; CJK radicals .. punctuation
+           (<= #x3041 cp #x33FF)              ; kana .. CJK compatibility
+           (<= #x3400 cp #x4DBF)              ; CJK extension A
+           (<= #x4E00 cp #x9FFF)              ; CJK unified ideographs
+           (<= #xA000 cp #xA4CF)              ; Yi
+           (<= #xAC00 cp #xD7A3)              ; Hangul syllables
+           (<= #xF900 cp #xFAFF)              ; CJK compatibility ideographs
+           (<= #xFE30 cp #xFE4F)              ; CJK compatibility forms
+           (<= #xFF00 cp #xFF60)              ; fullwidth forms
+           (<= #xFFE0 cp #xFFE6)              ; fullwidth signs
+           (<= #x1F300 cp #x1FAFF)            ; emoji
+           (<= #x20000 cp #x3FFFD))           ; CJK extensions B+
+       2)
+      (t 1))))
+
 (defun visible-length (s)
-  "Length of S ignoring SGR escape sequences."
+  "Display columns S occupies, ignoring SGR escape sequences (wide
+characters count 2, zero-width characters 0)."
   (let ((n 0) (i 0) (len (length s)))
     (loop while (< i len)
           do (let ((c (char s i)))
@@ -95,11 +128,13 @@ xterm modifyOtherKeys (Shift+Enter detection); returns t on a tty."
                       (let ((end (position-if (lambda (ch) (char<= #\@ ch #\~))
                                               s :start (+ i 2))))
                         (setf i (if end (1+ end) len))))
-                     (t (incf n) (incf i)))))
+                     (t (incf n (char-display-width c)) (incf i)))))
     n))
 
 (defun truncate-visible (s max)
-  "Truncate S to MAX visible columns, appending … when cut.  SGR-aware."
+  "Truncate S to at most MAX display columns, appending … when cut.
+SGR-aware and wide-character-aware: the result never paints past MAX
+columns, so a truncated region line cannot wrap the terminal."
   (if (<= (visible-length s) max)
       s
       (let ((n 0) (i 0) (len (length s)) (cut nil))
@@ -110,6 +145,8 @@ xterm modifyOtherKeys (Shift+Enter detection); returns t on a tty."
                           (let ((end (position-if (lambda (ch) (char<= #\@ ch #\~))
                                                   s :start (+ i 2))))
                             (setf i (if end (1+ end) len))))
-                         (t (when (>= n (1- max)) (setf cut i))
-                            (incf n) (incf i)))))
+                         (t (let ((w (char-display-width c)))
+                              (if (> (+ n w) (1- max))
+                                  (setf cut i)
+                                  (progn (incf n w) (incf i))))))))
         (concatenate 'string (subseq s 0 (or cut len)) (sgr 0) "…"))))

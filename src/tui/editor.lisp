@@ -198,23 +198,29 @@ re-pasting identical content right after its placeholder expands it inline."
 ;;; Display: soft-wrap logical lines into WIDTH-column rows.
 
 (defun eb-display-rows (eb width)
-  "Returns (values rows cursor-row cursor-col); every row is <= WIDTH chars."
+  "Returns (values rows cursor-row cursor-col); every row is at most WIDTH
+display columns.  Wrapping and the cursor position are measured in display
+columns (wide characters count 2), so painted rows never exceed the
+terminal width and ANSI cursor movement lands on the right cell."
   (let ((rows nil) (cursor-row 0) (cursor-col 0))
-    (loop for line in (eb-lines eb)
-          for line-index from 0
-          do (let ((chunks (if (zerop (length line))
-                               (list "")
-                               (loop for start from 0 below (length line) by width
-                                     collect (subseq line start
-                                                     (min (length line) (+ start width)))))))
-               (when (and (= line-index (eb-line eb))
-                          (= (eb-col eb) (length line))
-                          (zerop (mod (max 1 (eb-col eb)) width))
-                          (plusp (eb-col eb)))
-                 ;; cursor sits at the start of a fresh wrap row
-                 (setf chunks (append chunks (list ""))))
-               (when (= line-index (eb-line eb))
-                 (setf cursor-row (+ (length rows) (floor (eb-col eb) width))
-                       cursor-col (mod (eb-col eb) width)))
-               (setf rows (append rows chunks))))
+    (loop
+      for line in (eb-lines eb)
+      for line-index from 0
+      for cursor-here = (= line-index (eb-line eb))
+      do (let ((base (length rows)) (chunks nil) (start 0) (col 0))
+           (loop for i from 0 below (length line)
+                 for w = (max 1 (char-display-width (char line i)))
+                 do (when (> (+ col w) width)   ; wrap before this char
+                      (push (subseq line start i) chunks)
+                      (setf start i col 0))
+                    (when (and cursor-here (= i (eb-col eb)))
+                      (setf cursor-row (+ base (length chunks)) cursor-col col))
+                    (incf col w))
+           (push (subseq line start) chunks)
+           (when (and cursor-here (= (eb-col eb) (length line)))
+             (when (and (plusp col) (>= col width))
+               (push "" chunks)                 ; cursor opens a fresh wrap row
+               (setf col 0))
+             (setf cursor-row (+ base (1- (length chunks))) cursor-col col))
+           (setf rows (append rows (nreverse chunks)))))
     (values rows cursor-row cursor-col)))

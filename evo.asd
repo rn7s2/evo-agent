@@ -35,6 +35,7 @@
                                            (:file "input")
                                            (:file "editor")
                                            (:file "render")
+                                           (:file "markdown")
                                            (:file "tui")
                                            (:file "commands")))
                              (:file "cli")

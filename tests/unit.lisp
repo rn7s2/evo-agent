@@ -639,6 +639,125 @@ event: response.completed~%data: {\"type\":\"response.completed\",\"response\":{
       (check "scrollback resets height" (zerop evo.tui::*region-height*))
       (check "scrollback resets cursor row" (zerop evo.tui::*region-cursor-row*)))))
 
+;;; Display width: wide characters must count their true columns, or a
+;;; "truncated" region line still wraps the terminal and every repaint
+;;; strands a copy of the streaming line in scrollback.
+
+(defun test-display-width ()
+  (check "ascii width 1" (= 1 (evo.tui::char-display-width #\a)))
+  (check "cjk width 2" (= 2 (evo.tui::char-display-width #\中)))
+  (check "fullwidth punct width 2" (= 2 (evo.tui::char-display-width #\，)))
+  (check "emoji width 2" (= 2 (evo.tui::char-display-width #\🌟)))
+  (check "combining width 0" (= 0 (evo.tui::char-display-width (code-char #x0301))))
+  (check "tab width matches painter" (= 4 (evo.tui::char-display-width #\Tab)))
+  (check "visible-length counts columns" (= 7 (evo.tui::visible-length "ab中文a")))
+  (check "visible-length skips sgr" (= 2 (evo.tui::visible-length (evo.tui::dim "中"))))
+  ;; Truncation in columns: ascii behavior unchanged, wide content cut early.
+  (check "ascii under max unchanged"
+         (equal "abcdef" (evo.tui::truncate-visible "abcdef" 10)))
+  (check "ascii cut at max columns"
+         (= 5 (evo.tui::visible-length (evo.tui::truncate-visible "abcdefghij" 5))))
+  (let ((cut (evo.tui::truncate-visible (make-string 30 :initial-element #\中) 20)))
+    (check "wide cut within max columns" (<= (evo.tui::visible-length cut) 20))
+    (check "wide cut marked" (char= #\… (char cut (1- (length cut))))))
+  ;; Region line sanitizing: tabs expand, control chars drop, SGR survives.
+  (check "sanitize expands tab"
+         (equal "a    b" (evo.tui::sanitize-line (format nil "a~cb" #\Tab))))
+  (check "sanitize drops carriage return"
+         (equal "ab" (evo.tui::sanitize-line (format nil "a~cb" #\Return))))
+  (check "sanitize keeps sgr"
+         (equal (evo.tui::dim "x") (evo.tui::sanitize-line (evo.tui::dim "x"))))
+  ;; Editor wrap in columns; cursor position in columns.
+  (let ((eb (evo.tui::make-edit-buffer)))
+    (evo.tui::eb-insert-text eb "中中中")
+    (multiple-value-bind (rows crow ccol) (evo.tui::eb-display-rows eb 4)
+      (check "wide wrap rows" (equal rows '("中中" "中")))
+      (check "wide wrap cursor in columns" (and (= crow 1) (= ccol 2)))))
+  ;; End to end: a streaming wide line must never paint past the region
+  ;; width — the painted chunk stays under *cols*, so it cannot wrap.
+  (with-output-to-string (fake-tty)
+    (let ((evo.tui::*tty-out* fake-tty)
+          (evo.tui::*cols* 11)
+          (evo.tui::*region-height* 0)
+          (evo.tui::*region-cursor-row* 0))
+      (evo.tui::draw-region (list (make-string 8 :initial-element #\中)) 0 0)
+      (let ((out (get-output-stream-string fake-tty)))
+        (check "wide region line truncated"
+               (not (search "中中中中中" out)))))))
+
+;;; Markdown rendering of agent output
+
+(defun test-markdown ()
+  (let ((esc-bold (format nil "~c[1m" #\Escape))
+        (esc-italic (format nil "~c[3m" #\Escape))
+        (esc-code (format nil "~c[33m" #\Escape))
+        (esc-dim (format nil "~c[2m" #\Escape))
+        (esc-underline (format nil "~c[4m" #\Escape)))
+    (let ((md (evo.tui::make-md)))
+      ;; headings: marks kept dim, text bold
+      (let ((r (evo.tui::md-render-line "## Section" md)))
+        (check "heading bold" (search esc-bold r))
+        (check "heading marks dim" (search esc-dim r))
+        (check "heading text kept" (search "Section" r)))
+      (check "hashtag is not a heading"
+             (equal "#tag" (evo.tui::md-render-line "#tag" md)))
+      ;; inline styles
+      (let ((r (evo.tui::md-render-line "a **b** *c* `d`" md)))
+        (check "strong styled" (and (search esc-bold r) (not (search "**" r))))
+        (check "emph styled" (and (search esc-italic r) (not (search "*c*" r))))
+        (check "code span colored" (and (search esc-code r) (not (find #\` r)))))
+      (check "unmatched marker literal"
+             (equal "2 * 3 * 4" (evo.tui::md-render-line "2 * 3 * 4" md)))
+      (check "snake_case untouched"
+             (equal "eb_display_rows" (evo.tui::md-render-line "eb_display_rows" md)))
+      (check "code span protects content"
+             (search "**x**" (evo.tui::md-render-line "`**x**`" md)))
+      ;; lists, quotes, rules
+      (let ((r (evo.tui::md-render-line "- item" md)))
+        (check "bullet glyph" (search "•" r))
+        (check "bullet text" (search " item" r)))
+      (check "ordered prefix colored"
+             (search "1." (evo.tui::md-render-line "1. first" md)))
+      (check "blockquote gutter"
+             (search "▌" (evo.tui::md-render-line "> quoted" md)))
+      (let ((evo.tui::*cols* 20))
+        (check "hrule becomes a rule"
+               (search "───" (evo.tui::md-render-line "---" md))))
+      ;; links
+      (let ((r (evo.tui::md-render-line "see [evo](https://x.dev)" md)))
+        (check "link text underlined" (search esc-underline r))
+        (check "link url kept" (search "https://x.dev" r)))
+      ;; fenced code: fence dim, content verbatim, state toggles
+      (let ((r (evo.tui::md-render-line "```lisp" md)))
+        (check "fence dim" (search esc-dim r))
+        (check "fence enters code" (evo.tui::md-in-code md)))
+      (check "code content verbatim"
+             (equal "(x **y**)" (evo.tui::md-render-line "(x **y**)" md)))
+      ;; preview never advances the fence state
+      (check "preview leaves state alone"
+             (progn (evo.tui::md-render-preview "```" md)
+                    (evo.tui::md-in-code md)))
+      (evo.tui::md-render-line "```" md)
+      (check "fence closes" (not (evo.tui::md-in-code md)))
+      (let ((r (evo.tui::md-render-line "**b**" md)))
+        (check "styling resumes after fence" (search esc-bold r))))
+    ;; whole-text rendering starts from a fresh fence state
+    (let ((r (evo.tui::md-render-text (format nil "# t~%```~%**raw**~%```"))))
+      (check "text render styles heading" (search esc-bold r))
+      (check "text render keeps code raw" (search "**raw**" r)))))
+
+;;; User prompts sit between two rules in scrollback
+
+(defun test-user-prompt-block ()
+  (let* ((evo.tui::*cols* 30)
+         (block (evo.tui::user-prompt-block "hello"))
+         (lines (uiop:split-string block :separator '(#\Newline))))
+    (check "prompt block is three lines" (= 3 (length lines)))
+    (check "rule above" (search "─" (first lines)))
+    (check "prompt line marked" (and (search "❯" (second lines))
+                                     (search "hello" (second lines))))
+    (check "rule below" (search "─" (third lines)))))
+
 ;;; Input history navigation
 
 (defun test-input-history ()
@@ -1129,6 +1248,9 @@ event: response.completed~%data: {\"type\":\"response.completed\",\"response\":{
     (test-input)
     (test-tui-compose)
     (test-render-anchor)
+    (test-display-width)
+    (test-markdown)
+    (test-user-prompt-block)
     (test-input-history)
     (test-mode-switching)
     (test-goal-budget)
