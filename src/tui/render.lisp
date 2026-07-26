@@ -15,6 +15,12 @@
 (defvar *tui-lock* (bt:make-lock "tui"))
 (defvar *region-height* 0
   "Terminal rows the managed region currently occupies (0 = not drawn yet).")
+(defvar *region-cursor-row* 0
+  "Region row (0-based) the terminal cursor was left on by the last draw.
+The cursor parks on the editor row, which sits ABOVE the bottom rule and
+status line: moving to the region start must go up this many rows, not
+region-height-1 — overshooting lands in scrollback and clear-below then
+eats history lines.")
 
 (defun crlf (text)
   "LF -> CRLF for raw-mode output."
@@ -26,8 +32,8 @@
 
 (defun goto-region-start ()
   (wr (string #\Return))
-  (when (> *region-height* 1)
-    (wr (cursor-up (1- *region-height*))))
+  (when (plusp *region-cursor-row*)
+    (wr (cursor-up *region-cursor-row*)))
   (wr (clear-below)))
 
 (defun draw-region (lines cursor-row cursor-col)
@@ -41,10 +47,12 @@ CURSOR-ROW/CURSOR-COL within it (row 0 = first region line)."
           unless first do (wr (format nil "~c~c" #\Return #\Linefeed))
           do (wr (truncate-visible line (1- *cols*))))
     ;; Cursor: currently at end of last line; navigate to target cell.
-    (let ((up (- (length lines) 1 cursor-row)))
+    (let ((row (max 0 (min cursor-row (1- (length lines))))))
       (wr (string #\Return))
-      (when (plusp up) (wr (cursor-up up)))
-      (when (plusp cursor-col) (wr (cursor-right cursor-col))))
+      (let ((up (- (length lines) 1 row)))
+        (when (plusp up) (wr (cursor-up up))))
+      (when (plusp cursor-col) (wr (cursor-right cursor-col)))
+      (setf *region-cursor-row* row))
     (wr (show-cursor))
     (flush)
     (setf *region-height* (length lines))))
@@ -59,4 +67,4 @@ cleared here so scrolling can happen naturally)."
   (unless (and (plusp (length text))
                (char= (char text (1- (length text))) #\Newline))
     (wr (format nil "~c~c" #\Return #\Linefeed)))
-  (setf *region-height* 0))
+  (setf *region-height* 0 *region-cursor-row* 0))

@@ -13,8 +13,9 @@
 (defun current-goal (agent)
   (evo.journal:state-goal (fold-state (agent-journal agent))))
 
-(defparameter *default-token-budget* 2000000
-  "Runaway-cost brake when the user sets no budget.")
+(defparameter *default-token-budget* nil
+  "Default goal token budget.  NIL = no limit; a goal only trips the budget
+brake when the user (or settings :goal-token-budget) sets one explicitly.")
 
 (defun create-goal-entry (agent objective &key token-budget done-when)
   (append-entry (agent-journal agent)
@@ -54,9 +55,16 @@
 
 ;;; Continuation steering.
 
+(defun goal-budget-line (goal used)
+  "Human-readable budget state; a nil budget means no limit."
+  (let ((budget (pget goal :token-budget)))
+    (if budget
+        (format nil "~:d tokens used of ~:d (~:d remaining)"
+                used budget (max 0 (- budget used)))
+        (format nil "~:d tokens used (no limit)" used))))
+
 (defun goal-continuation-message (goal used &key todo-text)
-  (let ((budget (pget goal :token-budget))
-        (objective (pget goal :objective)))
+  (let ((objective (pget goal :objective)))
     (format nil
             "You are idle but your goal is still active. Continue working toward it now.
 
@@ -64,7 +72,7 @@
 ~a
 </goal>
 
-Budget: ~:d tokens used of ~:d (~:d remaining).
+Budget: ~a.
 ~@[
 Your current todo list (update it with the todo tool as you go):
 ~a~]
@@ -73,7 +81,7 @@ Rules:
 - Completion must be PROVEN from current evidence — files on disk, test output, runtime behavior — checked requirement by requirement right now, not from memory or intent. Only then call update-goal with status \"complete\".
 - If you are stuck, try a different approach first. Declare the goal blocked (update-goal status \"blocked\") only after the SAME blocker has defeated you in 3 consecutive goal turns, and say what the blocker is.
 - Otherwise: take the next concrete step toward the objective."
-            objective used budget (max 0 (- budget used)) todo-text)))
+            objective (goal-budget-line goal used) todo-text)))
 
 (defun goal-continuation-for (agent goal)
   "Build the continuation steering prompt, embedding the todo snapshot
@@ -135,10 +143,10 @@ a future session should take. Goal objective: ~a"
   (declare (ignore args))
   (let ((goal (current-goal evo:*agent*)))
     (if goal
-        (format nil "Current goal ~a [~a]: ~a~%Budget: ~:d tokens used of ~:d~@[~%done-when: ~a~]"
+        (format nil "Current goal ~a [~a]: ~a~%Budget: ~a~@[~%done-when: ~a~]"
                 (pget goal :goal-id) (string-downcase (pget goal :status))
                 (pget goal :objective)
-                (goal-tokens-used evo:*agent* goal) (pget goal :token-budget)
+                (goal-budget-line goal (goal-tokens-used evo:*agent* goal))
                 (pget goal :done-when))
         "No goal is set.")))
 
@@ -202,7 +210,7 @@ a future session should take. Goal objective: ~a"
    :description "Create a goal. Use ONLY when the user explicitly asks for a goal. Refuses if an unfinished goal exists. If the objective is mechanically checkable, first write a named zero-argument predicate function into a userspace .lisp file, load it with load_extension, and pass its name as done_when — completion will then be verified by running it."
    :schema '(:object
              (:objective :type :string :description "What done means, in the user's words")
-             (:token-budget :type :integer :optional t :description "Token budget for this goal")
+             (:token-budget :type :integer :optional t :description "Token budget for this goal; omit for no limit (the default)")
              (:done-when :type :string :optional t
               :description "Name of a zero-arg userspace predicate that returns true iff the goal is done"))
    :execute #'tool-create-goal)

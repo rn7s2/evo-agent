@@ -41,7 +41,7 @@ design; this README covers what is implemented and how to run it.
   replayed on resume; package locks on the kernel; seed corpus:
   [docs/](docs/) (extension API, journal format, self-extension guide) and
   example extensions — [plan-mode](extensions/plan-mode.lisp) (shipped
-  active: `/plan` `/auto` via tool gating + hidden `:custom-message` +
+  active: enforcement for `/mode` / shift+tab via tool gating + hidden `:custom-message` +
   transform-context filtering), git-checkpoint and permission-gate
   ([extensions/examples/](extensions/examples/)).
 
@@ -78,7 +78,7 @@ Sexpr plists: global `~/.evo/settings.sexp`, project
 ```lisp
 (:model "ark-deepseek-v4-pro"
  :thinking :xhigh               ; off low medium high xhigh
- :goal-token-budget 2000000
+ :goal-token-budget 2000000     ; per-goal token cap; omit for no limit (default)
  :providers (:anthropic (:base-url "http://127.0.0.1:8787"
                          :api-key "sk-...")))
 ```

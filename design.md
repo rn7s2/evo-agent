@@ -76,8 +76,8 @@ evo image (SBCL or ECL process)
 ├─ CORE EXTENSIONS  (bundled; same API & privileges as user extensions;
 │                    shipped by us, loaded first, essential ones not disableable)
 │    tui    adaptive renderer (scrollback + managed bottom region, SIGWINCH
-│           reflow), multi-line editor, slash commands: /goal /lore /plan
-│           /auto /compact /tree /resume /todo …
+│           reflow), multi-line editor, slash commands: /goal /lore /mode
+│           /compact /tree /resume /todo …
 │           optional Swank listener for the developer
 │    todo   checklist tool + :custom state, rendered by the tui
 ├─ USERSPACE  (unlocked packages: EVO.USER, …)
@@ -454,14 +454,15 @@ user must be able to see structure and progress at a glance.
 - **Prompt templates**: `.md` files, filename = command, `$1`/`$@`-style
   substitution, purely textual expansion.
 - **Slash command resolution** (pi's order): extension commands → input hook →
-  skills → templates → send to agent. Built-ins: `/goal /lore /plan /auto
-  /compact /tree /fork /resume /model /reload /export /help`.
-- **Modes**: `auto` (default: fully permissive) and `plan` — implemented
-  exactly like pi's plan-mode example extension: tool gating
-  (`set-active-tools`, no edit/write, allowlisted bash), injected
-  instructions via a hidden `:custom-message`, filtered back out of context
-  when the mode turns off. Modes are policy in userspace, not kernel
-  features.
+  skills → templates → send to agent. Built-ins: `/goal /lore /mode
+  /compact /tree /fork /resume /model /reload /export /help /quit /exit`.
+- **Modes**: `auto` (default: fully permissive) and `plan` — switched from
+  the TUI (shift+tab toggle, `/mode` choose box, status-line indicator)
+  through the public extension API: tool gating (`set-active-tools`, no
+  edit/write), injected instructions via a hidden `:custom-message`,
+  filtered back out of context when the mode turns off. The plan-mode
+  extension layers enforcement hooks (mutation blocking, allowlisted bash)
+  on the same journaled "mode" state.
 - **System prompt assembly** (pi's order): base → tool one-liners (opt-in) →
   guidelines → own-docs paths → lore → project context files → skills → cwd.
   Rebuilt on any tool-set change.

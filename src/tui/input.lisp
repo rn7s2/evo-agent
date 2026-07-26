@@ -7,7 +7,7 @@
 ;;;;
 ;;;; Events: (:char c) (:paste string) :enter :shift-enter :newline
 ;;;; :backspace :delete :up :down :left :right :home :end :word-left
-;;;; :word-right :escape (:ctrl char) :delete-word
+;;;; :word-right :escape (:ctrl char) :delete-word :shift-tab
 
 (in-package :evo.tui)
 
@@ -44,25 +44,35 @@
     (#\D (if (member 5 (cdr params)) :word-left
              (if (member 3 (cdr params)) :word-left :left)))
     (#\H :home) (#\F :end)
-    (#\u ;; kitty / CSI-u: code;modifiers u
+    (#\Z :shift-tab)                    ; CSI Z: back-tab
+    (#\u ;; kitty / CSI-u: code;modifiers u  (mod = 1 + shift:1 alt:2 ctrl:4)
      (let ((code (or (first params) 0))
            (mod (or (second params) 1)))
        (case code
          (13 (case mod (2 :shift-enter) ((3 4) :newline) (t :enter)))
          (27 :escape)
-         (9 (list :char #\Tab))
-         (t (when (<= 32 code 126)
-              (if (member mod '(1 2))
-                  (list :char (code-char code))
-                  nil))))))
+         (9 (if (= mod 2) :shift-tab (list :char #\Tab)))
+         ((8 127) :backspace)
+         (t (cond
+              ;; Ctrl+letter (with or without shift): (:ctrl char), matching
+              ;; the legacy C0-byte path.
+              ((and (member mod '(5 6)) (<= 97 code 122))
+               (list :ctrl (code-char code)))
+              ((and (member mod '(5 6)) (<= 65 code 90))
+               (list :ctrl (code-char (+ code 32))))
+              ((and (<= 32 code 126) (member mod '(1 2)))
+               (list :char (code-char code)))
+              (t nil))))))
     (#\~ (let ((n (first params)))
            (case n
              ((1 7) :home) ((4 8) :end) (3 :delete)
              (27 ;; modifyOtherKeys: 27;mod;code~
               (let ((mod (or (second params) 1))
                     (code (or (third params) 0)))
-                (when (= code 13)
-                  (case mod (2 :shift-enter) ((3 4) :newline) (t :enter)))))
+                (cond
+                  ((= code 13)
+                   (case mod (2 :shift-enter) ((3 4) :newline) (t :enter)))
+                  ((and (= code 9) (= mod 2)) :shift-tab))))
              (t nil))))
     (t nil)))
 

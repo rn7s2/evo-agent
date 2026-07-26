@@ -1,5 +1,5 @@
 #!/usr/bin/expect -f
-# tui.exp — drive the TUI under a pty: banner, /help, paste collapse,
+# tui.exp — drive the TUI under a pty: startup paint, /help, paste collapse,
 # a live model round-trip, todo panel, and /quit.
 set timeout 180
 
@@ -30,10 +30,10 @@ proc fail {name} {
 
 spawn "$repo/build/evo"
 
-# 1. banner appears
+# 1. the region paints on startup: status line with live context usage
 expect {
-    -re {enter sends} { check "banner" }
-    timeout { fail "banner"; exit 1 }
+    -re {ctx \d+k/\d+k} { check "startup status line" }
+    timeout { fail "startup status line"; exit 1 }
 }
 
 # 2. /help lists commands

@@ -10,7 +10,8 @@
   /help                this list
   /goal [objective]    show, create, or refine the goal
   /todo                toggle the todo panel
-  /model [id]          show or set the model (journaled; next turn)
+  /mode [auto|plan]    switch mode from a list (shift+tab toggles)
+  /model [id]          pick the model from a list, or set it directly
   /thinking [level]    off·low·medium·high·xhigh
   /compact [hint]      compact the context now
   /lore [text]         show lore, or add durable guidance (project scope)
@@ -20,9 +21,12 @@
   /new                 start a fresh session
   /export [path]       export the transcript as markdown
   /reload              reload extension directories
-  /quit                exit (ctrl+c ctrl+c, ctrl+d)
-keys: enter send · shift+enter/alt+enter/ctrl+j newline · esc interrupt ·
-      esc esc rewind · paste >3 lines collapses (paste again to expand)")
+  /quit /exit          exit (ctrl+c ctrl+c, ctrl+d)
+keys: enter send · shift+enter/alt+enter/ctrl+j newline · shift+tab auto/plan mode ·
+      tab complete /command · up/down input history (at buffer edge) ·
+      ctrl+a/e home/end · ctrl+b/f move · ctrl+d delete (quit when empty) ·
+      ctrl+k kill to eol · ctrl+w delete word · esc interrupt · esc esc rewind ·
+      paste >3 lines collapses (paste again to expand)")
 
 (defun goal-command (tui args)
   (let* ((agent (tui-agent tui))
@@ -30,7 +34,7 @@ keys: enter send · shift+enter/alt+enter/ctrl+j newline · esc interrupt ·
     (cond
       ((zerop (length args))
        (scroll tui (if goal
-                       (format nil "goal ~a [~(~a~)]: ~a~%tokens: ~:d / ~:d~@[~%done-when: ~a~]"
+                       (format nil "goal ~a [~(~a~)]: ~a~%tokens: ~:d~@[ / ~:d~]~@[~%done-when: ~a~]"
                                (pget goal :goal-id) (pget goal :status)
                                (pget goal :objective)
                                (goal-tokens-used agent goal)
@@ -144,6 +148,45 @@ keys: enter send · shift+enter/alt+enter/ctrl+j newline · esc interrupt ·
                (refresh-goal tui))))))
     t))
 
+(defun mode-command (tui args)
+  (cond
+    ((member args '("plan" "auto") :test #'string-equal)
+     (set-mode tui (string-downcase args)))
+    ((zerop (length args))
+     (enter-select
+      tui "mode:"
+      (list (list "auto" "auto" "full permissions (default)")
+            (list "plan" "plan" "read-only: explore and present a plan"))
+      (lambda (mode) (set-mode tui mode))
+      :index (if (equal (current-mode tui) "plan") 1 0)))
+    (t (scroll tui (dim "modes: auto plan"))))
+  t)
+
+(defun set-model (tui id)
+  (append-entry (agent-journal (tui-agent tui))
+                (list :type :model-change
+                      :provider (pget (find-model id) :provider :anthropic)
+                      :model id))
+  (refresh-goal tui)
+  (scroll tui (dim (format nil "model → ~a (next turn)" id))))
+
+(defun model-select-command (tui)
+  "Choose box: pick the model from the table, current one preselected."
+  (let ((current (tui-model-label tui)))
+    (enter-select
+     tui "model:"
+     (loop for m in *models*
+           for id = (pget m :id)
+           collect (list id id
+                         (format nil "~dk ctx~:[~; · current~]"
+                                 (round (pget m :context-window 0) 1000)
+                                 (equal id current))))
+     (lambda (id) (set-model tui id))
+     :index (or (position current *models*
+                          :key (lambda (m) (pget m :id)) :test #'equal)
+                0))
+    t))
+
 (defun export-command (tui args)
   (let* ((state (fold-state (agent-journal (tui-agent tui))))
          (path (if (plusp (length args))
@@ -179,15 +222,11 @@ keys: enter send · shift+enter/alt+enter/ctrl+j newline · esc interrupt ·
          (setf (tui-todo-visible tui) (not (tui-todo-visible tui))
                (tui-dirty tui) t)
          t)
+        ((cmd "mode") (mode-command tui args))
         ((cmd "model")
-         (cond ((zerop (length args))
-                (scroll tui (format nil "models: ~{~a~^, ~}"
-                                    (mapcar (lambda (m) (pget m :id)) *models*))))
-               (t (append-entry (agent-journal agent)
-                                (list :type :model-change :provider :anthropic
-                                      :model args))
-                  (refresh-goal tui)
-                  (scroll tui (dim (format nil "model → ~a (next turn)" args)))))
+         (if (zerop (length args))
+             (model-select-command tui)
+             (set-model tui args))
          t)
         ((cmd "thinking")
          (let ((level (intern (string-upcase args) :keyword)))
@@ -283,7 +322,9 @@ keys: enter send · shift+enter/alt+enter/ctrl+j newline · esc interrupt ·
     (setf *resized* nil)
     (refresh-size)
     (bt:with-lock-held (*tui-lock*)
-      (setf *region-height* (min *region-height* *rows*)))
+      (setf *region-height* (min *region-height* *rows*)
+            *region-cursor-row* (min *region-cursor-row*
+                                     (max 0 (1- *region-height*)))))
     (setf (tui-dirty tui) t))
   ;; Input.
   (let ((got (read-pending-bytes tui)))
@@ -304,15 +345,6 @@ keys: enter send · shift+enter/alt+enter/ctrl+j newline · esc interrupt ·
   (when (tui-dirty tui)
     (repaint tui)))
 
-(defun banner (tui &key resumed-p)
-  (let ((agent (tui-agent tui)))
-    (scroll tui (format nil "~a ~a"
-                        (bold "evo")
-                        (dim (format nil "· ~a · enter sends · shift+enter newline · /help · ~a"
-                                     (or (agent-model-override agent)
-                                         (setting :model "claude-sonnet-5"))
-                                     (if resumed-p "resumed" "new session")))))))
-
 (defun start-tui (agent &key resumed-p)
   "Run the interactive TUI until quit.  Returns an exit code."
   (let ((tui (make-tui :agent agent
@@ -326,7 +358,6 @@ keys: enter send · shift+enter/alt+enter/ctrl+j newline · esc interrupt ·
     (term-setup)
     (unwind-protect
          (progn
-           (banner tui :resumed-p resumed-p)
            (when resumed-p (show-history-tail tui))
            (refresh-goal tui)
            ;; An idle active goal always gets re-steered.

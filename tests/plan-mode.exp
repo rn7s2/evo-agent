@@ -1,6 +1,6 @@
 #!/usr/bin/expect -f
-# plan-mode.exp — e2e wiring of the plan-mode extension in the TUI:
-# /plan and /auto commands respond, and the journal records the mode state
+# plan-mode.exp — e2e wiring of plan mode in the TUI:
+# shift+tab toggles, /mode switches, and the journal records the mode state
 # and tool gating.  (The gate itself is unit-tested — model behavior under
 # plan instructions is nondeterministic.)
 set timeout 180
@@ -24,7 +24,7 @@ proc check {ok name} {
 }
 
 spawn "$repo/build/evo"
-expect { -re {enter sends} { check 1 banner } timeout { check 0 banner; exit 1 } }
+expect { -re {◆ auto} { check 1 startup-mode-indicator } timeout { check 0 startup-mode-indicator; exit 1 } }
 
 # One real turn so the journal flushes to disk.
 send "Reply with exactly the word: zebra-fig\r"
@@ -32,13 +32,27 @@ expect { -re {zebra-fig} {} timeout { check 0 first-turn; exit 1 } }
 expect { -re {zebra-fig} { check 1 first-turn } timeout { check 0 first-turn } }
 sleep 2
 
-send "/plan\r"
-expect { -re {plan mode} { check 1 plan-cmd } timeout { check 0 plan-cmd } }
+# shift+tab (CSI Z) toggles into plan mode; indicator follows
+send "\x1b\[Z"
+expect { -re {plan mode} { check 1 shift-tab-plan } timeout { check 0 shift-tab-plan } }
+expect { -re {◇ plan} { check 1 plan-indicator } timeout { check 0 plan-indicator } }
 sleep 1
-send "/auto\r"
-expect { -re {auto mode} { check 1 auto-cmd } timeout { check 0 auto-cmd } }
+# /mode auto switches back
+send "/mode auto\r"
+expect { -re {auto mode} { check 1 mode-auto-cmd } timeout { check 0 mode-auto-cmd } }
 sleep 1
-send "/quit\r"
+# /mode opens the choose box; pick plan (second entry)
+send "/mode\r"
+expect { -re {mode:} { check 1 mode-choose-box } timeout { check 0 mode-choose-box } }
+send "\x1b\[B"
+sleep 0.3
+send "\r"
+expect { -re {plan mode} { check 1 mode-box-select } timeout { check 0 mode-box-select } }
+sleep 1
+send "/mode auto\r"
+expect { -re {auto mode} {} timeout {} }
+sleep 1
+send "/exit\r"
 expect eof
 
 set session [exec sh -c "ls -t $env(EVO_HOME)/sessions/*/*.sexp | head -1"]

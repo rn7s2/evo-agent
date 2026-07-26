@@ -179,6 +179,7 @@ plugs in here.")
                      (when details (list :details details))))
       (emit-event agent :type :tool-result :name name :id id
                         :is-error (and is-error t)
+                        :content-chars (length content)
                         :content (truncate-string content 500)))))
 
 (defun message-tool-calls (message)
