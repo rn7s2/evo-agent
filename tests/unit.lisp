@@ -615,6 +615,56 @@ event: response.completed~%data: {\"type\":\"response.completed\",\"response\":{
       (evo.tui::handle-key-select tui :enter)
       (check "select 3-element item passes value" (eql got 1)))))
 
+(defun test-resume-picker ()
+  (let ((formatted (format-local-timestamp "2024-01-01T16:30:00Z"
+                                           :timezone-name "Asia/Shanghai")))
+    (check "local timestamp converts to timezone"
+           (search "2024-01-02 00:30" formatted))
+    (check "local timestamp names timezone"
+           (search "Asia/Shanghai" formatted)))
+  (check "resume summary collapses whitespace"
+         (equal (evo.tui::resume-summary-text (format nil "hello~%  world")
+                                              :max-chars 20)
+                "hello world"))
+  (let ((short (evo.tui::resume-summary-text "1234567890abcdef"
+                                             :max-chars 8)))
+    (check "resume summary truncates to max length"
+           (and (= (length short) 8)
+                (char= (char short 7) #\…))))
+  (let* ((dir (uiop:ensure-directory-pathname
+               (format nil "~a/evo-resume-~a/" (uiop:getenv "TMPDIR") (gen-id))))
+         (journal (progn (ensure-directories-exist dir)
+                         (make-session-journal dir)))
+         (prompt (format nil "first line~%second line ~a"
+                         (make-string 200 :initial-element #\x))))
+    (append-entry journal `(:type :message
+                            :message (:role :user
+                                      :content ((:type :text :text ,prompt)))))
+    (append-entry journal '(:type :message
+                            :message (:role :assistant :stop-reason :stop :model "m"
+                                      :usage (:input 1 :output 1 :cache-read 0 :cache-write 0)
+                                      :content ((:type :text :text "ok")))))
+    (let* ((path (namestring (journal-path journal)))
+           (session (list :path path :timestamp "2024-01-01T16:30:00Z"))
+           (item (first (evo.tui::resume-select-items
+                         (list session) :timezone-name "Asia/Shanghai")))
+           (label (first item))
+           (value (second item))
+           (desc (third item)))
+      (check "resume item is label value description"
+             (= (length item) 3))
+      (check "resume label shows local timestamp"
+             (and (search "2024-01-02 00:30" label)
+                  (search "Asia/Shanghai" label)))
+      (check "resume item value is session path"
+             (equal value path))
+      (check "resume description uses leaf user prompt"
+             (and (search "first line second line" desc)
+                  (not (find #\Newline desc))))
+      (check "resume description is bounded"
+             (and (<= (length desc) evo.tui::*resume-summary-max-chars*)
+                  (char= (char desc (1- (length desc))) #\…))))))
+
 ;;; Region draw anchoring: repaints must not climb into scrollback
 
 (defun test-render-anchor ()
@@ -1299,6 +1349,7 @@ event: response.completed~%data: {\"type\":\"response.completed\",\"response\":{
     (test-editor)
     (test-input)
     (test-tui-compose)
+    (test-resume-picker)
     (test-render-anchor)
     (test-display-width)
     (test-markdown)

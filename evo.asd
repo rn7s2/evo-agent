@@ -5,7 +5,8 @@
   :author "evo-agent"
   :license "MIT"
   :version "0.1.0"
-  :depends-on ("dexador" "com.inuoe.jzon" "flexi-streams" "bordeaux-threads")
+  :depends-on ("dexador" "com.inuoe.jzon" "flexi-streams" "bordeaux-threads"
+               "local-time")
   :serial t
   :components ((:module "src"
                 :serial t

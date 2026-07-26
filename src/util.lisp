@@ -13,6 +13,82 @@
     (format nil "~4,'0d-~2,'0d-~2,'0dT~2,'0d:~2,'0d:~2,'0dZ"
             year month day hour min sec)))
 
+(defvar *timezone-repository-read-p* nil)
+
+(defparameter *local-timestamp-format*
+  '((:year 4) #\- (:month 2) #\- (:day 2)
+    #\Space (:hour 2) #\: (:min 2))
+  "Compact timestamp format for session pickers.")
+
+(defun %timezone-by-location-name (name)
+  "Best-effort lookup of an IANA timezone NAME via local-time."
+  (when (and (stringp name) (plusp (length name)))
+    (or (ignore-errors (local-time:find-timezone-by-location-name name))
+        (progn
+          (unless *timezone-repository-read-p*
+            (ignore-errors (local-time:reread-timezone-repository))
+            (setf *timezone-repository-read-p* t))
+          (ignore-errors (local-time:find-timezone-by-location-name name))))))
+
+(defun %zoneinfo-location-from-path (path)
+  "Return the IANA location suffix from a zoneinfo PATH, if visible."
+  (let* ((raw (and path (string-trim '(#\Space #\Tab #\Newline #\Return)
+                                      (namestring (pathname path)))))
+         (pos (and raw (search "zoneinfo/" raw :test #'char=))))
+    (when pos
+      (let ((name (subseq raw (+ pos (length "zoneinfo/")))))
+        (when (%timezone-by-location-name name)
+          name)))))
+
+(defun %canonical-timezone-location-name (candidate)
+  "Normalize TZ-style CANDIDATE into an IANA timezone location name."
+  (let* ((raw (and candidate (string-trim '(#\Space #\Tab #\Newline #\Return)
+                                          candidate)))
+         (raw (and raw (plusp (length raw)) raw))
+         (without-colon (and raw (if (char= (char raw 0) #\:)
+                                     (subseq raw 1)
+                                     raw))))
+    (when (and without-colon (plusp (length without-colon)))
+      (or (%zoneinfo-location-from-path without-colon)
+          (%zoneinfo-location-from-path
+           (ignore-errors (namestring (truename (pathname without-colon)))))
+          (and (not (char= (char without-colon 0) #\/))
+               (%timezone-by-location-name without-colon)
+               without-colon)))))
+
+(defun local-timezone-name ()
+  "Best-effort local IANA timezone name, e.g. \"Asia/Shanghai\".
+Falls back to \"local\" when the OS does not expose a zoneinfo name."
+  (or (%canonical-timezone-location-name (getenv "TZ"))
+      (%canonical-timezone-location-name
+       (ignore-errors (namestring (truename #P"/etc/localtime"))))
+      "local"))
+
+(defun %format-cl-local-timestamp (timestamp timezone-label)
+  "Format TIMESTAMP in the host process local timezone via ANSI CL."
+  (multiple-value-bind (sec min hour day month year)
+      (decode-universal-time (local-time:timestamp-to-universal timestamp))
+    (declare (ignore sec))
+    (format nil "~4,'0d-~2,'0d-~2,'0d ~2,'0d:~2,'0d ~a"
+            year month day hour min timezone-label)))
+
+(defun format-local-timestamp (timestamp &key (timezone-name (local-timezone-name)))
+  "Format an ISO-8601 TIMESTAMP in local time and append the timezone name."
+  (handler-case
+      (let* ((ts (local-time:parse-timestring timestamp))
+             (name (and timezone-name
+                        (string-trim '(#\Space #\Tab #\Newline #\Return)
+                                     timezone-name)))
+             (zone (%timezone-by-location-name name)))
+        (if zone
+            (format nil "~a ~a"
+                    (local-time:format-timestring nil ts
+                                                  :timezone zone
+                                                  :format *local-timestamp-format*)
+                    name)
+            (%format-cl-local-timestamp ts (or name "local"))))
+    (error () timestamp)))
+
 (defvar *id-random-state* (make-random-state t))
 
 (defun reseed-ids ()

@@ -18,7 +18,8 @@
 
 (defpackage :evo.util
   (:use :cl)
-  (:export #:getenv #:iso8601-now #:gen-id #:reseed-ids #:pget #:pput #:plist-merge
+  (:export #:getenv #:iso8601-now #:format-local-timestamp #:local-timezone-name
+           #:gen-id #:reseed-ids #:pget #:pput #:plist-merge
            #:evo-home #:project-evo-dir #:encode-cwd #:ensure-directory
            #:write-sexpr-line #:read-sexpr #:read-sexpr-stream #:validate-journal-value
            #:setting #:set-setting #:reset-settings #:*settings*

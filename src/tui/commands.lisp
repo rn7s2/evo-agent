@@ -67,6 +67,56 @@ keys: enter send · shift+enter/alt+enter/ctrl+j newline · shift+tab auto/plan 
   (setf (tui-partial tui) "")
   (when note (scroll tui (dim note))))
 
+(defparameter *resume-summary-max-chars* 96
+  "Maximum characters of leaf user prompt shown in /resume session lists.")
+
+(defun %collapse-whitespace (text)
+  (string-join " "
+               (remove "" (uiop:split-string (or text "")
+                                               :separator '(#\Space #\Tab #\Newline #\Return))
+                       :test #'string=)))
+
+(defun %truncate-with-ellipsis (text max-chars)
+  (cond ((<= (length text) max-chars) text)
+        ((<= max-chars 0) "")
+        (t (concatenate 'string (subseq text 0 (1- max-chars)) "…"))))
+
+(defun resume-summary-text (text &key (max-chars *resume-summary-max-chars*))
+  "Single-line, bounded summary for a leaf user prompt."
+  (let ((clean (%collapse-whitespace text)))
+    (unless (zerop (length clean))
+      (%truncate-with-ellipsis clean max-chars))))
+
+(defun message-text-block (message)
+  (pget (find :text (pget message :content)
+              :key (lambda (b) (pget b :type)))
+        :text))
+
+(defun leaf-user-prompt (journal)
+  "Last user text on JOURNAL's current leaf path, or NIL."
+  (loop for entry in (reverse (entry-path journal))
+        for message = (and (eq (pget entry :type) :message)
+                           (pget entry :message))
+        when (and message (eq (pget message :role) :user))
+          return (message-text-block message)))
+
+(defun resume-session-summary (session)
+  "Dimmed description text for one /resume SESSION row."
+  (let ((prompt (ignore-errors
+                  (leaf-user-prompt (open-journal (pget session :path))))))
+    (and prompt (resume-summary-text prompt))))
+
+(defun resume-select-items (sessions &key timezone-name)
+  "Build choose-box items for /resume: local time label + leaf prompt summary."
+  (let ((timezone-name (or timezone-name (local-timezone-name))))
+    (loop for s in sessions
+          for i from 1
+          collect (list (format nil "~2d. ~a" i
+                                (format-local-timestamp (pget s :timestamp)
+                                                        :timezone-name timezone-name))
+                        (pget s :path)
+                        (resume-session-summary s)))))
+
 (defun resume-command (tui)
   (when (require-idle tui "/resume")
     (let ((sessions (list-sessions)))
@@ -74,10 +124,7 @@ keys: enter send · shift+enter/alt+enter/ctrl+j newline · shift+tab auto/plan 
           (scroll tui (dim "no sessions for this directory"))
           (enter-select
            tui "resume session:"
-           (loop for s in sessions
-                 for i from 1
-                 collect (cons (format nil "~2d. ~a" i (pget s :timestamp))
-                               (pget s :path)))
+           (resume-select-items sessions)
            (lambda (path)
              (switch-journal tui (open-journal path)
                              :note (format nil "resumed ~a" path))
