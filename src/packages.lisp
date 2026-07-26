@@ -39,7 +39,8 @@
   (:use :cl :evo.util)
   (:export #:find-model #:*models* #:model-context-window #:model-max-output
            #:call-provider #:provider-error
-           #:parse-sse-stream #:thinking-budget
+           #:parse-sse-stream #:parse-responses-sse-stream
+           #:thinking-budget #:reasoning-effort
            #:message-role #:message-content #:message-stop-reason
            #:usage-total-tokens #:message-usage #:message-cost))
 

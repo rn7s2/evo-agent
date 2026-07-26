@@ -1,4 +1,6 @@
-;;;; provider.lisp — the Anthropic Messages adapter.
+;;;; provider.lisp — the Anthropic Messages adapter, plus the provider
+;;;; infrastructure both adapters share (JSON bridge, handoff pass, HTTP +
+;;;; retry, dispatch).  The OpenAI Responses adapter is provider-openai.lisp.
 ;;;;
 ;;;; One unified message model; stateless replay (full history each request);
 ;;;; hand-rolled SSE; errors are data — this layer never signals into the
@@ -381,7 +383,56 @@ content wins (some proxies report end_turn alongside tool_use blocks)."
        (list :base-url (or (pget conf :base-url) "https://api.anthropic.com")
              :api-key (or (pget conf :api-key)
                           (getenv (or (pget conf :api-key-env) "ANTHROPIC_API_KEY"))
+                          "")))
+      (:openai
+       (list :base-url (or (pget conf :base-url) "https://api.openai.com")
+             :api-key (or (pget conf :api-key)
+                          (getenv (or (pget conf :api-key-env) "OPENAI_API_KEY"))
                           ""))))))
+
+(defun url-host (url)
+  (let* ((start (let ((p (search "://" url))) (if p (+ p 3) 0)))
+         (end (or (position-if (lambda (c) (member c '(#\/ #\: #\?))) url
+                               :start start)
+                  (length url))))
+    (subseq url start end)))
+
+(defun proxy-bypass-p (host)
+  "True when HOST must skip the proxy: loopback always, plus no_proxy /
+NO_PROXY entries (comma-separated; an entry matches itself and its
+subdomains; * matches everything)."
+  (flet ((suffix-p (suffix s)
+           (let ((n (- (length s) (length suffix))))
+             (and (>= n 0) (string-equal suffix s :start2 n)))))
+    (or (member host '("localhost" "127.0.0.1" "::1") :test #'string-equal)
+        (let ((no-proxy (or (getenv "no_proxy") (getenv "NO_PROXY"))))
+          (and no-proxy
+               (loop for start = 0 then (1+ end)
+                     for end = (or (position #\, no-proxy :start start)
+                                   (length no-proxy))
+                     for entry = (string-trim " " (subseq no-proxy start end))
+                     thereis (and (plusp (length entry))
+                                  (or (string= entry "*")
+                                      (string-equal entry host)
+                                      (suffix-p (if (char= (char entry 0) #\.)
+                                                    entry
+                                                    (concatenate 'string "." entry))
+                                                host)))
+                     until (= end (length no-proxy))))))))
+
+(defun env-proxy (url)
+  "Proxy for URL from the environment.  Passed explicitly on every
+request: dexador's *default-proxy* only reads the UPPERCASE env vars, and
+via a defvar evaluated at image build time — so in the shipped binary it
+is stale on top of missing the lowercase Unix convention."
+  (flet ((nonempty (name)
+           (let ((v (getenv name)))
+             (and v (plusp (length v)) v))))
+    (let ((proxy (or (nonempty "HTTPS_PROXY") (nonempty "https_proxy")
+                     (nonempty "HTTP_PROXY") (nonempty "http_proxy"))))
+      (and proxy
+           (not (proxy-bypass-p (url-host url)))
+           proxy))))
 
 (defun retryable-status-p (status)
   (or (member status '(408 409 429 425 529))
@@ -402,93 +453,115 @@ content wins (some proxies report end_turn alongside tool_use blocks)."
 
 (defparameter *max-attempts* 4)
 
-(defun call-provider (&key model system messages tools thinking-level on-event abort-flag)
+(defun call-provider (&key model system messages tools thinking-level cache-key
+                           on-event abort-flag)
   "Make one streamed request.  ALWAYS returns an assistant message plist —
-errors come back as data with :stop-reason :error/:aborted, never signals."
+errors come back as data with :stop-reason :error/:aborted, never signals.
+Dispatches on the model's :api tag.  CACHE-KEY (the session id) becomes
+prompt_cache_key on OpenAI; Anthropic uses cache_control breakpoints instead."
   (let* ((model (if (consp model) model (find-model model)))
          (config (provider-config (pget model :provider)))
-         (url (concatenate 'string (string-right-trim "/" (pget config :base-url))
-                           "/v1/messages"))
-         (body (build-request-json :model model :system system :messages messages
-                                   :tools tools :thinking-level thinking-level))
-         (headers `(("content-type" . "application/json")
-                    ("x-api-key" . ,(pget config :api-key))
-                    ("anthropic-version" . "2023-06-01")))
+         (base-url (string-right-trim "/" (pget config :base-url)))
          (last-error nil))
-    (flet ((finish (result)
-             (let* ((usage (pget result :usage))
-                    (usage (pput usage :cost-usd (compute-cost model usage))))
-               (append (list :role :assistant
-                             :api (pget model :api)
-                             :provider (pget model :provider)
-                             :model (pget model :id)
-                             :stop-reason (pget result :stop-reason)
-                             :usage usage
-                             :content (pget result :content))
-                       (when (pget result :error-message)
-                         (list :error-message (pget result :error-message))))))
-           (error-message (text retryable)
-             (list :role :assistant
-                   :api (pget model :api) :provider (pget model :provider)
-                   :model (pget model :id)
-                   :stop-reason :error :error-message text
-                   :retryable (and retryable t)
-                   :usage (list :input 0 :output 0 :cache-read 0 :cache-write 0 :cost-usd 0)
-                   :content nil)))
-      (dotimes (attempt *max-attempts*
-                        (error-message (format nil "Provider request failed after ~d attempts: ~a"
-                                               *max-attempts* last-error)
-                                       t))
-        (let ((outcome
-                (handler-case
-                    (let ((stream (dex:post url :headers headers :content body
-                                                :want-stream t :force-binary t
-                                                :keep-alive nil
-                                                :connect-timeout 15
-                                                :read-timeout 600)))
-                      (unwind-protect
-                           (let* ((chars (flexi-streams:make-flexi-stream
-                                          stream :external-format :utf-8))
-                                  (result (parse-sse-stream chars :on-event on-event
+    (multiple-value-bind (url headers body parser)
+        (ecase (pget model :api)
+          (:anthropic-messages
+           (values (concatenate 'string base-url "/v1/messages")
+                   `(("content-type" . "application/json")
+                     ("x-api-key" . ,(pget config :api-key))
+                     ("anthropic-version" . "2023-06-01"))
+                   (build-request-json :model model :system system :messages messages
+                                       :tools tools :thinking-level thinking-level)
+                   #'parse-sse-stream))
+          (:openai-responses
+           ;; Late-bound: the builder/parser live in provider-openai.lisp,
+           ;; which loads after this file.
+           (values (concatenate 'string base-url "/v1/responses")
+                   `(("content-type" . "application/json")
+                     ("authorization" . ,(concatenate 'string "Bearer "
+                                                      (pget config :api-key))))
+                   (funcall 'build-responses-request-json
+                            :model model :system system :messages messages
+                            :tools tools :thinking-level thinking-level
+                            :cache-key cache-key)
+                   'parse-responses-sse-stream)))
+      (flet ((finish (result)
+               (let* ((usage (pget result :usage))
+                      (usage (pput usage :cost-usd (compute-cost model usage))))
+                 (append (list :role :assistant
+                               :api (pget model :api)
+                               :provider (pget model :provider)
+                               :model (pget model :id)
+                               :stop-reason (pget result :stop-reason)
+                               :usage usage
+                               :content (pget result :content))
+                         (when (pget result :error-message)
+                           (list :error-message (pget result :error-message))))))
+             (error-message (text retryable)
+               (list :role :assistant
+                     :api (pget model :api) :provider (pget model :provider)
+                     :model (pget model :id)
+                     :stop-reason :error :error-message text
+                     :retryable (and retryable t)
+                     :usage (list :input 0 :output 0 :cache-read 0 :cache-write 0 :cost-usd 0)
+                     :content nil)))
+        (dotimes (attempt *max-attempts*
+                          (error-message (format nil "Provider request failed after ~d attempts: ~a"
+                                                 *max-attempts* last-error)
+                                         t))
+          (let ((outcome
+                  (handler-case
+                      (let ((stream (apply #'dex:post url
+                                           :headers headers :content body
+                                           :want-stream t :force-binary t
+                                           :keep-alive nil
+                                           :connect-timeout 15
+                                           :read-timeout 600
+                                           (let ((proxy (env-proxy url)))
+                                             (when proxy (list :proxy proxy))))))
+                        (unwind-protect
+                             (let* ((chars (flexi-streams:make-flexi-stream
+                                            stream :external-format :utf-8))
+                                    (result (funcall parser chars :on-event on-event
                                                                   :abort-flag abort-flag)))
-                             (cond
-                               ((pget result :aborted-p)
-                                (list :done (error-message "Aborted by user" nil)))
-                               ((pget result :error-message)
-                                (list :retry (pget result :error-message) nil))
-                               ((not (pget result :stopped-p))
-                                (list :retry "Stream ended without message_stop (truncated response)" nil))
-                               (t (list :done (finish result)))))
-                        (ignore-errors (close stream))))
-                  (dexador.error:http-request-failed (e)
-                    (let* ((status (dexador.error:response-status e))
-                           (body (ignore-errors
-                                  (let ((b (dexador.error:response-body e)))
-                                    (if (streamp b)
-                                        (ignore-errors
-                                         (let ((fb (flexi-streams:make-flexi-stream
-                                                    b :external-format :utf-8)))
-                                           (with-output-to-string (s)
-                                             (loop for line = (read-line fb nil)
-                                                   while line do (write-line line s)))))
-                                        (format nil "~a" b)))))
-                           (text (format nil "HTTP ~a: ~a" status
-                                         (truncate-string (or body "") 2000))))
-                      (if (retryable-status-p status)
-                          (list :retry text (parse-retry-after (dexador.error:response-headers e)))
-                          (list :done (error-message text nil)))))
-                  (provider-error (e)
-                    (list :done (error-message (provider-error-message e) nil)))
-                  (error (e)
-                    (list :retry (format nil "~a: ~a" (type-of e) e) nil)))))
-          (ecase (first outcome)
-            (:done (return (second outcome)))
-            (:retry
-             (setf last-error (second outcome))
-             (when (and abort-flag (funcall abort-flag))
-               (return (error-message "Aborted by user" nil)))
-             (let ((delay (retry-delay attempt (third outcome))))
-               (cond ((null delay)
-                      (return (error-message last-error t)))
-                     ((< attempt (1- *max-attempts*))
-                      (sleep delay)))))))))))
+                               (cond
+                                 ((pget result :aborted-p)
+                                  (list :done (error-message "Aborted by user" nil)))
+                                 ((pget result :error-message)
+                                  (list :retry (pget result :error-message) nil))
+                                 ((not (pget result :stopped-p))
+                                  (list :retry "Stream ended without a terminal event (truncated response)" nil))
+                                 (t (list :done (finish result)))))
+                          (ignore-errors (close stream))))
+                    (dexador.error:http-request-failed (e)
+                      (let* ((status (dexador.error:response-status e))
+                             (body (ignore-errors
+                                    (let ((b (dexador.error:response-body e)))
+                                      (if (streamp b)
+                                          (ignore-errors
+                                           (let ((fb (flexi-streams:make-flexi-stream
+                                                      b :external-format :utf-8)))
+                                             (with-output-to-string (s)
+                                               (loop for line = (read-line fb nil)
+                                                     while line do (write-line line s)))))
+                                          (format nil "~a" b)))))
+                             (text (format nil "HTTP ~a: ~a" status
+                                           (truncate-string (or body "") 2000))))
+                        (if (retryable-status-p status)
+                            (list :retry text (parse-retry-after (dexador.error:response-headers e)))
+                            (list :done (error-message text nil)))))
+                    (provider-error (e)
+                      (list :done (error-message (provider-error-message e) nil)))
+                    (error (e)
+                      (list :retry (format nil "~a: ~a" (type-of e) e) nil)))))
+            (ecase (first outcome)
+              (:done (return (second outcome)))
+              (:retry
+               (setf last-error (second outcome))
+               (when (and abort-flag (funcall abort-flag))
+                 (return (error-message "Aborted by user" nil)))
+               (let ((delay (retry-delay attempt (third outcome))))
+                 (cond ((null delay)
+                        (return (error-message last-error t)))
+                       ((< attempt (1- *max-attempts*))
+                        (sleep delay))))))))))))

@@ -130,6 +130,8 @@ plugs in here.")
             :messages messages
             :model (find-model model-id)
             :thinking thinking
+            ;; Session id = OpenAI prompt_cache_key (cache affinity).
+            :cache-key (pget (evo.journal:journal-header (agent-journal agent)) :id)
             :system (build-system-prompt tools :lore (all-lore :state state))))))
 
 ;;; Tool batch execution (sequential) with :tool-call interception —
@@ -227,6 +229,7 @@ Returns :stop :length :error :aborted."
                       :messages (pget ctx :messages)
                       :tools (mapcar #'tool->provider-spec (pget ctx :tools))
                       :thinking-level (pget ctx :thinking)
+                      :cache-key (pget ctx :cache-key)
                       :abort-flag (lambda () (agent-abort-flag agent))
                       :on-event (lambda (ev) (apply #'emit-event agent ev)))))
               (append-entry (agent-journal agent) (list :type :message :message assistant))

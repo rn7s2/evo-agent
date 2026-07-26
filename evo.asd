@@ -15,6 +15,7 @@
                              (:file "journal")
                              (:file "model-table")
                              (:file "provider")
+                             (:file "provider-openai")
                              (:file "tools")
                              (:file "prompt")
                              (:file "loop")

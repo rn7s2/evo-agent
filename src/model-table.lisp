@@ -19,6 +19,17 @@
     (:id "claude-haiku-4-5-20251001" :provider :anthropic :api :anthropic-messages
      :context-window 200000 :max-output 64000 :thinking t
      :cost (:input 1 :output 5 :cache-read 1/10 :cache-write 5/4))
+    ;; OpenAI Responses API models (272k input window; long-context
+    ;; surcharge tiers above that are not modeled).
+    (:id "gpt-5.6-sol" :provider :openai :api :openai-responses
+     :context-window 272000 :max-output 128000 :thinking t
+     :cost (:input 5 :output 30 :cache-read 1/2 :cache-write 25/4))
+    (:id "gpt-5.6-terra" :provider :openai :api :openai-responses
+     :context-window 272000 :max-output 128000 :thinking t
+     :cost (:input 5/2 :output 15 :cache-read 1/4 :cache-write 25/8))
+    (:id "gpt-5.6-luna" :provider :openai :api :openai-responses
+     :context-window 272000 :max-output 128000 :thinking t
+     :cost (:input 1 :output 6 :cache-read 1/10 :cache-write 5/4))
     ;; Local test proxy models (Anthropic Messages wire format).
     (:id "ark-deepseek-v4-pro" :provider :anthropic :api :anthropic-messages
      :context-window 1000000 :max-output 64000 :thinking t
@@ -52,4 +63,15 @@
     (:medium 8192)
     (:high 16384)
     (:xhigh 32768)
+    (t nil)))
+
+;;; Thinking levels → OpenAI reasoning effort.  NIL = reasoning off (the
+;;; adapter then sends an explicit effort "none").
+(defun reasoning-effort (level)
+  (case level
+    ((nil :off) nil)
+    (:low "low")
+    (:medium "medium")
+    (:high "high")
+    (:xhigh "xhigh")
     (t nil)))

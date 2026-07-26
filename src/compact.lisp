@@ -192,4 +192,5 @@ retain the tail on the :compaction entry.  Returns the entry."
              (search "too many tokens" text)
              (search "context length" text)
              (search "maximum context" text)
-             (search "context_length" text)))))
+             (search "context_length" text)
+             (search "exceeds the context window" text)))))

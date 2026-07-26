@@ -178,6 +178,182 @@ event: message_stop~%data: {\"type\":\"message_stop\"}~%~%"))
                    :key (lambda (b) (pget b :type))))
       (check "handoff no spurious synthesis" (= 3 (length out2))))))
 
+;;; OpenAI Responses SSE parsing
+
+(defparameter *oai-sse-sample*
+  (format nil "event: response.created~%data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-5.6-luna\"}}~%~%~
+event: response.output_item.added~%data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_1\",\"summary\":[]}}~%~%~
+event: response.reasoning_summary_text.delta~%data: {\"type\":\"response.reasoning_summary_text.delta\",\"output_index\":0,\"delta\":\"think\"}~%~%~
+event: response.output_item.done~%data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_1\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"think\"}],\"encrypted_content\":\"ENC\"}}~%~%~
+event: response.output_item.added~%data: {\"type\":\"response.output_item.added\",\"output_index\":1,\"item\":{\"type\":\"message\",\"id\":\"msg_1\",\"role\":\"assistant\",\"content\":[]}}~%~%~
+event: response.output_text.delta~%data: {\"type\":\"response.output_text.delta\",\"output_index\":1,\"delta\":\"hel\"}~%~%~
+event: response.output_text.delta~%data: {\"type\":\"response.output_text.delta\",\"output_index\":1,\"delta\":\"lo\"}~%~%~
+event: response.output_item.done~%data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"type\":\"message\",\"id\":\"msg_1\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"hello\"}]}}~%~%~
+event: response.output_item.added~%data: {\"type\":\"response.output_item.added\",\"output_index\":2,\"item\":{\"type\":\"function_call\",\"id\":\"fc_1\",\"call_id\":\"call_1\",\"name\":\"bash\",\"arguments\":\"\"}}~%~%~
+event: response.function_call_arguments.delta~%data: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":2,\"delta\":\"{\\\"comm\"}~%~%~
+event: response.function_call_arguments.delta~%data: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":2,\"delta\":\"and\\\": \\\"ls\\\"}\"}~%~%~
+event: response.completed~%data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-5.6-luna\",\"status\":\"completed\",\"usage\":{\"input_tokens\":100,\"input_tokens_details\":{\"cached_tokens\":40},\"output_tokens\":10}}}~%~%"))
+
+(defun test-openai-sse ()
+  (let* ((events nil)
+         (result (with-input-from-string (in *oai-sse-sample*)
+                   (parse-responses-sse-stream
+                    in :on-event (lambda (ev) (push ev events))))))
+    (check "oai sse stopped" (pget result :stopped-p))
+    (check "oai sse stop reason inferred" (eq (pget result :stop-reason) :tool-use))
+    (check "oai sse model" (equal (pget result :model) "gpt-5.6-luna"))
+    (check "oai sse usage unbundles cached"
+           (let ((u (pget result :usage)))
+             (and (= (pget u :input) 60) (= (pget u :cache-read) 40)
+                  (= (pget u :output) 10))))
+    (let ((blocks (pget result :content)))
+      (check "oai sse three blocks" (= 3 (length blocks)))
+      (check "oai sse thinking summary"
+             (and (eq (pget (first blocks) :type) :thinking)
+                  (equal (pget (first blocks) :thinking) "think")))
+      (check "oai sse reasoning item kept for replay"
+             (equal (pget (pget (first blocks) :item) :encrypted-content) "ENC"))
+      (check "oai sse text with item id"
+             (and (equal (pget (second blocks) :text) "hello")
+                  (equal (pget (second blocks) :item-id) "msg_1")))
+      (check "oai sse tool call ids"
+             (and (equal (pget (third blocks) :id) "call_1")
+                  (equal (pget (third blocks) :item-id) "fc_1")))
+      (check "oai sse tool args across chunks"
+             (equal (pget (pget (third blocks) :arguments) :command) "ls")))
+    (check "oai sse tool-call-start event carries call_id"
+           (let ((ev (find :tool-call-start events
+                           :key (lambda (e) (pget e :type)))))
+             (equal (pget ev :id) "call_1"))))
+  ;; A stream without a terminal response event is truncation (retry material).
+  (let ((result (with-input-from-string
+                    (in (format nil "event: response.created~%data: {\"type\":\"response.created\",\"response\":{}}~%~%"))
+                  (parse-responses-sse-stream in))))
+    (check "oai sse truncation detected" (not (pget result :stopped-p))))
+  ;; incomplete + max_output_tokens -> :length.
+  (let ((result (with-input-from-string
+                    (in (format nil "event: response.incomplete~%data: {\"type\":\"response.incomplete\",\"response\":{\"status\":\"incomplete\",\"incomplete_details\":{\"reason\":\"max_output_tokens\"},\"usage\":{\"input_tokens\":5,\"output_tokens\":7}}}~%~%"))
+                  (parse-responses-sse-stream in))))
+    (check "oai sse incomplete -> length"
+           (and (pget result :stopped-p)
+                (eq (pget result :stop-reason) :length)))))
+
+;;; OpenAI Responses request building
+
+(defun test-openai-request ()
+  (let* ((item '(:type "reasoning" :id "rs_1"
+                 :summary #((:type "summary_text" :text "s"))
+                 :encrypted-content "ENC"))
+         (history
+           (list '(:role :user :content ((:type :text :text "go")))
+                 (list :role :assistant :model "gpt-5.6-luna" :stop-reason :tool-use
+                       :usage '(:input 1 :output 1 :cache-read 0 :cache-write 0)
+                       :content (list (list :type :thinking :thinking "s" :item item)
+                                      '(:type :text :text "working" :item-id "msg_1")
+                                      '(:type :tool-call :id "call_a" :item-id "fc_a"
+                                        :name "bash" :arguments (:command "ls"))))
+                 '(:role :tool-result :tool-call-id "call_a" :tool-name "bash"
+                   :is-error nil :content ((:type :text :text "ok")))))
+         (tools (list (list :name "bash" :description "run"
+                            :input-schema (schema->json-schema
+                                           '(:object (:command :type :string :description "c"))))))
+         (raw (evo.provider::build-responses-request-json
+               :model (find-model "gpt-5.6-luna") :system "sys" :messages history
+               :tools tools :thinking-level :high :cache-key "sess-1"))
+         (req (com.inuoe.jzon:parse raw)))
+    (flet ((jget (&rest keys) (apply #'evo.provider::jget req keys)))
+      (check "oai req store false" (search "\"store\":false" raw))
+      (check "oai req instructions" (equal (jget "instructions") "sys"))
+      (check "oai req effort" (equal (jget "reasoning" "effort") "high"))
+      (check "oai req include encrypted reasoning"
+             (find "reasoning.encrypted_content" (jget "include") :test #'equal))
+      (check "oai req cache key" (equal (jget "prompt_cache_key") "sess-1"))
+      (check "oai req max output" (= (jget "max_output_tokens") 128000))
+      (check "oai req flat function tool"
+             (let ((tl (aref (jget "tools") 0)))
+               (and (equal (evo.provider::jget tl "type") "function")
+                    (equal (evo.provider::jget tl "name") "bash")
+                    (evo.provider::jget tl "parameters"))))
+      (let ((input (jget "input")))
+        (check "oai req item order"
+               (equal (map 'list (lambda (i) (evo.provider::jget i "type")) input)
+                      '("message" "reasoning" "message" "function_call"
+                        "function_call_output")))
+        (check "oai req reasoning replayed verbatim"
+               (and (equal (evo.provider::jget (aref input 1) "id") "rs_1")
+                    (equal (evo.provider::jget (aref input 1) "encrypted_content") "ENC")))
+        (check "oai req same-model ids kept"
+               (and (equal (evo.provider::jget (aref input 2) "id") "msg_1")
+                    (equal (evo.provider::jget (aref input 3) "id") "fc_a")))
+        (check "oai req function call wire form"
+               (and (equal (evo.provider::jget (aref input 3) "call_id") "call_a")
+                    (equal (pget (evo.provider::json->sexpr
+                                  (com.inuoe.jzon:parse
+                                   (evo.provider::jget (aref input 3) "arguments")))
+                                 :command)
+                           "ls")))
+        (check "oai req tool result output"
+               (and (equal (evo.provider::jget (aref input 4) "call_id") "call_a")
+                    (equal (evo.provider::jget (aref input 4) "output") "ok")))))
+    ;; Model switch: handoff drops the reasoning item; item ids don't replay
+    ;; (the server validates fc_*<->rs_* same-response pairing).
+    (let* ((raw2 (evo.provider::build-responses-request-json
+                  :model (find-model "gpt-5.6-sol") :system "sys" :messages history
+                  :thinking-level :high))
+           (input (evo.provider::jget (com.inuoe.jzon:parse raw2) "input")))
+      (check "oai req cross-model drops reasoning"
+             (equal (map 'list (lambda (i) (evo.provider::jget i "type")) input)
+                    '("message" "message" "function_call" "function_call_output")))
+      (check "oai req cross-model drops item ids"
+             (and (null (evo.provider::jget (aref input 1) "id"))
+                  (null (evo.provider::jget (aref input 2) "id")))))
+    ;; Thinking off: explicit effort none, no encrypted-content include.
+    (let ((raw3 (evo.provider::build-responses-request-json
+                 :model (find-model "gpt-5.6-luna") :messages history
+                 :thinking-level :off)))
+      (check "oai req thinking off -> effort none"
+             (equal (evo.provider::jget (com.inuoe.jzon:parse raw3)
+                                        "reasoning" "effort")
+                    "none"))
+      (check "oai req thinking off -> no include"
+             (not (search "reasoning.encrypted_content" raw3))))))
+
+;;; Proxy env detection
+
+(defun test-env-proxy ()
+  (let ((saved (mapcar (lambda (v) (cons v (getenv v)))
+                       '("HTTPS_PROXY" "https_proxy" "HTTP_PROXY" "http_proxy"
+                         "NO_PROXY" "no_proxy")))
+        (url "https://api.openai.com/v1/responses"))
+    (unwind-protect
+         (progn
+           (dolist (pair saved) (evo.port:setenv (car pair) ""))
+           (check "no proxy env" (null (evo.provider::env-proxy url)))
+           (evo.port:setenv "http_proxy" "http://lower:3128")
+           (check "lowercase http_proxy detected"
+                  (equal (evo.provider::env-proxy url) "http://lower:3128"))
+           (evo.port:setenv "https_proxy" "http://lowers:3128")
+           (check "lowercase https_proxy preferred"
+                  (equal (evo.provider::env-proxy url) "http://lowers:3128"))
+           (evo.port:setenv "HTTPS_PROXY" "http://upper:3128")
+           (check "uppercase still wins"
+                  (equal (evo.provider::env-proxy url) "http://upper:3128"))
+           (check "loopback bypasses proxy"
+                  (null (evo.provider::env-proxy "http://127.0.0.1:8787/v1/messages")))
+           (check "localhost bypasses proxy"
+                  (null (evo.provider::env-proxy "http://localhost:8787/v1/messages")))
+           (evo.port:setenv "no_proxy" "example.com, openai.com")
+           (check "no_proxy suffix match bypasses"
+                  (null (evo.provider::env-proxy url)))
+           (evo.port:setenv "no_proxy" "example.com")
+           (check "no_proxy non-match still proxies"
+                  (equal (evo.provider::env-proxy url) "http://upper:3128"))
+           (evo.port:setenv "no_proxy" "*")
+           (check "no_proxy star bypasses everything"
+                  (null (evo.provider::env-proxy url))))
+      (dolist (pair saved)
+        (evo.port:setenv (car pair) (or (cdr pair) ""))))))
+
 ;;; Editor
 
 (defun test-editor ()
@@ -707,6 +883,9 @@ event: message_stop~%data: {\"type\":\"message_stop\"}~%~%"))
     (test-schema)
     (test-sse)
     (test-handoff)
+    (test-openai-sse)
+    (test-openai-request)
+    (test-env-proxy)
     (test-editor)
     (test-input)
     (test-tui-compose)

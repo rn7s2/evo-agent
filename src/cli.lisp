@@ -33,7 +33,8 @@ a goal that was active picks itself back up.  Exit codes: 0 done, 1 error,
 
 Settings: ~/.evo/settings.sexp and <cwd>/.evo/settings.sexp (project wins), e.g.
   (:model \"ark-deepseek-v4-pro\" :thinking :xhigh
-   :providers (:anthropic (:base-url \"http://127.0.0.1:8787\" :api-key \"sk-...\")))")
+   :providers (:anthropic (:base-url \"http://127.0.0.1:8787\" :api-key \"sk-...\")
+               :openai (:api-key-env \"OPENAI_API_KEY\")))")
 
 (defun parse-args (argv)
   "Parse ARGV into a plist.  Signals on unknown flags."

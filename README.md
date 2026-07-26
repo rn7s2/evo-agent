@@ -45,7 +45,11 @@ design; this README covers what is implemented and how to run it.
   transform-context filtering), git-checkpoint and permission-gate
   ([extensions/examples/](extensions/examples/)).
 
-Post-v1 by design: OpenAI Responses adapter, sub-agents.
+- **Two provider adapters** on one unified message model — Anthropic
+  Messages and OpenAI Responses (stateless replay with `store: false`,
+  encrypted reasoning round-trip, `prompt_cache_key` = session id).
+
+Post-v1 by design: sub-agents.
 
 ## One binary
 
