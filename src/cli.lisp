@@ -154,7 +154,12 @@ Settings: ~/.evo/settings.sexp and <cwd>/.evo/settings.sexp (project wins), e.g.
 
 (defun toplevel ()
   "Entry point of the built binary (SBCL image toplevel / ECL epilogue):
-debugger off, in-image compiler on, exit code from MAIN."
+fresh id entropy, debugger off, in-image compiler on, exit code from MAIN.
+
+RESEED-IDS comes first and must stay there: the saved image carries the
+random state it was built with, so every id minted before this call would
+repeat across processes."
+  (reseed-ids)
   (evo.port:disable-debugger)
   (evo.port:ensure-in-image-compiler)
   (evo.port:exit-lisp (main)))

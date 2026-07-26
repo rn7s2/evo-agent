@@ -18,11 +18,15 @@
 (defun reseed-ids ()
   "Re-seed id generation from OS entropy.  MUST run at process startup: a
 save-lisp-and-die image bakes the load-time random state, so without this
-every process would emit the identical id sequence — and a resumed session
-would reuse ids already in its journal, corrupting the parent tree."
-  (setf *id-random-state* (make-random-state t)))
+every process would emit the identical id sequence — two agents started
+separately would pick the same goal id and the same session id, and a resumed
+session would reuse ids already in its journal, corrupting the parent tree.
 
-(uiop:register-image-restore-hook 'reseed-ids nil)
+Called explicitly from EVO.CLI:TOPLEVEL, not via
+UIOP:REGISTER-IMAGE-RESTORE-HOOK: those hooks only fire from
+UIOP:RESTORE-IMAGE, which the binary never reaches — SBCL is saved with our
+own :toplevel and ECL with our own :epilogue-code."
+  (setf *id-random-state* (make-random-state t)))
 
 (defun gen-id (&optional (nibbles 8))
   "Short random hex id."

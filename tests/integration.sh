@@ -104,6 +104,43 @@ session5=$(ls -t "$EVO_HOME"/sessions/*work5*/*.sexp 2>/dev/null | head -1)
     && [ -n "$session5" ] && grep -q "(:type :compaction" "$session5"
 report $? "compaction fires mid-task, task completes"
 
+# --- Test 6: two separately launched agents mint distinct ids ------------
+# A save-lisp-and-die image bakes its load-time random state, so this can
+# only be caught against the built binary — in-process tests reseed per
+# process and always pass.  No model needed: the ids are minted before the
+# first provider call, so an unreachable base-url still proves the point.
+ids_of() {   # $1 = EVO_HOME -> "<session-id> <goal-id>"
+    sed -n 's/.*:id "\([0-9a-f]\{16\}\)".*/\1/p;s/.*:goal-id "\([^"]*\)".*/\1/p' \
+        "$1"/sessions/*/*.sexp 2>/dev/null | head -2 | tr '\n' ' '
+}
+work6="$scratch/work6"
+mkdir -p "$work6"
+# Launched together, in one cwd: the worst case for any clock-seeded RNG, and
+# the exact scenario that reported the collision.
+pids6=""
+for h in a b; do
+    mkdir -p "$scratch/home6$h"
+    echo '(:providers (:anthropic (:base-url "http://127.0.0.1:9" :api-key "sk-x")))' \
+        > "$scratch/home6$h/settings.sexp"
+    (cd "$work6" && EVO_HOME="$scratch/home6$h" "$evo" --goal "id collision probe" \
+        -p "hi" --no-supervisor --no-userspace) >/dev/null 2>&1 &
+    pids6="$pids6 $!"
+done
+# Both journals land once the first (failed) provider turn is recorded; poll
+# for them rather than sitting through the rest of the retry backoff.
+for i in $(seq 1 150); do
+    [ -n "$(find "$scratch/home6a/sessions" -name '*.sexp' 2>/dev/null | head -1)" ] &&
+        [ -n "$(find "$scratch/home6b/sessions" -name '*.sexp' 2>/dev/null | head -1)" ] && break
+    sleep 0.2
+done
+# Grouped redirect: swallows the shell's own "Killed: 9" job notice too.
+{ kill -9 $pids6; wait $pids6; } 2>/dev/null
+ids_a=$(ids_of "$scratch/home6a")
+ids_b=$(ids_of "$scratch/home6b")
+# Both runs must have produced ids (guards against a vacuous pass), and differ.
+[ -n "$(echo "$ids_a" | tr -d ' ')" ] && [ "$ids_a" != "$ids_b" ]
+report $? "separate processes mint distinct session/goal ids [$ids_a] vs [$ids_b]"
+
 echo
 echo "$pass passed, $fail failed (scratch: $scratch)"
 [ $fail -eq 0 ]
