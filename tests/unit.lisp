@@ -854,7 +854,7 @@ event: response.completed~%data: {\"type\":\"response.completed\",\"response\":{
     (check "up from first line recalls history"
            (equal (evo.tui::eb-text eb) "second message"))
     ;; /commands never enter history, so recall can't re-open the popup.
-    (evo.tui::history-remember tui "/plan")
+    (evo.tui::history-remember tui "/todo")
     (check "slash command not recorded"
            (= 2 (length (evo.tui::tui-history tui))))
     (evo.tui::history-remember tui "//not a command")
@@ -914,12 +914,28 @@ event: response.completed~%data: {\"type\":\"response.completed\",\"response\":{
         ;; /mode with an explicit arg
         (evo.tui::mode-command tui "auto")
         (check "mode arg switches" (equal (evo.tui::current-mode tui) "auto"))
-        ;; completion candidates include the new commands
+        ;; completion candidates include /mode, but plan/auto remain mode
+        ;; arguments only — not standalone slash commands.
         (let ((commands (evo.tui::all-commands)))
           (check "mode is a completion candidate"
                  (assoc "mode" commands :test #'string=))
           (check "exit is a completion candidate"
-                 (assoc "exit" commands :test #'string=)))))))
+                 (assoc "exit" commands :test #'string=))
+          (check "plan is not a completion candidate"
+                 (not (assoc "plan" commands :test #'string=)))
+          (check "auto is not a completion candidate"
+                 (not (assoc "auto" commands :test #'string=))))
+        (check "plan is not a builtin command"
+               (not (evo.tui::builtin-command tui "plan" "")))
+        (check "auto is not a builtin command"
+               (not (evo.tui::builtin-command tui "auto" "")))
+        (evo.tui::dispatch-command tui (format nil "/~a" "plan"))
+        (check "slash plan does not switch mode"
+               (equal (evo.tui::current-mode tui) "auto"))
+        (evo.tui::set-mode tui "plan")
+        (evo.tui::dispatch-command tui (format nil "/~a" "auto"))
+        (check "slash auto does not switch mode"
+               (equal (evo.tui::current-mode tui) "plan"))))))
 
 ;;; Goal budgets (default: no limit)
 
