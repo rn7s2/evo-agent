@@ -57,7 +57,8 @@
   (let* ((command (pget args :command))
          (timeout (min *bash-max-timeout*
                        (or (pget args :timeout) *bash-default-timeout*)))
-         (out-file (uiop:with-temporary-file (:pathname p :keep t) p)))
+         (out-file (uiop:with-temporary-file (:pathname p :keep t) p))
+         (agent *executing-agent*))
     (unless (and (stringp command) (plusp (length command)))
       (error "command must be a non-empty string"))
     (unwind-protect
@@ -65,17 +66,46 @@
          (let ((process (evo.port:launch-child
                          "/bin/sh" (list "-c" command)
                          :input nil :output out-file :error-output :output)))
-           (loop with deadline = (+ (get-internal-real-time)
-                                    (* timeout internal-time-units-per-second))
-                 while (evo.port:process-alive-p process)
-                 when (> (get-internal-real-time) deadline)
-                   do (evo.port:process-kill process)
-                      (evo.port:process-wait process)
-                      (error "Command timed out after ~ds. Partial output:~%~a"
-                             timeout (truncate-string
-                                      (or (ignore-errors (read-file-string out-file)) "")
-                                      10000))
-                 do (sleep 0.05))
+           (when agent
+             (with-abort-cleanup (agent (lambda ()
+                                          (when (evo.port:process-alive-p process)
+                                            (evo.port:process-kill-tree process))))
+               (loop with deadline = (+ (get-internal-real-time)
+                                        (* timeout internal-time-units-per-second))
+                     while (evo.port:process-alive-p process)
+                     when (agent-abort-flag agent)
+                       do (evo.port:process-kill-tree process)
+                          (evo.port:process-wait process)
+                          (error "Command aborted by user. Partial output:~%~a"
+                                 (truncate-string
+                                  (or (ignore-errors (read-file-string out-file)) "")
+                                  10000))
+                     when (> (get-internal-real-time) deadline)
+                       do (evo.port:process-kill-tree process)
+                          (evo.port:process-wait process)
+                          (error "Command timed out after ~ds. Partial output:~%~a"
+                                 timeout (truncate-string
+                                          (or (ignore-errors (read-file-string out-file)) "")
+                                          10000))
+                     do (sleep 0.05))
+               (when (agent-abort-flag agent)
+                 (evo.port:process-wait process)
+                 (error "Command aborted by user. Partial output:~%~a"
+                        (truncate-string
+                         (or (ignore-errors (read-file-string out-file)) "")
+                         10000)))))
+           (unless agent
+             (loop with deadline = (+ (get-internal-real-time)
+                                      (* timeout internal-time-units-per-second))
+                   while (evo.port:process-alive-p process)
+                   when (> (get-internal-real-time) deadline)
+                     do (evo.port:process-kill-tree process)
+                        (evo.port:process-wait process)
+                        (error "Command timed out after ~ds. Partial output:~%~a"
+                               timeout (truncate-string
+                                        (or (ignore-errors (read-file-string out-file)) "")
+                                        10000))
+                   do (sleep 0.05)))
            (let ((code (nth-value 1 (evo.port:process-wait process)))
                  (output (or (ignore-errors (read-file-string out-file)) "")))
              (values

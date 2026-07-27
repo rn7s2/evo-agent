@@ -214,24 +214,76 @@ is stale on top of missing the lowercase Unix convention."
 ;;; helpers above.
 
 (defmethod perform-request ((api provider-api) url headers body
-                            &key on-event abort-flag)
-  (let ((stream (apply #'dex:post url
-                       :headers headers :content body
-                       :want-stream t :force-binary t
-                       :keep-alive nil
-                       :connect-timeout 15
-                       :read-timeout 600
-                       (let ((proxy (env-proxy url)))
-                         (when proxy (list :proxy proxy))))))
-    (unwind-protect
-         (parse-stream api
-                       (flexi-streams:make-flexi-stream
-                        stream :external-format :utf-8)
-                       :on-event on-event :abort-flag abort-flag)
-      (ignore-errors (close stream)))))
+                            &key on-event abort-flag abort-cleanup &allow-other-keys)
+  (let ((stream nil)
+        (done nil)
+        (cancelled nil)
+        (result nil)
+        (condition nil))
+    (labels ((aborted-result ()
+               (list :aborted-p t :content nil :stop-reason :aborted
+                     :usage (list :input 0 :output 0
+                                  :cache-read 0 :cache-write 0)))
+             (aborted-p ()
+               (or cancelled (and abort-flag (funcall abort-flag))))
+             (abort-stream ()
+               (when stream
+                 (ignore-errors (close stream :abort t))))
+             (emit (event)
+               (unless (aborted-p)
+                 (when on-event (funcall on-event event))))
+             (request-body ()
+               (unwind-protect
+                    (handler-case
+                        (setf result
+                              (progn
+                                (when (aborted-p)
+                                  (return-from request-body (setf result (aborted-result))))
+                                (setf stream (apply #'dex:post url
+                                                    :headers headers :content body
+                                                    :want-stream t :force-binary t
+                                                    :keep-alive nil
+                                                    :connect-timeout 15
+                                                    :read-timeout 600
+                                                    (let ((proxy (env-proxy url)))
+                                                      (when proxy (list :proxy proxy)))))
+                                (if (aborted-p)
+                                    (aborted-result)
+                                    (parse-stream api
+                                                  (flexi-streams:make-flexi-stream
+                                                   stream :external-format :utf-8)
+                                                  :on-event #'emit
+                                                  :abort-flag #'aborted-p))))
+                      (serious-condition (e)
+                        (setf condition e)))
+                 (ignore-errors (close stream))
+                 (setf done t))))
+      (let* ((unregister (and abort-cleanup (funcall abort-cleanup #'abort-stream)))
+             (thread (bt:make-thread #'request-body :name "evo-provider-request")))
+        (unwind-protect
+             (loop
+               (cond (done
+                      (when condition (error condition))
+                      (return result))
+                     ((and abort-flag (funcall abort-flag))
+                      (abort-stream)
+                      (setf cancelled t)
+                      (return (aborted-result))))
+               (sleep 0.02))
+          (when unregister (funcall unregister))
+          (unless cancelled (ignore-errors (bt:join-thread thread))))))))
+
+(defun abortible-sleep (seconds abort-flag)
+  "Sleep up to SECONDS, waking quickly when ABORT-FLAG becomes true."
+  (loop with deadline = (+ (get-internal-real-time)
+                           (* seconds internal-time-units-per-second))
+        until (or (and abort-flag (funcall abort-flag))
+                  (>= (get-internal-real-time) deadline))
+        do (sleep (min 0.05 (/ (max 0 (- deadline (get-internal-real-time)))
+                               internal-time-units-per-second)))))
 
 (defun call-provider (&key model system messages tools thinking-level cache-key
-                           on-event abort-flag)
+                           on-event abort-flag abort-cleanup)
   "Make one streamed request.  ALWAYS returns an assistant message plist —
 errors come back as data with :stop-reason :error/:aborted, never signals.
 The model's :api tag names the wire API; its :provider names the endpoint
@@ -268,6 +320,14 @@ Anthropic uses cache_control breakpoints instead."
                    :stop-reason :error :error-message text
                    :retryable (and retryable t)
                    :usage (list :input 0 :output 0 :cache-read 0 :cache-write 0)
+                   :content nil))
+           (aborted-message (&optional usage)
+             (list :role :assistant
+                   :api (pget model :api) :provider (pget model :provider)
+                   :model (pget model :id)
+                   :stop-reason :aborted
+                   :usage (or usage (list :input 0 :output 0
+                                          :cache-read 0 :cache-write 0))
                    :content nil)))
       (dotimes (attempt *max-attempts*
                         (error-message (format nil "Provider request failed after ~d attempts: ~a"
@@ -277,10 +337,11 @@ Anthropic uses cache_control breakpoints instead."
                 (handler-case
                     (let ((result (perform-request api url headers body
                                                    :on-event on-event
-                                                   :abort-flag abort-flag)))
+                                                   :abort-flag abort-flag
+                                                   :abort-cleanup abort-cleanup)))
                       (cond
                         ((pget result :aborted-p)
-                         (list :done (error-message "Aborted by user" nil)))
+                         (list :done (aborted-message (pget result :usage))))
                         ((pget result :error-message)
                          (list :retry (pget result :error-message) nil))
                         ((not (pget result :stopped-p))
@@ -312,9 +373,11 @@ Anthropic uses cache_control breakpoints instead."
             (:retry
              (setf last-error (second outcome))
              (when (and abort-flag (funcall abort-flag))
-               (return (error-message "Aborted by user" nil)))
+               (return (aborted-message)))
              (let ((delay (retry-delay attempt (third outcome))))
                (cond ((null delay)
                       (return (error-message last-error t)))
                      ((< attempt (1- *max-attempts*))
-                      (sleep delay)))))))))))
+                      (abortible-sleep delay abort-flag)
+                      (when (and abort-flag (funcall abort-flag))
+                        (return (aborted-message)))))))))))))

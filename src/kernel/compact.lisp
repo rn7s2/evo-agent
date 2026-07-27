@@ -120,7 +120,7 @@ messages verbatim — they must survive the summary.")
                  (truncate-string
                   (or (pget (first (message-content m)) :text) "") 1500)))))))
 
-(defun summarize (model thinking messages previous-summary hint)
+(defun summarize (model thinking messages previous-summary hint &key abort-flag abort-cleanup)
   "One summarization call.  Returns the summary text or signals."
   (let* ((instruction
            (if previous-summary
@@ -136,7 +136,9 @@ messages verbatim — they must survive the summary.")
          (result (call-provider :model model
                                 :system "You are a precise summarizer of agent work sessions."
                                 :messages (list message)
-                                :thinking-level thinking)))
+                                :thinking-level thinking
+                                :abort-flag abort-flag
+                                :abort-cleanup abort-cleanup)))
     (when (eq (message-stop-reason result) :error)
       (error "Summarization failed: ~a" (pget result :error-message)))
     (let ((text (pget (find :text (message-content result)
@@ -168,7 +170,10 @@ retain the tail on the :compaction entry.  Returns the entry."
                                (or (evo.journal:state-thinking state) :low)
                                dropped
                                (and previous (pget previous :summary))
-                               (and (plusp (length (or hint ""))) hint)))))
+                               (and (plusp (length (or hint ""))) hint)
+                               :abort-flag (lambda () (agent-abort-flag agent))
+                               :abort-cleanup (lambda (cleanup)
+                                                (add-abort-cleanup agent cleanup))))))
     (multiple-value-bind (read-files modified) (collect-file-sets dropped)
       (let ((all-read (union (coerce (or (and previous (pget previous :files-read)) #()) 'list)
                              read-files :test #'equal))

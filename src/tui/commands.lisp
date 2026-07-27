@@ -465,9 +465,9 @@ here lines up the id column too — provider, id and context each align."
                           (ignore-errors
                             (scroll tui (red (format nil "✗ tui error: ~a" e))))))
                       (sleep 0.02)))
-           ;; Shut down: interrupt any in-flight run cooperatively.
+           ;; Shut down: interrupt any in-flight run cooperatively and unblock it.
            (when (tui-running tui)
-             (setf (agent-abort-flag agent) t)
+             (request-abort agent)
              (loop repeat 250
                    while (tui-running tui)
                    do (dolist (event (drain-events tui))
