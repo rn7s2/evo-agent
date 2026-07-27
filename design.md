@@ -488,7 +488,7 @@ user must be able to see structure and progress at a glance.
 - **Slash command resolution** (pi's order): extension commands → input hook →
   skills → templates → send to agent. Built-ins: `/goal /lore /mode
   /compact /tree /fork /resume /model /reload /export /help /quit /exit`.
-- **Modes** (`src/plan-mode.lisp`, package `EVO.PLAN`): `auto` (default:
+- **Modes** (`src/core-ext/plan-mode.lisp`, package `EVO.PLAN`): `auto` (default:
   fully permissive) and `plan`. The mode is journal state (`:custom "mode"`),
   never a flag, so it survives restart and every frontend reads the same
   value. Switching applies policy through the public API — tool gating

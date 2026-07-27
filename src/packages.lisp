@@ -6,7 +6,7 @@
 ;;;; both core and user extensions build on it, nothing bypasses it.
 
 ;; Implementation portability layer: the only package that may touch
-;; sb-* / ext: / si: symbols.  See src/port.lisp.
+;; sb-* / ext: / si: symbols.  See src/port/port.lisp.
 (defpackage :evo.port
   (:use :cl)
   (:export #:exit-lisp #:argv #:runtime-pathname #:environ #:setenv

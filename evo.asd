@@ -10,10 +10,19 @@
   :serial t
   :components ((:module "src"
                 :serial t
+                ;; One directory per component; each is a single package.
+                ;; Order is load order — foundations, kernel, then the
+                ;; extensions and frontends built on top of it.
                 :components ((:file "packages")
-                             (:file "port")
-                             (:file "util")
-                             (:file "journal")
+                             (:module "port"
+                              :serial t
+                              :components ((:file "port")))
+                             (:module "util"
+                              :serial t
+                              :components ((:file "util")))
+                             (:module "journal"
+                              :serial t
+                              :components ((:file "journal")))
                              (:module "provider"
                               :serial t
                               :components ((:file "api")
@@ -21,16 +30,22 @@
                                            (:file "core")
                                            (:file "anthropic")
                                            (:file "openai")))
-                             (:file "tools")
-                             (:file "prompt")
-                             (:file "loop")
-                             (:file "lore")
-                             (:file "compact")
-                             (:file "extension")
-                             (:file "builtin-tools")
-                             (:file "todo")
-                             (:file "goal")
-                             (:file "plan-mode")
+                             (:module "kernel"
+                              :serial t
+                              :components ((:file "tools")
+                                           (:file "prompt")
+                                           (:file "loop")
+                                           (:file "lore")
+                                           (:file "compact")
+                                           (:file "extension")
+                                           (:file "builtin-tools")
+                                           (:file "goal")))
+                             ;; Core extensions: bundled, but built on the
+                             ;; same public API as userspace ones.
+                             (:module "core-ext"
+                              :serial t
+                              :components ((:file "todo")
+                                           (:file "plan-mode")))
                              (:module "tui"
                               :serial t
                               :components ((:file "term")
@@ -40,8 +55,10 @@
                                            (:file "markdown")
                                            (:file "tui")
                                            (:file "commands")))
-                             (:file "cli")
-                             (:file "supervisor")))))
+                             (:module "cli"
+                              :serial t
+                              :components ((:file "cli")
+                                           (:file "supervisor")))))))
 
 (asdf:defsystem "evo/tests"
   :description "Unit tests for evo."

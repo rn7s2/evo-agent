@@ -1215,7 +1215,7 @@ event: response.completed~%data: {\"type\":\"response.completed\",\"response\":{
              (= before (length (gethash :tool-call evo.kernel::*event-hooks*)))))
     ;; Regression guard: plan mode lives in the image, not in a directory the
     ;; boot loader sweeps.
-    (when (probe-file (merge-pathnames "src/plan-mode.lisp" (uiop:getcwd)))
+    (when (probe-file (merge-pathnames "src/core-ext/plan-mode.lisp" (uiop:getcwd)))
       (check "plan mode is not also shipped as a userspace extension"
              (not (probe-file (merge-pathnames "extensions/plan-mode.lisp"
                                                (uiop:getcwd))))))))

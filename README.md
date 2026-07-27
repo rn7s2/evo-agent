@@ -46,8 +46,8 @@ design; this README covers what is implemented and how to run it.
   [docs/](docs/) (extension API, journal format, self-extension guide) and
   example extensions — git-checkpoint and permission-gate
   ([extensions/examples/](extensions/examples/)); nothing ships active in
-  `~/.evo/extensions`, and the bundled extensions ([todo](src/todo.lisp),
-  [plan mode](src/plan-mode.lisp)) are built on the same public API rather
+  `~/.evo/extensions`, and the bundled extensions ([todo](src/core-ext/todo.lisp),
+  [plan mode](src/core-ext/plan-mode.lisp)) are built on the same public API rather
   than reaching past it.
 
 - **Two provider adapters** on one unified message model — Anthropic
@@ -127,28 +127,56 @@ tests/plan-mode.exp # plan/auto mode wiring e2e
 
 ## Layout
 
+Every directory under `src/` is one component owning exactly one package;
+`evo.asd` lists them in load order, foundations first.
+
 ```text
-src/packages.lisp      package graph (kernel locked; EVO.USER open; EVO = public API)
-src/util.lisp          safe sexpr IO, settings store, ids
-src/journal.lisp       entry tree, write-ahead append, fold, fork, sessions
-src/provider/api.lisp       provider-API protocol (CLOS) + API registry
-src/provider/registry.lisp  model + provider registries (populated from init.lisp)
-src/provider/core.lisp      shared provider core: handoff, SSE transport, retries
-src/provider/anthropic.lisp Anthropic Messages API
-src/provider/openai.lisp    OpenAI Responses API
-src/tools.lisp         tool registry, sexpr schema -> JSON Schema
-src/prompt.lisp        system prompt assembly, skills, templates
-src/loop.lisp          agent, turn loop, run-until-settled, hooks, heartbeat
-src/lore.lisp          lore stores
-src/compact.lisp       compaction
-src/extension.lisp     load-extension, boot/replay, locks, EVO public API
-src/builtin-tools.lisp read / write / edit / bash
-src/todo.lisp          todo core extension
-src/goal.lisp          goal driver, audited tools, done-when
-src/plan-mode.lisp     plan/auto modes core extension: policy + enforcement hooks
-src/tui/               term, input, editor, render, tui, commands
-src/cli.lisp           arg parsing, print/event modes, session bring-up
-src/supervisor.lisp    in-binary supervision
-docs/                  seed corpus (also installed to ~/.evo/docs)
-extensions/examples/   reference-only example extensions (installed to ~/.evo/docs/examples)
+src/packages.lisp        the whole package graph (kernel locked; EVO.USER open;
+                         EVO = public API) — the one file shared by all components
+
+src/port/                EVO.PORT — implementation portability layer, the only
+  port.lisp              code allowed to touch sb-* / ext: / si: symbols
+src/util/                EVO.UTIL
+  util.lisp              safe sexpr IO, settings store, ids
+src/journal/             EVO.JOURNAL
+  journal.lisp           entry tree, write-ahead append, fold, fork, sessions
+
+src/provider/            EVO.PROVIDER
+  api.lisp               provider-API protocol (CLOS) + API registry
+  registry.lisp          model + provider registries (populated from init.lisp)
+  core.lisp              shared provider core: handoff, SSE transport, retries
+  anthropic.lisp         Anthropic Messages API
+  openai.lisp            OpenAI Responses API
+
+src/kernel/              EVO.KERNEL — the core loop and nothing else
+  tools.lisp             tool registry, sexpr schema -> JSON Schema
+  prompt.lisp            system prompt assembly, skills, templates
+  loop.lisp              agent, turn loop, run-until-settled, hooks, heartbeat
+  lore.lisp              lore stores
+  compact.lisp           compaction
+  extension.lisp         load-extension, boot/replay, locks, EVO public API
+  builtin-tools.lisp     read / write / edit / bash
+  goal.lisp              goal driver, audited tools, done-when
+
+src/core-ext/            core extensions: bundled, but built on the same public
+  todo.lisp              API as user ones — EVO.TODO: todo checklists
+  plan-mode.lisp         EVO.PLAN: plan/auto modes, policy + enforcement hooks
+
+src/tui/                 EVO.TUI — also a core extension (§11), essential so
+  term.lisp              it cannot be disabled
+  input.lisp
+  editor.lisp
+  render.lisp
+  markdown.lisp
+  tui.lisp
+  commands.lisp
+
+src/cli/                 EVO.CLI
+  cli.lisp               arg parsing, print/event modes, session bring-up
+  supervisor.lisp        in-binary supervision
+
+docs/                    seed corpus (also installed to ~/.evo/docs)
+extensions/examples/     reference-only example extensions (installed to
+                         ~/.evo/docs/examples) — user extensions, distinct from
+                         the bundled core extensions in src/core-ext/
 ```
