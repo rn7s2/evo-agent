@@ -539,7 +539,7 @@ extension commands, builtins, skills, prompt templates (first wins)."
                                   collect (cons name (or (pget cmd :description)
                                                          "extension command")))
                             (copy-alist *builtin-commands*)
-                            (mapcar (lambda (s) (cons (pget s :name)
+                            (mapcar (lambda (s) (cons (format nil "skill:~a" (pget s :name))
                                                       (or (pget s :description) "skill")))
                                     (available-skills))
                             (mapcar (lambda (name) (cons name "prompt template"))
