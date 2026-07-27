@@ -23,8 +23,12 @@ design; this README covers what is implemented and how to run it.
   placeholder, paste-to-expand); slash commands with the resolution
   order (extension commands → builtins → skills → prompt templates → agent);
   `/tree` `/resume` `/fork`, double-escape rewind, ESC aborts; todo
-  checklist core extension rendered in the panel; skills (Agent
-  Skills standard, progressive disclosure) and `$1`/`$@` prompt templates.
+  checklist core extension rendered in the panel; plan/auto modes
+  (shift+tab, `/mode`) as a core extension — journaled mode state, gated
+  tool set, injected instructions filtered back out of context, and a
+  read-only `:tool-call` gate that judges every chained bash segment;
+  skills (Agent Skills standard, progressive disclosure) and `$1`/`$@`
+  prompt templates.
 - **Context management** — compaction (threshold at save points,
   manual `/compact`, overflow-error compact+retry-once), usage-anchored
   token accounting, cut points never at a tool result, structured + iterative
@@ -40,10 +44,11 @@ design; this README covers what is implemented and how to run it.
   into `EVO.USER`, loads it into its own runtime, journaled as `:load` and
   replayed on resume; package locks on the kernel; seed corpus:
   [docs/](docs/) (extension API, journal format, self-extension guide) and
-  example extensions — [plan-mode](extensions/plan-mode.lisp) (shipped
-  active: enforcement for `/mode` / shift+tab via tool gating + hidden `:custom-message` +
-  transform-context filtering), git-checkpoint and permission-gate
-  ([extensions/examples/](extensions/examples/)).
+  example extensions — git-checkpoint and permission-gate
+  ([extensions/examples/](extensions/examples/)); nothing ships active in
+  `~/.evo/extensions`, and the bundled extensions ([todo](src/todo.lisp),
+  [plan mode](src/plan-mode.lisp)) are built on the same public API rather
+  than reaching past it.
 
 - **Two provider adapters** on one unified message model — Anthropic
   Messages and OpenAI Responses (stateless replay with `store: false`,
@@ -140,9 +145,10 @@ src/extension.lisp     load-extension, boot/replay, locks, EVO public API
 src/builtin-tools.lisp read / write / edit / bash
 src/todo.lisp          todo core extension
 src/goal.lisp          goal driver, audited tools, done-when
+src/plan-mode.lisp     plan/auto modes core extension: policy + enforcement hooks
 src/tui/               term, input, editor, render, tui, commands
 src/cli.lisp           arg parsing, print/event modes, session bring-up
 src/supervisor.lisp    in-binary supervision
 docs/                  seed corpus (also installed to ~/.evo/docs)
-extensions/            plan-mode (shipped) + examples/
+extensions/examples/   reference-only example extensions (installed to ~/.evo/docs/examples)
 ```

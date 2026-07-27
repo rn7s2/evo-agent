@@ -36,7 +36,8 @@ tui-test: build
 	tests/tui.exp
 
 # Seed corpus (§10.4): docs + example extensions into the global evo home.
-# plan-mode is installed active; the other examples stay reference-only.
+# Everything installed here is reference-only — nothing ships active in
+# $(EVO_HOME)/extensions (plan mode is a core extension, in the binary).
 # The sample init.lisp is reference-only too: evo requires a real
 # $(EVO_HOME)/init.lisp (no built-in model table) — copy and edit it.
 install-home:
@@ -44,7 +45,6 @@ install-home:
 	cp docs/*.md $(EVO_HOME)/docs/
 	cp docs/examples/init.lisp $(EVO_HOME)/docs/examples/
 	cp extensions/examples/*.lisp $(EVO_HOME)/docs/examples/
-	cp extensions/plan-mode.lisp $(EVO_HOME)/extensions/
 
 clean:
 	rm -rf build

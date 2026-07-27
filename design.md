@@ -422,8 +422,10 @@ The four requirements (pi's anatomy, research §2.6), in CL:
    evo's own docs and examples. Additionally, CL introspection (`describe`,
    `apropos`, `macroexpand`) lets the agent interrogate the *running* runtime.
    **The seed corpus is a real deliverable**: extension-API docs plus a set of
-   exemplary hand-written extensions (plan mode, git-checkpoint, permission
-   gate are the pi-proven starter set). Expect models to write worse CL than
+   exemplary hand-written extensions (git-checkpoint and permission gate are
+   the pi-proven starter set; plan mode is the same shape, promoted into the
+   core because a read-only mode has to be there before the agent is trusted
+   to install it). Expect models to write worse CL than
    TS — the corpus and the condition-system error feedback are the
    mitigations.
 
@@ -486,13 +488,19 @@ user must be able to see structure and progress at a glance.
 - **Slash command resolution** (pi's order): extension commands → input hook →
   skills → templates → send to agent. Built-ins: `/goal /lore /mode
   /compact /tree /fork /resume /model /reload /export /help /quit /exit`.
-- **Modes**: `auto` (default: fully permissive) and `plan` — switched from
-  the TUI (shift+tab toggle, `/mode` choose box, status-line indicator)
-  through the public extension API: tool gating (`set-active-tools`, no
-  edit/write), injected instructions via a hidden `:custom-message`,
-  filtered back out of context when the mode turns off. The plan-mode
-  extension layers enforcement hooks (mutation blocking, allowlisted bash)
-  on the same journaled "mode" state.
+- **Modes** (`src/plan-mode.lisp`, package `EVO.PLAN`): `auto` (default:
+  fully permissive) and `plan`. The mode is journal state (`:custom "mode"`),
+  never a flag, so it survives restart and every frontend reads the same
+  value. Switching applies policy through the public API — tool gating
+  (`set-active-tools` down to `*plan-tools*`), instructions injected as a
+  keyed `:custom-message` — and two hooks enforce it: a `:tool-call` gate
+  (allowlist, not blocklist: a tool absent from `*plan-tools*` is blocked,
+  and bash is scanned quote-aware so every chained segment must have an
+  allowlisted head, with command substitution and output redirection out)
+  and a `:transform-context` filter that removes the injected instructions
+  from the projection once the mode is off. The TUI is presentation only:
+  shift+tab toggle, `/mode` choose box built from `EVO.PLAN:*MODES*`,
+  status-line indicator.
 - **System prompt assembly** (pi's order): base → tool one-liners (opt-in) →
   guidelines → own-docs paths → lore → project context files → skills → cwd.
   Rebuilt on any tool-set change.

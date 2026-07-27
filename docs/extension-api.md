@@ -54,7 +54,8 @@ Every extension file starts with:
 
 - `:tool-call` — THE interception point. Return `nil` to allow,
   `(:block t :reason "...")` to block, `(:arguments <new>)` to rewrite.
-  Permission gates, plan mode, and sandboxes are all built here.
+  Permission gates and sandboxes are all built here — so is the bundled
+  plan mode (`src/plan-mode.lisp`), which uses nothing you cannot.
 - `:transform-context` — receives the message list before each request;
   return a new list (filter/rewrite). Output is never written back to the
   journal.

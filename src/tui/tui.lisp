@@ -86,7 +86,8 @@ while the run thread is appending to it."
                      (error () nil))))
     (setf (tui-goal tui) (evo.journal:state-goal state)
           (tui-todos tui) (custom-state state "todo")
-          (tui-agent-mode tui) (or (custom-state state "mode") "auto")
+          (tui-agent-mode tui) (or (custom-state state "mode")
+                                   evo.plan:*default-mode*)
           (tui-model-label tui) (or model-id "(no model)")
           (tui-context-window tui) (and model-id
                                         (handler-case
@@ -100,36 +101,26 @@ while the run thread is appending to it."
                                         (agent-thinking-override agent)
                                         (setting :thinking :medium))))))
 
-;;; Plan/auto mode.  The TUI applies the mode policy through the public
-;;; extension API (custom state + tool gating + context injection); the
-;;; plan-mode extension adds enforcement hooks on top when installed.
-
-(defparameter *plan-mode-tools* '("read" "bash" "get_goal" "todo"))
-
-(defparameter *plan-mode-instructions*
-  "PLAN MODE is on. Do not modify anything: no writing or editing files, no
-state-changing shell commands. Explore the code, then produce a concrete
-step-by-step plan and present it to the user. When the user is satisfied
-they will switch you back to auto mode (shift+tab or /mode) to execute.")
+;;; Plan/auto mode.  Policy — tool gating, instruction injection, the
+;;; enforcement hooks — belongs to the plan-mode core extension (EVO.PLAN);
+;;; the TUI is presentation: switch, announce, indicate.
 
 (defun current-mode (tui)
-  (or (tui-agent-mode tui) "auto"))
+  (or (tui-agent-mode tui) evo.plan:*default-mode*))
+
+(defun mode-announcement (mode)
+  (yellow (if (equal mode "plan")
+              "◇ plan mode — read-only; shift+tab or /mode to execute"
+              "◆ auto mode — full permissions")))
 
 (defun set-mode (tui mode)
-  (unless (equal mode (current-mode tui))
-    (let ((agent (tui-agent tui)))
-      (cond
-        ((equal mode "plan")
-         (evo:set-custom-state "mode" "plan" agent)
-         (evo:set-active-tools agent *plan-mode-tools*)
-         (evo:inject-context *plan-mode-instructions* :key "plan-mode" :agent agent)
-         (scroll tui (yellow "◇ plan mode — read-only; shift+tab or /mode to execute")))
-        (t
-         (evo:set-custom-state "mode" "auto" agent)
-         (evo:set-active-tools agent nil)   ; nil = full tool set
-         (scroll tui (yellow "◆ auto mode — full permissions"))))
+  "Switch modes and announce it.  A switch to the current mode is a no-op —
+EVO.PLAN:SET-MODE returns NIL and nothing is journaled or scrolled."
+  (let ((mode (evo.plan:set-mode mode (tui-agent tui))))
+    (when mode
       (setf (tui-agent-mode tui) mode
-            (tui-dirty tui) t))))
+            (tui-dirty tui) t)
+      (scroll tui (mode-announcement mode)))))
 
 (defun toggle-mode (tui)
   (set-mode tui (if (equal (current-mode tui) "plan") "auto" "plan")))
@@ -505,11 +496,10 @@ wrapped between two rules, and the model status line under the editbox."
 
 ;;; Slash-command completion (Tab).
 
-(defparameter *mode-argument-command-names* '("plan" "auto")
-  "Mode names accepted only as /mode arguments, never standalone /commands.")
-
 (defun mode-argument-command-p (name)
-  (member name *mode-argument-command-names* :test #'string-equal))
+  "Mode names are accepted only as /mode arguments, never as standalone
+/commands — the registry of them is EVO.PLAN:*MODES*."
+  (and (evo.plan:mode-name name) t))
 
 (defparameter *builtin-commands*
   '(("help" . "commands and keys")

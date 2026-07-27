@@ -1,15 +1,16 @@
 #!/usr/bin/expect -f
 # plan-mode.exp — e2e wiring of plan mode in the TUI:
 # shift+tab toggles, /mode switches, and the journal records the mode state
-# and tool gating.  (The gate itself is unit-tested — model behavior under
-# plan instructions is nondeterministic.)
+# and tool gating.  Plan mode is a core extension, so the evo home here has
+# an EMPTY extensions directory on purpose: everything under test has to
+# come out of the binary.  (The gate itself is unit-tested — model behavior
+# under plan instructions is nondeterministic.)
 set timeout 180
 
 set repo [file dirname [file dirname [file normalize $argv0]]]
 set scratch [exec mktemp -d /tmp/evo-plan.XXXXXX]
 set env(EVO_HOME) "$scratch/home"
 file mkdir $env(EVO_HOME)/extensions
-exec cp "$repo/extensions/plan-mode.lisp" "$env(EVO_HOME)/extensions/plan-mode.lisp"
 set f [open "$env(EVO_HOME)/init.lisp" w]
 puts $f {(evo:register-model "ark-deepseek-v4-pro" :provider :anthropic :api :anthropic-messages :context-window 1000000 :max-output 64000 :thinking t)}
 puts $f {(evo:set-setting :model "ark-deepseek-v4-pro")}
@@ -63,6 +64,8 @@ check [expr {![catch {exec grep -q {:key "mode" :data "plan"} $session}]}] journ
 check [expr {![catch {exec grep -q {:key "mode" :data "auto"} $session}]}] journal-auto-state
 check [expr {![catch {exec grep -q {:type :tools-change} $session}]}] journal-tools-gated
 check [expr {![catch {exec grep -q {:key "plan-mode"} $session}]}] journal-injection
+# Nothing was loaded from an extensions directory: plan mode came from the binary.
+check [expr {[catch {exec grep -q {:type :load} $session}]}] no-userspace-load
 
 puts "\nSUMMARY: $bad failures ($scratch)"
 exit [expr {$bad > 0 ? 1 : 0}]

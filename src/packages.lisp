@@ -93,6 +93,15 @@
   (:use :cl :evo.util :evo.journal :evo.kernel)
   (:export #:current-todos #:format-todos))
 
+;; Plan/auto modes.  Uses nothing but EVO.UTIL and the public API, the way a
+;; userspace extension would.
+(defpackage :evo.plan
+  (:use :cl :evo.util)
+  (:export #:*modes* #:*default-mode* #:*plan-tools* #:*plan-bash-allowlist*
+           #:*plan-instructions* #:*instruction-key*
+           #:mode-name #:current-mode #:plan-mode-p #:set-mode
+           #:bash-block-reason))
+
 (defpackage :evo.tui
   (:use :cl :evo.util :evo.journal :evo.provider :evo.kernel)
   (:export #:start-tui))

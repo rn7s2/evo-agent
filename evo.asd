@@ -30,6 +30,7 @@
                              (:file "builtin-tools")
                              (:file "todo")
                              (:file "goal")
+                             (:file "plan-mode")
                              (:module "tui"
                               :serial t
                               :components ((:file "term")

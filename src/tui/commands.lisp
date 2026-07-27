@@ -196,17 +196,21 @@ keys: enter send · shift+enter/alt+enter/ctrl+j newline · shift+tab auto/plan 
     t))
 
 (defun mode-command (tui args)
+  "The modes themselves come from EVO.PLAN:*MODES* — the picker and the
+argument check never go stale against the core extension."
   (cond
-    ((member args '("plan" "auto") :test #'string-equal)
-     (set-mode tui (string-downcase args)))
+    ((evo.plan:mode-name args) (set-mode tui args))
     ((zerop (length args))
      (enter-select
       tui "mode:"
-      (list (list "auto" "auto" "full permissions (default)")
-            (list "plan" "plan" "read-only: explore and present a plan"))
+      (loop for (name . description) in evo.plan:*modes*
+            collect (list name name description))
       (lambda (mode) (set-mode tui mode))
-      :index (if (equal (current-mode tui) "plan") 1 0)))
-    (t (scroll tui (dim "modes: auto plan"))))
+      :index (or (position (current-mode tui) evo.plan:*modes*
+                           :key #'car :test #'equal)
+                 0)))
+    (t (scroll tui (dim (format nil "modes: ~{~a~^ ~}"
+                                (mapcar #'car evo.plan:*modes*))))))
   t)
 
 (defun set-model (tui id)
