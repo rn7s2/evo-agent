@@ -27,13 +27,12 @@
     (+ (ceiling chars 4) (* images 4800))))
 
 (defun estimate-context-tokens (messages)
-  "Anchor on the last assistant message with provider-reported usage; only
+  "Anchor on the last message with provider-reported usage; only
 the tail after it is estimated."
   (let ((anchor-index nil) (anchor-tokens 0))
     (loop for m in messages
           for i from 0
-          when (and (eq (message-role m) :assistant)
-                    (message-usage m)
+          when (and (message-usage m)
                     (plusp (usage-total-tokens (message-usage m))))
             do (setf anchor-index i
                      anchor-tokens (usage-total-tokens (message-usage m))))
@@ -121,7 +120,7 @@ messages verbatim — they must survive the summary.")
                   (or (pget (first (message-content m)) :text) "") 1500)))))))
 
 (defun summarize (model thinking messages previous-summary hint &key abort-flag abort-cleanup)
-  "One summarization call.  Returns the summary text or signals."
+  "One summarization call.  Returns the summary text and the provider usage."
   (let* ((instruction
            (if previous-summary
                (format nil "Below is the running summary of an agent session so far, followed by the next chunk of transcript. UPDATE the summary to incorporate the new events. ~a~@[~%Extra focus requested by the user: ~a~]~2%<previous-summary>~%~a~%</previous-summary>"
@@ -146,7 +145,7 @@ messages verbatim — they must survive the summary.")
                       :text)))
       (unless (and text (plusp (length text)))
         (error "Summarization returned no text"))
-      text)))
+      (values text (message-usage result)))))
 
 (defun previous-compaction (journal)
   (find :compaction (entry-path journal) :from-end t
@@ -163,17 +162,21 @@ retain the tail on the :compaction entry.  Returns the entry."
          (dropped (subseq messages 0 cut))
          (tail (subseq messages cut))
          (previous (previous-compaction journal))
-         (summary (progn
-                    (unless dropped
-                      (error "Nothing to compact: the whole context is within the keep-recent tail"))
-                    (summarize model
-                               (or (evo.journal:state-thinking state) :low)
-                               dropped
-                               (and previous (pget previous :summary))
-                               (and (plusp (length (or hint ""))) hint)
-                               :abort-flag (lambda () (agent-abort-flag agent))
-                               :abort-cleanup (lambda (cleanup)
-                                                (add-abort-cleanup agent cleanup))))))
+         (summary nil)
+         (summary-tokens 0))
+    (unless dropped
+      (error "Nothing to compact: the whole context is within the keep-recent tail"))
+    (multiple-value-bind (text usage)
+        (summarize model
+                   (or (evo.journal:state-thinking state) :low)
+                   dropped
+                   (and previous (pget previous :summary))
+                   (and (plusp (length (or hint ""))) hint)
+                   :abort-flag (lambda () (agent-abort-flag agent))
+                   :abort-cleanup (lambda (cleanup)
+                                    (add-abort-cleanup agent cleanup)))
+      (setf summary text
+            summary-tokens (and usage (pget usage :output 0))))
     (multiple-value-bind (read-files modified) (collect-file-sets dropped)
       (let ((all-read (union (coerce (or (and previous (pget previous :files-read)) #()) 'list)
                              read-files :test #'equal))
@@ -182,7 +185,13 @@ retain the tail on the :compaction entry.  Returns the entry."
         (append-entry journal
                       (list :type :compaction
                             :summary summary
-                            :retained-tail (coerce tail 'vector)
+                            :summary-tokens summary-tokens
+                            :retained-tail (coerce
+                                             (loop for m in tail
+                                                   collect (let ((copy (copy-list m)))
+                                                             (remf copy :usage)
+                                                             copy))
+                                             'vector)
                             :files-read (coerce all-read 'vector)
                             :files-modified (coerce all-modified 'vector)
                             :dropped-messages (length dropped)))))))

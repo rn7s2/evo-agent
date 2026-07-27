@@ -264,9 +264,12 @@ Returns :stop :length :error :aborted."
               (when (compaction-needed-p state (find-model
                                                 (effective-model-id state agent)))
                 (emit-event agent :type :compaction-start)
-                (handler-case (compact-now agent)
-                  (error (e) (warn "Compaction failed, continuing uncompacted: ~a" e)))
-                (emit-event agent :type :compaction-end)))
+                (unwind-protect
+                     (handler-case (compact-now agent)
+                       (error (e) (warn "Compaction failed, continuing uncompacted: ~a" e)))
+                  (emit-event agent :type :compaction-end))
+                (when (agent-abort-flag agent)
+                  (return :aborted))))
             (let* ((ctx (prepare-next-turn agent))
                    (assistant
                      (call-provider
@@ -328,10 +331,15 @@ messages? active goal?) -> continue.  Returns the final outcome."
              ;; Overflow recovery: compact + retry once.
              ((and (overflow-error-p msg) (not (agent-compact-retried agent)))
               (setf (agent-compact-retried agent) t)
-              (handler-case (compact-now agent)
-                (error (e)
-                  (warn "Overflow-recovery compaction failed: ~a" e)
-                  (return outcome))))
+              (emit-event agent :type :compaction-start)
+              (unwind-protect
+                   (handler-case (compact-now agent)
+                     (error (e)
+                       (warn "Overflow-recovery compaction failed: ~a" e)
+                       (return outcome)))
+                (emit-event agent :type :compaction-end))
+              (when (agent-abort-flag agent)
+                (return :aborted)))
              ((and (pget msg :retryable)
                    (< (agent-retry-count agent) *max-turn-retries*))
               (incf (agent-retry-count agent)))
