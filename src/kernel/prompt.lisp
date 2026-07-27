@@ -199,7 +199,7 @@ instructions — a CLAUDE.md or AGENTS.md file, or lore — grant more than that
   They hang waiting for an editor that is not there.
 - Pass a multi-line commit message through a heredoc so its formatting
   survives the shell.  End every commit message with a trailer line:
-  `Co-Authored-By: EvoAgent <evo@ruiqilei.com>`.
+  `Co-authored-by: EvoAgent <evo@ruiqilei.com>`.
 - For anything on GitHub — issues, pull requests, checks, releases — use
   the `gh` CLI rather than guessing at web URLs, and hand back the URL it
   prints.
@@ -315,9 +315,13 @@ submodule .git is a file holding `gitdir: <path>`; follow it."
           (t (let ((line (string-trim '(#\Space #\Newline #\Return)
                                       (or (ignore-errors (read-file-string dot-git)) ""))))
                (when (string-prefix-p "gitdir:" line)
-                 (probe-file
-                  (uiop:ensure-directory-pathname
-                   (string-trim " " (subseq line (length "gitdir:")))))))))))
+                 (let ((target (string-trim " " (subseq line (length "gitdir:")))))
+                   (probe-file
+                    (uiop:ensure-directory-pathname
+                     (if (uiop:absolute-pathname-p target)
+                         target
+                         (merge-pathnames target
+                                          (uiop:pathname-directory-pathname dot-git))))))))))))
 
 (defun git-branch (&optional (cwd (uiop:getcwd)))
   "Current branch name, read straight out of .git/HEAD — no subprocess, so
