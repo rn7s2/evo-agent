@@ -550,8 +550,8 @@ event: response.completed~%data: {\"type\":\"response.completed\",\"response\":{
       (evo.tui::eb-clear (evo.tui::tui-editor tui))
       (evo.tui::eb-insert-text (evo.tui::tui-editor tui) "/mod")
       (evo.tui::submit tui)
-      (check "enter completes partial command"
-             (equal (evo.tui::eb-text (evo.tui::tui-editor tui)) "/mode "))
+      (check "enter completes /mod to /model"
+             (equal (evo.tui::eb-text (evo.tui::tui-editor tui)) "/model "))
       ;; esc hides the popup until the prefix changes
       (evo.tui::eb-clear (evo.tui::tui-editor tui))
       (evo.tui::eb-insert-text (evo.tui::tui-editor tui) "/t")
@@ -865,7 +865,7 @@ event: response.completed~%data: {\"type\":\"response.completed\",\"response\":{
     (check "escaped slash text recorded"
            (equal "//not a command" (first (evo.tui::tui-history tui))))))
 
-;;; Plan/auto mode switching (shift+tab, /mode, status indicator)
+;;; Plan/auto mode switching (shift+tab, /permission, status indicator)
 
 (defun test-mode-switching ()
   (let* ((dir (uiop:ensure-directory-pathname
@@ -904,20 +904,24 @@ event: response.completed~%data: {\"type\":\"response.completed\",\"response\":{
         (check "auto restores full tool set"
                (equal (evo.journal:state-tools (fold-state journal))
                       (evo.kernel:all-tool-names)))
-        ;; /mode with no args opens the choose box, preselecting current
-        (evo.tui::mode-command tui "")
-        (check "mode choose box opens" (eq (evo.tui::tui-mode tui) :select))
-        (check "mode box has two entries"
+        ;; /permission with no args opens the choose box, preselecting current
+        (evo.tui::builtin-command tui "permission" "")
+        (check "permission choose box opens"
+               (eq (evo.tui::tui-mode tui) :select))
+        (check "permission box has two entries"
                (= 2 (length (evo.tui::tui-select-items tui))))
-        (check "mode box preselects current"
+        (check "permission box preselects current"
                (= 0 (evo.tui::tui-select-index tui)))
         (evo.tui::handle-key-select tui :down)
         (evo.tui::handle-key-select tui :enter)
-        (check "mode box selection switches"
+        (check "permission box selection switches"
                (equal (evo.tui::current-mode tui) "plan"))
-        ;; /mode with an explicit arg
-        (evo.tui::mode-command tui "auto")
-        (check "mode arg switches" (equal (evo.tui::current-mode tui) "auto"))
+        ;; /permission with an explicit arg
+        (evo.tui::builtin-command tui "permission" "auto")
+        (check "permission arg switches"
+               (equal (evo.tui::current-mode tui) "auto"))
+        (check "mode is no longer a builtin command"
+               (not (evo.tui::builtin-command tui "mode" "")))
         ;; Even stale userspace extensions that registered the old commands must
         ;; not resurrect them in completion or dispatch.
         (let ((called nil))
@@ -935,11 +939,13 @@ event: response.completed~%data: {\"type\":\"response.completed\",\"response\":{
                       :description "old auto command"))
           (unwind-protect
                (progn
-                 ;; completion candidates include /mode, but plan/auto remain mode
-                 ;; arguments only — not standalone slash commands.
+                 ;; Completion candidates include /permission, but plan/auto
+                 ;; remain mode arguments only — not standalone slash commands.
                  (let ((commands (evo.tui::all-commands)))
-                   (check "mode is a completion candidate"
-                          (assoc "mode" commands :test #'string=))
+                   (check "permission is a completion candidate"
+                          (assoc "permission" commands :test #'string=))
+                   (check "mode is not a completion candidate"
+                          (not (assoc "mode" commands :test #'string=)))
                    (check "exit is a completion candidate"
                           (assoc "exit" commands :test #'string=))
                    (check "plan is not a completion candidate"

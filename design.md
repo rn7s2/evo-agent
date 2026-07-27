@@ -438,8 +438,8 @@ something to say.
 - **Prompt templates**: `.md` files whose filename is the command, with
   `$1`..`$9` and `$@` substitution. Purely textual expansion.
 - **Slash command resolution**: extension commands → input hook → skills →
-  templates → send to the agent. Built-ins are `/goal /lore /mode /compact
-  /tree /fork /resume /model /reload /export /help /quit /exit`.
+  templates → send to the agent. Built-ins are `/goal /lore /permission
+  /compact /tree /fork /resume /model /reload /export /help /quit /exit`.
 - **Modes** (`src/core-ext/plan-mode.lisp`, package `EVO.PLAN`): `auto`, the
   fully permissive default, and `plan`. The mode is journal state (`:custom
   "mode"`), never a flag, so it survives restart and every frontend reads the
@@ -451,7 +451,7 @@ something to say.
   have an allowlisted head, with command substitution and output redirection
   excluded), and a `:transform-context` filter that removes the injected
   instructions from the projection once the mode is off. The TUI is
-  presentation only: a shift+tab toggle, a `/mode` chooser built from
+  presentation only: a shift+tab toggle, a `/permission` chooser built from
   `EVO.PLAN:*MODES*`, and a status-line indicator.
 
 Plan mode is the reference implementation of the extension API's depth: a

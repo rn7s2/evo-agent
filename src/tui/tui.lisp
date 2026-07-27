@@ -112,7 +112,7 @@ while the run thread is appending to it."
 
 (defun mode-announcement (mode)
   (yellow (if (equal mode "plan")
-              "◇ plan mode — read-only; shift+tab or /mode to execute"
+              "◇ plan mode — read-only; shift+tab or /permission to execute"
               "◆ auto mode — full permissions")))
 
 (defun set-mode (tui mode)
@@ -574,7 +574,7 @@ wrapped between two rules, and the model status line under the editbox."
 ;;; Slash-command completion (Tab).
 
 (defun mode-argument-command-p (name)
-  "Mode names are accepted only as /mode arguments, never as standalone
+  "Mode names are accepted only as /permission arguments, never as standalone
 /commands — the registry of them is EVO.PLAN:*MODES*."
   (and (evo.plan:mode-name name) t))
 
@@ -582,7 +582,7 @@ wrapped between two rules, and the model status line under the editbox."
   '(("help" . "commands and keys")
     ("goal" . "show, create, or refine the goal")
     ("todo" . "toggle the todo panel")
-    ("mode" . "switch auto/plan mode (shift+tab toggles)")
+    ("permission" . "switch auto/plan mode (shift+tab toggles)")
     ("model" . "pick the model from a list, or set it directly")
     ("thinking" . "off·low·medium·high·xhigh")
     ("compact" . "compact the context now")
@@ -888,11 +888,11 @@ esc.  Outside a /command word, Tab stays a literal tab character."
          (name (subseq text 1 space))
          (args (string-trim " " (if space (subseq text (1+ space)) ""))))
     (cond
-      ;; Mode names are only /mode arguments.  Keep stale userspace extensions
-      ;; or templates named "plan"/"auto" from resurrecting standalone
-      ;; slash commands after an upgrade.
+      ;; Mode names are only /permission arguments.  Keep stale userspace
+      ;; extensions or templates named "plan"/"auto" from resurrecting
+      ;; standalone slash commands after an upgrade.
       ((mode-argument-command-p name)
-       (scroll tui (dim (format nil "/~a is not a command — use /mode ~a"
+       (scroll tui (dim (format nil "/~a is not a command — use /permission ~a"
                                name (string-downcase name))))
        t)
       ;; 1. extension commands

@@ -50,7 +50,7 @@ command must have an allowlisted head, so `git log | head` passes and
   "PLAN MODE is on. Do not modify anything: no writing or editing files, no
 state-changing shell commands. Explore the code, then produce a concrete
 step-by-step plan and present it to the user. When the user is satisfied
-they will switch you back to auto mode (shift+tab or /mode) to execute.")
+they will switch you back to auto mode (shift+tab or /permission) to execute.")
 
 (defparameter *instruction-key* "plan-mode"
   "Key on the injected :custom-message, so the context filter can find it.")
@@ -170,7 +170,7 @@ only for read-only commands."
       (cond
         ((not (member name *plan-tools* :test #'equal))
          (list :block t
-               :reason (format nil "plan mode is read-only: ~a is not available (~{~a~^ ~} are). Present a plan; the user switches back with shift+tab or /mode to execute it."
+               :reason (format nil "plan mode is read-only: ~a is not available (~{~a~^ ~} are). Present a plan; the user switches back with shift+tab or /permission to execute it."
                                name *plan-tools*)))
         ((equal name "bash")
          (let ((reason (bash-block-reason (pget (pget call :arguments) :command))))
