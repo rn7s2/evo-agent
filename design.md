@@ -330,7 +330,7 @@ A goal is journal state; the current goal is a fold over `:goal` entries.
 
 Statuses are `:active`, `:paused`, `:blocked`, `:budget-limited`, `:complete`.
 The model may transition only to `:complete` or `:blocked`, through
-`update-goal`, under the audit rules below. Pause, resume, and budget
+`update_goal`, under the audit rules below. Pause, resume, and budget
 transitions belong to the user and the system.
 
 ### 8.2 Driver
@@ -347,7 +347,7 @@ transitions belong to the user and the system.
   audit** (declare `:blocked` only after the same blocker recurs across three
   consecutive goal turns).
 - Doing nothing is not completion. An idle active goal is always re-steered.
-  Termination is explicit: the model calls `update-goal`, a budget trips, or
+  Termination is explicit: the model calls `update_goal`, a budget trips, or
   the user pauses.
 - **Budget accounting** runs every turn over tokens and wall time. Exhaustion
   moves the goal to `:budget-limited`, and the next steering is a wrap-up

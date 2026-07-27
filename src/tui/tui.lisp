@@ -234,10 +234,11 @@ inside the TUI tick loop and on session resume, so malformed ARGUMENTS
     (:thinking-delta
      (let* ((tail (concatenate 'string (tui-thinking-tail tui)
                                (substitute #\Space #\Newline (pget event :text))))
-            ;; Reserve room for the fixed parts of the activity line
-            ;; ("✢ thinking · " + "  esc interrupt" ≈ 28 cols); the rest
-            ;; is the tail's share of the terminal width.
-            (budget (max 10 (- *cols* 28))))
+            ;; Reserve room for the fixed parts of the activity line:
+            ;; "✳ thinking · " (14 cols — · renders as 2 in CJK terminals)
+            ;; + "  esc interrupt " (16 cols, trailing space for breathing room)
+            ;; = 30 cols.
+            (budget (max 10 (- *cols* 30))))
        (setf (tui-thinking-tail tui)
              (if (> (length tail) budget) (subseq tail (- (length tail) budget)) tail))
        (setf (tui-dirty tui) t)))
@@ -352,7 +353,7 @@ inside the TUI tick loop and on session resume, so malformed ARGUMENTS
 instead of disappearing, so the region height does not oscillate."
   (cond
     ((and (tui-running tui) (plusp (length (tui-thinking-tail tui))))
-     (dim (format nil "~c thinking · ~a  esc interrupt"
+     (dim (format nil "~c thinking · ~a  esc interrupt "
                   (char *thinking-frames*
                         (mod (tui-spinner tui) (length *thinking-frames*)))
                   (tui-thinking-tail tui))))
@@ -780,6 +781,9 @@ esc.  Outside a /command word, Tab stays a literal tab character."
     (setf (tui-dirty tui) t)))
 
 (defun enter-select (tui title items action &key (index 0))
+  (when (null items)
+    (return-from enter-select
+      (scroll tui (format nil "~a: nothing to select" title))))
   (setf (tui-select-title tui) title
         (tui-select-items tui) items
         (tui-select-index tui) (min (max 0 index) (1- (length items)))
