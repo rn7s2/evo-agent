@@ -456,14 +456,18 @@ event: response.completed~%data: {\"type\":\"response.completed\",\"response\":{
         (check "bottom rule below editbox" (search "─" (fifth lines)))
         (check "status line under editbox" (search "ctx 34k/200k" (sixth lines)))
         (check "cursor on editor row" (and (= crow 3) (= ccol 2))))
-      ;; Activity animation: rotating slash working, pulsing star thinking,
+      ;; Activity animation: rotating slash working/compacting, pulsing star thinking,
       ;; static idle glyph.
       (check "idle glyph" (search "○ idle" (evo.tui::activity-line tui)))
       (setf (evo.tui::tui-running tui) t)
       (check "working slash frame 0" (search "| working" (evo.tui::activity-line tui)))
       (incf (evo.tui::tui-spinner tui))
       (check "working slash rotates" (search "/ working" (evo.tui::activity-line tui)))
-      (setf (evo.tui::tui-thinking-tail tui) "hm")
+      (setf (evo.tui::tui-compacting tui) t)
+      (check "compacting slash rotates"
+             (search "/ compacting..." (evo.tui::activity-line tui)))
+      (setf (evo.tui::tui-compacting tui) nil
+            (evo.tui::tui-thinking-tail tui) "hm")
       (check "thinking pulse frame" (search "✳ thinking · hm" (evo.tui::activity-line tui)))
       (setf (evo.tui::tui-thinking-tail tui) "")
       ;; Activity + todo sections + editbox rules.
@@ -1026,6 +1030,94 @@ event: response.completed~%data: {\"type\":\"response.completed\",\"response\":{
 
 ;;; Compaction
 
+(defclass compact-fixture-api (provider-api) ())
+(defvar *compact-fixture-mode* :success)
+(defvar *compact-fixture-started* nil)
+(defvar *compact-fixture-unblocked* nil)
+
+(defmethod endpoint-path ((api compact-fixture-api))
+  (declare (ignore api))
+  "/fixture/compact")
+
+(defmethod auth-headers ((api compact-fixture-api) config)
+  (declare (ignore api config))
+  nil)
+
+(defmethod thinking-param ((api compact-fixture-api) level)
+  (declare (ignore api level))
+  nil)
+
+(defmethod build-request ((api compact-fixture-api)
+                          &key model system messages tools thinking-level cache-key)
+  (declare (ignore api model system messages tools thinking-level cache-key))
+  "{}")
+
+(defmethod perform-request ((api compact-fixture-api) url headers body
+                            &key on-event abort-flag abort-cleanup &allow-other-keys)
+  (declare (ignore api url headers body on-event))
+  (setf *compact-fixture-started* t)
+  (ecase *compact-fixture-mode*
+    (:success
+     (list :content '((:type :text :text "tiny summary"))
+           :stopped-p t :stop-reason :stop
+           :usage '(:input 10 :output 2 :cache-read 0 :cache-write 0)))
+    (:wait
+     (let ((unregister (and abort-cleanup
+                            (funcall abort-cleanup
+                                     (lambda ()
+                                       (setf *compact-fixture-unblocked* t))))))
+       (unwind-protect
+            (loop until *compact-fixture-unblocked*
+                  do (when (and abort-flag (funcall abort-flag))
+                       (setf *compact-fixture-unblocked* t))
+                     (sleep 0.02))
+         (when unregister (funcall unregister)))
+       (list :aborted-p t :content nil :stop-reason :aborted
+             :usage '(:input 0 :output 0 :cache-read 0 :cache-write 0))))))
+
+(defun setup-compact-fixture-model ()
+  (register-api :compact-fixture (make-instance 'compact-fixture-api))
+  (register-provider* :compact-fixture :base-url "https://fixture.invalid")
+  (register-model* "compact-fixture-model" :provider :compact-fixture
+                   :api :compact-fixture :context-window 10000 :max-output 100
+                   :thinking nil))
+
+(defun make-compact-fixture-tui (&key (old-chars 4000))
+  (let* ((dir (uiop:ensure-directory-pathname
+               (format nil "~a/evo-compact-tui-~a/" (uiop:getenv "TMPDIR") (gen-id))))
+         (journal (progn (ensure-directories-exist dir) (make-session-journal dir)))
+         (agent (make-agent :journal journal))
+         (tui (evo.tui::make-tui :agent agent)))
+    (append-entry journal '(:type :model-change :model "compact-fixture-model"))
+    (append-entry journal `(:type :message
+                            :message (:role :user
+                                      :content ((:type :text :text ,(make-string old-chars :initial-element #\x))))))
+    (append-entry journal '(:type :message
+                            :message (:role :user
+                                      :content ((:type :text :text "tail")))))
+    ;; An assistant message with provider-reported usage in the retained tail.
+    ;; Before the fix this usage anchored the estimate, so compact did not
+    ;; lower the displayed token count.
+    (append-entry journal '(:type :message
+                            :message (:role :assistant
+                                      :content ((:type :text :text "ok"))
+                                      :stop-reason :stop
+                                      :usage (:input 8000 :output 100 :cache-read 0 :cache-write 0))))
+    (setf (agent-events-cb agent) (lambda (event) (evo.tui::push-event tui event)))
+    (values tui agent journal)))
+
+(defun wait-for-compact-worker (tui &key (seconds 2))
+  (loop with deadline = (+ (get-internal-real-time)
+                           (* seconds internal-time-units-per-second))
+        while (and (evo.tui::tui-running tui)
+                   (< (get-internal-real-time) deadline))
+        do (dolist (event (evo.tui::drain-events tui))
+             (evo.tui::handle-agent-event tui event))
+           (sleep 0.02))
+  (dolist (event (evo.tui::drain-events tui))
+    (evo.tui::handle-agent-event tui event))
+  (not (evo.tui::tui-running tui)))
+
 (defun test-compaction ()
   ;; select-cut never starts the tail at a tool result.
   (let* ((mk-user '(:role :user :content ((:type :text :text "u"))))
@@ -1061,13 +1153,83 @@ event: response.completed~%data: {\"type\":\"response.completed\",\"response\":{
       (check "compaction keeps later entries"
              (equal "after"
                     (evo.util:pget (first (evo.provider:message-content (third messages))) :text)))))
+  ;; Manual /compact runs on a worker: the UI immediately shows a rotating
+  ;; compacting activity line, then refreshes context accounting after the
+  ;; compaction entry lands.
+  (let ((previous-mode *compact-fixture-mode*)
+        (previous-keep evo.kernel::*compact-keep-recent-tokens*))
+    (unwind-protect
+         (progn
+           (setf *compact-fixture-mode* :success
+                 *compact-fixture-started* nil
+                 *compact-fixture-unblocked* nil
+                 evo.kernel::*compact-keep-recent-tokens* 1)
+           (setup-compact-fixture-model)
+           (multiple-value-bind (tui agent journal) (make-compact-fixture-tui)
+             (declare (ignore agent))
+             (evo.tui::refresh-goal tui)
+             (let ((before (evo.tui::tui-context-tokens tui)))
+               (with-output-to-string (fake-tty)
+                 (let ((evo.tui::*tty-out* fake-tty)
+                       (evo.tui::*region-height* 0)
+                       (evo.tui::*region-cursor-row* 0))
+                   (evo.tui::start-compact-worker tui "")
+                   (check "manual compact starts worker instead of blocking UI"
+                          (evo.tui::tui-running tui))
+                   (check "manual compact provider request starts"
+                          (loop repeat 100 until *compact-fixture-started*
+                                do (sleep 0.01)
+                                finally (return *compact-fixture-started*)))
+                   (check "manual compact shows spinner activity"
+                          (search "compacting..." (evo.tui::activity-line tui)))
+                   (check "manual compact worker finishes" (wait-for-compact-worker tui))
+                   (let ((after (evo.tui::tui-context-tokens tui)))
+                     (check "manual compact appends compaction entry"
+                            (find :compaction (entry-path journal)
+                                  :key (lambda (e) (pget e :type))))
+                     (check "manual compact refreshes context tokens"
+                            (< after before))))))))
+      (setf *compact-fixture-mode* previous-mode
+            evo.kernel::*compact-keep-recent-tokens* previous-keep)))
+  ;; Interrupting manual /compact sets the same abort flag used by model calls;
+  ;; the provider cleanup runs and the worker comes back without appending a
+  ;; compaction checkpoint.
+  (let ((previous-mode *compact-fixture-mode*)
+        (previous-keep evo.kernel::*compact-keep-recent-tokens*))
+    (unwind-protect
+         (progn
+           (setf *compact-fixture-mode* :wait
+                 *compact-fixture-started* nil
+                 *compact-fixture-unblocked* nil
+                 evo.kernel::*compact-keep-recent-tokens* 1)
+           (setup-compact-fixture-model)
+           (multiple-value-bind (tui agent journal) (make-compact-fixture-tui)
+             (declare (ignore agent))
+             (with-output-to-string (fake-tty)
+               (let ((evo.tui::*tty-out* fake-tty)
+                     (evo.tui::*region-height* 0)
+                     (evo.tui::*region-cursor-row* 0))
+                 (evo.tui::start-compact-worker tui "")
+                 (loop repeat 100 until *compact-fixture-started* do (sleep 0.01))
+                 (evo.tui::interrupt-run tui)
+                 (check "manual compact interrupt runs abort cleanup"
+                        (loop repeat 100 until *compact-fixture-unblocked*
+                              do (sleep 0.01)
+                              finally (return *compact-fixture-unblocked*)))
+                 (check "manual compact interrupt finishes worker"
+                        (wait-for-compact-worker tui))
+                 (check "manual compact interrupt appends no checkpoint"
+                        (not (find :compaction (entry-path journal)
+                                   :key (lambda (e) (pget e :type))))))))
+      (setf *compact-fixture-mode* previous-mode
+            evo.kernel::*compact-keep-recent-tokens* previous-keep)))
   ;; Overflow classification.
   (check "overflow detected"
          (overflow-error-p '(:role :assistant :stop-reason :error
                              :error-message "HTTP 400: prompt is too long: 250000 tokens")))
   (check "overflow not confused with 500"
          (not (overflow-error-p '(:role :assistant :stop-reason :error
-                                  :error-message "HTTP 500: boom")))))
+                                  :error-message "HTTP 500: boom"))))))
 
 ;;; Lore
 

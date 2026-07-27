@@ -317,11 +317,7 @@ here lines up the id column too — provider, id and context each align."
          t)
         ((cmd "compact")
          (if (require-idle tui "/compact")
-             (progn (scroll tui (dim "compacting…"))
-                    (handler-case
-                        (progn (evo.kernel:compact-now agent :hint args)
-                               (scroll tui (green "✓ compacted")))
-                      (error (e) (scroll tui (red (format nil "✗ compact: ~a" e))))))
+             (start-compact-worker tui args)
              t)
          t)
         ((cmd "lore")

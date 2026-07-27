@@ -19,6 +19,7 @@
   (partial "")
   (md (make-md))        ; markdown fence state for the streaming text
   (thinking-tail "")
+  (compacting nil)
   (spinner 0)
   (tick 0)
   (quiet-ticks 0)
@@ -74,7 +75,7 @@
     (scroll tui (md-render-line (tui-partial tui) (tui-md tui)))
     (setf (tui-partial tui) "")))
 
-(defun refresh-goal (tui)
+(defun refresh-goal (tui &key (reset-goal-run-tokens t))
   "Re-derive the cached fold state (goal, todos, model/thinking labels).
 Compose-region uses only these caches: repaints must not fold the journal
 while the run thread is appending to it."
@@ -95,11 +96,12 @@ while the run thread is appending to it."
                                           (error () nil)))
           (tui-context-tokens tui) (evo.kernel:estimate-context-tokens
                                     (evo.journal:state-messages state))
-          (tui-goal-run-tokens tui) 0
           (tui-thinking-label tui) (string-downcase
                                     (or (evo.journal:state-thinking state)
                                         (agent-thinking-override agent)
-                                        (setting :thinking :medium))))))
+                                        (setting :thinking :medium))))
+    (when reset-goal-run-tokens
+      (setf (tui-goal-run-tokens tui) 0))))
 
 ;;; Plan/auto mode.  Policy — tool gating, instruction injection, the
 ;;; enforcement hooks — belongs to the plan-mode core extension (EVO.PLAN);
@@ -130,6 +132,7 @@ EVO.PLAN:SET-MODE returns NIL and nothing is journaled or scrolled."
 (defun start-worker (tui)
   (unless (tui-running tui)
     (setf (tui-running tui) t
+          (tui-compacting tui) nil
           (agent-abort-flag (tui-agent tui)) nil)
     (setf (tui-worker tui)
           (bt:make-thread
@@ -150,6 +153,49 @@ EVO.PLAN:SET-MODE returns NIL and nothing is journaled or scrolled."
                               :error)))
                  (push-event tui (list :type :worker-done :outcome outcome)))))
            :name "evo-run"))))
+
+(defun start-compact-worker (tui hint)
+  "Run manual compaction on the worker thread so the TUI can keep repainting
+and ESC can interrupt the summarization request."
+  (unless (tui-running tui)
+    (let ((agent (tui-agent tui)))
+      (setf (tui-running tui) t
+            (tui-compacting tui) t
+            (agent-abort-flag agent) nil)
+      (setf (tui-worker tui)
+            (bt:make-thread
+             (lambda ()
+               (let ((outcome :error))
+                 (unwind-protect
+                      (progn
+                        (emit-event agent :type :compaction-start)
+                        (setf outcome
+                              (handler-case
+                                  (progn
+                                    (evo.kernel:compact-now agent :hint hint)
+                                    (if (agent-abort-flag agent)
+                                        (progn
+                                          (push-event tui (list :type :compact-result
+                                                                :outcome :aborted))
+                                          :aborted)
+                                        (progn
+                                          (push-event tui (list :type :compact-result
+                                                                :outcome :stop))
+                                          :stop)))
+                                (serious-condition (e)
+                                  (if (agent-abort-flag agent)
+                                      (progn
+                                        (push-event tui (list :type :compact-result
+                                                              :outcome :aborted))
+                                        :aborted)
+                                      (progn
+                                        (push-event tui (list :type :compact-result
+                                                              :outcome :error
+                                                              :text (format nil "~a" e)))
+                                        :error))))))
+                   (emit-event agent :type :compaction-end)
+                   (push-event tui (list :type :worker-done :outcome outcome)))))
+             :name "evo-compact")))))
 
 (defun user-prompt-block (text)
   "User prompts sit between two rules in scrollback — mirroring the
@@ -290,13 +336,28 @@ inside the TUI tick loop and on session resume, so malformed ARGUMENTS
     (:todo-changed
      (setf (tui-todos tui) (pget event :todos)
            (tui-dirty tui) t))
+    (:compaction-start
+     (setf (tui-compacting tui) t
+           (tui-dirty tui) t))
+    (:compaction-end
+     (setf (tui-compacting tui) nil)
+     (refresh-goal tui :reset-goal-run-tokens nil)
+     (setf (tui-dirty tui) t))
+    (:compact-result
+     (case (pget event :outcome)
+       (:stop (scroll tui (green "✓ compacted")))
+       (:aborted (scroll tui (dim "✗ compact interrupted")))
+       (:error (scroll tui (red (format nil "✗ compact: ~a" (pget event :text)))))))
     (:worker-error
      (scroll tui (red (format nil "✗ internal error in run: ~a" (pget event :text)))))
     (:worker-done
      ;; Reset the run state FIRST: if any of the rendering below signals,
      ;; the TUI must already know the worker is gone (a stuck running=t
      ;; with no worker means no run can ever start again).
-     (setf (tui-running tui) nil (tui-worker tui) nil (tui-thinking-tail tui) "")
+     (setf (tui-running tui) nil
+           (tui-worker tui) nil
+           (tui-compacting tui) nil
+           (tui-thinking-tail tui) "")
      (flush-partial tui)
      (setf (tui-md tui) (make-md))
      (refresh-goal tui)
@@ -359,6 +420,10 @@ inside the TUI tick loop and on session resume, so malformed ARGUMENTS
   "The permanent activity indicator.  Always one line — settling to idle
 instead of disappearing, so the region height does not oscillate."
   (cond
+    ((and (tui-running tui) (tui-compacting tui))
+     (dim (format nil "~c compacting...  esc interrupt"
+                  (char *working-frames*
+                        (mod (tui-spinner tui) (length *working-frames*))))))
     ((and (tui-running tui) (plusp (length (tui-thinking-tail tui))))
      (dim (format nil "~c thinking · ~a  esc interrupt "
                   (char *thinking-frames*
