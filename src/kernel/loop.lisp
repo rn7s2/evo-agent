@@ -109,7 +109,26 @@ plugs in here.")
   "Agent whose tool call is currently executing on this thread, if any.")
 
 (defun request-abort (agent)
-  "Set AGENT's abort flag and run all registered unblock cleanups now."
+  "Set AGENT's abort flag and run all registered unblock cleanups now.
+
+WARNING: cleanups run on THIS thread — the caller's, typically the TUI thread,
+NOT on the worker thread that registered them.  Any cleanup that touches a
+resource owned by the worker thread is a cross-thread data race.
+
+Process handles (SBCL's sb-ext:process-* or ECL's ext:external-process-*) are
+the most dangerous case: sb-ext:process-wait and ext:external-process-wait
+call waitpid(2) under the hood, and concurrent waitpid on the same PID from
+two threads is undefined behavior at the C level.  The process struct's
+status/exit-code slots are also unsynchronized — a reader on the worker
+thread can see a torn state mid-write.  This can crash the runtime.
+
+Tools that own thread-local resources (child processes, FFI handles) should
+poll agent-abort-flag themselves and tear down those resources on their own
+thread — do NOT register such teardowns here.
+
+Closing a stream from another thread is also a data race on the stream
+reference, though in practice the consequences are caught by ignore-errors.
+Setting a flag is the only truly safe cleanup."
   (let (cleanups)
     (bt:with-lock-held ((agent-lock agent))
       (setf (agent-abort-flag agent) t)
@@ -134,6 +153,25 @@ If AGENT is already aborted, CLEANUP is invoked immediately too."
                       :test #'eq :count 1))))))
 
 (defmacro with-abort-cleanup ((agent cleanup) &body body)
+  "Register CLEANUP for cross-thread abort notification.
+
+PITFALL: CLEANUP runs on the aborting thread (the TUI thread), NOT on the
+worker thread that entered this macro.  This is a cross-thread data race for
+any resource tied to the spawning thread.
+
+Process handles (SBCL's sb-ext:process-* or ECL's ext:external-process-*) are
+the worst case: process-wait calls waitpid(2), which is undefined behavior
+when called concurrently from two threads on the same PID; the process
+struct's status/exit-code slots are also unsynchronized and a reader on the
+worker thread can see a torn state mid-write.  This can crash the runtime.
+
+Closing a stream from another thread is also a data race on the stream
+reference, though the consequences are typically caught by ignore-errors
+rather than crashing.
+
+If CLEANUP needs to tear down a thread-local resource (a child process, an
+FFI handle, a stream), do NOT use this macro.  Instead, poll
+agent-abort-flag from the worker thread and perform the teardown there."
   `(let ((unregister (add-abort-cleanup ,agent ,cleanup)))
      (unwind-protect
           (progn ,@body)

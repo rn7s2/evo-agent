@@ -37,6 +37,37 @@ Every extension file starts with:
   the same name replaces it (CL redefinition: applies to the NEXT call, not
   frames already running).
 
+### Long-running tools and interruption
+
+When the user presses Escape, the TUI thread calls `request-abort`, which sets
+the agent's abort flag and runs every registered cleanup function. **Cleanups
+run on the TUI thread, not on the worker thread executing your tool.** This is
+a cross-thread data race for any resource tied to the spawning thread.
+
+**Process handles are the worst case.** Both SBCL
+(`sb-ext:process-kill`/`process-wait`/`process-alive-p`) and ECL
+(`ext:terminate-process`/`ext:external-process-wait`/`ext:external-process-status`)
+are unsafe to call from a different thread than the one that launched the
+process. `process-wait` calls `waitpid(2)`, which is undefined behavior when
+invoked concurrently from two threads on the same PID. The process struct's
+status and exit-code slots are also unsynchronized — a reader on the worker
+thread can see a torn state mid-write. This can crash the runtime.
+
+**Closing a stream from another thread is also a data race** on the stream
+reference, though the consequences are typically caught by `ignore-errors`
+rather than crashing.
+
+If your tool spawns a child process or holds any thread-local resource:
+
+- **Do** poll `evo:*agent*`'s abort flag from the worker thread itself and
+  kill/wait the process there.
+- **Do not** register a `with-abort-cleanup` that calls `process-kill`,
+  `process-wait`, or `close` on a resource you did not create on this thread.
+
+The bundled `bash` tool (`src/kernel/builtin-tools.lisp`) follows this rule:
+it polls the abort flag in its own loop and kills the child process on the
+worker thread, never via a cross-thread cleanup.
+
 ## Commands
 
 ```lisp
