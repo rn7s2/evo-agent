@@ -1054,6 +1054,50 @@ event: response.completed~%data: {\"type\":\"response.completed\",\"response\":{
                        (namestring (uiop:ensure-directory-pathname
                                     (format nil "~a/evo-unit-home" (or (uiop:getenv "TMPDIR") "/tmp"))))))))
 
+;;; System prompt templating: {{PLACEHOLDER}} tokens are where facts about
+;;; the running environment get injected — and the boundary of what evo will
+;;; expand is the boundary of what evo wrote.
+
+(defun test-prompt-template ()
+  (let ((bindings '(("A" . "alpha") ("B" . "beta"))))
+    (check "render substitutes every occurrence"
+           (equal (evo.kernel::render-template "{{A}} and {{A}} then {{B}}" bindings)
+                  "alpha and alpha then beta"))
+    (check "render leaves an unbound placeholder standing"
+           (equal (evo.kernel::render-template "{{A}}/{{NOPE}}" bindings)
+                  "alpha/{{NOPE}}")))
+  (let ((dir (uiop:ensure-directory-pathname
+              (format nil "~a/evo-prompt-~a/" (uiop:getenv "TMPDIR") (gen-id)))))
+    (ensure-directories-exist dir)
+    (write-file-string (merge-pathnames "CLAUDE.md" dir)
+                       "keep {{WORKING_DIRECTORY}} literal")
+    (let* ((prompt (build-system-prompt nil :cwd dir :model "some-model-id"))
+           (env (subseq prompt (search "## Environment" prompt))))
+      (check "environment reports the working directory"
+             (search (namestring dir) env))
+      (check "environment reports today's date"
+             (search (evo.kernel::today-string) env))
+      (check "environment reports the model in play"
+             (search "some-model-id" env))
+      (check "environment leaves no placeholder unresolved"
+             (not (search "{{" env)))
+      (check "user context files are injected, not expanded"
+             (search "keep {{WORKING_DIRECTORY}} literal" prompt))
+      (check "model falls back rather than leaving a hole"
+             (search "unknown" (build-system-prompt nil :cwd dir)))
+      (check "language section is absent until configured"
+             (not (search "## Language" prompt)))
+      (check "gitStatus is omitted outside a repository"
+             (not (search "## gitStatus" prompt))))
+    (let ((previous (setting :language)))
+      (unwind-protect
+           (progn
+             (setf (setting :language) "Korean")
+             (check "language section appears once configured"
+                    (search "Always respond in Korean"
+                            (build-system-prompt nil :cwd dir))))
+        (setf (setting :language) previous)))))
+
 ;;; Tool-call event contract: the kernel announces the call — parsed
 ;;; arguments included — BEFORE executing it, then reports the result.
 
@@ -1587,6 +1631,7 @@ here must be reachable through the public EVO package with no ::."
     (test-templates)
     (test-compaction)
     (test-lore)
+    (test-prompt-template)
     (test-tool-call-events)
     (test-tool-call-display)
     (test-plan-mode)
