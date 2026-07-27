@@ -67,33 +67,34 @@
                          "/bin/sh" (list "-c" command)
                          :input nil :output out-file :error-output :output)))
            (when agent
-             (with-abort-cleanup (agent (lambda ()
-                                          (when (evo.port:process-alive-p process)
-                                            (evo.port:process-kill-tree process))))
-               (loop with deadline = (+ (get-internal-real-time)
-                                        (* timeout internal-time-units-per-second))
-                     while (evo.port:process-alive-p process)
-                     when (agent-abort-flag agent)
-                       do (evo.port:process-kill-tree process)
-                          (evo.port:process-wait process)
-                          (error "Command aborted by user. Partial output:~%~a"
-                                 (truncate-string
-                                  (or (ignore-errors (read-file-string out-file)) "")
-                                  10000))
-                     when (> (get-internal-real-time) deadline)
-                       do (evo.port:process-kill-tree process)
-                          (evo.port:process-wait process)
-                          (error "Command timed out after ~ds. Partial output:~%~a"
-                                 timeout (truncate-string
-                                          (or (ignore-errors (read-file-string out-file)) "")
-                                          10000))
-                     do (sleep 0.05))
-               (when (agent-abort-flag agent)
-                 (evo.port:process-wait process)
-                 (error "Command aborted by user. Partial output:~%~a"
-                        (truncate-string
-                         (or (ignore-errors (read-file-string out-file)) "")
-                         10000)))))
+             ;; The worker that launched PROCESS remains its sole owner.  The
+             ;; TUI thread only sets the abort flag; cross-thread kill/wait on
+             ;; an SBCL process handle can race the polling worker and crash
+             ;; the runtime.
+             (loop with deadline = (+ (get-internal-real-time)
+                                      (* timeout internal-time-units-per-second))
+                   while (evo.port:process-alive-p process)
+                   when (agent-abort-flag agent)
+                     do (evo.port:process-kill-tree process)
+                        (evo.port:process-wait process)
+                        (error "Command aborted by user. Partial output:~%~a"
+                               (truncate-string
+                                (or (ignore-errors (read-file-string out-file)) "")
+                                10000))
+                   when (> (get-internal-real-time) deadline)
+                     do (evo.port:process-kill-tree process)
+                        (evo.port:process-wait process)
+                        (error "Command timed out after ~ds. Partial output:~%~a"
+                               timeout (truncate-string
+                                        (or (ignore-errors (read-file-string out-file)) "")
+                                        10000))
+                   do (sleep 0.05))
+             (when (agent-abort-flag agent)
+               (evo.port:process-wait process)
+               (error "Command aborted by user. Partial output:~%~a"
+                      (truncate-string
+                       (or (ignore-errors (read-file-string out-file)) "")
+                       10000))))
            (unless agent
              (loop with deadline = (+ (get-internal-real-time)
                                       (* timeout internal-time-units-per-second))

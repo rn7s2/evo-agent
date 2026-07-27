@@ -1536,13 +1536,28 @@ event: response.completed~%data: {\"type\":\"response.completed\",\"response\":{
                        (or (uiop:getenv "TMPDIR") "/tmp") (gen-id))))
          (journal (progn (ensure-directories-exist dir) (make-session-journal dir)))
          (agent (make-agent :journal journal))
+         (marker (merge-pathnames "started" dir))
          (start (get-internal-real-time))
-         (aborted nil))
-    (setf (agent-abort-flag agent) t)
-    (let ((evo.kernel::*executing-agent* agent))
-      (handler-case (evo.kernel::tool-bash '(:command "sleep 5" :timeout 10))
-        (error (e)
-          (setf aborted (search "aborted" (format nil "~a" e))))))
+         (aborted nil)
+         (worker
+           (bt:make-thread
+            (lambda ()
+              (let ((evo.kernel::*executing-agent* agent))
+                (handler-case
+                    (evo.kernel::tool-bash
+                     (list :command (format nil "touch ~s; sleep 5" (namestring marker))
+                           :timeout 10))
+                  (error (e)
+                    (setf aborted (search "aborted" (format nil "~a" e)))))))
+            :name "test-bash-abort")))
+    (loop repeat 100 until (probe-file marker) do (sleep 0.01))
+    (check "bash command starts before interrupt" (probe-file marker))
+    (check "bash process remains owned by its execution thread"
+           (bt:with-lock-held ((evo.kernel::agent-lock agent))
+             (null (evo.kernel::agent-abort-cleanups agent))))
+    (request-abort agent)
+    (bt:join-thread worker)
+    (ignore-errors (delete-file marker))
     (let ((elapsed (/ (- (get-internal-real-time) start)
                       internal-time-units-per-second)))
       (check "bash observes abort without waiting for command completion"
