@@ -15,6 +15,8 @@
   /thinking [level]    off·low·medium·high·xhigh
   /compact [hint]      compact the context now
   /lore [text]         show lore, or add durable guidance (project scope)
+  /memory [request]    show project memory or ask the agent to refine it
+  /global-memory [...] show global user memory or ask the agent to refine it
   /tree                navigate entries, move the leaf (rewind/branch)
   /resume              switch to another session
   /fork                fork this session at the current leaf
@@ -63,6 +65,9 @@ keys: enter send · shift+enter/alt+enter/ctrl+j newline · shift+tab auto/plan 
 (defun switch-journal (tui journal &key note)
   (setf (agent-journal (tui-agent tui)) journal)
   (replay-loads (fold-state journal))
+  (run-hooks :session-start
+             (list :agent (tui-agent tui)
+                   :resumed (journal-started-p journal)))
   (refresh-goal tui)
   (setf (tui-partial tui) "")
   (when note (scroll tui (dim note))))

@@ -901,7 +901,10 @@ esc.  Outside a /command word, Tab stays a literal tab character."
          (handler-case
              (let ((result (funcall fn (list :agent (tui-agent tui) :args args :tui tui))))
                (when (stringp result) (scroll tui result))
-               (refresh-goal tui))
+               (refresh-goal tui)
+               (when (and (steering-pending-p (tui-agent tui))
+                          (not (tui-running tui)))
+                 (start-worker tui)))
            (error (e) (scroll tui (red (format nil "✗ /~a: ~a" name e)))))))
       ;; 2. builtins
       ((builtin-command tui name args))

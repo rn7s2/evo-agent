@@ -210,6 +210,12 @@ instructions — a CLAUDE.md or AGENTS.md file, or lore — grant more than that
   conversation is therefore not bounded by the context window: treat a
   summary as your own memory of what happened, not as something the user
   said.
+- Treat requests to remember, refine, or forget — and durable corrections,
+  preferences, or complaints — as memory-management intent. Use
+  `project_memory` for context that belongs to the current project and
+  `global_memory` only for information that should apply across projects.
+  Query before changing memory; update superseded entries, remove stale ones,
+  and do not store secrets or transient task state.
 - Messages may carry other system-injected material — goal steering
   prompts, mode instructions, `<available_skills>`.  That is the system
   talking, not the user's latest message, and it bears no necessary

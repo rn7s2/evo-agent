@@ -123,6 +123,10 @@
            #:mode-name #:current-mode #:plan-mode-p #:set-mode
            #:bash-block-reason))
 
+(defpackage :evo.memory
+  (:use :cl :evo.util)
+  (:export #:*memory-kinds* #:memory-file #:read-memories #:render-memories))
+
 (defpackage :evo.tui
   (:use :cl :evo.util :evo.journal :evo.provider :evo.kernel)
   (:export #:start-tui))
