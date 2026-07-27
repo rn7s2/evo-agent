@@ -24,7 +24,7 @@ design; this README covers what is implemented and how to run it.
   order (extension commands → builtins → skills → prompt templates → agent);
   `/tree` `/resume` `/fork`, double-escape rewind, ESC aborts; todo
   checklist core extension rendered in the panel; plan/auto modes
-  (shift+tab, `/mode`) as a core extension — journaled mode state, gated
+  (shift+tab, `/permission`) as a core extension — journaled mode state, gated
   tool set, injected instructions filtered back out of context, and a
   read-only `:tool-call` gate that judges every chained bash segment;
   skills (Agent Skills standard, progressive disclosure) and `$1`/`$@`

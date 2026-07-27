@@ -10,7 +10,7 @@
   /help                this list
   /goal [objective]    show, create, or refine the goal
   /todo                toggle the todo panel
-  /mode [auto|plan]    switch mode from a list (shift+tab toggles)
+  /permission [auto|plan] switch mode from a list (shift+tab toggles)
   /model [id]          pick the model from a list, or set it directly
   /thinking [level]    off·low·medium·high·xhigh
   /compact [hint]      compact the context now
@@ -200,14 +200,14 @@ keys: enter send · shift+enter/alt+enter/ctrl+j newline · shift+tab auto/plan 
                (refresh-goal tui))))))
     t))
 
-(defun mode-command (tui args)
+(defun permission-command (tui args)
   "The modes themselves come from EVO.PLAN:*MODES* — the picker and the
 argument check never go stale against the core extension."
   (cond
     ((evo.plan:mode-name args) (set-mode tui args))
     ((zerop (length args))
      (enter-select
-      tui "mode:"
+      tui "permission:"
       (loop for (name . description) in evo.plan:*modes*
             collect (list name name description))
       (lambda (mode) (set-mode tui mode))
@@ -305,7 +305,7 @@ here lines up the id column too — provider, id and context each align."
          (setf (tui-todo-visible tui) (not (tui-todo-visible tui))
                (tui-dirty tui) t)
          t)
-        ((cmd "mode") (mode-command tui args))
+        ((cmd "permission") (permission-command tui args))
         ((cmd "model")
          (if (zerop (length args))
              (model-select-command tui)

@@ -1,6 +1,6 @@
 #!/usr/bin/expect -f
 # plan-mode.exp — e2e wiring of plan mode in the TUI:
-# shift+tab toggles, /mode switches, and the journal records the mode state
+# shift+tab toggles, /permission switches, and the journal records the mode state
 # and tool gating.  Plan mode is a core extension, so the evo home here has
 # an EMPTY extensions directory on purpose: everything under test has to
 # come out of the binary.  (The gate itself is unit-tested — model behavior
@@ -41,19 +41,19 @@ send "\x1b\[Z"
 expect { -re {plan mode} { check 1 shift-tab-plan } timeout { check 0 shift-tab-plan } }
 expect { -re {◇ plan} { check 1 plan-indicator } timeout { check 0 plan-indicator } }
 sleep 1
-# /mode auto switches back
-send "/mode auto\r"
-expect { -re {auto mode} { check 1 mode-auto-cmd } timeout { check 0 mode-auto-cmd } }
+# /permission auto switches back
+send "/permission auto\r"
+expect { -re {auto mode} { check 1 permission-auto-cmd } timeout { check 0 permission-auto-cmd } }
 sleep 1
-# /mode opens the choose box; pick plan (second entry)
-send "/mode\r"
-expect { -re {mode:} { check 1 mode-choose-box } timeout { check 0 mode-choose-box } }
+# /permission opens the choose box; pick plan (second entry)
+send "/permission\r"
+expect { -re {permission:} { check 1 permission-choose-box } timeout { check 0 permission-choose-box } }
 send "\x1b\[B"
 sleep 0.3
 send "\r"
-expect { -re {plan mode} { check 1 mode-box-select } timeout { check 0 mode-box-select } }
+expect { -re {plan mode} { check 1 permission-box-select } timeout { check 0 permission-box-select } }
 sleep 1
-send "/mode auto\r"
+send "/permission auto\r"
 expect { -re {auto mode} {} timeout {} }
 sleep 1
 send "/exit\r"
