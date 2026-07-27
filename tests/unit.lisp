@@ -1253,6 +1253,171 @@ event: response.completed~%data: {\"type\":\"response.completed\",\"response\":{
                        (namestring (uiop:ensure-directory-pathname
                                     (format nil "~a/evo-unit-home" (or (uiop:getenv "TMPDIR") "/tmp"))))))))
 
+;;; Memory
+
+(defun test-project-memory ()
+  (let* ((dir (uiop:ensure-directory-pathname
+               (format nil "~a/evo-memory-~a/" (uiop:getenv "TMPDIR") (gen-id))))
+         (journal (progn (ensure-directories-exist dir) (make-session-journal dir)))
+         (agent (make-agent :journal journal)))
+    (check "project memory tool registered" (find-tool "project_memory"))
+    (check "global memory tool registered" (find-tool "global_memory"))
+    (check "project memory command registered" (gethash "memory" evo::*commands*))
+    (check "global memory command registered" (gethash "global-memory" evo::*commands*))
+    (check "project memory starts empty"
+           (null (evo.memory:read-memories :cwd dir)))
+    (evo.memory::perform-project-memory-action
+     '(:action "add" :kind "decision"
+       :text "Use structured project memory entries.")
+     :cwd dir)
+    (evo.memory::perform-project-memory-action
+     '(:action "add" :kind "constraint"
+       :text "Core extensions use the public API.")
+     :cwd dir)
+    (let* ((entries (evo.memory:read-memories :cwd dir))
+           (decision (find :decision entries :key (lambda (entry) (pget entry :kind))))
+           (constraint (find :constraint entries :key (lambda (entry) (pget entry :kind))))
+           (decision-id (pget decision :id))
+           (constraint-id (pget constraint :id)))
+      (check "project memory persists structured entries"
+             (and (= 2 (length entries))
+                  (string-prefix-p "mem-" decision-id)
+                  (pget decision :created-at)
+                  (pget decision :updated-at)))
+      (check "project memory query filters text"
+             (let ((result (evo.memory::perform-project-memory-action
+                            '(:action "query" :query "structured") :cwd dir)))
+               (and (search decision-id result)
+                    (not (search constraint-id result)))))
+      (evo.memory::perform-project-memory-action
+       (list :action "update" :id decision-id
+             :text "Use structured entries so stale memories can be removed.")
+       :cwd dir)
+      (check "project memory updates by stable id"
+             (equal "Use structured entries so stale memories can be removed."
+                    (pget (find decision-id (evo.memory:read-memories :cwd dir)
+                                :key (lambda (entry) (pget entry :id))
+                                :test #'equal)
+                          :text)))
+      (check-signals "project memory rejects exact duplicates"
+                     (evo.memory::perform-project-memory-action
+                      '(:action "add" :kind "decision"
+                        :text "Use structured entries so stale memories can be removed.")
+                      :cwd dir))
+      (check-signals "project memory rejects unknown kinds"
+                     (evo.memory::perform-project-memory-action
+                      '(:action "add" :kind "misc" :text "junk") :cwd dir))
+      (let ((rendered (evo.memory:render-memories
+                       (evo.memory:read-memories :cwd dir))))
+        (check "project memory renders ordered sections"
+               (and (search "## Constraints" rendered)
+                    (search "## Decisions" rendered)
+                    (< (search "## Constraints" rendered)
+                       (search "## Decisions" rendered)))))
+      (evo.memory::perform-project-memory-action
+       (list :action "remove" :id constraint-id) :cwd dir)
+      (check "project memory removes stale entries"
+             (and (= 1 (length (evo.memory:read-memories :cwd dir)))
+                  (null (find constraint-id (evo.memory:read-memories :cwd dir)
+                              :key (lambda (entry) (pget entry :id))
+                              :test #'equal))))
+      (check "memory slash command shows current entries"
+             (search decision-id
+                     (evo.memory::memory-command
+                      (list :agent agent :args "") :cwd dir)))
+      (evo.memory::memory-command
+       (list :agent agent :args "remember the release command") :cwd dir)
+      (check "memory slash command steers the agent"
+             (steering-pending-p agent))
+      (evo.kernel::drain-steering agent)
+      (check "memory slash command records user intention"
+             (search "remember the release command"
+                     (pget (first (message-content
+                                   (first (state-messages (fold-state journal)))))
+                           :text))))
+    (let* ((session-journal (make-session-journal dir))
+           (session-agent (make-agent :journal session-journal)))
+      (evo.memory::inject-memory-scope
+       (list :agent session-agent :resumed nil) :project dir)
+      (let ((messages (state-messages (fold-state session-journal))))
+        (check "fresh session injects project memory once"
+               (and (= 1 (length messages))
+                    (equal "project-memory" (pget (pget (first messages) :meta) :key))
+                    (search "stale memories can be removed"
+                            (pget (first (message-content (first messages))) :text)))))
+      (evo.memory::inject-session-memory
+       (list :agent session-agent :resumed t) :cwd dir)
+      (check "resumed session does not reinject project memory"
+             (= 1 (length (state-messages (fold-state session-journal))))))))
+
+(defun test-global-memory ()
+  (let* ((previous-home (or (uiop:getenv "EVO_HOME")
+                            (namestring (evo-home))))
+         (global-home (uiop:ensure-directory-pathname
+                       (format nil "~a/evo-global-memory-~a/"
+                               (uiop:getenv "TMPDIR") (gen-id))))
+         (dir (uiop:ensure-directory-pathname
+               (format nil "~a/evo-global-memory-project-~a/"
+                       (uiop:getenv "TMPDIR") (gen-id)))))
+    (ensure-directories-exist dir)
+    (evo.port:setenv "EVO_HOME" (namestring global-home))
+    (unwind-protect
+         (progn
+           (evo.memory::perform-global-memory-action
+            '(:action "add" :kind "convention"
+              :text "Prefer concise technical responses.")
+            :cwd dir)
+           (evo.memory::perform-project-memory-action
+            '(:action "add" :kind "fact"
+              :text "This project uses session-level memory.")
+            :cwd dir)
+           (let ((global (evo.memory:read-memories :scope :global :cwd dir))
+                 (project (evo.memory:read-memories :scope :project :cwd dir)))
+             (check "global and project memory stores are isolated"
+                    (and (= 1 (length global))
+                         (= 1 (length project))
+                         (search "concise" (pget (first global) :text))
+                         (search "session-level" (pget (first project) :text))))
+             (check "global memory uses evo home"
+                    (equal (truename (evo.memory:memory-file :scope :global :cwd dir))
+                           (truename (merge-pathnames "memory.sexp" global-home))))
+             (check "global memory slash command shows current entries"
+                    (search (pget (first global) :id)
+                            (evo.memory::global-memory-command
+                             (list :agent nil :args "") :cwd dir))))
+           (let* ((journal (make-session-journal dir))
+                  (agent (make-agent :journal journal)))
+             (evo.memory::global-memory-command
+              (list :agent agent :args "remember my preferred test style") :cwd dir)
+             (check "global memory slash command steers to global tool"
+                    (progn
+                      (evo.kernel::drain-steering agent)
+                      (search "`global_memory`"
+                              (pget (first (message-content
+                                            (first (state-messages
+                                                    (fold-state journal)))))
+                                    :text))))
+             (let* ((session-journal (make-session-journal dir))
+                    (session-agent (make-agent :journal session-journal)))
+               (evo.memory::inject-session-memory
+                (list :agent session-agent :resumed nil) :cwd dir)
+               (let ((messages (state-messages (fold-state session-journal))))
+                 (check "fresh session injects global then project memory"
+                        (equal '("global-memory" "project-memory")
+                               (mapcar (lambda (message)
+                                         (pget (pget message :meta) :key))
+                                       messages)))
+                 (check "global memory snapshot has ordinary context"
+                        (search "Prefer concise technical responses."
+                                (pget (first (message-content (first messages)))
+                                      :text))))
+               (evo.memory::inject-session-memory
+                (list :agent session-agent :resumed t) :cwd dir)
+               (check "resume does not reinject either memory scope"
+                      (= 2 (length (state-messages
+                                    (fold-state session-journal))))))))
+      (evo.port:setenv "EVO_HOME" previous-home))))
+
 ;;; System prompt templating: {{PLACEHOLDER}} tokens are where facts about
 ;;; the running environment get injected — and the boundary of what evo will
 ;;; expand is the boundary of what evo wrote.
@@ -1282,6 +1447,10 @@ event: response.completed~%data: {\"type\":\"response.completed\",\"response\":{
              (not (search "{{" env)))
       (check "user context files are injected, not expanded"
              (search "keep {{WORKING_DIRECTORY}} literal" prompt))
+      (check "system prompt directs explicit memory management"
+             (and (search "requests to remember, refine, or forget" prompt)
+                  (search "`project_memory`" prompt)
+                  (search "`global_memory`" prompt)))
       (check "model falls back rather than leaving a hole"
              (search "unknown" (build-system-prompt nil :cwd dir)))
       (check "language section is absent until configured"
@@ -1885,6 +2054,8 @@ here must be reachable through the public EVO package with no ::."
     (test-templates)
     (test-compaction)
     (test-lore)
+    (test-project-memory)
+    (test-global-memory)
     (test-prompt-template)
     (test-tool-call-events)
     (test-interrupt)

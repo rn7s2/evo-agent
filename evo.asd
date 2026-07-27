@@ -45,7 +45,8 @@
                              (:module "core-ext"
                               :serial t
                               :components ((:file "todo")
-                                           (:file "plan-mode")))
+                                           (:file "plan-mode")
+                                           (:file "memory")))
                              (:module "tui"
                               :serial t
                               :components ((:file "term")

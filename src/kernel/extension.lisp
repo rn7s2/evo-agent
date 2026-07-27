@@ -90,7 +90,7 @@ fatal — a corrupted runtime is repaired by fixing/removing a source file."
 
 (defparameter *kernel-packages*
   '(:evo.port :evo.util :evo.journal :evo.provider :evo.kernel :evo.cli :evo
-    :evo.todo :evo.plan :evo.tui))
+    :evo.todo :evo.plan :evo.memory :evo.tui))
 
 (defun lock-kernel-packages ()
   "Package locks: permissive but not suicidal — touching the kernel
