@@ -45,6 +45,7 @@ plugs in here.")
   thinking-override
   (retry-count 0)
   (compact-retried nil)   ; overflow-recovery guard: compact + retry ONCE
+  (abort-cleanups nil)    ; fns that unblock the currently-running operation
   ;; The TUI steers from its input thread while a run thread drains;
   ;; queue access is the one cross-thread seam.
   (lock (bt:make-lock "agent-queues")))
@@ -103,6 +104,40 @@ plugs in here.")
                                          :content (list (list :type :text :text text)))))
       (emit-event agent :type :steering :text text))
     (length texts)))
+
+(defvar *executing-agent* nil
+  "Agent whose tool call is currently executing on this thread, if any.")
+
+(defun request-abort (agent)
+  "Set AGENT's abort flag and run all registered unblock cleanups now."
+  (let (cleanups)
+    (bt:with-lock-held ((agent-lock agent))
+      (setf (agent-abort-flag agent) t)
+      (setf cleanups (copy-list (agent-abort-cleanups agent))))
+    (dolist (cleanup cleanups)
+      (ignore-errors (funcall cleanup)))
+    t))
+
+(defun add-abort-cleanup (agent cleanup)
+  "Register CLEANUP until the returned unregister function is called.
+If AGENT is already aborted, CLEANUP is invoked immediately too."
+  (let (run-now)
+    (bt:with-lock-held ((agent-lock agent))
+      (push cleanup (agent-abort-cleanups agent))
+      (setf run-now (agent-abort-flag agent)))
+    (when run-now
+      (ignore-errors (funcall cleanup)))
+    (lambda ()
+      (bt:with-lock-held ((agent-lock agent))
+        (setf (agent-abort-cleanups agent)
+              (remove cleanup (agent-abort-cleanups agent)
+                      :test #'eq :count 1))))))
+
+(defmacro with-abort-cleanup ((agent cleanup) &body body)
+  `(let ((unregister (add-abort-cleanup ,agent ,cleanup)))
+     (unwind-protect
+          (progn ,@body)
+       (funcall unregister))))
 
 ;;; Save point: the whole context snapshot is rebuilt between turns.
 
@@ -179,8 +214,9 @@ guaranteed by the CLI preflight)."
            (intercept-tool-call name (pget call :arguments))
          (if blocked-p
              (setf content (format nil "Tool call blocked: ~a" reason) is-error t)
-             (multiple-value-setq (content details is-error)
-               (execute-tool tool args))))))
+              (multiple-value-setq (content details is-error)
+                (let ((*executing-agent* agent))
+                  (execute-tool tool args)))))))
     (let ((content (truncate-string (or content "") *max-tool-result-chars*)))
       (append-entry (agent-journal agent)
                     (append
@@ -241,6 +277,8 @@ Returns :stop :length :error :aborted."
                       :thinking-level (pget ctx :thinking)
                       :cache-key (pget ctx :cache-key)
                       :abort-flag (lambda () (agent-abort-flag agent))
+                      :abort-cleanup (lambda (cleanup)
+                                       (add-abort-cleanup agent cleanup))
                       :on-event (lambda (ev) (apply #'emit-event agent ev)))))
               (append-entry (agent-journal agent) (list :type :message :message assistant))
               (emit-event agent :type :message-end
@@ -252,7 +290,13 @@ Returns :stop :length :error :aborted."
               (ecase (message-stop-reason assistant)
                 (:tool-use
                  (dolist (call (message-tool-calls assistant))
-                   (run-tool-call agent call)))
+                   (when (agent-abort-flag agent)
+                     (return))
+                   (run-tool-call agent call)
+                   (when (agent-abort-flag agent)
+                     (return)))
+                 (when (agent-abort-flag agent)
+                   (return :aborted)))
                 (:length
                  (if (message-tool-calls assistant)
                      (synthesize-truncation-results agent assistant)

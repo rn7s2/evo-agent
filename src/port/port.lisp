@@ -92,6 +92,45 @@ environment; otherwise a list of \"VAR=VALUE\" strings."
   #+sbcl (sb-ext:process-kill process sb-unix:sigkill)
   #+ecl (ext:terminate-process process t))
 
+(defun process-pid (process)
+  "Return the OS pid for PROCESS, or NIL if the implementation cannot expose it."
+  #+sbcl (sb-ext:process-pid process)
+  #+ecl (ext:external-process-pid process))
+
+(defun child-pids (pid)
+  "Immediate child pids of PID, via pgrep.  Best-effort helper for cleanup."
+  (when pid
+    (let* ((out-file (uiop:with-temporary-file (:pathname p :keep t) p))
+           (pgrep (ignore-errors
+                    (launch-child "/bin/sh"
+                                  (list "-c" (format nil "pgrep -P ~d" pid))
+                                  :input nil :output out-file :error-output nil))))
+      (unwind-protect
+           (when pgrep
+             (process-wait pgrep)
+             (let ((out (ignore-errors
+                          (with-open-file (in out-file :direction :input
+                                                       :external-format :utf-8)
+                            (loop for line = (read-line in nil)
+                                  while line
+                                  for n = (parse-integer line :junk-allowed t)
+                                  when n collect n)))))
+               out))
+        (ignore-errors (delete-file out-file))))))
+
+(defun process-kill-tree (process)
+  "Best-effort SIGKILL of PROCESS and its current descendants."
+  (labels ((kill-pid-tree (pid)
+             (dolist (child (child-pids pid))
+               (kill-pid-tree child))
+             (ignore-errors
+              #+sbcl (sb-unix:unix-kill pid sb-unix:sigkill)
+              #+ecl (si:system (format nil "kill -9 ~d >/dev/null 2>&1" pid)))))
+    (let ((pid (ignore-errors (process-pid process))))
+      (if pid
+          (kill-pid-tree pid)
+          (process-kill process)))))
+
 (defun process-wait (process)
   "Block until PROCESS exits.  Returns (values STATUS CODE): STATUS is
 :exited or :signaled; CODE is the exit code or the signal number."

@@ -10,7 +10,8 @@
 (defpackage :evo.port
   (:use :cl)
   (:export #:exit-lisp #:argv #:runtime-pathname #:environ #:setenv
-           #:launch-child #:process-alive-p #:process-kill #:process-wait
+           #:launch-child #:process-alive-p #:process-kill #:process-kill-tree
+           #:process-wait #:process-pid
            #:lock-package #:unlock-package #:add-package-local-nickname
            #:make-fd-output-stream #:make-fd-input-stream
            #:install-signal-handler #:+sigwinch+
@@ -63,6 +64,7 @@
            #:run #:run-until-settled #:make-agent #:agent
            #:agent-journal #:agent-events-cb #:agent-abort-flag
            #:agent-model-override #:agent-thinking-override
+           #:request-abort #:with-abort-cleanup
            #:queue-steering #:queue-followup #:emit-event #:steering-pending-p
            ;; prompt, skills, templates
            #:build-system-prompt #:available-skills #:find-skill

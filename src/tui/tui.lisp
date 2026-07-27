@@ -218,6 +218,13 @@ inside the TUI tick loop and on session resume, so malformed ARGUMENTS
   "FORMAT-TOOL-CALL-PLAIN in scrollback colors."
   (cyan (format-tool-call-plain name arguments)))
 
+(defun interrupt-run (tui)
+  "Interrupt the active run and unblock the worker's current operation."
+  (when (tui-running tui)
+    (request-abort (tui-agent tui))
+    (scroll tui (dim "✗ interrupting…"))
+    t))
+
 ;;; Agent event handling (events arrive from the worker thread via the queue).
 
 (defun handle-agent-event (tui event)
@@ -746,13 +753,12 @@ esc.  Outside a /command word, Tab stays a literal tab character."
               (popup-prefix        ; first esc just hides the popup
                (setf (tui-complete-dismissed tui) popup-prefix
                      (tui-last-esc tui) 0))
+              ((tui-running tui)
+               (interrupt-run tui)
+               (setf (tui-last-esc tui) 0))
               (t
-               (cond ((tui-running tui)
-                      (setf (agent-abort-flag (tui-agent tui)) t)
-                      (scroll tui (dim "✗ interrupting…")))
-                     ((< (- (now-ms) (tui-last-esc tui)) 600)
-                      (rewind-to-last-user tui))
-                     (t nil))
+               (when (< (- (now-ms) (tui-last-esc tui)) 600)
+                 (rewind-to-last-user tui))
                (setf (tui-last-esc tui) (now-ms))))))
          (t nil))))
     (setf (tui-dirty tui) t)))

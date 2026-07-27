@@ -58,11 +58,14 @@ described in the file header."))
 the API's native parameter (Anthropic budget_tokens integer, OpenAI effort
 string).  NIL means thinking off."))
 
-(defgeneric perform-request (api url headers body &key on-event abort-flag)
+(defgeneric perform-request (api url headers body &key on-event abort-flag
+                                                 abort-cleanup &allow-other-keys)
   (:documentation "Execute one request and return the result plist.  The
-default method (core.lisp) streams SSE over dexador and delegates to
-PARSE-STREAM; override for a non-SSE framing.  May signal transport
-errors — the retry loop in call-provider classifies them."))
+ default method (core.lisp) streams SSE over dexador and delegates to
+ PARSE-STREAM; override for a non-SSE framing.  May signal transport
+ errors — the retry loop in call-provider classifies them.  ABORT-CLEANUP,
+ when supplied, registers a cleanup function that should unblock the
+ current request (usually by closing its stream)."))
 
 ;;; Self-seeding defaults: base URL and canonical API-key env var are
 ;;; properties of the API, seeded into the provider registry so an env key

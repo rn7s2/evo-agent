@@ -1119,6 +1119,61 @@ event: response.completed~%data: {\"type\":\"response.completed\",\"response\":{
       (check "unknown tool reports an error result"
              (pget (second events) :is-error)))))
 
+;;; Interrupts yield to active UI affordances, then unblock tool execution.
+
+(defun test-interrupt ()
+  (let* ((dir (uiop:ensure-directory-pathname
+               (format nil "~a/evo-interrupt-~a/"
+                       (or (uiop:getenv "TMPDIR") "/tmp") (gen-id))))
+         (journal (progn (ensure-directories-exist dir) (make-session-journal dir)))
+         (agent (make-agent :journal journal))
+         (tui (evo.tui::make-tui :agent agent)))
+    (setf (evo.tui::tui-running tui) t)
+    (evo.tui::eb-insert-text (evo.tui::tui-editor tui) "/t")
+    (with-output-to-string (fake-tty)
+      (let ((evo.tui::*tty-out* fake-tty)
+            (evo.tui::*region-height* 0)
+            (evo.tui::*region-cursor-row* 0))
+        (evo.tui::handle-key-edit tui :escape)
+        (check "esc while running hides popup before interrupting"
+               (and (not (agent-abort-flag agent))
+                    (equal (evo.tui::tui-complete-dismissed tui) "t")))
+        (evo.tui::handle-key-edit tui :escape)
+        (check "esc interrupts after popup is dismissed"
+               (agent-abort-flag agent)))))
+  (let* ((dir (uiop:ensure-directory-pathname
+               (format nil "~a/evo-select-interrupt-~a/"
+                       (or (uiop:getenv "TMPDIR") "/tmp") (gen-id))))
+         (journal (progn (ensure-directories-exist dir) (make-session-journal dir)))
+         (agent (make-agent :journal journal))
+         (tui (evo.tui::make-tui :agent agent)))
+    (setf (evo.tui::tui-running tui) t)
+    (evo.tui::enter-select tui "pick:" (list (cons "item" :item)) #'identity)
+    (with-output-to-string (fake-tty)
+      (let ((evo.tui::*tty-out* fake-tty)
+            (evo.tui::*region-height* 0)
+            (evo.tui::*region-cursor-row* 0))
+        (evo.tui::handle-key-select tui :escape)))
+    (check "esc while running cancels select before interrupting"
+           (and (eq (evo.tui::tui-mode tui) :edit)
+                (not (agent-abort-flag agent)))))
+  (let* ((dir (uiop:ensure-directory-pathname
+               (format nil "~a/evo-bash-abort-~a/"
+                       (or (uiop:getenv "TMPDIR") "/tmp") (gen-id))))
+         (journal (progn (ensure-directories-exist dir) (make-session-journal dir)))
+         (agent (make-agent :journal journal))
+         (start (get-internal-real-time))
+         (aborted nil))
+    (setf (agent-abort-flag agent) t)
+    (let ((evo.kernel::*executing-agent* agent))
+      (handler-case (evo.kernel::tool-bash '(:command "sleep 5" :timeout 10))
+        (error (e)
+          (setf aborted (search "aborted" (format nil "~a" e))))))
+    (let ((elapsed (/ (- (get-internal-real-time) start)
+                      internal-time-units-per-second)))
+      (check "bash observes abort without waiting for command completion"
+             (and aborted (< elapsed 3/2))))))
+
 ;;; Tool-call display: one line, key arguments only, and total — malformed
 ;;; arguments must degrade, never signal (this renders in the tick loop).
 
@@ -1633,6 +1688,7 @@ here must be reachable through the public EVO package with no ::."
     (test-lore)
     (test-prompt-template)
     (test-tool-call-events)
+    (test-interrupt)
     (test-tool-call-display)
     (test-plan-mode)
     (format t "~%~d passed, ~d failed~%" *pass* *fail*)
