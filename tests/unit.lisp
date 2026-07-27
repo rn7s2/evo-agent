@@ -985,7 +985,44 @@ event: response.completed~%data: {\"type\":\"response.completed\",\"response\":{
                 (format nil "---~%name: demo~%description: a demo skill~%---~%body"))))
     (check "frontmatter parse"
            (and (equal (cdr (assoc "name" front :test #'equal)) "demo")
-                (equal (cdr (assoc "description" front :test #'equal)) "a demo skill")))))
+                (equal (cdr (assoc "description" front :test #'equal)) "a demo skill"))))
+  (let* ((old-home (uiop:getenv "HOME"))
+         (home (uiop:ensure-directory-pathname
+                (format nil "~a/evo-agents-home-~a/" (uiop:getenv "TMPDIR") (gen-id))))
+         (cwd (uiop:ensure-directory-pathname
+               (format nil "~a/evo-agents-project-~a/" (uiop:getenv "TMPDIR") (gen-id))))
+         (shadow (format nil "shadow-~a" (gen-id)))
+         (global-agents-only (format nil "global-agents-~a" (gen-id)))
+         (project-agents-only (format nil "project-agents-~a" (gen-id))))
+    (flet ((write-skill (path name description)
+             (write-file-string
+              path
+              (format nil "---~%name: ~a~%description: ~a~%---~%body" name description))))
+      (unwind-protect
+           (progn
+             (evo.port:setenv "HOME" (namestring home))
+             (write-skill (merge-pathnames (format nil ".agents/skills/~a/SKILL.md" shadow) home)
+                          shadow "global agents")
+             (write-skill (merge-pathnames (format nil "skills/~a/SKILL.md" shadow) (evo-home))
+                          shadow "global evo")
+             (write-skill (merge-pathnames (format nil ".agents/skills/~a/SKILL.md" shadow) cwd)
+                          shadow "project agents")
+             (write-skill (merge-pathnames (format nil ".evo/skills/~a/SKILL.md" shadow) cwd)
+                          shadow "project evo")
+             (write-skill (merge-pathnames (format nil ".agents/skills/~a/SKILL.md" global-agents-only) home)
+                          global-agents-only "global agents only")
+             (write-skill (merge-pathnames (format nil ".agents/skills/~a/SKILL.md" project-agents-only) cwd)
+                          project-agents-only "project agents only")
+             (let ((skills (available-skills cwd)))
+               (check "global .agents skills are scanned"
+                      (find global-agents-only skills :key (lambda (s) (pget s :name)) :test #'equal))
+               (check "project .agents skills are scanned"
+                      (find project-agents-only skills :key (lambda (s) (pget s :name)) :test #'equal))
+               (check ".evo shadows .agents and project shadows global"
+                      (equal (pget (find shadow skills :key (lambda (s) (pget s :name)) :test #'equal)
+                                   :description)
+                             "project evo"))))
+        (when old-home (evo.port:setenv "HOME" old-home))))))
 
 ;;; Compaction
 

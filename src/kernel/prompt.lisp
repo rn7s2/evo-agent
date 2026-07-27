@@ -424,11 +424,15 @@ it becomes available to every section evo owns."
                             (string-trim " " (subseq line (1+ colon))))))))
 
 (defun skills-directories (&optional (cwd (uiop:getcwd)))
-  (list (merge-pathnames "skills/" (evo-home))
+  ;; Low-to-high precedence: project dirs shadow global dirs, and evo's own
+  ;; directory shadows the generic .agents directory at the same scope.
+  (list (merge-pathnames ".agents/skills/" (user-homedir-pathname))
+        (merge-pathnames "skills/" (evo-home))
+        (merge-pathnames ".agents/skills/" (uiop:ensure-directory-pathname cwd))
         (merge-pathnames "skills/" (project-evo-dir cwd))))
 
 (defun available-skills (&optional (cwd (uiop:getcwd)))
-  "Plists (:name :description :path), project skills shadowing global ones."
+  "Plists (:name :description :path). Later skill dirs shadow earlier ones."
   (let ((skills nil))
     (dolist (dir (skills-directories cwd) (nreverse skills))
       (dolist (skill-md (directory (merge-pathnames "*/SKILL.md" dir)))
