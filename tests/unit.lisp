@@ -914,28 +914,49 @@ event: response.completed~%data: {\"type\":\"response.completed\",\"response\":{
         ;; /mode with an explicit arg
         (evo.tui::mode-command tui "auto")
         (check "mode arg switches" (equal (evo.tui::current-mode tui) "auto"))
-        ;; completion candidates include /mode, but plan/auto remain mode
-        ;; arguments only — not standalone slash commands.
-        (let ((commands (evo.tui::all-commands)))
-          (check "mode is a completion candidate"
-                 (assoc "mode" commands :test #'string=))
-          (check "exit is a completion candidate"
-                 (assoc "exit" commands :test #'string=))
-          (check "plan is not a completion candidate"
-                 (not (assoc "plan" commands :test #'string=)))
-          (check "auto is not a completion candidate"
-                 (not (assoc "auto" commands :test #'string=))))
-        (check "plan is not a builtin command"
-               (not (evo.tui::builtin-command tui "plan" "")))
-        (check "auto is not a builtin command"
-               (not (evo.tui::builtin-command tui "auto" "")))
-        (evo.tui::dispatch-command tui (format nil "/~a" "plan"))
-        (check "slash plan does not switch mode"
-               (equal (evo.tui::current-mode tui) "auto"))
-        (evo.tui::set-mode tui "plan")
-        (evo.tui::dispatch-command tui (format nil "/~a" "auto"))
-        (check "slash auto does not switch mode"
-               (equal (evo.tui::current-mode tui) "plan"))))))
+        ;; Even stale userspace extensions that registered the old commands must
+        ;; not resurrect them in completion or dispatch.
+        (let ((called nil))
+          (setf (gethash "plan" evo::*commands*)
+                (list :fn (lambda (ctx)
+                            (declare (ignore ctx))
+                            (setf called "plan")
+                            "old /plan")
+                      :description "old plan command")
+                (gethash "auto" evo::*commands*)
+                (list :fn (lambda (ctx)
+                            (declare (ignore ctx))
+                            (setf called "auto")
+                            "old /auto")
+                      :description "old auto command"))
+          (unwind-protect
+               (progn
+                 ;; completion candidates include /mode, but plan/auto remain mode
+                 ;; arguments only — not standalone slash commands.
+                 (let ((commands (evo.tui::all-commands)))
+                   (check "mode is a completion candidate"
+                          (assoc "mode" commands :test #'string=))
+                   (check "exit is a completion candidate"
+                          (assoc "exit" commands :test #'string=))
+                   (check "plan is not a completion candidate"
+                          (not (assoc "plan" commands :test #'string=)))
+                   (check "auto is not a completion candidate"
+                          (not (assoc "auto" commands :test #'string=))))
+                 (check "plan is not a builtin command"
+                        (not (evo.tui::builtin-command tui "plan" "")))
+                 (check "auto is not a builtin command"
+                        (not (evo.tui::builtin-command tui "auto" "")))
+                 (evo.tui::dispatch-command tui (format nil "/~a" "plan"))
+                 (check "slash plan does not switch mode"
+                        (equal (evo.tui::current-mode tui) "auto"))
+                 (check "slash plan extension not called" (null called))
+                 (evo.tui::set-mode tui "plan")
+                 (evo.tui::dispatch-command tui (format nil "/~a" "auto"))
+                 (check "slash auto does not switch mode"
+                        (equal (evo.tui::current-mode tui) "plan"))
+                 (check "slash auto extension not called" (null called)))
+            (remhash "plan" evo::*commands*)
+            (remhash "auto" evo::*commands*)))))))
 
 ;;; Goal budgets (default: no limit)
 

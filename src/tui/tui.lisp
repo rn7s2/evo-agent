@@ -505,6 +505,12 @@ wrapped between two rules, and the model status line under the editbox."
 
 ;;; Slash-command completion (Tab).
 
+(defparameter *mode-argument-command-names* '("plan" "auto")
+  "Mode names accepted only as /mode arguments, never standalone /commands.")
+
+(defun mode-argument-command-p (name)
+  (member name *mode-argument-command-names* :test #'string-equal))
+
 (defparameter *builtin-commands*
   '(("help" . "commands and keys")
     ("goal" . "show, create, or refine the goal")
@@ -531,18 +537,19 @@ wrapped between two rules, and the model status line under the editbox."
 (defun all-commands ()
   "Completion candidates as (name . description), mirroring dispatch order:
 extension commands, builtins, skills, prompt templates (first wins)."
-  (sort (remove-duplicates
-         (append (loop for name being the hash-keys of evo::*commands*
-                         using (hash-value cmd)
-                       collect (cons name (or (pget cmd :description)
-                                              "extension command")))
-                 (copy-alist *builtin-commands*)
-                 (mapcar (lambda (s) (cons (pget s :name)
-                                           (or (pget s :description) "skill")))
-                         (available-skills))
-                 (mapcar (lambda (name) (cons name "prompt template"))
-                         (template-names)))
-         :key #'car :test #'string= :from-end t)
+  (sort (remove-if (lambda (entry) (mode-argument-command-p (car entry)))
+                   (remove-duplicates
+                    (append (loop for name being the hash-keys of evo::*commands*
+                                    using (hash-value cmd)
+                                  collect (cons name (or (pget cmd :description)
+                                                         "extension command")))
+                            (copy-alist *builtin-commands*)
+                            (mapcar (lambda (s) (cons (pget s :name)
+                                                      (or (pget s :description) "skill")))
+                                    (available-skills))
+                            (mapcar (lambda (name) (cons name "prompt template"))
+                                    (template-names)))
+                    :key #'car :test #'string= :from-end t))
         #'string< :key #'car))
 
 (defparameter *completion-max-rows* 6)
@@ -812,6 +819,13 @@ esc.  Outside a /command word, Tab stays a literal tab character."
          (name (subseq text 1 space))
          (args (string-trim " " (if space (subseq text (1+ space)) ""))))
     (cond
+      ;; Mode names are only /mode arguments.  Keep stale userspace extensions
+      ;; or templates named "plan"/"auto" from resurrecting standalone
+      ;; slash commands after an upgrade.
+      ((mode-argument-command-p name)
+       (scroll tui (dim (format nil "/~a is not a command — use /mode ~a"
+                               name (string-downcase name))))
+       t)
       ;; 1. extension commands
       ((gethash name evo::*commands*)
        (let ((fn (pget (gethash name evo::*commands*) :fn)))
