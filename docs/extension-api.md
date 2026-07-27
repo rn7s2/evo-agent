@@ -96,10 +96,55 @@ idempotent and an override is just a later call.
 (evo:setting :model)                        ; read a setting
 ```
 
-`:api` names a kernel provider API (`:anthropic-messages`,
-`:openai-responses`); API implementations are curated kernel code, not
-user-registrable. Tools, commands, and hooks may be registered from init
-files too.
+`:api` names a registered provider API — `:anthropic-messages` and
+`:openai-responses` ship bundled, and you can add your own (below). Tools,
+commands, and hooks may be registered from init files too.
+
+## Provider APIs (new wire protocols)
+
+A provider API is one wire protocol. Subclass `provider-api`, implement the
+generics, register it — then any model can name it via `:api`. This is the
+same path the bundled adapters take; nothing about them is privileged.
+
+```lisp
+(defclass myco-api (evo:provider-api) ())
+
+(defmethod evo:endpoint-path ((api myco-api)) "/v1/chat")
+(defmethod evo:auth-headers ((api myco-api) config)
+  (list (cons "authorization" (format nil "Bearer ~a" (getf config :api-key)))))
+(defmethod evo:build-request ((api myco-api) &key model system messages tools
+                                                  thinking-level cache-key)
+  ...)                                ; -> JSON request body string
+(defmethod evo:parse-stream ((api myco-api) char-stream &key on-event abort-flag)
+  ...)                                ; -> result plist; see src/provider/api.lisp
+(defmethod evo:thinking-param ((api myco-api) level) nil)
+
+(evo:register-api :myco-chat (make-instance 'myco-api))
+(evo:register-model "myco-large" :provider :myco :api :myco-chat
+  :context-window 128000 :max-output 8192)
+(evo:register-provider :myco :base-url "https://api.myco.com"
+  :api-key-env "MYCO_API_KEY")
+```
+
+The adapter contract `parse-stream` must honor — the result plist, the
+events emitted via `:on-event`, and the errors-are-data rule — is specified
+in the header of `src/provider/api.lisp`. `evo:perform-request` has a
+default method that streams SSE over dexador; override it only for a
+non-SSE framing. `evo:map-sse-events` is available if you want the default
+SSE framing but your own event dispatch.
+
+Optionally make the API self-seeding, so an env key alone is enough config
+and users need no `register-provider` call:
+
+```lisp
+(defmethod evo:default-provider-key ((api myco-api)) :myco)
+(defmethod evo:default-base-url ((api myco-api)) "https://api.myco.com")
+(defmethod evo:default-api-key-env ((api myco-api)) "MYCO_API_KEY")
+```
+
+These three default to `nil` (seed nothing), so implementing them is
+genuinely optional. Re-registering the same key replaces in place, which
+is what keeps a reloaded extension idempotent.
 
 ## Other API
 

@@ -92,11 +92,17 @@ empty (some proxies need none)."
                          "")))))
 
 (defun reset-user-registries ()
-  "Clear models; re-seed providers from the kernel APIs' defaults.
-Called before each userspace boot so config re-evaluation is idempotent."
+  "Clear models; re-seed providers from the registered APIs' defaults.
+Called before each userspace boot so config re-evaluation is idempotent.
+An API with no DEFAULT-PROVIDER-KEY seeds nothing — the usual case for an
+extension-defined API, whose provider comes from init.lisp like any other."
   (setf *models* nil *providers* nil)
   (loop for (nil . api) in *apis*
-        do (register-provider* (default-provider-key api)
-                               :base-url (default-base-url api)
-                               :api-key-env (default-api-key-env api)))
+        for key = (default-provider-key api)
+        when key
+          do (apply #'register-provider* key
+                    (append (let ((url (default-base-url api)))
+                              (when url (list :base-url url)))
+                            (let ((env (default-api-key-env api)))
+                              (when env (list :api-key-env env))))))
   nil)

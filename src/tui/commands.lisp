@@ -223,19 +223,44 @@ argument check never go stale against the core extension."
   (refresh-goal tui)
   (scroll tui (dim (format nil "model → ~a (next turn)" id))))
 
+(defun format-context-window (n)
+  "200000 -> \"200k\", 1000000 -> \"1M\": the picker's description column is
+narrow, and \"1000k\" reads worse than \"1M\" for the big-context models."
+  (cond ((>= n 1000000)
+         (let ((m (/ n 1000000.0d0)))
+           (if (= m (ffloor m))
+               (format nil "~dM" (round m))
+               (format nil "~,1fM" m))))
+        (t (format nil "~dk" (round n 1000)))))
+
+(defun model-row-label (model provider-width)
+  "Provider column then id, padded into aligned columns.  Provider leads
+because ids collide across providers — the same model served direct and
+through a proxy differ only by that word."
+  (format nil "~va  ~a" provider-width
+          (string-downcase (pget model :provider)) (pget model :id)))
+
 (defun model-select-command (tui)
-  "Choose box: pick the model from the registry, current one preselected."
-  (let ((current (tui-model-label tui)))
+  "Choose box: pick the model from the registry, current one preselected.
+The renderer pads every label to the widest one, so padding the provider
+here lines up the id column too — provider, id and context each align."
+  (let* ((current (tui-model-label tui))
+         (models (all-models))
+         (provider-width
+           (reduce #'max models
+                   :key (lambda (m) (length (string (pget m :provider))))
+                   :initial-value 0)))
     (enter-select
      tui "model:"
-     (loop for m in (all-models)
+     (loop for m in models
            for id = (pget m :id)
-           collect (list id id
-                         (format nil "~dk ctx~:[~; · current~]"
-                                 (round (pget m :context-window 0) 1000)
+           collect (list (model-row-label m provider-width)
+                         id
+                         (format nil "~a ctx~:[~; · current~]"
+                                 (format-context-window (pget m :context-window 0))
                                  (equal id current))))
      (lambda (id) (set-model tui id))
-     :index (or (position current (all-models)
+     :index (or (position current models
                           :key (lambda (m) (pget m :id)) :test #'equal)
                 0))
     t))

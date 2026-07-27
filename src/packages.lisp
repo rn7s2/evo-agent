@@ -43,10 +43,13 @@
            #:reset-user-registries
            #:call-provider #:provider-error
            #:parse-sse-stream #:parse-responses-sse-stream
-           ;; provider-API protocol
-           #:provider-api #:find-api #:endpoint-path #:auth-headers
+           ;; provider-API protocol — an extension point: subclass
+           ;; PROVIDER-API, implement the generics, REGISTER-API it.
+           #:provider-api #:find-api #:register-api #:api-keys
+           #:endpoint-path #:auth-headers
            #:build-request #:parse-stream #:thinking-param #:perform-request
            #:map-sse-events
+           #:default-provider-key #:default-base-url #:default-api-key-env
            #:message-role #:message-content #:message-stop-reason
            #:usage-total-tokens #:message-usage))
 
@@ -77,12 +80,28 @@
            #:overflow-error-p #:select-cut))
 
 ;; Public API for extensions, config (init.lisp), and userspace code.
+;;
+;; The provider-API protocol is imported rather than re-defined: EVO:PARSE-STREAM
+;; and EVO.PROVIDER:PARSE-STREAM are the same symbol, so an extension can
+;; subclass and specialize the wire protocol without naming a kernel package.
 (defpackage :evo
   (:use :cl)
+  (:import-from :evo.provider
+                #:provider-api #:register-api #:find-api #:api-keys
+                #:endpoint-path #:auth-headers #:build-request #:parse-stream
+                #:thinking-param #:perform-request #:map-sse-events
+                #:default-provider-key #:default-base-url #:default-api-key-env
+                #:provider-error)
   (:export #:register-tool #:register-command #:on #:load-extension
            #:register-model #:register-provider #:set-setting #:setting
            #:set-active-tools #:all-tools #:*agent* #:current-goal
-           #:steer #:inject-context #:custom-state #:set-custom-state))
+           #:steer #:inject-context #:custom-state #:set-custom-state
+           ;; provider-API protocol (imported from EVO.PROVIDER above)
+           #:provider-api #:register-api #:find-api #:api-keys
+           #:endpoint-path #:auth-headers #:build-request #:parse-stream
+           #:thinking-param #:perform-request #:map-sse-events
+           #:default-provider-key #:default-base-url #:default-api-key-env
+           #:provider-error))
 
 ;; Userspace: all agent-written tools and code live here.  Unlocked.
 (defpackage :evo.user

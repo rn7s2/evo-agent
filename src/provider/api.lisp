@@ -2,10 +2,11 @@
 ;;;;
 ;;;; A provider API is one wire protocol (Anthropic Messages, OpenAI
 ;;;; Responses, ...), implemented as a CLOS class with methods for request
-;;;; building and stream parsing.  APIs are kernel-curated: they are
-;;;; registered at load time by the files in this module and are not
-;;;; user-extensible — users register MODELS and PROVIDERS (registry.lisp),
-;;;; which name an API by its :api keyword.
+;;;; building and stream parsing.  The bundled APIs are registered at load
+;;;; time by the files in this module; an extension registers its own the
+;;;; same way, through the public EVO surface (evo:register-api) — the
+;;;; protocol is an extension point, not a kernel privilege.  Either way a
+;;;; MODEL names its API by the :api keyword (registry.lisp).
 ;;;;
 ;;;; The adapter contract every API implementation must honor:
 ;;;;
@@ -63,20 +64,47 @@ default method (core.lisp) streams SSE over dexador and delegates to
 PARSE-STREAM; override for a non-SSE framing.  May signal transport
 errors — the retry loop in call-provider classifies them."))
 
-;;; Kernel-curated provider defaults: base URL and canonical API-key env var
-;;; are properties of the API, seeded into the provider registry so an env
-;;; key alone is enough config (registry.lisp).
+;;; Self-seeding defaults: base URL and canonical API-key env var are
+;;; properties of the API, seeded into the provider registry so an env key
+;;; alone is enough config to talk to a stock endpoint (registry.lisp).
+;;;
+;;; All three default to NIL so an API is useful the moment the wire
+;;; protocol is implemented.  A NIL DEFAULT-PROVIDER-KEY means "seeds
+;;; nothing": reset-user-registries skips the API and its provider is
+;;; registered from init.lisp like any other.  Without these defaults an
+;;; extension-defined API would boot fine and then die on the *next*
+;;; reset — i.e. on /reload — with a no-applicable-method error.
 
-(defgeneric default-provider-key (api))
-(defgeneric default-base-url (api))
-(defgeneric default-api-key-env (api))
+(defgeneric default-provider-key (api)
+  (:method ((api provider-api)) nil)
+  (:documentation "Provider key this API seeds into the registry, or NIL to
+seed nothing."))
 
-;;; Registry: ordered alist, load-time population, not user-extensible.
+(defgeneric default-base-url (api)
+  (:method ((api provider-api)) nil)
+  (:documentation "Stock endpoint base URL for the seeded provider."))
+
+(defgeneric default-api-key-env (api)
+  (:method ((api provider-api)) nil)
+  (:documentation "Canonical API-key environment variable for the seeded
+provider."))
+
+;;; Registry: ordered alist, populated at load time by the files in this
+;;; module and at boot by extensions.
 
 (defvar *apis* nil
   "Ordered alist of (:api-keyword . provider-api-instance).")
 
 (defun register-api (key instance)
+  "Register (or replace, keeping position) the provider API under KEY.
+Validates eagerly so a typo in an extension errors at load time rather
+than at the first model call.  Re-registering is how a reloaded extension
+stays idempotent."
+  (unless (keywordp key)
+    (error "register-api: key must be a keyword, got ~s" key))
+  (unless (typep instance 'provider-api)
+    (error "register-api ~s: instance must be a PROVIDER-API subclass, got ~s"
+           key (type-of instance)))
   (let ((entry (assoc key *apis*)))
     (if entry
         (setf (cdr entry) instance)
@@ -88,5 +116,7 @@ errors — the retry loop in call-provider classifies them."))
 
 (defun find-api (key)
   (or (cdr (assoc key *apis*))
-      (error "Unknown provider API ~s. Kernel APIs: ~{~s~^, ~}."
+      (error "Unknown provider API ~s. Registered APIs: ~{~s~^, ~}.~%~
+              Bundled APIs are always present; an extension-defined one is~%~
+              only there once its extension has run (evo:register-api)."
              key (api-keys))))

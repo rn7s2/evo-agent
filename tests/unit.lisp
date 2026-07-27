@@ -1284,6 +1284,108 @@ event: response.completed~%data: {\"type\":\"response.completed\",\"response\":{
          (and (equal "/v1/messages" (endpoint-path (find-api :anthropic-messages)))
               (equal "/v1/responses" (endpoint-path (find-api :openai-responses))))))
 
+;;; Extension-defined provider APIs (a new wire protocol from userspace).
+
+;; A minimal API: implements the protocol, seeds nothing.  The common case
+;; for an extension, and the one that used to break /reload.
+(defclass bare-fixture-api (provider-api) ())
+(defmethod endpoint-path ((api bare-fixture-api)) "/v1/bare")
+(defmethod thinking-param ((api bare-fixture-api) level)
+  (declare (ignore level)) nil)
+
+;; A self-seeding API: supplies the provider defaults too, so an env key
+;; alone is enough config.
+(defclass seeding-fixture-api (provider-api) ())
+(defmethod endpoint-path ((api seeding-fixture-api)) "/v1/seeded")
+(defmethod default-provider-key ((api seeding-fixture-api)) :fixture-co)
+(defmethod default-base-url ((api seeding-fixture-api)) "https://api.fixture.co")
+(defmethod default-api-key-env ((api seeding-fixture-api)) "FIXTURE_CO_KEY")
+
+(defun test-extension-apis ()
+  "A provider API is an extension point, not a kernel privilege: everything
+here must be reachable through the public EVO package with no ::."
+  ;; The public surface is what makes this real — verify the protocol is
+  ;; actually exported from EVO, and is the *same* symbol as EVO.PROVIDER's
+  ;; (imported, not shadowed), so a defmethod in userspace specializes the
+  ;; generic the kernel actually calls.
+  (dolist (name '("PROVIDER-API" "REGISTER-API" "FIND-API" "API-KEYS"
+                  "ENDPOINT-PATH" "AUTH-HEADERS" "BUILD-REQUEST" "PARSE-STREAM"
+                  "THINKING-PARAM" "PERFORM-REQUEST" "MAP-SSE-EVENTS"
+                  "DEFAULT-PROVIDER-KEY" "DEFAULT-BASE-URL" "DEFAULT-API-KEY-ENV"))
+    (check (format nil "EVO exports ~a" name)
+           (eq :external (nth-value 1 (find-symbol name :evo))))
+    (check (format nil "EVO:~a is EVO.PROVIDER:~a" name name)
+           (eq (find-symbol name :evo) (find-symbol name :evo.provider))))
+  ;; Registration validates eagerly.
+  (check-signals "register-api rejects a non-keyword key"
+                 (register-api "not-a-keyword" (make-instance 'bare-fixture-api)))
+  (check-signals "register-api rejects a non-provider-api instance"
+                 (register-api :bad-fixture "not-an-api"))
+  (let ((original (copy-alist evo.provider::*apis*)))
+    (unwind-protect
+         (progn
+           (register-api :bare-fixture (make-instance 'bare-fixture-api))
+           (register-api :seeding-fixture (make-instance 'seeding-fixture-api))
+           (check "extension api resolves via find-api" (find-api :bare-fixture))
+           (check "extension api implements the protocol"
+                  (equal "/v1/bare" (endpoint-path (find-api :bare-fixture))))
+           (check "re-registering is idempotent (reloaded extension)"
+                  (progn (register-api :bare-fixture (make-instance 'bare-fixture-api))
+                         (= 1 (count :bare-fixture (api-keys)))))
+           (check "a model may name an extension api"
+                  (progn (register-model* "fixture-model" :provider :fixture-co
+                                          :api :bare-fixture
+                                          :context-window 100 :max-output 10)
+                         (equal :bare-fixture (pget (find-model "fixture-model") :api))))
+           ;; The /reload regression: reset-user-registries walks every
+           ;; registered API.  Before the default methods existed this died
+           ;; on the second boot with no-applicable-method.
+           (check "reset survives an api that seeds nothing"
+                  (progn (reset-user-registries) t))
+           (check "an api with no default-provider-key seeds no provider"
+                  (not (member :nil (mapcar #'car evo.provider::*providers*))))
+           (check "a self-seeding extension api seeds its base-url"
+                  (equal "https://api.fixture.co"
+                         (pget (provider-config :fixture-co) :base-url)))
+           (check "bundled apis still seed after an extension api is added"
+                  (equal "https://api.anthropic.com"
+                         (pget (provider-config :anthropic) :base-url)))
+           (check "apis survive a reset (only models/providers are cleared)"
+                  (find-api :bare-fixture)))
+      (setf evo.provider::*apis* original)
+      (reset-user-registries))))
+
+(defun test-model-picker-labels ()
+  "The /model choose box leads with the provider in an aligned column."
+  (check "context window in k" (equal "200k" (evo.tui::format-context-window 200000)))
+  (check "exactly 1M" (equal "1M" (evo.tui::format-context-window 1000000)))
+  (check "fractional M" (equal "1.5M" (evo.tui::format-context-window 1500000)))
+  (check "sub-1M stays k" (equal "272k" (evo.tui::format-context-window 272000)))
+  (check "zero/unknown" (equal "0k" (evo.tui::format-context-window 0)))
+  ;; Provider first, padded so the id column starts at the same offset for
+  ;; every row; the renderer then pads the whole label to align the context.
+  (let* ((models '((:id "claude-opus-5" :provider :anthropic)
+                   (:id "gpt-5.6-luna" :provider :openai)
+                   (:id "m" :provider :a)))
+         (width (reduce #'max models
+                        :key (lambda (m) (length (string (pget m :provider))))
+                        :initial-value 0))
+         (labels* (mapcar (lambda (m) (evo.tui::model-row-label m width)) models)))
+    (check "provider leads the row"
+           (evo.util:string-prefix-p "anthropic" (first labels*)))
+    (check "provider is downcased"
+           (evo.util:string-prefix-p "openai" (second labels*)))
+    ;; The id is always the label's suffix, so its start column is exact.
+    (check "id column aligns across providers"
+           (let ((starts (mapcar (lambda (m l) (- (length l) (length (pget m :id))))
+                                 models labels*)))
+             (and (apply #'= starts)
+                  (= (first starts) (+ width 2)))))
+    (check "short provider is padded, not truncated"
+           (equal "a          m" (third labels*)))
+    (check "widest provider gets no padding, just the separator"
+           (equal "anthropic  claude-opus-5" (first labels*)))))
+
 (defun register-fixture-models ()
   "The unit suite's stand-in for init.lisp: the model registry ships empty."
   (register-model* "gpt-5.6-luna" :provider :openai :api :openai-responses
@@ -1458,6 +1560,8 @@ event: response.completed~%data: {\"type\":\"response.completed\",\"response\":{
     (test-schema)
     (test-registry)
     (test-apis)
+    (test-extension-apis)
+    (test-model-picker-labels)
     (register-fixture-models)
     (test-sse)
     (test-sse-transport)

@@ -106,10 +106,12 @@ pick it. Without that, evo exits with a pointer to the sample at
 (evo:register-provider :anthropic :base-url "http://127.0.0.1:8787" :api-key "sk-...")
 ```
 
-Dialects (`:anthropic-messages`, `:openai-responses`) are kernel-curated;
-models and providers are yours. Config runs in userspace with the full
-extension API, so `register-tool`, hooks, and `load-extension` work here
-too.
+Two dialects ship bundled (`:anthropic-messages`, `:openai-responses`);
+models and providers are yours, and so is the protocol — subclass
+`evo:provider-api`, implement the generics, `evo:register-api` it, and a
+model can name it via `:api` ([docs/extension-api.md](docs/extension-api.md)).
+Config runs in userspace with the full extension API, so `register-tool`,
+hooks, and `load-extension` work here too.
 
 ## Tests
 

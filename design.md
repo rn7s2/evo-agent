@@ -42,7 +42,7 @@ References:
 | D3 | **Journal format is native sexprs** (one form per line), and sexprs are the default for every data format we control (lore, goal state). Config is not data: init.lisp is evaluated Lisp (see D6). | Human-readable, `read`-able from Lisp with zero external serialization deps. |
 | D4 | **Interface is a CLI** with an adaptive TUI (mandatory: adapts to console resize). Not Emacs/Swank-first. | Approachable for newcomers; CLI adapts to the most contexts. Swank remains a developer side-door, not the product. |
 | D5 | **Supervisor architecture: yes.** A tiny outer process owns launch, crash detection, restart, resume. | Long-running goal pursuit requires surviving self-inflicted death. |
-| D6 | Providers: **both adapters ship** (Anthropic Messages, OpenAI Responses) as kernel-curated CLOS *provider APIs*; **models and endpoint configs are user-registered from init.lisp** (config-as-code, no built-in model table, no settings.sexp). One unified message model for all APIs. | Historically Anthropic-only-then-OpenAI-post-v1 for scope control. The API/registry split keeps new wire protocols a kernel concern while models/providers stay config — still skips pi-ai's 40-provider sprawl. |
+| D6 | Providers: **both adapters ship** (Anthropic Messages, OpenAI Responses) as CLOS *provider APIs*; **models and endpoint configs are user-registered from init.lisp** (config-as-code, no built-in model table, no settings.sexp). A new wire protocol is an extension point, not a kernel privilege: `evo:register-api` takes any `provider-api` subclass. One unified message model for all APIs. | Historically Anthropic-only-then-OpenAI-post-v1 for scope control. The API/registry split keeps *bundled* protocols curated while models/providers stay config — still skips pi-ai's 40-provider sprawl. Making the protocol registerable follows D13: if the TUI can be a core extension, a wire protocol can be a user one. |
 | D7 | Goal system follows **codex's design**: persisted goal + idle-continuation steering + explicit audited completion + budgets. Optional Lisp acceptance predicate as kernel-side verifier. | See §8. |
 | D8 | Kernel/userspace split enforced with **package locks** (SBCL native, ECL `si:package-lock`, behind `evo.port`). | Permissive but not suicidal: touching the kernel requires an explicit, auditable unlock. |
 | D9 | Tool execution is **sequential** in v1. | Parallel is where pi's thread-discipline complexity lives; revisit later. |
@@ -185,15 +185,23 @@ by surgery on opaque state.
 ## 5. Provider layer
 
 One unified model, two shipped adapters (D6), one architecture:
-**provider APIs** — kernel-curated CLOS classes (`src/provider/` module,
-one file per API) implementing `endpoint-path` / `auth-headers` /
+**provider APIs** — CLOS classes (`src/provider/` module, one file per
+bundled API) implementing `endpoint-path` / `auth-headers` /
 `build-request` / `parse-stream` / `thinking-param` / `perform-request` —
-dispatched from `call-provider` via the model's `:api` tag. Everything
+dispatched from `call-provider` via the model's `:api` tag, and
+registerable from an extension as well as from the module. Everything
 below is pi-validated (research §2.5); deltas from pi noted.
 
-- **APIs are kernel, models are config.** A new wire protocol is a new
-  file in `src/provider/` implementing the generics (registered at load
-  time, not user-extensible — replay/caching correctness is curated).
+- **APIs are a protocol, models are config.** A new wire protocol is a
+  class implementing the generics, registered with `register-api`. The
+  bundled ones are files in `src/provider/`, registered at load time; an
+  extension registers its own identically, through the public `EVO`
+  surface (§11) — the protocol symbols are exported there, so userspace
+  specializes the same generics `call-provider` dispatches on. The three
+  self-seeding generics (`default-provider-key` / `default-base-url` /
+  `default-api-key-env`) default to `nil`, so an API that only implements
+  the wire protocol is complete: it seeds no provider and takes its
+  endpoint from init.lisp like any other.
   Models and provider endpoints come from init.lisp via ordered registries
   (`provider/registry.lisp`): `register-model` (re-register replaces in
   place), `register-provider` (field-wise merge; stock endpoints
