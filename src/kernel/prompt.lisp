@@ -198,7 +198,8 @@ instructions — a CLAUDE.md or AGENTS.md file, or lore — grant more than that
 - Interactive git is unavailable: no `-i` flags (`rebase -i`, `add -i`).
   They hang waiting for an editor that is not there.
 - Pass a multi-line commit message through a heredoc so its formatting
-  survives the shell.
+  survives the shell.  End every commit message with a trailer line:
+  `Co-Authored-By: EvoAgent <evo@ruiqilei.com>`.
 - For anything on GitHub — issues, pull requests, checks, releases — use
   the `gh` CLI rather than guessing at web URLs, and hand back the URL it
   prints.
