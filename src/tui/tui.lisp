@@ -232,10 +232,14 @@ inside the TUI tick loop and on session resume, so malformed ARGUMENTS
               (setf (tui-partial tui) (subseq (tui-partial tui) (1+ pos))))
      (setf (tui-dirty tui) t))
     (:thinking-delta
-     (let ((tail (concatenate 'string (tui-thinking-tail tui)
-                              (substitute #\Space #\Newline (pget event :text)))))
+     (let* ((tail (concatenate 'string (tui-thinking-tail tui)
+                               (substitute #\Space #\Newline (pget event :text))))
+            ;; Reserve room for the fixed parts of the activity line
+            ;; ("✢ thinking · " + "  esc interrupt" ≈ 28 cols); the rest
+            ;; is the tail's share of the terminal width.
+            (budget (max 10 (- *cols* 28))))
        (setf (tui-thinking-tail tui)
-             (if (> (length tail) 60) (subseq tail (- (length tail) 60)) tail))
+             (if (> (length tail) budget) (subseq tail (- (length tail) budget)) tail))
        (setf (tui-dirty tui) t)))
     (:tool-call-start
      (flush-partial tui)
