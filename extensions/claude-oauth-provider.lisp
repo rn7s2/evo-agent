@@ -294,8 +294,8 @@ request arrives or 120 seconds elapse."
     (unwind-protect
         (handler-case
             (let ((client
-                    (sb-ext:with-timeout 120
-                      (usocket:socket-accept socket))))
+                    (evo.port:call-with-timeout
+                     120 (lambda () (usocket:socket-accept socket)))))
               (unwind-protect
                   (let* ((stream (usocket:socket-stream client))
                          (line (read-line stream nil nil)))
@@ -317,7 +317,7 @@ request arrives or 120 seconds elapse."
                                     <p>You may close this window and return to evo.</p></body></html>~%")
                     (force-output stream))
                 (usocket:socket-close client)))
-          (sb-ext:timeout ()
+          (evo.port:timeout-error ()
             nil))
       (usocket:socket-close socket))
     code))
@@ -345,9 +345,11 @@ request arrives or 120 seconds elapse."
                        :state state)))
          (response
            (handler-case
-               (dex:post *claude-oauth-token-url*
-                         :headers `(("Content-Type" . "application/json"))
-                         :content body)
+               (apply #'dex:post *claude-oauth-token-url*
+                      :headers `(("Content-Type" . "application/json"))
+                      :content body
+                      (let ((proxy (evo.util:env-proxy *claude-oauth-token-url*)))
+                        (when proxy (list :proxy proxy))))
              (dexador.error:http-request-failed (e)
                (let ((resp-body (ignore-errors (dexador.error:response-body e))))
                  (error "Token exchange failed: HTTP ~a~@[: ~a~]"
@@ -381,9 +383,11 @@ request arrives or 120 seconds elapse."
                        :scope *claude-oauth-scope*)))
          (response
            (handler-case
-               (dex:post *claude-oauth-token-url*
-                         :headers `(("Content-Type" . "application/json"))
-                         :content body)
+               (apply #'dex:post *claude-oauth-token-url*
+                      :headers `(("Content-Type" . "application/json"))
+                      :content body
+                      (let ((proxy (evo.util:env-proxy *claude-oauth-token-url*)))
+                        (when proxy (list :proxy proxy))))
              (dexador.error:http-request-failed (e)
                (error "Token refresh failed: HTTP ~a"
                       (dexador.error:response-status e)))))
@@ -416,9 +420,11 @@ access token.  Returns a parsed JSON object (hash-table) or signals an error."
       (error "No Claude OAuth token: set CLAUDE_OAUTH_ACCESS_TOKEN or run /claude-oauth:login"))
     (handler-case
         (let ((response
-                (dex:get *claude-oauth-models-url*
-                         :headers `(("Authorization" . ,(format nil "Bearer ~a" token))
-                                    ("anthropic-version" . "2023-06-01")))))
+                (apply #'dex:get *claude-oauth-models-url*
+                       :headers `(("Authorization" . ,(format nil "Bearer ~a" token))
+                                  ("anthropic-version" . "2023-06-01"))
+                       (let ((proxy (evo.util:env-proxy *claude-oauth-models-url*)))
+                         (when proxy (list :proxy proxy))))))
           (com.inuoe.jzon:parse response))
       (dexador.error:http-request-failed (e)
         (let ((status (dexador.error:response-status e))
@@ -490,7 +496,7 @@ Returns a list of registered model-id strings."
                      (quri:url-encode code-challenge))))
       ;; Run the blocking callback server + token exchange in a background
       ;; thread so the main event loop is not frozen.
-      (sb-thread:make-thread
+      (bt:make-thread
         (lambda ()
           (let ((code (claude-oauth--start-callback-server port)))
             (cond
@@ -523,7 +529,7 @@ Returns a list of registered model-id strings."
       (if (not refresh)
           "No refresh token: set CLAUDE_OAUTH_REFRESH_TOKEN or run /claude-oauth:login first."
           (progn
-            (sb-thread:make-thread
+            (bt:make-thread
               (lambda ()
                 (handler-case
                     (let ((tokens (claude-oauth--refresh-token refresh)))

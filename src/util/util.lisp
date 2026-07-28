@@ -6,6 +6,50 @@
 (defun getenv (name)
   (uiop:getenv name))
 
+(defun url-host (url)
+  (let* ((start (let ((p (search "://" url))) (if p (+ p 3) 0)))
+         (end (or (position-if (lambda (c) (member c '(#\/ #\: #\?))) url
+                               :start start)
+                  (length url))))
+    (subseq url start end)))
+
+(defun proxy-bypass-p (host)
+  "True when HOST must skip the proxy: loopback always, plus no_proxy /
+NO_PROXY entries (comma-separated; an entry matches itself and its
+subdomains; * matches everything)."
+  (flet ((suffix-p (suffix s)
+           (let ((n (- (length s) (length suffix))))
+             (and (>= n 0) (string-equal suffix s :start2 n)))))
+    (or (member host '("localhost" "127.0.0.1" "::1") :test #'string-equal)
+        (let ((no-proxy (or (getenv "no_proxy") (getenv "NO_PROXY"))))
+          (and no-proxy
+               (loop for start = 0 then (1+ end)
+                     for end = (or (position #\, no-proxy :start start)
+                                   (length no-proxy))
+                     for entry = (string-trim " " (subseq no-proxy start end))
+                     thereis (and (plusp (length entry))
+                                  (or (string= entry "*")
+                                      (string-equal entry host)
+                                      (suffix-p (if (char= (char entry 0) #\.)
+                                                    entry
+                                                    (concatenate 'string "." entry))
+                                                host)))
+                     until (= end (length no-proxy))))))))
+
+(defun env-proxy (url)
+  "Proxy for URL from the environment.  Passed explicitly on every
+request: dexador's *default-proxy* only reads the UPPERCASE env vars, and
+via a defvar evaluated at image build time — so in the shipped binary it
+is stale on top of missing the lowercase Unix convention."
+  (flet ((nonempty (name)
+           (let ((v (getenv name)))
+             (and v (plusp (length v)) v))))
+    (let ((proxy (or (nonempty "HTTPS_PROXY") (nonempty "https_proxy")
+                     (nonempty "HTTP_PROXY") (nonempty "http_proxy"))))
+      (and proxy
+           (not (proxy-bypass-p (url-host url)))
+           proxy))))
+
 (defun iso8601-now ()
   "Current UTC time as an ISO-8601 string."
   (multiple-value-bind (sec min hour day month year)
