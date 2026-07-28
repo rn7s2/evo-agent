@@ -283,9 +283,10 @@ make test           # unit: sexpr IO, journal, schema, registries, provider
                     #       APIs, SSE + transport, request builders, handoff,
                     #       init files, preflight, editor, input parser,
                     #       templates, compaction, lore, plan-mode
-make integration    # live (needs the proxy): tool round-trip, kill -9 +
-                    #       manual resume, goal completion, induced-crash
-                    #       supervision, mid-task compaction
+make integration    # live e2e: tool round-trip, kill -9 + manual resume,
+                    #       goal completion, induced-crash supervision,
+                    #       mid-task compaction. Backend via env (skips if
+                    #       unreachable): EVO_TEST_BASE_URL / _API_KEY / _MODEL
 make tui-test       # expect-driven TUI under a pty
 tests/plan-mode.exp # plan/auto mode wiring e2e
 ```

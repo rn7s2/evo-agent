@@ -9,7 +9,7 @@
 ;; sb-* / ext: / si: symbols.  See src/port/port.lisp.
 (defpackage :evo.port
   (:use :cl)
-  (:export #:exit-lisp #:argv #:runtime-pathname #:environ #:setenv
+  (:export #:exit-lisp #:argv #:runtime-pathname #:environ #:setenv #:getpid
            #:launch-child #:process-alive-p #:process-kill #:process-kill-tree
            #:process-wait #:process-pid
            #:lock-package #:unlock-package #:add-package-local-nickname

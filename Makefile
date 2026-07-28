@@ -48,7 +48,9 @@ install: build install-home
 test:
 	$(RUN_SCRIPT) tests/run-unit.lisp $(STDIN_GUARD)
 
-# End-to-end integration tests against a freshly built binary.
+# End-to-end integration tests against a freshly built binary.  The backend is
+# configurable via EVO_TEST_BASE_URL / EVO_TEST_API_KEY / EVO_TEST_MODEL; the
+# live tests skip cleanly when no backend is reachable.
 integration: build
 	tests/integration.sh
 

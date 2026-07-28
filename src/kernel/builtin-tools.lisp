@@ -53,19 +53,56 @@
 (defparameter *bash-default-timeout* 120)
 (defparameter *bash-max-timeout* 600)
 
+(defparameter *bash-max-inline-bytes* (* 1024 1024)
+  "Bash output at or above this size (1 MiB) is left on disk instead of
+returned inline: dumping megabytes into the context is wasteful and rarely
+what's wanted.  The tool returns a head preview plus the file path so the
+agent can read it selectively (read tool offset/limit, grep, sed, head/tail).")
+
+(defparameter *bash-preview-chars* 4000
+  "How many leading characters of a spilled-to-disk output to show inline.")
+
+(defun file-byte-length (path)
+  "Size of PATH in bytes, or NIL if it can't be measured."
+  (ignore-errors
+   (with-open-file (in path :element-type '(unsigned-byte 8)
+                            :if-does-not-exist nil)
+     (and in (file-length in)))))
+
+(defun read-file-head-string (path max-chars)
+  "First MAX-CHARS characters of PATH (UTF-8); NIL if unreadable (e.g. binary)."
+  (ignore-errors
+   (with-open-file (in path :direction :input :external-format :utf-8
+                            :if-does-not-exist nil)
+     (when in
+       (let* ((buf (make-string max-chars))
+              (n (read-sequence buf in)))
+         (subseq buf 0 n))))))
+
 (defun tool-bash (args)
   (let* ((command (pget args :command))
          (timeout (min *bash-max-timeout*
                        (or (pget args :timeout) *bash-default-timeout*)))
          (out-file (uiop:with-temporary-file (:pathname p :keep t) p))
+         (keep nil)          ; leave OUT-FILE on disk when output is large
          (agent *executing-agent*))
     (unless (and (stringp command) (plusp (length command)))
       (error "command must be a non-empty string"))
     (unwind-protect
          ;; The child inherits our environment and working directory.
+         ;; NEW-SESSION detaches the child from evo's controlling terminal, so
+         ;; a command that tries to prompt on /dev/tty (sudo, ssh, gpg) fails
+         ;; at once instead of hanging until the timeout — the agent has no way
+         ;; to answer such a prompt.  INPUT NIL (null device) covers the
+         ;; separate stdin-EOF case.  EVO_PID names this (the worker) process,
+         ;; since NEW-SESSION means $PPID points at the wrapper, not evo.
          (let ((process (evo.port:launch-child
                          "/bin/sh" (list "-c" command)
-                         :input nil :output out-file :error-output :output)))
+                         :input nil :output out-file :error-output :output
+                         :new-session t
+                         :environment (list* (format nil "EVO_PID=~d"
+                                                     (evo.port:getpid))
+                                             (evo.port:environ)))))
            (when agent
              ;; The worker that launched PROCESS remains its sole owner.  The
              ;; TUI thread only sets the abort flag; cross-thread kill/wait on
@@ -108,13 +145,33 @@
                                         10000))
                    do (sleep 0.05)))
            (let ((code (nth-value 1 (evo.port:process-wait process)))
-                 (output (or (ignore-errors (read-file-string out-file)) "")))
-             (values
-              (format nil "~a~@[~%(exit code ~d)~]"
-                      (if (zerop (length output)) "(no output)" output)
-                      (and (/= code 0) code))
-              (list :exit-code code))))
-      (ignore-errors (delete-file out-file)))))
+                 (bytes (or (file-byte-length out-file) 0)))
+             (if (>= bytes *bash-max-inline-bytes*)
+                 ;; Too big to inline: keep the file and point the agent at it.
+                 (progn
+                   (setf keep t)
+                   (values
+                    (format nil
+                            "Output was large (~d bytes) — left on disk ~
+                             instead of returned inline.~%Saved to: ~a~%~
+                             Read it selectively (don't cat the whole file): ~
+                             the read tool with offset/limit, or grep/sed/~
+                             head/tail on that path.~%~%--- first ~d chars ---~%~
+                             ~a~%--- end of preview ---~@[~%(exit code ~d)~]"
+                            bytes (namestring out-file) *bash-preview-chars*
+                            (or (read-file-head-string out-file *bash-preview-chars*)
+                                "(non-UTF-8 output; preview unavailable)")
+                            (and (/= code 0) code))
+                    (list :exit-code code
+                          :output-file (namestring out-file)
+                          :output-bytes bytes)))
+                 (let ((output (or (ignore-errors (read-file-string out-file)) "")))
+                   (values
+                    (format nil "~a~@[~%(exit code ~d)~]"
+                            (if (zerop (length output)) "(no output)" output)
+                            (and (/= code 0) code))
+                    (list :exit-code code))))))
+      (unless keep (ignore-errors (delete-file out-file))))))
 
 (defun register-builtin-tools ()
   (register-tool*
@@ -143,7 +200,7 @@
    :execute #'tool-edit)
   (register-tool*
    :name "bash"
-   :description "Run a shell command via /bin/sh -c in the working directory. Returns combined stdout/stderr and exit code."
+   :description "Run a shell command via /bin/sh -c in the working directory. Returns combined stdout/stderr and exit code. Output at or above 1 MiB is not returned inline: it is written to a temp file and the tool returns that path plus a short head preview — read it back selectively (this read tool with offset/limit, or grep/sed/head/tail) rather than dumping it whole."
    :schema '(:object
              (:command :type :string :description "Shell command to run")
              (:timeout :type :integer :optional t

@@ -47,6 +47,11 @@
   #+sbcl (sb-ext:posix-environ)
   #+ecl (ext:environ))
 
+(defun getpid ()
+  "This process's own PID."
+  #+sbcl (sb-posix:getpid)
+  #+ecl (si:getpid))
+
 (defun setenv (name value)
   "Set environment variable NAME to VALUE in this process."
   #+sbcl (sb-posix:setenv name value 1)
@@ -57,13 +62,71 @@
 ;;; The handle returned by LAUNCH-CHILD is opaque; pass it only to
 ;;; PROCESS-ALIVE-P / PROCESS-KILL / PROCESS-WAIT.
 
+(defun program-in-path (name)
+  "Absolute pathname of NAME on PATH, or NIL.  RUN-PROGRAM does not search
+PATH (SBCL :search defaults NIL), so callers pass absolute paths."
+  (loop for dir in (uiop:split-string (or (uiop:getenv "PATH") "")
+                                       :separator '(#\:))
+        thereis (and (plusp (length dir))
+                     (probe-file
+                      (merge-pathnames
+                       name (uiop:ensure-directory-pathname dir))))))
+
+(defvar *new-session-prefix* :unresolved
+  "Cached argv prefix that runs a child in its own session with no
+controlling terminal, or NIL if no mechanism exists on this host.")
+
+;; setsid(2) fails (EPERM) when the caller is already a process-group leader
+;; — and RUN-PROGRAM launches our child as exactly that.  So the shim must
+;; fork first (like setsid(1) does): the grandchild is never a group leader,
+;; setsid() there succeeds, and it execs the real command in a fresh session
+;; with no controlling terminal.  The forking parent waits and propagates the
+;; child's status (128+signal on a signal death, else the exit code), so our
+;; RUN-PROGRAM handle still reports the right code; PROCESS-KILL-TREE reaches
+;; the grandchild through pgrep -P.
+(defparameter *perl-setsid-shim*
+  (concatenate
+   'string
+   "my $p=fork; defined $p or die 'fork';"
+   " if($p==0){POSIX::setsid(); exec(@ARGV) or die 'exec';}"
+   " waitpid($p,0); exit(($? & 127) ? 128+($? & 127) : ($? >> 8));"))
+
+(defun new-session-prefix ()
+  "An argv prefix that runs the child in a new session with no controlling
+terminal.  Prefer a perl fork+setsid shim (perl ships on macOS, which has no
+setsid binary); fall back to setsid(1) -w (-w so our handle waits on the real
+child).  Cached; NIL when neither exists (then WRAP-NEW-SESSION no-ops)."
+  (if (eq *new-session-prefix* :unresolved)
+      (setf *new-session-prefix*
+            (let ((perl (program-in-path "perl"))
+                  (setsid (program-in-path "setsid")))
+              (cond
+                (perl (list (namestring perl) "-MPOSIX" "-e"
+                            *perl-setsid-shim* "--"))
+                (setsid (list (namestring setsid) "-w"))
+                (t nil))))
+      *new-session-prefix*))
+
+(defun wrap-new-session (program args)
+  "Rewrite (PROGRAM . ARGS) so the child starts in a new session with no
+controlling terminal: a prompt that opens /dev/tty (sudo, ssh, gpg) then
+fails at once instead of hanging a non-interactive agent forever.  Best
+effort — returns PROGRAM/ARGS unchanged if no mechanism is available."
+  (let ((prefix (new-session-prefix)))
+    (if prefix
+        (values (first prefix) (append (rest prefix) (cons program args)))
+        (values program args))))
+
 (defun launch-child (program args &key (input t) (output t) (error-output t)
-                                       environment)
+                                       environment new-session)
   "Spawn PROGRAM (an absolute path) with ARGS, without waiting.
 INPUT/OUTPUT/ERROR-OUTPUT: t inherits the parent's fd, a pathname redirects
 to that file (superseding), nil is the null device; ERROR-OUTPUT may also be
 :output to merge stderr into OUTPUT.  ENVIRONMENT nil inherits the parent's
-environment; otherwise a list of \"VAR=VALUE\" strings."
+environment; otherwise a list of \"VAR=VALUE\" strings.  NEW-SESSION detaches
+the child from the controlling terminal (see WRAP-NEW-SESSION)."
+  (when new-session
+    (multiple-value-setq (program args) (wrap-new-session program args)))
   #+sbcl
   (apply #'sb-ext:run-program program args
          :wait nil
