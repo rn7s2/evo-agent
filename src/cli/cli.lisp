@@ -23,7 +23,7 @@ Usage:
   evo --list-sessions            list sessions for this cwd
   evo --model <id>               model id (default: the :model setting from init.lisp)
   evo --thinking <level>         off|low|medium|high|xhigh (default medium)
-  evo --no-userspace             boot without init.lisp or extensions (quarantine mode)
+  evo --no-userspace             boot without init.lisp, post-init.lisp, or extensions (quarantine mode)
   evo --no-supervisor            run the session in-process, no crash-restart parent
   evo --help
 
@@ -31,8 +31,10 @@ evo supervises itself: crashes and hangs restart the session with --resume;
 a goal that was active picks itself back up.  Exit codes: 0 done, 1 error,
 2 goal blocked, 3 budget-limited, 64 usage error.
 
-Config: ~/.evo/init.lisp then <cwd>/.evo/init.lisp (Lisp, evaluated in order;
-later calls override).  evo ships no built-in model table, e.g.
+Config: ~/.evo/init.lisp, then <cwd>/.evo/init.lisp, then extensions, then
+~/.evo/post-init.lisp, then <cwd>/.evo/post-init.lisp (Lisp, evaluated in order;
+later calls override).  post-init.lisp runs after extensions, so it can reference
+models registered by extensions.  evo ships no built-in model table, e.g.
   (evo:register-model \"claude-sonnet-5\"
     :provider :anthropic :api :anthropic-messages
     :context-window 200000 :max-output 64000 :thinking t)

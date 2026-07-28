@@ -12,9 +12,6 @@
 ;;;;   CLAUDE_OAUTH_ACCESS_TOKEN  — OAuth access token (sk-ant-oat-...)
 ;;;;   CLAUDE_OAUTH_REFRESH_TOKEN — OAuth refresh token
 ;;;;   CLAUDE_OAUTH_CLIENT_ID     — OAuth client id (default: Claude Code's)
-;;;;   CLAUDE_OAUTH_MODEL         — Anthropic model id to register
-;;;;   CLAUDE_OAUTH_CONTEXT_WINDOW — context window (default 200000)
-;;;;   CLAUDE_OAUTH_MAX_OUTPUT    — max output tokens (default 64000)
 ;;;;
 ;;;; Token storage: ~/.evo/claude-oauth/token.sexp (not journaled, not in repo).
 
@@ -406,33 +403,6 @@ request arrives or 120 seconds elapse."
                                            (+ (claude-oauth--now-ms) 2592000000))))))
 
 ;;; ---------------------------------------------------------------------------
-;;; Model registration from env
-;;; ---------------------------------------------------------------------------
-
-(defun claude-oauth--parse-positive-integer-env (name default)
-  (let ((raw (claude-oauth--env name)))
-    (if raw
-        (let ((value (ignore-errors (parse-integer raw :junk-allowed nil))))
-          (unless (and value (plusp value))
-            (error "~a must be a positive integer, got ~s" name raw))
-          value)
-        default)))
-
-(defun claude-oauth--register-env-model ()
-  (let ((model-id (claude-oauth--env "CLAUDE_OAUTH_MODEL")))
-    (when model-id
-      (evo:register-model model-id
-                          :provider :anthropic-oauth
-                          :api :anthropic-oauth-messages
-                          :context-window (claude-oauth--parse-positive-integer-env
-                                           "CLAUDE_OAUTH_CONTEXT_WINDOW" 200000)
-                          :max-output (claude-oauth--parse-positive-integer-env
-                                       "CLAUDE_OAUTH_MAX_OUTPUT" 64000)
-                          :thinking t)
-      (unless (evo:setting :model)
-        (evo:set-setting :model model-id)))))
-
-;;; ---------------------------------------------------------------------------
 ;;; Fetch models from Anthropic
 ;;; ---------------------------------------------------------------------------
 
@@ -459,18 +429,6 @@ access token.  Returns a parsed JSON object (hash-table) or signals an error."
                               (let ((j (com.inuoe.jzon:parse body)))
                                 (gethash "error" j))))))))))
 
-(defun claude-oauth--guess-context-window (model-id)
-  "Guess a context-window size from the MODEL-ID string.
-Returns 200000 by default (most Claude models)."
-  (declare (ignore model-id))
-  200000)
-
-(defun claude-oauth--guess-max-output (model-id)
-  "Guess a max-output size from the MODEL-ID string.
-Returns 64000 by default (most Claude models)."
-  (declare (ignore model-id))
-  64000)
-
 (defun claude-oauth--register-fetched-models (json)
   "Register every model in the JSON response (hash-table with \"data\" array).
 Returns a list of registered model-id strings."
@@ -480,31 +438,16 @@ Returns a list of registered model-id strings."
     (loop for entry across data
           for id = (gethash "id" entry)
           when id
-            collect (progn
+            collect (let* ((caps (gethash "capabilities" entry))
+                           (thinking-obj (and caps (gethash "thinking" caps)))
+                           (thinking (and thinking-obj (gethash "supported" thinking-obj))))
                       (evo:register-model id
                                           :provider :anthropic-oauth
                                           :api :anthropic-oauth-messages
-                                          :context-window (claude-oauth--guess-context-window id)
-                                          :max-output (claude-oauth--guess-max-output id)
-                                          :thinking t)
+                                          :context-window (or (gethash "max_input_tokens" entry) 200000)
+                                          :max-output (or (gethash "max_tokens" entry) 64000)
+                                          :thinking (if thinking t nil))
                       id))))
-
-(defun claude-oauth--fetch-and-register-models ()
-  "Fetch models from Anthropic and register them.  Returns a summary string."
-  (handler-case
-      (let* ((json (claude-oauth--fetch-models))
-             (ids (claude-oauth--register-fetched-models json)))
-        (with-output-to-string (s)
-          (format s "Registered ~d model~:p from Anthropic:~%" (length ids))
-          (dolist (id ids)
-            (format s "  ~a~%" id))
-          ;; If no model is currently set, default to the first one.
-          (unless (evo:setting :model)
-            (let ((first (first ids)))
-              (evo:set-setting :model first)
-              (format s "Model set to ~a (was unset).~%" first)))))
-    (error (e)
-      (format nil "Failed to fetch models: ~a" e))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Registration
@@ -514,7 +457,16 @@ Returns a list of registered model-id strings."
 (evo:register-provider :anthropic-oauth
                        :base-url "https://api.anthropic.com"
                        :api-key-env "CLAUDE_OAUTH_ACCESS_TOKEN")
-(claude-oauth--register-env-model)
+
+;; Auto-register models from the API at load time (best-effort: needs a token).
+;; init.lisp runs before extensions, so it can pick the default model after
+;; registration is complete.  The extension only makes models available; it
+;; never overrides the user's choice.
+(handler-case
+    (claude-oauth--register-fetched-models (claude-oauth--fetch-models))
+  (error (e)
+    (format *error-output* "~&[claude-oauth] Could not fetch models at load time: ~a~%~
+                              Run /claude-oauth:login then /reload to register models.~%" e)))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Slash commands
@@ -543,7 +495,7 @@ Returns a list of registered model-id strings."
           (let ((code (claude-oauth--start-callback-server port)))
             (cond
               ((null code)
-               (format *error-output* "~&[claude-oauth] Login timed out.~%"))
+               (format *error-output* "~&[claude-oauth] Login timed out.~%~%~%~%~%~%"))
               (t
                (handler-case
                    (let ((tokens (claude-oauth--exchange-code code code-verifier redirect-uri state)))
@@ -551,9 +503,9 @@ Returns a list of registered model-id strings."
                                                  (getf tokens :refresh-token)
                                                  (getf tokens :expires-at)
                                                  (getf tokens :refresh-token-expires-at))
-                     (format *error-output* "~&[claude-oauth] Login successful. Token stored.~%"))
+                     (format *error-output* "~&[claude-oauth] Login successful. Token stored.~%~%~%~%~%~%"))
                  (error (e)
-                   (format *error-output* "~&[claude-oauth] Login failed: ~a~%" e)))))))
+                   (format *error-output* "~&[claude-oauth] Login failed: ~a~%~%~%~%~%~%" e)))))))
         :name "claude-oauth-login")
       ;; Open the browser immediately.
       (uiop:launch-program (list "open" auth-url) :ignore-error-status t)
@@ -579,18 +531,12 @@ Returns a list of registered model-id strings."
                                                   (getf tokens :refresh-token)
                                                   (getf tokens :expires-at)
                                                   (getf tokens :refresh-token-expires-at))
-                      (format *error-output* "~&[claude-oauth] Token refreshed and stored.~%"))
+                      (format *error-output* "~&[claude-oauth] Token refreshed and stored.~%~%~%~%~%~%"))
                   (error (e)
-                    (format *error-output* "~&[claude-oauth] Token refresh failed: ~a~%" e))))
+                    (format *error-output* "~&[claude-oauth] Token refresh failed: ~a~%~%~%~%~%~%" e))))
               :name "claude-oauth-refresh")
             "Refreshing token in background... Check stderr for status."))))
   :description "Refresh the Claude OAuth access token")
-
-(evo:register-command "claude-oauth:models"
-  (lambda (ctx)
-    (declare (ignore ctx))
-    (claude-oauth--fetch-and-register-models))
-  :description "Fetch available models from Anthropic and register them")
 
 (evo:register-command "claude-oauth:status"
   (lambda (ctx)

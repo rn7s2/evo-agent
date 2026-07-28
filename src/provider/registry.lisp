@@ -46,8 +46,8 @@ a typo errors at init-load time, not mid-run."
   (cond ((consp id) id)
         ((find id *models* :key (lambda (m) (pget m :id)) :test #'string=))
         (t (error "Unknown model ~s: no registered model has that id.~%~
-                   Registered models: ~:[none — is your init.lisp missing?~;~:*~{~a~^, ~}~]~%~
-                   Register it in init.lisp:~%  ~
+                   Registered models: ~:[none — is your init.lisp or post-init.lisp missing?~;~:*~{~a~^, ~}~]~%~
+                   Register it in init.lisp or post-init.lisp:~%  ~
                    (evo:register-model ~s~%    ~
                    :provider :anthropic :api :anthropic-messages~%    ~
                    :context-window 200000 :max-output 64000 :thinking t)"
@@ -79,7 +79,7 @@ empty (some proxies need none)."
   (let ((conf (cdr (or (assoc key *providers*)
                        (error "No provider ~s is registered — add~%  ~
                                (evo:register-provider ~s :base-url \"https://...\" :api-key-env \"...\")~%~
-                               to your init.lisp."
+                               to your init.lisp or post-init.lisp."
                               key key)))))
     (let ((base-url (pget conf :base-url)))
       (unless base-url
