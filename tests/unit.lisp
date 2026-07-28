@@ -504,13 +504,13 @@ event: response.completed~%data: {\"type\":\"response.completed\",\"response\":{
     ;; Tab completion of a unique /command.
     (let ((tui (evo.tui::make-tui)))
       (evo.tui::eb-insert-text (evo.tui::tui-editor tui) "/expo")
-      (evo.tui::complete-command tui)
+      (evo.tui::complete-at-point tui)
       (check "unique completion + space"
              (equal (evo.tui::eb-text (evo.tui::tui-editor tui)) "/export "))
       ;; Tab in plain text stays a literal tab.
       (evo.tui::eb-clear (evo.tui::tui-editor tui))
       (evo.tui::eb-insert-text (evo.tui::tui-editor tui) "x")
-      (evo.tui::complete-command tui)
+      (evo.tui::complete-at-point tui)
       (check "literal tab outside command"
              (equal (evo.tui::eb-text (evo.tui::tui-editor tui))
                     (format nil "x~c" #\Tab))))
@@ -518,14 +518,15 @@ event: response.completed~%data: {\"type\":\"response.completed\",\"response\":{
     ;; suggestions under the editor, alongside the input.
     (let ((tui (evo.tui::make-tui)))
       (evo.tui::eb-insert-text (evo.tui::tui-editor tui) "/t")
-      (multiple-value-bind (prefix matches) (evo.tui::completion-context tui)
+      (multiple-value-bind (prefix matches kind) (evo.tui::completion-context tui)
         (check "popup active on /prefix" (equal prefix "t"))
+        (check "popup knows it is completing a command" (eq :command kind))
         (check "popup filters by prefix"
                (and (<= 3 (length matches))
                     (every (lambda (m) (evo.util:string-prefix-p "t" (car m)))
                            matches)))
         ;; help text: dim, in an aligned column
-        (let ((rows (evo.tui::completion-rows tui matches)))
+        (let ((rows (evo.tui::completion-rows tui matches kind)))
           (flet ((desc-col (row marker)
                    (let ((pos (search marker row)))
                      (and pos (evo.tui::visible-length (subseq row 0 pos))))))
@@ -543,7 +544,7 @@ event: response.completed~%data: {\"type\":\"response.completed\",\"response\":{
                     (find-if (lambda (l) (search "● /thinking" l)) lines)
                     (find-if (lambda (l) (search "  /todo" l)) lines))))
       (evo.tui::edit-down tui)            ; selection moves in the popup...
-      (evo.tui::complete-command tui)     ; ...and tab accepts it
+      (evo.tui::complete-at-point tui)     ; ...and tab accepts it
       (check "tab accepts highlighted"
              (equal (evo.tui::eb-text (evo.tui::tui-editor tui)) "/todo "))
       ;; enter on a partial command word completes instead of submitting
@@ -564,10 +565,10 @@ event: response.completed~%data: {\"type\":\"response.completed\",\"response\":{
     (let ((tui (evo.tui::make-tui))
           (evo.tui::*rows* 24))
       (evo.tui::eb-insert-text (evo.tui::tui-editor tui) "/")
-      (multiple-value-bind (prefix matches) (evo.tui::completion-context tui)
+      (multiple-value-bind (prefix matches kind) (evo.tui::completion-context tui)
         (check "bare slash lists all commands"
                (and (equal prefix "") (> (length matches) 7)))
-        (let ((rows (evo.tui::completion-rows tui matches)))
+        (let ((rows (evo.tui::completion-rows tui matches kind)))
           (check "popup height bounded"
                  (<= (length rows) (1+ evo.tui::*completion-max-rows*)))
           (check "popup overflow indicator"
@@ -857,13 +858,160 @@ event: response.completed~%data: {\"type\":\"response.completed\",\"response\":{
     (evo.tui::edit-up tui)
     (check "up from first line recalls history"
            (equal (evo.tui::eb-text eb) "second message"))
-    ;; /commands never enter history, so recall can't re-open the popup.
-    (evo.tui::history-remember tui "/todo")
-    (check "slash command not recorded"
-           (= 2 (length (evo.tui::tui-history tui))))
-    (evo.tui::history-remember tui "//not a command")
-    (check "escaped slash text recorded"
-           (equal "//not a command" (first (evo.tui::tui-history tui))))))
+    ;; Everything submitted is recalled, /commands included — whole,
+    ;; partial, with arguments or without.
+    (dolist (text '("//not a command" "/todo" "/goal ship it" "/eval (+ 1 2)"
+                    "/eval (evo:all-too" "/tod" "/"))
+      (evo.tui::history-remember tui text)
+      (check (format nil "remembered ~a" text)
+             (equal text (first (evo.tui::tui-history tui)))))
+    (evo.tui::history-remember tui "/")
+    (check "consecutive duplicate still collapses"
+           (equal '("/" "/tod") (subseq (evo.tui::tui-history tui) 0 2)))
+    ;; Browsing walks all of it, and no popup ever takes over — not on a
+    ;; bare slash, not mid-symbol, not on a partial command word.
+    (evo.tui::eb-clear eb)
+    (dolist (expected '("/" "/tod" "/eval (evo:all-too" "/eval (+ 1 2)"
+                        "/goal ship it" "/todo" "//not a command"
+                        "second message" "first message"))
+      (evo.tui::edit-up tui)
+      (check (format nil "up recalls ~a" expected)
+             (equal (evo.tui::eb-text eb) expected))
+      (check (format nil "no popup on recalled ~a" expected)
+             (null (evo.tui::completion-context tui))))
+    ;; Editing a recalled entry makes it new input again: suggestions return.
+    (evo.tui::history-recall tui "/tod")
+    (check "recalled partial command word stays quiet"
+           (null (evo.tui::completion-context tui)))
+    (evo.tui::eb-backspace eb)
+    (check "editing it brings suggestions back"
+           (evo.tui::completion-context tui))
+    (evo.tui::eb-insert-char eb #\d)
+    (check "editing back to exactly the recalled text is quiet again"
+           (null (evo.tui::completion-context tui)))
+    ;; Tab asks for completion outright, whatever put the text there.
+    (evo.tui::complete-at-point tui)
+    (check "tab completes recalled content"
+           (equal "/todo " (evo.tui::eb-text eb)))))
+
+;;; /eval completion: the popup completes the image's own functions and
+;;; variables inside an /eval invocation.
+
+(defun test-eval-completion ()
+  ;; What the cursor is on, and where the token starts.
+  (let* ((tui (evo.tui::make-tui))
+         (eb (evo.tui::tui-editor tui)))
+    (evo.tui::eb-insert-text eb "/eval (evo:all-too")
+    (multiple-value-bind (prefix kind) (evo.tui::completion-target eb)
+      (check "eval content completes symbols" (eq :symbol kind))
+      (check "token stops at the open paren" (equal "evo:all-too" prefix)))
+    (multiple-value-bind (token start) (evo.tui::symbol-token-at-cursor eb)
+      (check "token start is where it began" (= start 7))
+      (check "token is what was typed" (equal "evo:all-too" token)))
+    ;; Tab splices the completion in place, leaving the rest of the form.
+    (evo.tui::eb-insert-text eb ")")
+    (evo.tui::eb-move eb :left)
+    (evo.tui::complete-at-point tui)
+    (check "tab replaces just the token"
+           (equal "/eval (evo:all-tools)" (evo.tui::eb-text eb)))
+    (check "cursor lands after the completion"
+           (= (evo.tui::eb-col eb) (1- (length (evo.tui::eb-text eb))))))
+  ;; The command word itself is never completed over.
+  (let* ((tui (evo.tui::make-tui))
+         (eb (evo.tui::tui-editor tui)))
+    (evo.tui::eb-insert-text eb "/eval (car x)")
+    (evo.tui::eb-move eb :home)
+    (dotimes (i 3) (evo.tui::eb-move eb :right))
+    (check "no symbol completion inside the command word"
+           (null (evo.tui::symbol-token-at-cursor eb)))
+    (evo.tui::eb-move eb :end)
+    (check "no popup after a closing paren"
+           (null (evo.tui::completion-context tui))))
+  ;; Rendering: symbols show as typed, commands keep their slash.
+  (let* ((tui (evo.tui::make-tui))
+         (eb (evo.tui::tui-editor tui)))
+    (evo.tui::eb-insert-text eb "/eval (all-tool")
+    (multiple-value-bind (prefix matches kind) (evo.tui::completion-context tui)
+      (check "popup opens on an eval symbol" (equal "all-tool" prefix))
+      (check "popup knows it is completing a symbol" (eq :symbol kind))
+      (let ((rows (evo.tui::completion-rows tui matches kind)))
+        (check "symbol rows carry no slash"
+               (and (find-if (lambda (r) (search "all-tools" r)) rows)
+                    (notany (lambda (r) (search "/all-tools" r)) rows)))))
+    ;; Non-eval commands keep completing command names, not symbols.
+    (evo.tui::eb-set-text eb "/lore car")
+    (check "other commands do not complete symbols"
+           (null (evo.tui::completion-target eb))))
+  ;; A whole symbol name completes itself out of existence: nothing left to
+  ;; choose, so no popup to capture up/down, and tab has nothing to say.
+  (let* ((tui (evo.tui::make-tui))
+         (eb (evo.tui::tui-editor tui)))
+    (evo.tui::eb-insert-text eb "/eval (mapca")
+    (check "popup while the name is partial" (evo.tui::completion-context tui))
+    (evo.tui::eb-insert-char eb #\r)
+    (check "popup gone once the name is whole"
+           (null (evo.tui::completion-context tui)))
+    (evo.tui::complete-at-point tui)
+    (check "tab on a whole name leaves the buffer alone"
+           (equal "/eval (mapcar" (evo.tui::eb-text eb)))
+    ;; A name that is still a prefix of others keeps its popup.
+    (evo.tui::eb-set-text eb "/eval (list")
+    (check "a whole name that others extend keeps its popup"
+           (evo.tui::completion-context tui))))
+
+(defun completion-names (token)
+  (mapcar #'car (evo.eval:completions-for token)))
+
+(defun test-eval-completion-source ()
+  ;; Unqualified: everything reachable while evaluating.
+  (let ((names (completion-names "all-too")))
+    (check "completes an evo function reachable unqualified"
+           (member "all-tools" names :test #'string=)))
+  (check "completes a CL function"
+         (member "mapcar" (completion-names "mapca") :test #'string=))
+  (check "completes a variable"
+         (member "*package*" (completion-names "*packa") :test #'string=))
+  (check "reports what a candidate is"
+         (equal "function" (cdr (assoc "mapcar" (evo.eval:completions-for "mapca")
+                                       :test #'string=))))
+  (check "macros are named as macros"
+         (search "macro" (cdr (assoc "defun" (evo.eval:completions-for "defu")
+                                     :test #'string=))))
+  ;; Only what can be called or read: an interned symbol that is neither is
+  ;; not a completion candidate.
+  (intern "EVAL-COMPLETION-BLANK" :evo.user)
+  (check "a symbol that is neither function nor variable is not offered"
+         (null (completion-names "eval-completion-blan")))
+  (check "the same name completes once it names something"
+         (progn (eval `(defparameter ,(intern "EVAL-COMPLETION-BLANK" :evo.user) 1))
+                (member "eval-completion-blank" (completion-names "eval-completion-blan")
+                        :test #'string=)))
+  ;; Qualified: exports through one colon, the package's own through two.
+  (check "single colon completes exported symbols"
+         (member "evo:register-tool" (completion-names "evo:regis") :test #'string=))
+  (check "single colon does not reach unexported symbols"
+         (null (completion-names "evo.kernel:drain-steer")))
+  (check "double colon reaches the package's own symbols"
+         (member "evo.kernel::drain-steering" (completion-names "evo.kernel::drain-steer")
+                 :test #'string=))
+  (check "an unknown package completes nothing"
+         (null (completion-names "no-such-package:x")))
+  (check "keywords complete after a colon"
+         (member ":test" (completion-names ":tes") :test #'string=))
+  ;; Package names themselves, so the next keystroke lands qualified.
+  (check "package names complete with their colon"
+         (member "evo.kernel:" (completion-names "evo.kern") :test #'string=))
+  ;; Nothing to filter on means no popup at all, rather than the whole image.
+  (check "an empty token offers nothing" (null (completion-names "")))
+  (check "a bare colon offers nothing" (null (completion-names ":")))
+  ;; Case-insensitive in, canonical lowercase out.
+  (check "matching ignores case"
+         (member "mapcar" (completion-names "MAPCA") :test #'string=))
+  ;; Sorted and unique — the popup shows a window of this list.
+  (let ((names (completion-names "ma")))
+    (check "candidates are sorted" (equal names (sort (copy-list names) #'string<)))
+    (check "candidates are unique"
+           (= (length names) (length (remove-duplicates names :test #'string=))))))
 
 ;;; Plan/auto mode switching (shift+tab, /permission, status indicator)
 
@@ -2145,5 +2293,7 @@ here must be reachable through the public EVO package with no ::."
     (test-tool-call-display)
     (test-plan-mode)
     (test-eval)
+    (test-eval-completion)
+    (test-eval-completion-source)
     (format t "~%~d passed, ~d failed~%" *pass* *fail*)
     (if (zerop *fail*) 0 1)))

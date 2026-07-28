@@ -120,6 +120,133 @@ frontend down."
       ((null values) (write-string "⇒ ; no values" out))
       (t (format out "~{⇒ ~a~^~%~}" (mapcar #'print-value values))))))
 
+;;; Completion: what the image has to offer.
+;;;
+;;; The frontend asks what a half-typed token could become; deciding that is
+;;; the same knowledge /eval already owns — which package the content reads
+;;; in, and what a symbol has to be to be worth offering.  Only functions
+;;; and variables are offered: the image interns far more symbols than it
+;;; can call or read, and a suggestion you cannot evaluate is noise.
+
+(defparameter *token-delimiters*
+  '(#\Space #\Tab #\Newline #\Return #\( #\) #\' #\" #\` #\, #\; #\#)
+  "Characters that end a symbol token.  Colon is absent deliberately: it is
+part of the token, so a package qualifier completes as one piece.")
+
+(defun token-start (text end)
+  "Index where the symbol token ending at END in TEXT begins."
+  (let ((i (min end (length text))))
+    (loop while (and (plusp i)
+                     (not (member (char text (1- i)) *token-delimiters*)))
+          do (decf i))
+    i))
+
+(defun split-qualifier (token)
+  "TOKEN split at its package marker: (values PACKAGE NAME MARKER), MARKER
+being \":\", \"::\", or NIL when TOKEN names no package.  An empty PACKAGE
+is the keyword package, the way the reader treats a leading colon."
+  (let ((colon (position #\: token)))
+    (if (null colon)
+        (values nil token nil)
+        (let ((marker (if (and (< (1+ colon) (length token))
+                               (char= (char token (1+ colon)) #\:))
+                          "::"
+                          ":")))
+          (values (subseq token 0 colon)
+                  (subseq token (+ colon (length marker)))
+                  marker)))))
+
+(defun completion-package (name)
+  (if (zerop (length name))
+      (find-package :keyword)
+      (or (find-package (string-upcase name)) (find-package name))))
+
+(defun symbol-kind (symbol)
+  "What SYMBOL is, as a description, or NIL when it is neither a function
+nor a variable — nothing /eval could call or read."
+  (let ((kinds nil))
+    (cond ((keywordp symbol) (push "keyword" kinds))
+          ((not (boundp symbol)))
+          ((constantp symbol) (push "constant" kinds))
+          (t (push "variable" kinds)))
+    (cond ((special-operator-p symbol) (push "special operator" kinds))
+          ((macro-function symbol) (push "macro" kinds))
+          ((fboundp symbol)
+           (push (if (typep (ignore-errors (fdefinition symbol)) 'generic-function)
+                     "generic function"
+                     "function")
+                 kinds)))
+    (when kinds (string-join ", " kinds))))
+
+(defun prefix-match-p (prefix name)
+  "Case-insensitive: symbol names are stored upcased and typed lowercase."
+  (and (<= (length prefix) (length name))
+       (string-equal prefix name :end2 (length prefix))))
+
+(defun offer (symbol prefix qualifier)
+  "SYMBOL as a (name . description) candidate when it matches PREFIX and is
+worth offering, else NIL.  NAME is the whole replacement text, qualifier
+included, so accepting it replaces the token as typed."
+  (let ((name (symbol-name symbol)))
+    (when (prefix-match-p prefix name)
+      (let ((kind (symbol-kind symbol)))
+        (when kind
+          (cons (concatenate 'string qualifier (string-downcase name)) kind))))))
+
+(defun qualified-completions (package prefix qualifier external-only)
+  "Symbols of PACKAGE matching PREFIX.  A single colon offers what the
+package exports; a double colon offers what it owns — an inherited symbol
+belongs to the package it came from, and is reachable under that name."
+  (let ((out nil))
+    (flet ((collect (symbol)
+             (let ((candidate (offer symbol prefix qualifier)))
+               (when candidate (push candidate out)))))
+      (if external-only
+          (do-external-symbols (symbol package) (collect symbol))
+          (do-symbols (symbol package)
+            (when (eq (symbol-package symbol) package) (collect symbol)))))
+    out))
+
+(defun accessible-completions (prefix)
+  "Symbols reachable unqualified while evaluating: the eval package's own,
+plus everything CL and EVO bring into it."
+  (let ((out nil))
+    (do-symbols (symbol (eval-package))
+      (let ((candidate (offer symbol prefix "")))
+        (when candidate (push candidate out))))
+    out))
+
+(defun package-completions (prefix)
+  "Package names and nicknames matching PREFIX, offered with their colon
+already attached so the next keystroke lands in a qualified completion."
+  (let ((out nil))
+    (dolist (package (list-all-packages) out)
+      (dolist (name (cons (package-name package) (package-nicknames package)))
+        (when (prefix-match-p prefix name)
+          (push (cons (concatenate 'string (string-downcase name) ":") "package")
+                out))))))
+
+(defun completions-for (token)
+  "Candidates for TOKEN, a partly typed symbol: (name . description) pairs
+sorted by name, where NAME replaces TOKEN whole.  NIL when TOKEN gives
+nothing to filter on — an empty token, or a bare colon, would offer the
+whole image rather than complete anything."
+  (multiple-value-bind (package-part name-part marker) (split-qualifier token)
+    (let ((qualifier (or package-part "")))
+      (when (or (plusp (length name-part)) (plusp (length qualifier)))
+        (sort (remove-duplicates
+               (if marker
+                   (let ((package (completion-package qualifier)))
+                     (when package
+                       (qualified-completions
+                        package name-part
+                        (concatenate 'string (string-downcase qualifier) marker)
+                        (string= marker ":"))))
+                   (append (accessible-completions name-part)
+                           (package-completions name-part)))
+               :key #'car :test #'string= :from-end t)
+              #'string< :key #'car)))))
+
 ;;; The command.
 
 (defun eval-command (context)

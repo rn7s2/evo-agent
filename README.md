@@ -234,7 +234,19 @@ the essential ones cannot be disabled.
   reachable. Exactly one form: reading happens with `*read-eval*` off, so
   anything else (empty, unreadable, or several forms) is rejected with the
   reason before a thing runs, and several forms are pointed at `(progn ...)`.
-  Printed output is captured, not written over the frame.
+  Printed output is captured, not written over the frame. Tab completes the
+  image's own **functions and variables** — unqualified, `pkg:` exports,
+  `pkg::` internals, keywords, and package names — each labelled with what it
+  is; only what can actually be called or read is offered. A name that nothing
+  else extends completes itself out of existence — no popup showing you your
+  own word back.
+- **Up/down input history** recalls everything submitted — ordinary text and
+  every `/command`, whole or partial. Nothing is filtered out, because the
+  popup is kept out of the way instead: a suggestion list is something new
+  input asks for, never something recalled content arrives with. (A popup
+  captures up/down, so one opening on a recalled entry would strand browsing
+  there.) Edit a recalled line and it is new input again, suggestions and all;
+  Tab asks for them outright whatever put the text there.
 
 ## Configuration
 

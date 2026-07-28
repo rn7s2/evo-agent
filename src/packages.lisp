@@ -131,7 +131,10 @@
 (defpackage :evo.eval
   (:use :cl :evo.util)
   (:export #:*eval-package-name* #:eval-package
-           #:single-form #:eval-form))
+           #:single-form #:eval-form
+           ;; completion source: the image's own answer to "what could this
+           ;; half-typed token be?", which frontends render.
+           #:token-start #:completions-for #:symbol-kind))
 
 (defpackage :evo.tui
   (:use :cl :evo.util :evo.journal :evo.provider :evo.kernel)

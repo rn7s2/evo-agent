@@ -17,7 +17,8 @@
   /lore [text]         show lore, or add durable guidance (project scope)
   /memory [request]    show project memory or ask the agent to refine it
   /global-memory [...] show global user memory or ask the agent to refine it
-  /eval <sexpr>        evaluate one sexpr in the live image (progn to group)
+  /eval <sexpr>        evaluate one sexpr in the live image (progn to group;
+                       tab completes functions/variables, up/down recalls)
   /tree                navigate entries, move the leaf (rewind/branch)
   /resume              switch to another session
   /fork                fork this session at the current leaf
@@ -26,7 +27,7 @@
   /reload              re-evaluate init.lisp + extension directories
   /quit /exit          exit (ctrl+c ctrl+c, ctrl+d)
 keys: enter send · shift+enter/alt+enter/ctrl+j newline · shift+tab auto/plan mode ·
-      tab complete /command · up/down input history (at buffer edge) ·
+      tab complete /command or /eval symbol · up/down input history (at buffer edge) ·
       ctrl+a/e home/end · ctrl+b/f move · ctrl+d delete (quit when empty) ·
       ctrl+k kill to eol · ctrl+w delete word · esc interrupt · esc esc rewind ·
       paste >3 lines collapses (paste again to expand)")
