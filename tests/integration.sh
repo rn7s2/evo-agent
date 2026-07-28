@@ -1,12 +1,36 @@
 #!/bin/sh
-# integration.sh — live tests against the local Anthropic-compatible proxy
-# (ark-deepseek-v4-pro, thinking xhigh, per tests config).
+# integration.sh — live end-to-end tests against a running Anthropic-compatible
+# backend.  Nothing here is hardcoded to one proxy: point it anywhere via env.
+#
+#   EVO_TEST_BASE_URL  provider base url
+#   EVO_TEST_API_KEY   bearer / x-api-key
+#   EVO_TEST_MODEL     model id to drive
+#
+# NONE of these have defaults: no backend, key, or model id is baked into the
+# repo.  The dev values live in project memory (.evo/, git-ignored).  With any
+# of them unset this is a hard failure — there is nothing to test against.
 #
 # Covers the exit criteria in scope:
 #   streamed tool-call round-trip
 #   multi-turn task in print mode; kill -9 mid-task; resume cleanly
 #   goals: a goal run that terminates via audited update_goal :complete
 set -u
+
+: "${EVO_TEST_BASE_URL:=}"
+: "${EVO_TEST_API_KEY:=}"
+: "${EVO_TEST_MODEL:=}"
+
+if [ -z "$EVO_TEST_BASE_URL" ] || [ -z "$EVO_TEST_API_KEY" ] || [ -z "$EVO_TEST_MODEL" ]; then
+    echo "integration: set EVO_TEST_BASE_URL, EVO_TEST_API_KEY and EVO_TEST_MODEL" >&2
+    echo "             (dev values are in this project's memory)" >&2
+    exit 1
+fi
+
+# The supervisor passes these to its child; if THIS script is itself launched
+# from inside a supervised evo (e.g. an agent's bash tool), they leak in and
+# every evo we spawn thinks it is already the supervised child — no supervisor,
+# so the crash-recovery test can't work.  Scrub them for a clean slate.
+unset EVO_SUPERVISED_CHILD EVO_HEARTBEAT_FILE
 
 repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 evo="$repo/build/evo"
@@ -15,22 +39,39 @@ export EVO_HOME="$scratch/home"
 work="$scratch/work"
 mkdir -p "$EVO_HOME" "$work"
 
-cat > "$EVO_HOME/init.lisp" <<'EOF'
-(evo:register-model "ark-deepseek-v4-pro"
+# Config is interpolated (unquoted heredoc): the values come from the env.
+cat > "$EVO_HOME/init.lisp" <<EOF
+(evo:register-model "$EVO_TEST_MODEL"
   :provider :anthropic :api :anthropic-messages
   :context-window 1000000 :max-output 64000 :thinking t)
-(evo:set-setting :model "ark-deepseek-v4-pro")
+(evo:set-setting :model "$EVO_TEST_MODEL")
 (evo:set-setting :thinking :xhigh)
 (evo:register-provider :anthropic
-  :base-url "http://127.0.0.1:8787"
-  :api-key "sk-evo-default-dd196a205a364d844b67b52a9c418c8e")
+  :base-url "$EVO_TEST_BASE_URL"
+  :api-key "$EVO_TEST_API_KEY")
 EOF
 
-pass=0; fail=0
+pass=0; fail=0; skip=0
 report() {
     if [ "$1" -eq 0 ]; then pass=$((pass+1)); echo "PASS: $2"
     else fail=$((fail+1)); echo "FAIL: $2"; fi
 }
+report_skip() { skip=$((skip+1)); echo "SKIP: $1"; }
+
+# Preflight: tests 1-5 drive a real model.  If the backend isn't reachable,
+# skip them cleanly (rather than fail) so `make integration` on a box without
+# a backend doesn't masquerade as a code regression.  Test 6 needs no network.
+if curl -fsS -m 5 "$EVO_TEST_BASE_URL/v1/models" \
+        -H "Authorization: Bearer $EVO_TEST_API_KEY" >/dev/null 2>&1; then
+    live=1
+else
+    live=0
+    echo "note: backend not reachable/authorized at $EVO_TEST_BASE_URL — skipping live tests"
+    echo "      (set EVO_TEST_API_KEY — dev value is in project memory — plus"
+    echo "       EVO_TEST_BASE_URL / EVO_TEST_MODEL to point elsewhere)"
+fi
+
+if [ "$live" -eq 1 ]; then
 
 # --- Test 1: multi-turn tool round-trip in print mode -----------------
 (
@@ -83,7 +124,10 @@ work4="$scratch/work4"
 mkdir -p "$work4"
 (
     cd "$work4"
-    "$evo" --goal "Two-step goal. Step 1: use the bash tool to run exactly: kill -9 \$PPID — this kills your own process; that is EXPECTED and required. Run it ONLY ONCE: if the session already shows an interrupted kill attempt, do NOT run it again. Step 2 (after you are restarted): create crash-proof.txt containing the single word survived, verify it exists with bash, then declare the goal complete." \
+    # bash tool calls run under a session-detach wrapper, so $PPID is the
+    # wrapper, not evo.  The bash tool exports EVO_PID = the evo (worker)
+    # process, so killing it actually crashes evo and exercises the supervisor.
+    "$evo" --goal "Two-step goal. Step 1: use the bash tool to run exactly: kill -9 \$EVO_PID — this kills the evo process running you; that is EXPECTED and required. Run it ONLY ONCE: if the session already shows an interrupted kill attempt, do NOT run it again. Step 2 (after you are restarted): create crash-proof.txt containing the single word survived, verify it exists with bash, then declare the goal complete." \
         >/dev/null 2>"$scratch/t4.err"
 )
 t4=$?
@@ -109,13 +153,21 @@ session5=$(ls -t "$EVO_HOME"/sessions/*work5*/*.sexp 2>/dev/null | head -1)
     && [ -n "$session5" ] && grep -q "(:type :compaction" "$session5"
 report $? "compaction fires mid-task, task completes"
 
+else
+    report_skip "print-mode multi-turn tool round-trip"
+    report_skip "kill -9 mid-task, resume cleanly"
+    report_skip "goal run terminates via update_goal complete"
+    report_skip "supervisor: induced crash -> restart -> resume -> goal complete"
+    report_skip "compaction fires mid-task, task completes"
+fi
+
 # --- Test 6: two separately launched agents mint distinct ids ------------
 # A save-lisp-and-die image bakes its load-time random state, so this can
 # only be caught against the built binary — in-process tests reseed per
 # process and always pass.  The ids are minted before the first provider
-# call, so an unreachable base-url still proves the point.  (Config is
-# required now, so this can't run --no-userspace: a probe model is
-# registered per home instead.)
+# call, so a deliberately-unreachable base-url still proves the point (and
+# keeps this test network-free).  (Config is required now, so this can't run
+# --no-userspace: a probe model is registered per home instead.)
 ids_of() {   # $1 = EVO_HOME -> "<session-id> <goal-id>"
     sed -n 's/.*:id "\([0-9a-f]\{16\}\)".*/\1/p;s/.*:goal-id "\([^"]*\)".*/\1/p' \
         "$1"/sessions/*/*.sexp 2>/dev/null | head -2 | tr '\n' ' '
@@ -154,5 +206,5 @@ ids_b=$(ids_of "$scratch/home6b")
 report $? "separate processes mint distinct session/goal ids [$ids_a] vs [$ids_b]"
 
 echo
-echo "$pass passed, $fail failed (scratch: $scratch)"
+echo "$pass passed, $fail failed, $skip skipped (scratch: $scratch)"
 [ $fail -eq 0 ]

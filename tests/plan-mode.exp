@@ -11,11 +11,31 @@ set repo [file dirname [file dirname [file normalize $argv0]]]
 set scratch [exec mktemp -d /tmp/evo-plan.XXXXXX]
 set env(EVO_HOME) "$scratch/home"
 file mkdir $env(EVO_HOME)/extensions
+# Backend config comes from the environment (defaults for the local dev proxy).
+proc envdef {name default} {
+    global env
+    return [expr {[info exists env($name)] ? $env($name) : $default}]
+}
+set base_url [envdef EVO_TEST_BASE_URL ""]
+set api_key  [envdef EVO_TEST_API_KEY  ""]
+set model    [envdef EVO_TEST_MODEL    ""]
+# No backend/key/model is baked into the repo (dev values are in project
+# memory, .evo/).  Without full config this live-model test can't run: fail
+# hard rather than pass vacuously.
+if {$base_url eq "" || $api_key eq "" || $model eq ""} {
+    puts stderr "plan-mode.exp: set EVO_TEST_BASE_URL, EVO_TEST_API_KEY and EVO_TEST_MODEL (dev values in project memory)"
+    exit 1
+}
+# Don't inherit a parent supervisor's private env (e.g. when run from inside an
+# agent): let the evo under test manage its own lifecycle and heartbeat.
+foreach v {EVO_SUPERVISED_CHILD EVO_HEARTBEAT_FILE} {
+    if {[info exists env($v)]} { unset env($v) }
+}
 set f [open "$env(EVO_HOME)/init.lisp" w]
-puts $f {(evo:register-model "ark-deepseek-v4-pro" :provider :anthropic :api :anthropic-messages :context-window 1000000 :max-output 64000 :thinking t)}
-puts $f {(evo:set-setting :model "ark-deepseek-v4-pro")}
+puts $f "(evo:register-model \"$model\" :provider :anthropic :api :anthropic-messages :context-window 1000000 :max-output 64000 :thinking t)"
+puts $f "(evo:set-setting :model \"$model\")"
 puts $f {(evo:set-setting :thinking :low)}
-puts $f {(evo:register-provider :anthropic :base-url "http://127.0.0.1:8787" :api-key "sk-evo-default-dd196a205a364d844b67b52a9c418c8e")}
+puts $f "(evo:register-provider :anthropic :base-url \"$base_url\" :api-key \"$api_key\")"
 close $f
 file mkdir "$scratch/work"
 cd "$scratch/work"
