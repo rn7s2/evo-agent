@@ -61,14 +61,18 @@ fasl litter next to config, and ECL evaluates it without the compiler."
 (defun boot-userspace (&key journal (cwd (uiop:getcwd)))
   "Reset user registries and settings, evaluate init files (global then
 project — an override is just a later call), then load extension
-directories.  Init files are environment, not history: re-evaluated every
+directories, then evaluate post-init files (global then project) so
+extensions can register models before post-init picks a default.
+Init files are environment, not history: re-evaluated every
 boot, never journaled (unlike extension :load entries), so the reset makes
 this idempotent for /reload and repeated boots."
   (evo.util:reset-settings)
   (evo.provider:reset-user-registries)
   (load-init-file (merge-pathnames "init.lisp" (evo-home)))
   (load-init-file (merge-pathnames "init.lisp" (project-evo-dir cwd)))
-  (boot-extensions :journal journal :cwd cwd))
+  (boot-extensions :journal journal :cwd cwd)
+  (load-init-file (merge-pathnames "post-init.lisp" (evo-home)))
+  (load-init-file (merge-pathnames "post-init.lisp" (project-evo-dir cwd))))
 
 (defun replay-loads (state &key journal)
   "Replay a resumed session's :load entries against the files on disk.

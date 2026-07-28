@@ -22,7 +22,7 @@
   /fork                fork this session at the current leaf
   /new                 start a fresh session
   /export [path]       export the transcript as markdown
-  /reload              re-evaluate init.lisp + extension directories
+  /reload              re-evaluate init.lisp + extensions + post-init.lisp
   /quit /exit          exit (ctrl+c ctrl+c, ctrl+d)
 keys: enter send · shift+enter/alt+enter/ctrl+j newline · shift+tab auto/plan mode ·
       tab complete /command · up/down input history (at buffer edge) ·
@@ -353,7 +353,7 @@ here lines up the id column too — provider, id and context each align."
         ((cmd "reload")
          (boot-userspace :journal (agent-journal agent))
          (refresh-goal tui)             ; model registry may have changed
-         (scroll tui (dim "userspace reloaded (init + extensions)"))
+         (scroll tui (dim "userspace reloaded (init + extensions + post-init)"))
          t)
         (t nil)))))
 
