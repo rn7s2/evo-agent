@@ -46,7 +46,8 @@
                               :serial t
                               :components ((:file "todo")
                                            (:file "plan-mode")
-                                           (:file "memory")))
+                                           (:file "memory")
+                                           (:file "eval")))
                              (:module "tui"
                               :serial t
                               :components ((:file "term")

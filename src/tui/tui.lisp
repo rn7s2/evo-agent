@@ -40,6 +40,7 @@
   (history nil)
   (history-index nil)   ; nil = not browsing
   (history-draft nil)   ; buffer text stashed when browsing started
+  (recalled-text nil)   ; text history put in the buffer; no popup while it stands
   ;; Live /command completion popup state.
   (complete-index 0)
   (complete-prefix nil)
@@ -505,7 +506,7 @@ wrapped between two rules, and the model status line under the editbox."
       (t
        (multiple-value-bind (rows crow ccol)
            (eb-display-rows (tui-editor tui) (max 10 (- *cols* 3)))
-         (multiple-value-bind (cprefix cmatches) (completion-context tui)
+         (multiple-value-bind (cprefix cmatches ckind) (completion-context tui)
            (declare (ignore cprefix))
            (let ((base (1+ (length lines)))) ; editor rows start after the top rule
              (setf lines
@@ -516,7 +517,7 @@ wrapped between two rules, and the model status line under the editbox."
                                  collect (concatenate 'string
                                                       (if (zerop i) (cyan "❯ ") "  ")
                                                       row))
-                           (when cmatches (completion-rows tui cmatches))
+                           (when cmatches (completion-rows tui cmatches ckind))
                            (list sep (status-line tui))))
              (setf cursor-row (+ base crow)
                    cursor-col (+ 2 ccol)))))))
@@ -629,33 +630,96 @@ extension commands, builtins, skills, prompt templates (first wins)."
          (char= (char line 0) #\/)
          (not (find #\Space line)))))
 
+(defparameter *symbol-completion-command* "eval"
+  "The command whose content completes against the image rather than
+against a name list.  Its content is Lisp being typed into the running
+image, so the candidates are that image's own functions and variables —
+EVO.EVAL decides what qualifies, the popup only renders it.")
+
+(defun symbol-completion-buffer-p (eb)
+  "The buffer is an invocation of the symbol-completing command, past its
+command word (the space is what ends the word and starts the content)."
+  (let* ((line (first (eb-lines eb)))
+         (space (position #\Space line)))
+    (and space
+         (plusp (length line))
+         (char= (char line 0) #\/)
+         (string-equal *symbol-completion-command* (subseq line 1 space)))))
+
+(defun symbol-token-at-cursor (eb)
+  "The symbol token being typed at the cursor: (values TOKEN START), or NIL
+when the cursor is not in completable content.  The command word itself is
+never completed over — on the first line the content starts after it."
+  (when (symbol-completion-buffer-p eb)
+    (let* ((line (eb-current-line eb))
+           (end (eb-col eb))
+           (start (evo.eval:token-start line end)))
+      (unless (and (zerop (eb-line eb))
+                   (<= start (position #\Space (first (eb-lines eb)))))
+        (values (subseq line start end) start)))))
+
+(defun completion-target (eb)
+  "What the cursor sits on: (values PREFIX KIND), KIND being :command for a
+/command word or :symbol for content inside the symbol-completing command.
+NIL when there is nothing to complete."
+  (if (command-word-p eb)
+      (values (subseq (first (eb-lines eb)) 1) :command)
+      (let ((token (symbol-token-at-cursor eb)))
+        (when token (values token :symbol)))))
+
+(defun completion-matches (tui kind prefix)
+  "Candidates for PREFIX as (name . description).  The command list is
+fixed for the popup's lifetime and cached; symbols are asked of the image
+on every keystroke, since evaluating can define more of them."
+  (ecase kind
+    (:command
+     (remove-if-not (lambda (entry) (string-prefix-p prefix (car entry)))
+                    (or (tui-complete-candidates tui)
+                        (setf (tui-complete-candidates tui) (all-commands)))))
+    (:symbol (evo.eval:completions-for prefix))))
+
 (defun completion-context (tui)
-  "Live popup state: (values prefix matches) while a /command word is being
-typed and suggestions exist; nil otherwise.  Esc hides the popup until the
-prefix changes.  Candidates are cached for the popup's lifetime."
+  "Live popup state: (values prefix matches kind) while something is being
+typed that has suggestions; nil otherwise.  Only new input raises a popup —
+content up/down recalled has none until it is edited.  Esc hides the popup
+until the prefix changes."
   (let ((eb (tui-editor tui)))
-    (cond
-      ((not (command-word-p eb))
-       (setf (tui-complete-candidates tui) nil
-             (tui-complete-prefix tui) nil
-             (tui-complete-dismissed tui) nil)
-       nil)
-      (t
-       (let ((prefix (subseq (first (eb-lines eb)) 1)))
+    (multiple-value-bind (prefix kind) (completion-target eb)
+      (cond
+        ((recalled-buffer-p tui) nil)
+        ((null kind)
+         (setf (tui-complete-candidates tui) nil
+               (tui-complete-prefix tui) nil
+               (tui-complete-dismissed tui) nil)
+         nil)
+        (t
+         (unless (eq kind :command)
+           (setf (tui-complete-candidates tui) nil))
          (unless (equal prefix (tui-complete-prefix tui))
            (setf (tui-complete-prefix tui) prefix
                  (tui-complete-index tui) 0)
            (unless (equal prefix (tui-complete-dismissed tui))
              (setf (tui-complete-dismissed tui) nil)))
          (unless (tui-complete-dismissed tui)
-           (let ((matches (remove-if-not
-                           (lambda (entry) (string-prefix-p prefix (car entry)))
-                           (or (tui-complete-candidates tui)
-                               (setf (tui-complete-candidates tui)
-                                     (all-commands))))))
-             (when matches (values prefix matches)))))))))
+           (let ((matches (completion-matches tui kind prefix)))
+             (unless (completion-settled-p prefix matches)
+               (when matches (values prefix matches kind))))))))))
 
-(defun completion-rows (tui matches)
+(defun completion-settled-p (prefix matches)
+  "MATCHES leave nothing to choose: the only candidate is the word already
+typed.  Such a popup shows the user their own input back, and — worse —
+captures the up/down presses that would otherwise browse history.  So a
+name completes itself out of existence the moment it is whole."
+  (and matches
+       (null (rest matches))
+       (string= prefix (car (first matches)))))
+
+(defun completion-label (kind name)
+  "How a candidate reads in the popup: a command wears its slash, a symbol
+is shown exactly as it would be typed."
+  (if (eq kind :command) (concatenate 'string "/" name) name))
+
+(defun completion-rows (tui matches kind)
   "Bounded popup rows under the editor: a window of (name . description)
 suggestions around the selection, descriptions dim in an aligned column,
 plus an overflow indicator."
@@ -664,58 +728,98 @@ plus an overflow indicator."
          (index (min (tui-complete-index tui) (1- n)))
          (start (max 0 (min (- index (floor window 2)) (- n window))))
          (end (min n (+ start window)))
-         (width (loop for (name . nil) in matches maximize (length name))))
+         (width (loop for (name . nil) in matches
+                      maximize (length (completion-label kind name)))))
     (setf (tui-complete-index tui) index)
     (append
      (loop for i from start below end
            for (name . desc) = (nth i matches)
+           for label = (completion-label kind name)
            collect (concatenate
                     'string
                     (if (= i index)
-                        (reverse-video (format nil "● /~a" name))
-                        (format nil "  /~a" name))
+                        (reverse-video (format nil "● ~a" label))
+                        (format nil "  ~a" label))
                     (if (plusp (length (or desc "")))
                         (concatenate 'string
-                                     (make-string (+ 2 (- width (length name)))
+                                     (make-string (+ 2 (- width (length label)))
                                                   :initial-element #\Space)
                                      (dim desc))
                         "")))
      (when (> n window)
        (list (dim (format nil "  … ~d/~d" (1+ index) n)))))))
 
-(defun accept-completion (tui name)
-  "Replace the command word with NAME, ready for arguments."
-  (eb-set-text (tui-editor tui) (format nil "/~a " name)))
+(defun accept-completion (tui name kind)
+  "Put NAME in the buffer: a command replaces the whole word and opens its
+argument; a symbol replaces just the token under the cursor, leaving the
+rest of the form — and the closing parens — alone."
+  (let ((eb (tui-editor tui)))
+    (if (eq kind :command)
+        (eb-set-text eb (format nil "/~a " name))
+        (multiple-value-bind (token start) (symbol-token-at-cursor eb)
+          (declare (ignore token))
+          (let ((line (eb-current-line eb)))
+            (setf (eb-current-line eb)
+                  (concatenate 'string (subseq line 0 start) name
+                               (subseq line (eb-col eb)))
+                  (eb-col eb) (+ start (length name))))))))
 
-(defun complete-command (tui)
-  "Tab: accept the popup's highlighted command.  Re-shows a popup hidden by
-esc.  Outside a /command word, Tab stays a literal tab character."
-  (setf (tui-complete-dismissed tui) nil)
-  (multiple-value-bind (prefix matches) (completion-context tui)
+(defun complete-at-point (tui)
+  "Tab: accept the popup's highlighted candidate — a /command word, or a
+function or variable inside the symbol-completing command.  Re-shows a
+popup hidden by esc, or withheld from recalled content: asking for
+completion outright is new input, whatever put the text there.  With
+nothing to complete, Tab stays a literal tab."
+  (setf (tui-complete-dismissed tui) nil
+        (tui-recalled-text tui) nil)
+  (multiple-value-bind (prefix matches kind) (completion-context tui)
     (declare (ignore prefix))
-    (cond
-      (matches
-       (accept-completion tui (car (nth (tui-complete-index tui) matches))))
-      ((command-word-p (tui-editor tui))
-       (scroll tui (dim (format nil "no command matches ~a"
-                                (first (eb-lines (tui-editor tui)))))))
-      (t (eb-insert-char (tui-editor tui) #\Tab)))))
+    (if matches
+        (accept-completion tui (car (nth (tui-complete-index tui) matches)) kind)
+        (multiple-value-bind (target target-kind) (completion-target (tui-editor tui))
+          (cond
+            ((null target-kind) (eb-insert-char (tui-editor tui) #\Tab))
+            ;; Already whole: there is nothing to add and nothing to report.
+            ((completion-settled-p target (completion-matches tui target-kind target)))
+            ((eq target-kind :command)
+             (scroll tui (dim (format nil "no command matches /~a" target))))
+            ((plusp (length target))
+             (scroll tui (dim (format nil "no function or variable matches ~a" target))))
+            (t (eb-insert-char (tui-editor tui) #\Tab)))))))
 
 ;;; Input history: up/down recall previous submissions when the cursor
-;;; cannot move further within the buffer's own lines.  /commands are not
-;;; recorded: recalling one would put a bare command word in the buffer,
-;;; re-opening the completion popup, which then captures the next up/down
-;;; press ("//" submissions are literal text and recall normally).
+;;; cannot move further within the buffer's own lines.
+;;;
+;;; Everything submitted is recalled — ordinary text, "//" literals, every
+;;; /command, whole or partial.  Nothing is filtered, because the popup is
+;;; kept out of the way instead: a suggestion list is something only new
+;;; input asks for, never something recalled content brings with it.  A
+;;; popup captures up/down, so one appearing on a recalled entry would
+;;; strand browsing on it.
+;;;
+;;; That is one comparison, not a flag to keep in sync: the recalled text is
+;;; remembered, and the popup stays shut for exactly as long as the buffer
+;;; still holds it.  Editing it — a character, a backspace, a paste — makes
+;;; the buffer new input again, and suggestions come back on their own.
 
 (defun history-reset-browse (tui)
   (setf (tui-history-index tui) nil (tui-history-draft tui) nil))
 
 (defun history-remember (tui text)
-  (unless (or (equal text (first (tui-history tui)))
-              (and (string-prefix-p "/" text)
-                   (not (string-prefix-p "//" text))))
+  (unless (equal text (first (tui-history tui)))   ; consecutive duplicate
     (push text (tui-history tui)))
   (history-reset-browse tui))
+
+(defun history-recall (tui text)
+  "Put a recalled TEXT in the buffer, marked as recalled so no popup opens
+on it."
+  (eb-set-text (tui-editor tui) text)
+  (setf (tui-recalled-text tui) text))
+
+(defun recalled-buffer-p (tui)
+  "The buffer is still exactly what history put there, untouched."
+  (and (tui-recalled-text tui)
+       (equal (eb-text (tui-editor tui)) (tui-recalled-text tui))))
 
 (defun history-prev (tui)
   (let ((eb (tui-editor tui))
@@ -725,20 +829,20 @@ esc.  Outside a /command word, Tab stays a literal tab character."
           ((null index)
            (setf (tui-history-draft tui) (eb-text eb)
                  (tui-history-index tui) 0)
-           (eb-set-text eb (first hist)))
+           (history-recall tui (first hist)))
           ((< index (1- (length hist)))
            (incf (tui-history-index tui))
-           (eb-set-text eb (nth (tui-history-index tui) hist))))))
+           (history-recall tui (nth (tui-history-index tui) hist))))))
 
 (defun history-next (tui)
-  (let ((eb (tui-editor tui))
-        (index (tui-history-index tui)))
+  (let ((index (tui-history-index tui)))
     (when index
       (if (zerop index)
-          (progn (eb-set-text eb (or (tui-history-draft tui) ""))
+          (progn (history-recall tui (or (tui-history-draft tui) ""))
                  (history-reset-browse tui))
           (progn (decf (tui-history-index tui))
-                 (eb-set-text eb (nth (tui-history-index tui) (tui-history tui))))))))
+                 (history-recall tui (nth (tui-history-index tui)
+                                          (tui-history tui))))))))
 
 (defun edit-up (tui)
   "Completion popup first, then line motion, then history."
@@ -769,7 +873,7 @@ esc.  Outside a /command word, Tab stays a literal tab character."
       ((consp event)
        (case (first event)
          (:char (if (char= (second event) #\Tab)
-                    (complete-command tui)
+                    (complete-at-point tui)
                     (eb-insert-char eb (second event))))
          (:paste (eb-paste eb (second event)))
          (:ctrl
@@ -795,7 +899,7 @@ esc.  Outside a /command word, Tab stays a literal tab character."
             (#\l (bt:with-lock-held (*tui-lock*)
                    (wr (esc "2J") (esc "H")) (flush)
                    (setf *region-height* 0 *region-cursor-row* 0)))
-            (#\i (complete-command tui)) ; Ctrl+I = Tab on some terminals
+            (#\i (complete-at-point tui)) ; Ctrl+I = Tab on some terminals
             (#\j (eb-newline eb))))     ; Ctrl+J: newline everywhere
          (t nil))
        (when (eq (first event) :ctrl)
@@ -867,9 +971,9 @@ esc.  Outside a /command word, Tab stays a literal tab character."
 (defun submit (tui)
   ;; Enter with the popup open on a partial command word accepts the
   ;; highlighted suggestion instead of submitting the fragment.
-  (multiple-value-bind (prefix matches) (completion-context tui)
+  (multiple-value-bind (prefix matches kind) (completion-context tui)
     (when (and matches (not (member prefix matches :key #'car :test #'string=)))
-      (accept-completion tui (car (nth (tui-complete-index tui) matches)))
+      (accept-completion tui (car (nth (tui-complete-index tui) matches)) kind)
       (return-from submit)))
   (let ((text (string-trim '(#\Space #\Newline)
                            (eb-submit-text (tui-editor tui)))))
