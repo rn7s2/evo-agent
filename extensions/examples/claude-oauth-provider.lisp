@@ -135,7 +135,8 @@ turns: one with text/thinking blocks and one with tool_use blocks."
 
 (defun claude-oauth--trim (value)
   (and (stringp value)
-       (string-trim '(#\Space #\Tab #\Newline #\Return) value)))
+       (let ((trimmed (string-trim '(#\Space #\Tab #\Newline #\Return) value)))
+         (and (plusp (length trimmed)) trimmed))))
 
 (defun claude-oauth--env (name)
   (let ((value (claude-oauth--trim (uiop:getenv name))))
@@ -432,6 +433,80 @@ request arrives or 120 seconds elapse."
         (evo:set-setting :model model-id)))))
 
 ;;; ---------------------------------------------------------------------------
+;;; Fetch models from Anthropic
+;;; ---------------------------------------------------------------------------
+
+(defparameter *claude-oauth-models-url* "https://api.anthropic.com/v1/models")
+
+(defun claude-oauth--fetch-models ()
+  "Fetch the list of available models from the Anthropic API using the OAuth
+access token.  Returns a parsed JSON object (hash-table) or signals an error."
+  (let ((token (claude-oauth--resolve-token)))
+    (unless token
+      (error "No Claude OAuth token: set CLAUDE_OAUTH_ACCESS_TOKEN or run /claude-oauth:login"))
+    (handler-case
+        (let ((response
+                (dex:get *claude-oauth-models-url*
+                         :headers `(("Authorization" . ,(format nil "Bearer ~a" token))
+                                    ("anthropic-version" . "2023-06-01")))))
+          (com.inuoe.jzon:parse response))
+      (dexador.error:http-request-failed (e)
+        (let ((status (dexador.error:response-status e))
+              (body (ignore-errors (dexador.error:response-body e))))
+          (error "Failed to fetch models from Anthropic: HTTP ~a~@[: ~a~]"
+                 status (and body
+                             (ignore-errors
+                              (let ((j (com.inuoe.jzon:parse body)))
+                                (gethash "error" j))))))))))
+
+(defun claude-oauth--guess-context-window (model-id)
+  "Guess a context-window size from the MODEL-ID string.
+Returns 200000 by default (most Claude models)."
+  (declare (ignore model-id))
+  200000)
+
+(defun claude-oauth--guess-max-output (model-id)
+  "Guess a max-output size from the MODEL-ID string.
+Returns 64000 by default (most Claude models)."
+  (declare (ignore model-id))
+  64000)
+
+(defun claude-oauth--register-fetched-models (json)
+  "Register every model in the JSON response (hash-table with \"data\" array).
+Returns a list of registered model-id strings."
+  (let ((data (gethash "data" json)))
+    (unless data
+      (error "Unexpected response from /v1/models: missing \"data\" key"))
+    (loop for entry across data
+          for id = (gethash "id" entry)
+          when id
+            collect (progn
+                      (evo:register-model id
+                                          :provider :anthropic-oauth
+                                          :api :anthropic-oauth-messages
+                                          :context-window (claude-oauth--guess-context-window id)
+                                          :max-output (claude-oauth--guess-max-output id)
+                                          :thinking t)
+                      id))))
+
+(defun claude-oauth--fetch-and-register-models ()
+  "Fetch models from Anthropic and register them.  Returns a summary string."
+  (handler-case
+      (let* ((json (claude-oauth--fetch-models))
+             (ids (claude-oauth--register-fetched-models json)))
+        (with-output-to-string (s)
+          (format s "Registered ~d model~:p from Anthropic:~%" (length ids))
+          (dolist (id ids)
+            (format s "  ~a~%" id))
+          ;; If no model is currently set, default to the first one.
+          (unless (evo:setting :model)
+            (let ((first (first ids)))
+              (evo:set-setting :model first)
+              (format s "Model set to ~a (was unset).~%" first)))))
+    (error (e)
+      (format nil "Failed to fetch models: ~a" e))))
+
+;;; ---------------------------------------------------------------------------
 ;;; Registration
 ;;; ---------------------------------------------------------------------------
 
@@ -510,6 +585,12 @@ request arrives or 120 seconds elapse."
               :name "claude-oauth-refresh")
             "Refreshing token in background... Check stderr for status."))))
   :description "Refresh the Claude OAuth access token")
+
+(evo:register-command "claude-oauth:models"
+  (lambda (ctx)
+    (declare (ignore ctx))
+    (claude-oauth--fetch-and-register-models))
+  :description "Fetch available models from Anthropic and register them")
 
 (evo:register-command "claude-oauth:status"
   (lambda (ctx)
