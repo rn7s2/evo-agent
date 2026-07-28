@@ -1,13 +1,21 @@
+# evo — build & install
+#
+# Configuration variables (override on the command line, e.g. `make LISP=ecl`):
+#   LISP     — Common Lisp implementation used to build and run scripts.
+#   EVO_HOME — Global evo home seeded by `install-home` (docs, examples, ...).
+#   PREFIX   — Install prefix; the binary lands in $(PREFIX)/bin/evo.
+#   HEAP_MB  — Dynamic heap (MiB) for the SBCL-built binary, baked in via
+#              :save-runtime-options (D10). ECL grows its heap on demand, so
+#              this has no effect there.
 LISP ?= sbcl
 EVO_HOME ?= $(HOME)/.evo
 PREFIX ?= /usr/local
-# Heap for the SBCL-built binary — baked in via :save-runtime-options (D10).
-# ECL's heap grows on demand; no build-time size there.
 HEAP_MB ?= 4096
 
-# Per-implementation "load a script non-interactively" invocations.  The
-# scripts themselves exit explicitly, so ECL only needs stdin closed to
-# guarantee no REPL is left behind on error.
+# Per-implementation "load a script non-interactively" invocations. The
+# scripts exit explicitly, so ECL only needs stdin closed (STDIN_GUARD) to
+# guarantee no REPL is left behind on error. BUILD_SCRIPT additionally sizes
+# the heap for SBCL (see HEAP_MB above).
 ifeq ($(LISP),ecl)
 RUN_SCRIPT = $(LISP) -q --load
 BUILD_SCRIPT = $(LISP) -q --load
@@ -18,26 +26,41 @@ BUILD_SCRIPT = $(LISP) --dynamic-space-size $(HEAP_MB) --non-interactive --load
 STDIN_GUARD =
 endif
 
+# All targets are actions, not files — declare them phony so they always run.
 .PHONY: build test integration tui-test clean install install-home
 
+# Compile the standalone evo binary into build/evo.
 build:
 	$(BUILD_SCRIPT) build.lisp $(STDIN_GUARD)
 
-install: build
-	install -m 755 build/evo $(PREFIX)/bin/evo
+# Out-of-box install: build the binary, seed $(EVO_HOME) (install-home), then
+# drop the binary into $(PREFIX)/bin. Falls back to sudo when the target dir
+# isn't writable.
+install: build install-home
+	@if [ -w $(PREFIX)/bin ] || mkdir -p $(PREFIX)/bin 2>/dev/null && [ -w $(PREFIX)/bin ]; then \
+	  install -m 755 build/evo $(PREFIX)/bin/evo; \
+	else \
+	  echo "Need sudo to write to $(PREFIX)/bin"; \
+	  sudo install -m 755 build/evo $(PREFIX)/bin/evo; \
+	fi
 
+# Run the unit-test suite.
 test:
 	$(RUN_SCRIPT) tests/run-unit.lisp $(STDIN_GUARD)
 
+# End-to-end integration tests against a freshly built binary.
 integration: build
 	tests/integration.sh
 
+# Expect-driven TUI smoke test against a freshly built binary.
 tui-test: build
 	tests/tui.exp
 
-# Seed corpus (§10.4): docs + example extensions into the global evo home.
-# Everything installed here is reference-only — nothing ships active in
+# Seed corpus: docs + example extensions into the global evo home.
+# Everything installed under docs/ is reference-only — nothing ships active in
 # $(EVO_HOME)/extensions (plan mode is a core extension, in the binary).
+# Vendored extensions in extensions/ are installed directly into
+# $(EVO_HOME)/extensions/ and loaded at startup.
 # The sample init.lisp is reference-only too: evo requires a real
 # $(EVO_HOME)/init.lisp (no built-in model table) — copy and edit it.
 install-home:
@@ -45,6 +68,8 @@ install-home:
 	cp docs/*.md $(EVO_HOME)/docs/
 	cp docs/examples/init.lisp $(EVO_HOME)/docs/examples/
 	cp extensions/examples/*.lisp $(EVO_HOME)/docs/examples/
+	cp extensions/*.lisp $(EVO_HOME)/extensions/
 
+# Remove build artifacts.
 clean:
 	rm -rf build

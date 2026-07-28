@@ -1,7 +1,7 @@
-;;;; claude-oauth-provider.lisp — example extension (manual install).
+;;;; claude-oauth-provider.lisp — vendored user extension, installed by make.
 ;;;;
-;;;; Install by copying this file to ~/.evo/extensions/ and restarting evo:
-;;;;   cp extensions/examples/claude-oauth-provider.lisp ~/.evo/extensions/
+;;;; Lives in extensions/ and is installed to $(EVO_HOME)/extensions/ by
+;;;; `make install` (via install-home).  Loaded automatically at evo startup.
 ;;;;
 ;;;; Registers an Anthropic Messages provider that authenticates with a
 ;;;; Claude/Anthropic OAuth access token and injects Claude Code billing-header
