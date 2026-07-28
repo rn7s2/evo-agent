@@ -127,6 +127,12 @@
   (:use :cl :evo.util)
   (:export #:*memory-kinds* #:memory-file #:read-memories #:render-memories))
 
+;; /eval — one sexpr, evaluated in the live image (EVO.USER).
+(defpackage :evo.eval
+  (:use :cl :evo.util)
+  (:export #:*eval-package-name* #:eval-package
+           #:single-form #:eval-form))
+
 (defpackage :evo.tui
   (:use :cl :evo.util :evo.journal :evo.provider :evo.kernel)
   (:export #:start-tui))

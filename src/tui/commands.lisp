@@ -17,6 +17,7 @@
   /lore [text]         show lore, or add durable guidance (project scope)
   /memory [request]    show project memory or ask the agent to refine it
   /global-memory [...] show global user memory or ask the agent to refine it
+  /eval <sexpr>        evaluate one sexpr in the live image (progn to group)
   /tree                navigate entries, move the leaf (rewind/branch)
   /resume              switch to another session
   /fork                fork this session at the current leaf

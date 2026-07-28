@@ -226,8 +226,15 @@ the essential ones cannot be disabled.
   and `$@` substitution.
 - **Slash command resolution**: extension commands → builtins → skills →
   prompt templates → send to the agent. Built-ins: `/goal /lore /memory
-  /global-memory /permission /compact /tree /fork /resume /model /reload /export
-  /help /quit /exit`.
+  /global-memory /permission /compact /eval /tree /fork /resume /model /reload
+  /export /help /quit /exit`.
+- **`/eval <sexpr>`**: a REPL into the live image. The content is read and
+  evaluated in `EVO.USER` — the same package extensions and agent-written code
+  live in — so registered tools, extension state and `evo:*agent*` are all
+  reachable. Exactly one form: reading happens with `*read-eval*` off, so
+  anything else (empty, unreadable, or several forms) is rejected with the
+  reason before a thing runs, and several forms are pointed at `(progn ...)`.
+  Printed output is captured, not written over the frame.
 
 ## Configuration
 

@@ -1708,6 +1708,68 @@ event: response.completed~%data: {\"type\":\"response.completed\",\"response\":{
              (not (probe-file (merge-pathnames "extensions/plan-mode.lisp"
                                                (uiop:getcwd))))))))
 
+;;; /eval
+
+(defun eval-command-output (args)
+  (evo.eval::eval-command (list :args args)))
+
+(defun test-eval ()
+  (check "eval command registered" (gethash "eval" evo::*commands*))
+  ;; Arity: exactly one form, checked before anything runs.
+  (check "single sexpr evaluates"
+         (equal "⇒ 3" (eval-command-output "(+ 1 2)")))
+  (check "leading and trailing whitespace is not a second form"
+         (equal "⇒ 3" (eval-command-output (format nil "  (+ 1 2) ~%"))))
+  (check "a trailing comment is not a second form"
+         (equal "⇒ 3" (eval-command-output (format nil "(+ 1 2) ; sum~%"))))
+  (let ((rejected (eval-command-output "(+ 1 2) (+ 3 4)")))
+    (check "multiple sexprs are rejected" (search "expected exactly one" rejected))
+    (check "multiple sexprs report the count" (search "2 forms" rejected))
+    (check "multiple sexprs are pointed at progn" (search "(progn ...)" rejected)))
+  (check "empty content is rejected with a usage line"
+         (search "nothing to evaluate" (eval-command-output "   ")))
+  (check "unreadable content is rejected with a reason"
+         (search "unreadable sexpr" (eval-command-output "(+ 1 2")))
+  ;; Rejection is decided at read time, so nothing in the input can run
+  ;; before the arity check does.
+  (let ((evo.user::*eval-canary* nil))
+    (declare (special evo.user::*eval-canary*))
+    (eval-command-output "#.(setf evo.user::*eval-canary* t) (+ 1 2)")
+    (check "a rejected input never evaluates any of its forms"
+           (null evo.user::*eval-canary*)))
+  ;; The image, not a sandbox: what the session registered is reachable.
+  (check "eval sees the live tool registry"
+         (equal (format nil "⇒ ~a"
+                        (let ((*print-case* :downcase))
+                          (prin1-to-string (length (all-tool-names)))))
+                (eval-command-output "(length (evo:all-tools))")))
+  (check "eval sees userspace definitions from earlier evals"
+         (progn (eval-command-output "(progn (defun eval-probe () :from-userspace)
+                                             (eval-probe))")
+                (equal "⇒ :from-userspace" (eval-command-output "(eval-probe)"))))
+  (check "eval reads in the userspace package"
+         (equal (format nil "⇒ ~s" (package-name (find-package :evo.user)))
+                (eval-command-output "(package-name *package*)")))
+  ;; Output is captured, never written at the frontend's terminal.
+  (let ((result (eval-command-output "(progn (princ \"printed\") :done)")))
+    (check "printed output is captured above the value"
+           (equal (format nil "printed~%⇒ :done") result)))
+  ;; A failing form is reported, not signalled at the caller.
+  (let ((result (eval-command-output "(error \"boom\")")))
+    (check "an error during evaluation is reported" (search "boom" result))
+    (check "an error names its condition type" (search "simple-error" result)))
+  (check "no values prints as no values"
+         (equal "⇒ ; no values" (eval-command-output "(values)")))
+  (check "multiple values print one per line"
+         (equal (format nil "⇒ 1~%⇒ 2") (eval-command-output "(values 1 2)")))
+  ;; Bounded printing: a live image holds unbounded and circular objects.
+  (check "long results are elided, not dumped"
+         (search "..." (eval-command-output "(make-list 5000)")))
+  (check "circular results terminate"
+         (let ((evo.eval::*print-length-limit* 10))
+           (plusp (length (eval-command-output
+                           "(let ((x (list 1 2))) (setf (cdr (last x)) x) x)"))))))
+
 ;;; Model/provider registries + provider-API protocol
 
 (defun test-registry ()
@@ -2082,5 +2144,6 @@ here must be reachable through the public EVO package with no ::."
     (test-interrupt)
     (test-tool-call-display)
     (test-plan-mode)
+    (test-eval)
     (format t "~%~d passed, ~d failed~%" *pass* *fail*)
     (if (zerop *fail*) 0 1)))
