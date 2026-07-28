@@ -57,6 +57,20 @@
   #+sbcl (sb-posix:setenv name value 1)
   #+ecl (ext:setenv name value))
 
+(define-condition timeout-error (error)
+  ((seconds :initarg :seconds :reader timeout-error-seconds))
+  (:report (lambda (condition stream)
+             (format stream "Operation timed out after ~a seconds."
+                     (timeout-error-seconds condition)))))
+
+(defun call-with-timeout (seconds function)
+  "Call FUNCTION, signaling TIMEOUT-ERROR if it does not finish in SECONDS."
+  (handler-case
+      (bt:with-timeout (seconds)
+        (funcall function))
+    (bt:timeout ()
+      (error 'timeout-error :seconds seconds))))
+
 ;;; Child processes.
 ;;;
 ;;; The handle returned by LAUNCH-CHILD is opaque; pass it only to

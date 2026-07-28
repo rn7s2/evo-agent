@@ -320,7 +320,17 @@ event: response.completed~%data: {\"type\":\"response.completed\",\"response\":{
       (check "oai req thinking off -> no include"
              (not (search "reasoning.encrypted_content" raw3))))))
 
-;;; Proxy env detection
+;;; Timeouts and proxy env detection
+
+(defun test-port-timeout ()
+  (check "portable timeout returns completed value"
+         (= (evo.port:call-with-timeout 1 (lambda () 42)) 42))
+  (check "portable timeout signals timeout-error"
+         (handler-case
+             (progn
+               (evo.port:call-with-timeout 0.01 (lambda () (sleep 1)))
+               nil)
+           (evo.port:timeout-error () t))))
 
 (defun test-env-proxy ()
   (let ((saved (mapcar (lambda (v) (cons v (getenv v)))
@@ -330,30 +340,74 @@ event: response.completed~%data: {\"type\":\"response.completed\",\"response\":{
     (unwind-protect
          (progn
            (dolist (pair saved) (evo.port:setenv (car pair) ""))
-           (check "no proxy env" (null (evo.provider::env-proxy url)))
+           (check "no proxy env" (null (evo.util:env-proxy url)))
            (evo.port:setenv "http_proxy" "http://lower:3128")
            (check "lowercase http_proxy detected"
-                  (equal (evo.provider::env-proxy url) "http://lower:3128"))
+                  (equal (evo.util:env-proxy url) "http://lower:3128"))
            (evo.port:setenv "https_proxy" "http://lowers:3128")
            (check "lowercase https_proxy preferred"
-                  (equal (evo.provider::env-proxy url) "http://lowers:3128"))
+                  (equal (evo.util:env-proxy url) "http://lowers:3128"))
            (evo.port:setenv "HTTPS_PROXY" "http://upper:3128")
            (check "uppercase still wins"
-                  (equal (evo.provider::env-proxy url) "http://upper:3128"))
+                  (equal (evo.util:env-proxy url) "http://upper:3128"))
            (check "loopback bypasses proxy"
-                  (null (evo.provider::env-proxy "http://127.0.0.1:8787/v1/messages")))
+                  (null (evo.util:env-proxy "http://127.0.0.1:8787/v1/messages")))
            (check "localhost bypasses proxy"
-                  (null (evo.provider::env-proxy "http://localhost:8787/v1/messages")))
+                  (null (evo.util:env-proxy "http://localhost:8787/v1/messages")))
            (evo.port:setenv "no_proxy" "example.com, openai.com")
            (check "no_proxy suffix match bypasses"
-                  (null (evo.provider::env-proxy url)))
+                  (null (evo.util:env-proxy url)))
            (evo.port:setenv "no_proxy" "example.com")
            (check "no_proxy non-match still proxies"
-                  (equal (evo.provider::env-proxy url) "http://upper:3128"))
+                  (equal (evo.util:env-proxy url) "http://upper:3128"))
            (evo.port:setenv "no_proxy" "*")
            (check "no_proxy star bypasses everything"
-                  (null (evo.provider::env-proxy url))))
+                  (null (evo.util:env-proxy url))))
       (dolist (pair saved)
+        (evo.port:setenv (car pair) (or (cdr pair) ""))))))
+
+(defun test-claude-oauth-proxy-guards ()
+  (let* ((env-names '("HTTPS_PROXY" "https_proxy" "HTTP_PROXY" "http_proxy"
+                      "NO_PROXY" "no_proxy" "CLAUDE_OAUTH_ACCESS_TOKEN"))
+         (saved-env (mapcar (lambda (name) (cons name (getenv name))) env-names))
+         (saved-get (symbol-function 'dex:get))
+         (saved-post (symbol-function 'dex:post))
+         (calls nil)
+         (proxy "http://lowercase-proxy:3128"))
+    (unwind-protect
+         (progn
+           (dolist (name env-names) (evo.port:setenv name ""))
+           (evo.port:setenv "https_proxy" proxy)
+           (evo.port:setenv "CLAUDE_OAUTH_ACCESS_TOKEN" "test-access-token")
+           (setf (symbol-function 'dex:get)
+                 (lambda (url &rest args)
+                   (push (list :get url args) calls)
+                   "{\"data\":[]}"))
+           (setf (symbol-function 'dex:post)
+                 (lambda (url &rest args)
+                   (push (list :post url args) calls)
+                   "{\"access_token\":\"access\",\"refresh_token\":\"refresh\",\"expires_in\":3600}"))
+           (load (merge-pathnames "extensions/claude-oauth-provider.lisp"
+                                  (uiop:getcwd))
+                 :verbose nil :print nil)
+           (setf calls nil)
+           (funcall (symbol-function
+                     (find-symbol "CLAUDE-OAUTH--EXCHANGE-CODE" :evo.user))
+                    "code" "verifier" "http://localhost/callback" "state")
+           (funcall (symbol-function
+                     (find-symbol "CLAUDE-OAUTH--REFRESH-TOKEN" :evo.user))
+                    "refresh")
+           (funcall (symbol-function
+                     (find-symbol "CLAUDE-OAUTH--FETCH-MODELS" :evo.user)))
+           (check "claude oauth guards all outbound requests"
+                  (= (length calls) 3))
+           (check "claude oauth uses lowercase environment proxy"
+                  (every (lambda (call)
+                           (equal (getf (third call) :proxy) proxy))
+                         calls)))
+      (setf (symbol-function 'dex:get) saved-get
+            (symbol-function 'dex:post) saved-post)
+      (dolist (pair saved-env)
         (evo.port:setenv (car pair) (or (cdr pair) ""))))))
 
 ;;; Editor
@@ -2267,7 +2321,9 @@ here must be reachable through the public EVO package with no ::."
     (test-anthropic-request)
     (test-openai-sse)
     (test-openai-request)
+    (test-port-timeout)
     (test-env-proxy)
+    (test-claude-oauth-proxy-guards)
     (test-init-files)
     (test-preflight)
     (test-parse-args)

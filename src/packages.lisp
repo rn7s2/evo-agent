@@ -10,6 +10,7 @@
 (defpackage :evo.port
   (:use :cl)
   (:export #:exit-lisp #:argv #:runtime-pathname #:environ #:setenv #:getpid
+           #:call-with-timeout #:timeout-error
            #:launch-child #:process-alive-p #:process-kill #:process-kill-tree
            #:process-wait #:process-pid
            #:lock-package #:unlock-package #:add-package-local-nickname
@@ -19,7 +20,7 @@
 
 (defpackage :evo.util
   (:use :cl)
-  (:export #:getenv #:iso8601-now #:format-local-timestamp #:local-timezone-name
+  (:export #:getenv #:env-proxy #:iso8601-now #:format-local-timestamp #:local-timezone-name
            #:gen-id #:reseed-ids #:pget #:pput #:plist-merge
            #:evo-home #:project-evo-dir #:encode-cwd #:ensure-directory
            #:write-sexpr-line #:read-sexpr #:read-sexpr-stream #:validate-journal-value
