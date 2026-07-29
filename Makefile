@@ -71,6 +71,7 @@ install-home:
 	cp docs/examples/init.lisp $(EVO_HOME)/docs/examples/
 	cp extensions/examples/*.lisp $(EVO_HOME)/docs/examples/
 	cp extensions/*.lisp $(EVO_HOME)/extensions/
+	rm -f $(EVO_HOME)/extensions/*.fasl
 
 # Remove build artifacts.
 clean:
