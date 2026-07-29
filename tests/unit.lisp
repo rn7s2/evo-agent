@@ -410,6 +410,102 @@ event: response.completed~%data: {\"type\":\"response.completed\",\"response\":{
       (dolist (pair saved-env)
         (evo.port:setenv (car pair) (or (cdr pair) ""))))))
 
+(defun test-claude-oauth-auto-refresh ()
+  ;; Test ensure-valid-token: fresh token → no-op, expired token → refresh.
+  (let* ((env-names '("HTTPS_PROXY" "https_proxy" "HTTP_PROXY" "http_proxy"
+                      "NO_PROXY" "no_proxy" "CLAUDE_OAUTH_ACCESS_TOKEN"
+                      "CLAUDE_OAUTH_REFRESH_TOKEN"))
+         (saved-env (mapcar (lambda (name) (cons name (getenv name))) env-names))
+         (saved-post (symbol-function 'dex:post))
+         (saved-get (symbol-function 'dex:get))
+         (refresh-calls nil)
+         (token-dir (merge-pathnames "claude-oauth/"
+                                     (or (getenv "EVO_HOME")
+                                         (merge-pathnames ".evo/" (user-homedir-pathname)))))
+         (token-file (merge-pathnames "token.sexp" token-dir)))
+    (unwind-protect
+         (progn
+           ;; Clean environment and token file.
+           (dolist (name env-names) (evo.port:setenv name ""))
+           (when (probe-file token-file) (delete-file token-file))
+           ;; Mock dex:get (fetch-models at load time) and dex:post (refresh).
+           (setf (symbol-function 'dex:get)
+                 (lambda (url &rest args)
+                   (declare (ignore url args))
+                   "{\"data\":[]}"))
+           (setf (symbol-function 'dex:post)
+                 (lambda (url &rest args)
+                   (push (list url args) refresh-calls)
+                   "{\"access_token\":\"refreshed-at\",\"refresh_token\":\"refreshed-rt\",\"expires_in\":3600}"))
+           (load (merge-pathnames "extensions/claude-oauth-provider.lisp"
+                                  (uiop:getcwd))
+                 :verbose nil :print nil)
+           (let* ((now (funcall (find-symbol "CLAUDE-OAUTH--NOW-MS" :evo.user)))
+                  (refresh-fn (symbol-function
+                               (find-symbol "CLAUDE-OAUTH--ENSURE-VALID-TOKEN" :evo.user)))
+                  (write-tokens-fn (symbol-function
+                                    (find-symbol "CLAUDE-OAUTH--WRITE-TOKENS" :evo.user)))
+                  (read-tokens-fn (symbol-function
+                                   (find-symbol "CLAUDE-OAUTH--READ-TOKENS" :evo.user))))
+             ;; 1. No stored file — should return NIL, no refresh.
+             (setf refresh-calls nil)
+             (check "auto-refresh: no stored file → nil"
+                    (null (funcall refresh-fn)))
+             (check "auto-refresh: no stored file → no refresh call"
+                    (null refresh-calls))
+             ;; 2. Fresh token — should return the stored token, no refresh.
+             (funcall write-tokens-fn "sk-ant-oat-fresh" "rt-fresh"
+                      (+ now 3600000) (+ now 2592000000))
+             (setf refresh-calls nil)
+             (check "auto-refresh: fresh token → no refresh"
+                    (string= (funcall refresh-fn) "sk-ant-oat-fresh"))
+             (check "auto-refresh: fresh token → no dex:post"
+                    (null refresh-calls))
+             ;; 3. Expired token (0s remaining) — should refresh and return new token.
+             (funcall write-tokens-fn "sk-ant-oat-expired" "rt-expired"
+                      now (+ now 2592000000))
+             (setf refresh-calls nil)
+             (check "auto-refresh: expired token → refreshed"
+                    (string= (funcall refresh-fn) "refreshed-at"))
+             (check "auto-refresh: expired token → called dex:post"
+                    (and refresh-calls (= (length refresh-calls) 1)))
+             ;; Verify the stored file was updated.
+             (let ((updated (funcall read-tokens-fn)))
+               (check "auto-refresh: stored token updated"
+                      (string= (getf updated :access-token) "refreshed-at"))
+               (check "auto-refresh: stored refresh token updated"
+                      (string= (getf updated :refresh-token) "refreshed-rt")))
+             ;; 4. Refresh token expired — should signal provider-error.
+             (funcall write-tokens-fn "sk-ant-oat-expired2" "rt-expired2"
+                      (- now 1000) (- now 1000))
+             (setf refresh-calls nil)
+             (check "auto-refresh: expired refresh token → error"
+                    (handler-case
+                        (progn (funcall refresh-fn) nil)
+                      (provider-error (e)
+                        (and (search "refresh token expired"
+                                     (funcall (read-from-string "evo.provider::provider-error-message") e)
+                                     :test #'char-equal)
+                             t))))
+             ;; 5. Auto-refresh disabled — should return stored token without refresh.
+             (setf (symbol-value
+                    (find-symbol "*CLAUDE-OAUTH-AUTO-REFRESH*" :evo.user)) nil)
+             (funcall write-tokens-fn "sk-ant-oat-stale" "rt-stale"
+                      (- now 1000) (+ now 2592000000))
+             (setf refresh-calls nil)
+             (check "auto-refresh: disabled → no refresh"
+                    (string= (funcall refresh-fn) "sk-ant-oat-stale"))
+             (check "auto-refresh: disabled → no dex:post"
+                    (null refresh-calls))
+             ;; Re-enable auto-refresh for the next test run.
+             (setf (symbol-value
+                    (find-symbol "*CLAUDE-OAUTH-AUTO-REFRESH*" :evo.user)) t)))
+      (setf (symbol-function 'dex:post) saved-post
+            (symbol-function 'dex:get) saved-get)
+      (dolist (pair saved-env)
+        (evo.port:setenv (car pair) (or (cdr pair) "")))
+      (when (probe-file token-file) (delete-file token-file)))))
+
 ;;; Editor
 
 (defun test-editor ()
@@ -2324,6 +2420,7 @@ here must be reachable through the public EVO package with no ::."
     (test-port-timeout)
     (test-env-proxy)
     (test-claude-oauth-proxy-guards)
+    (test-claude-oauth-auto-refresh)
     (test-init-files)
     (test-preflight)
     (test-parse-args)
