@@ -127,8 +127,10 @@ point.
   self-contained checkpoint, so rebuilding context is O(1).
 - **Lore** (`/lore`): human knowledge and constraints, durable across a whole
   session and immune to summarization. Stored out-of-band and injected into the
-  system prompt every turn. Global (`~/.evo/lore.sexp`), project
-  (`.evo/lore.sexp`), and session scopes.
+  system prompt every turn, each tagged with an `[id]`. Global
+  (`~/.evo/lore.sexp`, via `/global-lore`), project (`.evo/lore.sexp`, via
+  `/lore`), and session scopes. The agent can edit or remove entries by id
+  via the `lore` tool, but only when you explicitly ask it to.
 - **Memory** (`/memory`, `/global-memory`): curated structured memory with kinds
   (constraint, convention, decision, procedure, fact, issue), snapshotted once
   per session into the transcript. The agent queries and refines the store
@@ -225,9 +227,9 @@ the essential ones cannot be disabled.
 - **Prompt templates**: `.md` files whose filename is the command, with `$1`..`$9`
   and `$@` substitution.
 - **Slash command resolution**: extension commands → builtins → skills →
-  prompt templates → send to the agent. Built-ins: `/goal /lore /memory
-  /global-memory /permission /compact /eval /tree /fork /resume /model /reload
-  /export /help /quit /exit`.
+  prompt templates → send to the agent. Built-ins: `/goal /lore /global-lore
+  /memory /global-memory /permission /compact /eval /tree /fork /resume /model
+  /reload /export /help /quit /exit`.
 - **`/eval <sexpr>`**: a REPL into the live image. The content is read and
   evaluated in `EVO.USER` — the same package extensions and agent-written code
   live in — so registered tools, extension state and `evo:*agent*` are all

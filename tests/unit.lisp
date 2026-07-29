@@ -1543,16 +1543,61 @@ event: response.completed~%data: {\"type\":\"response.completed\",\"response\":{
     (evo.port:setenv "EVO_HOME" (namestring home))
     (unwind-protect
          (progn
-           (add-lore "always run tests" :scope :global)
-           (add-lore "prefer rg over grep" :scope :global)
-           ;; :cwd is the scratch home, not the repo — a real .evo/lore.sexp
-           ;; in the working tree must not leak into project scope here.
-           (let ((lore (all-lore :cwd home)))
-             (check "lore round trip"
-                    (equal lore '("always run tests" "prefer rg over grep"))))
-           (let ((prompt (build-system-prompt nil :lore (all-lore :cwd home))))
-             (check "lore injected into prompt"
-                    (search "prefer rg over grep" prompt))))
+           (let ((id1 (add-lore "always run tests" :scope :global))
+                 (id2 (add-lore "prefer rg over grep" :scope :global)))
+             ;; :cwd is the scratch home, not the repo — a real .evo/lore.sexp
+             ;; in the working tree must not leak into project scope here.
+             (let ((lore (all-lore :cwd home)))
+               (check "lore round trip"
+                      (equal lore '("always run tests" "prefer rg over grep"))))
+             (let ((entries (all-lore-entries :cwd home)))
+               (check "lore entries carry ids"
+                      (and (equal id1 (getf (first entries) :id))
+                           (equal id2 (getf (second entries) :id))))
+               (check "lore entries carry scope"
+                      (every (lambda (e) (eq :global (getf e :scope))) entries)))
+             (let ((prompt (build-system-prompt nil :lore (all-lore-entries :cwd home))))
+               (check "lore injected into prompt with id"
+                      (and (search "prefer rg over grep" prompt)
+                           (search id2 prompt))))
+             ;; Edit and remove by id (no agent -> file scopes only).
+             (edit-lore id1 "always run all tests" :agent nil :cwd home)
+             (check "lore edited by id"
+                    (equal (all-lore :cwd home)
+                           '("always run all tests" "prefer rg over grep")))
+             (remove-lore id2 :agent nil :cwd home)
+             (check "lore removed by id"
+                    (equal (all-lore :cwd home) '("always run all tests")))
+             (check "find-lore-scope locates surviving entry"
+                    (eq :global (find-lore-scope id1 :cwd home)))
+             (check "find-lore-scope nil for removed entry"
+                    (null (find-lore-scope id2 :cwd home)))
+             (check "lore tool registered" (find-tool "lore")))
+           ;; Session-scoped lore rides the journal, not the files.
+           (let* ((sdir (uiop:ensure-directory-pathname
+                         (format nil "~a/evo-lore-sess-~a/" (uiop:getenv "TMPDIR") (gen-id))))
+                  (journal (progn (ensure-directories-exist sdir)
+                                  (make-session-journal sdir)))
+                  (agent (make-agent :journal journal))
+                  (sid (add-session-lore agent "stay in the sandbox")))
+             (flet ((state () (fold-state (agent-journal agent))))
+               (check "session lore appears in entries"
+                      (let ((e (find :session (all-lore-entries :state (state) :cwd home)
+                                     :key (lambda (x) (getf x :scope)))))
+                        (and e (equal (getf e :id) sid)
+                             (equal (getf e :text) "stay in the sandbox"))))
+               (check "find-lore-scope locates session lore"
+                      (eq :session (find-lore-scope sid :state (state) :cwd home)))
+               (edit-lore sid "stay strictly in the sandbox" :agent agent :cwd home)
+               (check "session lore edited by id"
+                      (equal "stay strictly in the sandbox"
+                             (getf (find :session (all-lore-entries :state (state) :cwd home)
+                                         :key (lambda (x) (getf x :scope)))
+                                   :text)))
+               (remove-lore sid :agent agent :cwd home)
+               (check "session lore removed by id"
+                      (null (find :session (all-lore-entries :state (state) :cwd home)
+                                  :key (lambda (x) (getf x :scope))))))))
       (evo.port:setenv "EVO_HOME"
                        (namestring (uiop:ensure-directory-pathname
                                     (format nil "~a/evo-unit-home" (or (uiop:getenv "TMPDIR") "/tmp"))))))))

@@ -14,7 +14,8 @@
   /model [id]          pick the model from a list, or set it directly
   /thinking [level]    off·low·medium·high·xhigh
   /compact [hint]      compact the context now
-  /lore [text]         show lore, or add durable guidance (project scope)
+  /lore [text]         show lore (with ids), or add project-scope guidance; ask me to edit/remove by id
+  /global-lore [text]  show lore, or add user-scope (every project) guidance
   /memory [request]    show project memory or ask the agent to refine it
   /global-memory [...] show global user memory or ask the agent to refine it
   /eval <sexpr>        evaluate one sexpr in the live image (progn to group;
@@ -296,6 +297,27 @@ here lines up the id column too — provider, id and context each align."
     (scroll tui (format nil "exported to ~a" path))
     t))
 
+(defun lore-command (tui args scope)
+  "Show all lore, or add durable guidance at SCOPE (:project or :global)."
+  (let ((agent (tui-agent tui))
+        (label (if (eq scope :global) "global lore" "lore")))
+    (if (zerop (length args))
+        (let ((entries (evo.kernel:all-lore-entries)))
+          (scroll tui (if entries
+                          (format nil "lore (ask me to edit/remove by id):~%~{ · [~a] (~(~a~)) ~a~%~}"
+                                  (loop for e in entries
+                                        collect (getf e :id)
+                                        collect (getf e :scope)
+                                        collect (getf e :text)))
+                          (dim "no lore — /lore <text> adds durable guidance"))))
+        (let ((id (evo.kernel:add-lore args :scope scope)))
+          (scroll tui (green (format nil "✓ ~a added [~a] (injected every turn)" label id)))
+          (when (tui-running tui)
+            (queue-steering agent
+                            (format nil "The user added ~a (durable guidance, applies from now on): ~a"
+                                    label args)))))
+    t))
+
 (defun builtin-command (tui name args)
   (let ((agent (tui-agent tui)))
     (macrolet ((cmd (&rest names) `(member name ',names :test #'string-equal)))
@@ -327,18 +349,8 @@ here lines up the id column too — provider, id and context each align."
              (start-compact-worker tui args)
              t)
          t)
-        ((cmd "lore")
-         (if (zerop (length args))
-             (let ((entries (evo.kernel:all-lore)))
-               (scroll tui (if entries
-                               (format nil "lore:~%~{ · ~a~%~}" entries)
-                               (dim "no lore — /lore <text> adds durable guidance"))))
-             (progn (evo.kernel:add-lore args :scope :project)
-                    (scroll tui (green "✓ lore added (injected every turn)"))
-                    (when (tui-running tui)
-                      (queue-steering agent
-                                      (format nil "The user added lore (durable guidance, applies from now on): ~a" args)))))
-         t)
+        ((cmd "lore") (lore-command tui args :project))
+        ((cmd "global-lore") (lore-command tui args :global))
         ((cmd "tree") (tree-command tui))
         ((cmd "resume" "sessions") (resume-command tui))
         ((cmd "fork")
