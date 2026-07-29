@@ -181,6 +181,58 @@ turns: one with text/thinking blocks and one with tool_use blocks."
       (getf (claude-oauth--read-tokens) :refresh-token)))
 
 ;;; ---------------------------------------------------------------------------
+;;; Auto-refresh
+;;; ---------------------------------------------------------------------------
+
+(defparameter *claude-oauth-auto-refresh* t
+  "When T (default), auth-headers automatically refreshes the access token
+before it expires.  Set to NIL to rely on manual /claude-oauth:refresh.")
+
+(defparameter *claude-oauth-refresh-before-expiry* 360
+  "Seconds before access-token expiry to trigger an automatic refresh.")
+
+(defun claude-oauth--ensure-valid-token ()
+  "Return the current OAuth access token, refreshing it first if needed.
+Signals EVO:PROVIDER-ERROR if a refresh is required but fails or the refresh
+token itself is expired."
+  (let ((stored (claude-oauth--read-tokens)))
+    (cond
+      ;; No stored file — env-only or not logged in.  Return whatever we have.
+      ((not stored)
+       (claude-oauth--resolve-token))
+      ;; Auto-refresh disabled or no expiry info to check.
+      ((or (not *claude-oauth-auto-refresh*)
+           (not (getf stored :expires-at)))
+       (or (getf stored :access-token) (claude-oauth--resolve-token)))
+      (t
+       (let* ((now (claude-oauth--now-ms))
+              (remaining (floor (/ (- (getf stored :expires-at) now) 1000))))
+         (if (> remaining *claude-oauth-refresh-before-expiry*)
+             ;; Token still fresh.
+             (or (getf stored :access-token) (claude-oauth--resolve-token))
+             ;; Token is near or past expiry — refresh.
+             (let ((refresh (getf stored :refresh-token)))
+               (unless refresh
+                 (error 'evo:provider-error
+                        :message "Access token expired and no refresh token stored. Run /claude-oauth:login to re-authenticate."))
+               ;; Check refresh-token expiry.
+               (let ((rt-expires (getf stored :refresh-token-expires-at)))
+                 (when (and rt-expires (<= rt-expires now))
+                   (error 'evo:provider-error
+                          :message "Refresh token expired. Run /claude-oauth:login to re-authenticate.")))
+               (handler-case
+                   (let ((tokens (claude-oauth--refresh-token refresh)))
+                     (claude-oauth--write-tokens (getf tokens :access-token)
+                                                 (getf tokens :refresh-token)
+                                                 (getf tokens :expires-at)
+                                                 (getf tokens :refresh-token-expires-at))
+                     (format *error-output* "~&[claude-oauth] Access token auto-refreshed.~%")
+                     (getf tokens :access-token))
+                 (error (e)
+                   (error 'evo:provider-error
+                          :message (format nil "Auto-refresh failed: ~a" e)))))))))))
+
+;;; ---------------------------------------------------------------------------
 ;;; Provider API methods
 ;;; ---------------------------------------------------------------------------
 
@@ -191,7 +243,7 @@ turns: one with text/thinking blocks and one with tool_use blocks."
 (defmethod evo:auth-headers ((api claude-oauth-messages-api) config)
   (declare (ignore api))
   (let ((token (or (claude-oauth--trim (getf config :api-key))
-                   (claude-oauth--resolve-token))))
+                   (claude-oauth--ensure-valid-token))))
     (unless token
       (error 'evo:provider-error
              :message "No Claude OAuth token: set CLAUDE_OAUTH_ACCESS_TOKEN or run /claude-oauth:login"))
@@ -199,15 +251,6 @@ turns: one with text/thinking blocks and one with tool_use blocks."
                  (string= "sk-ant-oat" token :end2 10))
       (error 'evo:provider-error
              :message "Token does not look like a Claude/Anthropic OAuth access token (expected sk-ant-oat prefix)."))
-    ;; Warn if the access token is expired or about to expire (5-minute grace).
-    (let ((stored (claude-oauth--read-tokens)))
-      (when stored
-        (let* ((expires-at (getf stored :expires-at))
-               (remaining (and expires-at
-                               (floor (/ (- expires-at (claude-oauth--now-ms)) 1000)))))
-          (when (and remaining (<= remaining 300))
-            (format *error-output* "~&[claude-oauth] WARNING: access token ~:[expired ~:*~d s ago~;expires in ~d s~]~%"
-                    (max 0 remaining) (abs remaining))))))
     `(("Authorization" . ,(format nil "Bearer ~a" token))
       ("anthropic-version" . "2023-06-01"))))
 
@@ -602,5 +645,7 @@ Returns a list of registered model-id strings."
                 stored (and stored (namestring (claude-oauth--token-file))))
         (format s "  billing-header injection: enabled (cc_version=~a, cc_entrypoint=~a)~%"
                 *claude-code-version* *claude-code-entrypoint*)
+        (format s "  auto-refresh: ~:[disabled~;enabled (refresh at ~a s before expiry)~]~%"
+                *claude-oauth-auto-refresh* *claude-oauth-refresh-before-expiry*)
         (format s "  client_id: ~a" (claude-oauth--client-id)))))
   :description "Show Claude OAuth provider diagnostics")
