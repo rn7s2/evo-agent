@@ -387,13 +387,19 @@ in about twenty lines of kernel code.
 Human knowledge, guidance, and constraints, durable across a whole session and
 immune to summarization.
 
-- `/lore <text>` appends to an out-of-band store: a sexpr file per scope
-  (global `~/.evo/lore.sexp`, project `.evo/lore.sexp`) plus session-scoped
-  entries in the journal.
-- Lore is injected into the system-prompt region **every turn**. It is never
-  entrusted to the compactor's summarizer.
+- `/lore <text>` appends to an out-of-band store: a sexpr file per scope,
+  each entry `(:id ... :text ... :timestamp ...)` on its own line. `/lore`
+  writes project scope (`.evo/lore.sexp`), `/global-lore` writes user scope
+  (`~/.evo/lore.sexp`); session-scoped entries ride the journal as `:custom`
+  state (compaction-immune but disposable — they die with the session).
+- Lore is injected into the system-prompt region **every turn**, each entry
+  tagged with its `[id]`. It is never entrusted to the compactor's summarizer.
 - Mid-run `/lore` rides the steering queue: acknowledged at the next turn
   boundary, durable thereafter.
+- The `lore` tool lets the agent **edit or remove** entries by id (and add,
+  choosing project/global/session scope). It is stricter than the `memory`
+  tools: the agent must not curate lore on its own initiative — only when the
+  user has explicitly asked to change their lore.
 - Context files (`AGENTS.md`, `CLAUDE.md`) are loaded by walking root→cwd,
   nearest last. Lore complements repository conventions rather than replacing
   them.
@@ -438,8 +444,9 @@ something to say.
 - **Prompt templates**: `.md` files whose filename is the command, with
   `$1`..`$9` and `$@` substitution. Purely textual expansion.
 - **Slash command resolution**: extension commands → input hook → skills →
-  templates → send to the agent. Built-ins are `/goal /lore /permission
-  /compact /tree /fork /resume /model /reload /export /help /quit /exit`.
+  templates → send to the agent. Built-ins are `/goal /lore /global-lore
+  /permission /compact /tree /fork /resume /model /reload /export /help /quit
+  /exit`.
 - **Modes** (`src/core-ext/plan-mode.lisp`, package `EVO.PLAN`): `auto`, the
   fully permissive default, and `plan`. The mode is journal state (`:custom
   "mode"`), never a flag, so it survives restart and every frontend reads the

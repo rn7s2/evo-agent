@@ -499,10 +499,13 @@ it becomes available to every section evo owns."
                                 (directory (merge-pathnames "examples/*.lisp" docs))))
             (format out "- ~a~%" (namestring file)))))
       (when lore
-        ;; Lore: injected every turn, immune to summarization.
+        ;; Lore: injected every turn, immune to summarization.  Each entry
+        ;; carries its [id] so the user can ask to edit or remove it by id.
         (format out "~%## Lore (durable user guidance — always applies)~%")
         (dolist (item lore)
-          (format out "- ~a~%" item)))
+          (if (and (listp item) (getf item :text))
+              (format out "- [~a] ~a~%" (getf item :id) (getf item :text))
+              (format out "- ~a~%" item))))
       (dolist (path (context-files cwd))
         (let ((content (ignore-errors (read-file-string path))))
           (when (and content (plusp (length content)))

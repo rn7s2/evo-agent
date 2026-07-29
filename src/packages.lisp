@@ -78,7 +78,8 @@
            #:current-goal #:goal-continuation-message #:goal-continuation-for
            #:register-goal-tools #:create-goal-entry #:goal-tokens-used
            ;; lore + compaction
-           #:add-lore #:add-session-lore #:all-lore
+           #:add-lore #:add-session-lore #:all-lore #:all-lore-entries
+           #:edit-lore #:remove-lore #:find-lore-scope
            #:compact-now #:compaction-needed-p #:estimate-context-tokens
            #:overflow-error-p #:select-cut))
 

@@ -212,8 +212,9 @@ guaranteed by the CLI preflight)."
             :thinking thinking
             ;; Session id = OpenAI prompt_cache_key (cache affinity).
             :cache-key (pget (evo.journal:journal-header (agent-journal agent)) :id)
-            :system (build-system-prompt tools :lore (all-lore :state state)
-                                               :model model-id)))))
+            :system (build-system-prompt tools
+                                         :lore (all-lore-entries :state state)
+                                         :model model-id)))))
 
 ;;; Tool batch execution (sequential) with :tool-call interception —
 ;;; the one point permission gates / plan mode / sandboxing build on.
