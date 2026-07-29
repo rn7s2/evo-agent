@@ -199,6 +199,15 @@ turns: one with text/thinking blocks and one with tool_use blocks."
                  (string= "sk-ant-oat" token :end2 10))
       (error 'evo:provider-error
              :message "Token does not look like a Claude/Anthropic OAuth access token (expected sk-ant-oat prefix)."))
+    ;; Warn if the access token is expired or about to expire (5-minute grace).
+    (let ((stored (claude-oauth--read-tokens)))
+      (when stored
+        (let* ((expires-at (getf stored :expires-at))
+               (remaining (and expires-at
+                               (floor (/ (- expires-at (claude-oauth--now-ms)) 1000)))))
+          (when (and remaining (<= remaining 300))
+            (format *error-output* "~&[claude-oauth] WARNING: access token ~:[expired ~:*~d s ago~;expires in ~d s~]~%"
+                    (max 0 remaining) (abs remaining))))))
     `(("Authorization" . ,(format nil "Bearer ~a" token))
       ("anthropic-version" . "2023-06-01"))))
 
@@ -249,6 +258,29 @@ turns: one with text/thinking blocks and one with tool_use blocks."
 (defmethod evo:default-api-key-env ((api claude-oauth-messages-api))
   (declare (ignore api))
   "CLAUDE_OAUTH_ACCESS_TOKEN")
+
+;;; ---------------------------------------------------------------------------
+;;; Safe error extraction from API responses
+;;; ---------------------------------------------------------------------------
+
+(defun claude-oauth--extract-error (body)
+  "Safely extract a human-readable error description from a response BODY.
+BODY may be a JSON string or an already-parsed hash-table.  Returns a string
+or NIL."
+  (when body
+    (ignore-errors
+     (let* ((j (etypecase body
+                (string (com.inuoe.jzon:parse body))
+                (hash-table body)))
+            (err (gethash "error" j)))
+       ;; Anthropic error shape: {"error": {"type": "...", "message": "..."}}
+       ;; OAuth error shape:    {"error": "...", "error_description": "..."}
+       (typecase err
+         (hash-table
+          (or (gethash "message" err)
+              (gethash "type" err)))
+         (string err)
+         (t (gethash "error_description" j)))))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; OAuth PKCE login flow
@@ -354,10 +386,7 @@ request arrives or 120 seconds elapse."
                (let ((resp-body (ignore-errors (dexador.error:response-body e))))
                  (error "Token exchange failed: HTTP ~a~@[: ~a~]"
                         (dexador.error:response-status e)
-                        (and resp-body
-                             (ignore-errors
-                              (let ((j (com.inuoe.jzon:parse resp-body)))
-                                (gethash "error_description" j)))))))))
+                        (claude-oauth--extract-error resp-body))))))
          (json (com.inuoe.jzon:parse response)))
     (let ((access (gethash "access_token" json))
           (refresh (gethash "refresh_token" json))
@@ -379,8 +408,7 @@ request arrives or 120 seconds elapse."
   (let* ((body (claude-oauth--json-string
                  (list :grant_type "refresh_token"
                        :refresh_token refresh-token
-                       :client_id (claude-oauth--client-id)
-                       :scope *claude-oauth-scope*)))
+                       :client_id (claude-oauth--client-id))))
          (response
            (handler-case
                (apply #'dex:post *claude-oauth-token-url*
@@ -389,8 +417,12 @@ request arrives or 120 seconds elapse."
                       (let ((proxy (evo.util:env-proxy *claude-oauth-token-url*)))
                         (when proxy (list :proxy proxy))))
              (dexador.error:http-request-failed (e)
-               (error "Token refresh failed: HTTP ~a"
-                      (dexador.error:response-status e)))))
+               (let ((resp-body (ignore-errors (dexador.error:response-body e))))
+                 (format *error-output* "~&[claude-oauth] Token refresh request: url=~a body=~a~%"
+                         *claude-oauth-token-url* body)
+                 (error "Token refresh failed: HTTP ~a~@[: ~a~]"
+                        (dexador.error:response-status e)
+                        (claude-oauth--extract-error resp-body))))))
          (json (com.inuoe.jzon:parse response)))
     (let ((access (gethash "access_token" json))
           (refresh (gethash "refresh_token" json))
@@ -430,10 +462,7 @@ access token.  Returns a parsed JSON object (hash-table) or signals an error."
         (let ((status (dexador.error:response-status e))
               (body (ignore-errors (dexador.error:response-body e))))
           (error "Failed to fetch models from Anthropic: HTTP ~a~@[: ~a~]"
-                 status (and body
-                             (ignore-errors
-                              (let ((j (com.inuoe.jzon:parse body)))
-                                (gethash "error" j))))))))))
+                 status (claude-oauth--extract-error body)))))))
 
 (defun claude-oauth--register-fetched-models (json)
   "Register every model in the JSON response (hash-table with \"data\" array).

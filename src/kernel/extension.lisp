@@ -14,11 +14,21 @@
 (defvar *loaded-extension-paths* nil
   "Truenames loaded this boot; :load replay skips them.")
 
+(defun extension-fasl-path (source-path)
+  "Return the expected fasl path for SOURCE-PATH (same dir, .fasl extension)."
+  (make-pathname :type "fasl" :defaults source-path))
+
 (defun load-extension* (path &key (reason "loaded") journal (record t))
   "Compile + load PATH into userspace; journal a :load entry.
-CL redefinition semantics: new definitions apply from the next call."
+CL redefinition semantics: new definitions apply from the next call.
+Stale fasl files are deleted before compilation so a changed source is
+always recompiled (ECL may skip if the fasl is newer than the source)."
   (let* ((path (truename path))
          (journal (or journal *current-journal*)))
+    ;; Delete any stale fasl to force recompilation.
+    (let ((fasl (extension-fasl-path path)))
+      (when (probe-file fasl)
+        (delete-file fasl)))
     (let ((*package* (find-package :evo.user)))
       (handler-bind ((warning #'muffle-warning))
         (multiple-value-bind (fasl warnings-p failure-p)
@@ -58,6 +68,42 @@ fasl litter next to config, and ECL evaluates it without the compiler."
           (format *error-output* "~&evo: error in init file ~a: ~a~%" path e)))))
   path)
 
+;;; Snapshot/restore for extension registries so /reload is idempotent.
+;;; reset-user-registries clears models and providers; we also need to clear
+;;; extension-sourced commands, tools, and APIs so that removing a registration
+;;; from an extension file takes effect on /reload.
+
+(defvar *pre-extension-registries* nil
+  "Saved state of all registries before extension loading.  Restored on
+/reload so that re-running extensions is idempotent — registrations removed
+from source are cleaned up.")
+
+(defun snapshot-extension-registries ()
+  "Save the current registry state; called before boot-extensions."
+  (setf *pre-extension-registries*
+        (list :commands (loop for k being the hash-keys of evo::*commands* collect k)
+              :apis (mapcar #'car evo.provider::*apis*)
+              :tools (loop for k being the hash-keys of *tool-registry* collect k))))
+
+(defun restore-extension-registries ()
+  "Remove registrations added by extensions (anything not in the pre-extension snapshot)."
+  (when *pre-extension-registries*
+    ;; Commands: remove entries not in the pre-extension set.
+    (let ((keep (pget *pre-extension-registries* :commands)))
+      (loop for k being the hash-keys of evo::*commands*
+            unless (member k keep :test #'equal)
+            do (remhash k evo::*commands*)))
+    ;; APIs: keep only entries whose key was in the pre-extension set.
+    (let ((keep (pget *pre-extension-registries* :apis)))
+      (setf evo.provider::*apis*
+            (remove-if-not (lambda (entry) (member (car entry) keep :test #'eq))
+                           evo.provider::*apis*)))
+    ;; Tools: remove entries not in the pre-extension set.
+    (let ((keep (pget *pre-extension-registries* :tools)))
+      (loop for k being the hash-keys of *tool-registry*
+            unless (member k keep :test #'equal)
+            do (remhash k *tool-registry*)))))
+
 (defun boot-userspace (&key journal (cwd (uiop:getcwd)))
   "Reset user registries and settings, evaluate init files (global then
 project — an override is just a later call), then load extension
@@ -68,8 +114,10 @@ boot, never journaled (unlike extension :load entries), so the reset makes
 this idempotent for /reload and repeated boots."
   (evo.util:reset-settings)
   (evo.provider:reset-user-registries)
+  (restore-extension-registries)
   (load-init-file (merge-pathnames "init.lisp" (evo-home)))
   (load-init-file (merge-pathnames "init.lisp" (project-evo-dir cwd)))
+  (snapshot-extension-registries)
   (boot-extensions :journal journal :cwd cwd)
   (load-init-file (merge-pathnames "post-init.lisp" (evo-home)))
   (load-init-file (merge-pathnames "post-init.lisp" (project-evo-dir cwd))))
