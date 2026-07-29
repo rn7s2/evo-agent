@@ -130,8 +130,30 @@ EVO.PLAN:SET-MODE returns NIL and nothing is journaled or scrolled."
 
 ;;; Worker thread.
 
+(defun check-model-ready (tui)
+  "Non-fatal counterpart of the CLI's headless preflight: T when the
+session's effective model resolves in the registry.  On failure scroll
+the config error and the recovery path — the TUI must stay up, /model
+and /reload are how the registry gets fixed."
+  (let ((agent (tui-agent tui)))
+    (handler-case
+        (progn (find-model (evo.kernel:effective-model-id
+                            (fold-state (agent-journal agent)) agent))
+               t)
+      (error (e)
+        (scroll tui (red (format nil "✗ ~a" e)))
+        (scroll tui (dim "recover with /model (pick a registered model) or /reload (after fixing init.lisp)"))
+        nil))))
+
 (defun start-worker (tui)
   (unless (tui-running tui)
+    ;; Model gate, before anything reaches the journal: queued steering
+    ;; is memory-only until the run drains it, so a blocked submit is
+    ;; not lost — /model or /reload releases it.
+    (unless (check-model-ready tui)
+      (when (steering-pending-p (tui-agent tui))
+        (scroll tui (dim "input stays queued — it runs once the model resolves")))
+      (return-from start-worker))
     (setf (tui-running tui) t
           (tui-compacting tui) nil
           (agent-abort-flag (tui-agent tui)) nil)
@@ -159,6 +181,8 @@ EVO.PLAN:SET-MODE returns NIL and nothing is journaled or scrolled."
   "Run manual compaction on the worker thread so the TUI can keep repainting
 and ESC can interrupt the summarization request."
   (unless (tui-running tui)
+    (unless (check-model-ready tui)     ; summarization needs the model too
+      (return-from start-compact-worker))
     (let ((agent (tui-agent tui)))
       (setf (tui-running tui) t
             (tui-compacting tui) t

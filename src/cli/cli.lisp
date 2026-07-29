@@ -196,9 +196,12 @@ A commented sample is at docs/examples/init.lisp (installed to~%~
                "Note: --no-userspace skips init files, so no models are registered in this mode.")))
 
 (defun preflight-model (agent journal opts)
-  "Single choke point for the missing/unknown-model config error, raised
-as usage-error: exit 64 is the one code the supervisor never restarts, so
-a config problem cannot enter the restart/quarantine loop."
+  "Headless-only model check, raised as usage-error: exit 64 is the one
+code the supervisor never restarts, so a config problem cannot enter the
+restart/quarantine loop.  Runs after SETUP-AGENT has journaled a --model
+choice, so it validates the id the first turn will actually use.  The TUI
+never preflights — it gates at run start instead (CHECK-MODEL-READY),
+where /model and /reload can fix the registry in place."
   (let ((id (or (evo.journal:state-model (fold-state journal))
                 (evo.kernel:agent-model-override agent)
                 (setting :model))))
@@ -232,7 +235,6 @@ a config problem cannot enter the restart/quarantine loop."
           (evo.kernel:boot-userspace :journal (and (not resumed-p) journal))
           (when resumed-p
             (replay-loads (fold-state journal)))))
-    (preflight-model agent journal opts)
     (run-hooks :session-start (list :agent agent :resumed resumed-p))
     ;; Journal explicit model/thinking choices so resume preserves them.
     (when (getf opts :model)
@@ -263,6 +265,9 @@ a config problem cannot enter the restart/quarantine loop."
                                        #'print-mode-event-handler))
     (declare (ignore resumed-p))
     (let ((journal (agent-journal agent)))
+      ;; Fail eagerly: headless has no /model recovery, and nothing may
+      ;; enter the journal before the model is known to resolve.
+      (preflight-model agent journal opts)
       ;; Seed the run.
       (let ((prompt (getf opts :prompt))
             (goal (evo.kernel:current-goal agent)))

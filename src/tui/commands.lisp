@@ -229,7 +229,12 @@ argument check never go stale against the core extension."
   (append-entry (agent-journal (tui-agent tui))
                 (list :type :model-change :model id))
   (refresh-goal tui)
-  (scroll tui (dim (format nil "model → ~a (next turn)" id))))
+  (scroll tui (dim (format nil "model → ~a (next turn)" id)))
+  ;; A submit blocked by the model gate left its steering queued in
+  ;; memory; a valid model releases it.
+  (when (and (steering-pending-p (tui-agent tui))
+             (not (tui-running tui)))
+    (start-worker tui)))
 
 (defun format-context-window (n)
   "200000 -> \"200k\", 1000000 -> \"1M\": the picker's description column is
@@ -368,6 +373,10 @@ here lines up the id column too — provider, id and context each align."
          (boot-userspace :journal (agent-journal agent))
          (refresh-goal tui)             ; model registry may have changed
          (scroll tui (dim "userspace reloaded (init + extensions + post-init)"))
+         ;; Steering blocked on the model gate re-runs it; still-broken
+         ;; config re-scrolls the error instead of silently sitting.
+         (when (and (steering-pending-p agent) (not (tui-running tui)))
+           (start-worker tui))
          t)
         (t nil)))))
 
@@ -459,11 +468,16 @@ here lines up the id column too — provider, id and context each align."
          (progn
            (when resumed-p (show-history-tail tui))
            (refresh-goal tui)
-           ;; An idle active goal always gets re-steered.
+           ;; An idle active goal always gets re-steered; start-worker's
+           ;; model gate scrolls a startup warning if the model went
+           ;; stale.  With no goal, check explicitly — a missing model
+           ;; should surface now, not at the first submit.
            (let ((goal (tui-goal tui)))
-             (when (and goal (eq (pget goal :status) :active))
-               (queue-steering agent (goal-continuation-for agent goal))
-               (start-worker tui)))
+             (if (and goal (eq (pget goal :status) :active))
+                 (progn
+                   (queue-steering agent (goal-continuation-for agent goal))
+                   (start-worker tui))
+                 (check-model-ready tui)))
            (repaint tui)
            ;; Self-heal, innermost layer: a bug in input parsing or
            ;; repainting must not take the session down — report it and
