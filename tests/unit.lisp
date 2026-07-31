@@ -25,6 +25,13 @@
                         (format t "FAIL ~a: expected a signal~%" ,name))
      (error () (incf *pass*))))
 
+(defun tmp-dir ()
+  "Scratch directory for test fixtures. TMPDIR is always set on macOS but
+   not guaranteed on Linux (e.g. GitHub Actions runners), where an unguarded
+   (uiop:getenv \"TMPDIR\") would splice the literal string \"NIL\" into a
+   path instead of failing loudly."
+  (or (uiop:getenv "TMPDIR") "/tmp"))
+
 ;;; sexpr IO
 
 (defun roundtrip (form)
@@ -53,7 +60,7 @@ line2")))
 
 (defun test-journal ()
   (let* ((dir (uiop:ensure-directory-pathname
-               (format nil "~a/evo-test-~a/" (uiop:getenv "TMPDIR") (gen-id))))
+               (format nil "~a/evo-test-~a/" (tmp-dir) (gen-id))))
          (journal (progn (ensure-directories-exist dir)
                          (let ((*default-pathname-defaults* dir))
                            (make-session-journal dir)))))
@@ -526,7 +533,7 @@ event: response.completed~%data: {\"type\":\"response.completed\",\"response\":{
          (saved-post (symbol-function 'dex:post))
          (saved-get (symbol-function 'dex:get))
          (home (uiop:ensure-directory-pathname
-                (format nil "~a/evo-oauth-models-~a/" (uiop:getenv "TMPDIR") (gen-id))))
+                (format nil "~a/evo-oauth-models-~a/" (tmp-dir) (gen-id))))
          (refresh-calls nil)
          (get-auths nil)
          (next-access-token "sk-ant-oat-refreshed")
@@ -911,7 +918,7 @@ event: response.completed~%data: {\"type\":\"response.completed\",\"response\":{
            (and (= (length short) 8)
                 (char= (char short 7) #\…))))
   (let* ((dir (uiop:ensure-directory-pathname
-               (format nil "~a/evo-resume-~a/" (uiop:getenv "TMPDIR") (gen-id))))
+               (format nil "~a/evo-resume-~a/" (tmp-dir) (gen-id))))
          (journal (progn (ensure-directories-exist dir)
                          (make-session-journal dir)))
          (prompt (format nil "first line~%second line ~a"
@@ -1280,7 +1287,7 @@ event: response.completed~%data: {\"type\":\"response.completed\",\"response\":{
 
 (defun test-mode-switching ()
   (let* ((dir (uiop:ensure-directory-pathname
-               (format nil "~a/evo-mode-~a/" (uiop:getenv "TMPDIR") (gen-id))))
+               (format nil "~a/evo-mode-~a/" (tmp-dir) (gen-id))))
          (journal (progn (ensure-directories-exist dir) (make-session-journal dir)))
          (agent (make-agent :journal journal))
          (tui (evo.tui::make-tui :agent agent)))
@@ -1383,7 +1390,7 @@ event: response.completed~%data: {\"type\":\"response.completed\",\"response\":{
 
 (defun test-goal-budget ()
   (let* ((dir (uiop:ensure-directory-pathname
-               (format nil "~a/evo-goal-~a/" (uiop:getenv "TMPDIR") (gen-id))))
+               (format nil "~a/evo-goal-~a/" (tmp-dir) (gen-id))))
          (journal (progn (ensure-directories-exist dir) (make-session-journal dir)))
          (agent (make-agent :journal journal)))
     (create-goal-entry agent "do the thing")
@@ -1409,9 +1416,9 @@ event: response.completed~%data: {\"type\":\"response.completed\",\"response\":{
                 (equal (cdr (assoc "description" front :test #'equal)) "a demo skill"))))
   (let* ((old-home (uiop:getenv "HOME"))
          (home (uiop:ensure-directory-pathname
-                (format nil "~a/evo-agents-home-~a/" (uiop:getenv "TMPDIR") (gen-id))))
+                (format nil "~a/evo-agents-home-~a/" (tmp-dir) (gen-id))))
          (cwd (uiop:ensure-directory-pathname
-               (format nil "~a/evo-agents-project-~a/" (uiop:getenv "TMPDIR") (gen-id))))
+               (format nil "~a/evo-agents-project-~a/" (tmp-dir) (gen-id))))
          (shadow (format nil "shadow-~a" (gen-id)))
          (global-agents-only (format nil "global-agents-~a" (gen-id)))
          (project-agents-only (format nil "project-agents-~a" (gen-id))))
@@ -1501,7 +1508,7 @@ event: response.completed~%data: {\"type\":\"response.completed\",\"response\":{
 
 (defun make-compact-fixture-tui (&key (old-chars 4000))
   (let* ((dir (uiop:ensure-directory-pathname
-               (format nil "~a/evo-compact-tui-~a/" (uiop:getenv "TMPDIR") (gen-id))))
+               (format nil "~a/evo-compact-tui-~a/" (tmp-dir) (gen-id))))
          (journal (progn (ensure-directories-exist dir) (make-session-journal dir)))
          (agent (make-agent :journal journal))
          (tui (evo.tui::make-tui :agent agent)))
@@ -1551,7 +1558,7 @@ event: response.completed~%data: {\"type\":\"response.completed\",\"response\":{
                (not (eq (evo.provider:message-role (nth cut messages)) :tool-result))))))
   ;; :compaction fold: summary + retained tail + entries after.
   (let* ((dir (uiop:ensure-directory-pathname
-               (format nil "~a/evo-test-~a/" (uiop:getenv "TMPDIR") (gen-id))))
+               (format nil "~a/evo-test-~a/" (tmp-dir) (gen-id))))
          (journal (progn (ensure-directories-exist dir) (make-session-journal dir))))
     (append-entry journal '(:type :message :message (:role :user :content ((:type :text :text "old")))))
     (append-entry journal
@@ -1652,7 +1659,7 @@ event: response.completed~%data: {\"type\":\"response.completed\",\"response\":{
 
 (defun test-lore ()
   (let* ((home (uiop:ensure-directory-pathname
-                (format nil "~a/evo-lore-~a/" (uiop:getenv "TMPDIR") (gen-id)))))
+                (format nil "~a/evo-lore-~a/" (tmp-dir) (gen-id)))))
     (evo.port:setenv "EVO_HOME" (namestring home))
     (unwind-protect
          (progn
@@ -1688,7 +1695,7 @@ event: response.completed~%data: {\"type\":\"response.completed\",\"response\":{
              (check "lore tool registered" (find-tool "lore")))
            ;; Session-scoped lore rides the journal, not the files.
            (let* ((sdir (uiop:ensure-directory-pathname
-                         (format nil "~a/evo-lore-sess-~a/" (uiop:getenv "TMPDIR") (gen-id))))
+                         (format nil "~a/evo-lore-sess-~a/" (tmp-dir) (gen-id))))
                   (journal (progn (ensure-directories-exist sdir)
                                   (make-session-journal sdir)))
                   (agent (make-agent :journal journal))
@@ -1713,16 +1720,16 @@ event: response.completed~%data: {\"type\":\"response.completed\",\"response\":{
                                   :key (lambda (x) (getf x :scope))))))))
       (evo.port:setenv "EVO_HOME"
                        (namestring (uiop:ensure-directory-pathname
-                                    (format nil "~a/evo-unit-home" (or (uiop:getenv "TMPDIR") "/tmp"))))))))
+                                    (format nil "~a/evo-unit-home" (tmp-dir))))))))
 
 ;;; /lore vs /global-lore must respect scope, the way /memory and
 ;;; /global-memory do — they used to both dump every scope, indistinguishably.
 
 (defun test-lore-slash-commands ()
   (let* ((home (uiop:ensure-directory-pathname
-                (format nil "~a/evo-lore-cmd-home-~a/" (uiop:getenv "TMPDIR") (gen-id))))
+                (format nil "~a/evo-lore-cmd-home-~a/" (tmp-dir) (gen-id))))
          (dir (uiop:ensure-directory-pathname
-               (format nil "~a/evo-lore-cmd-proj-~a/" (uiop:getenv "TMPDIR") (gen-id))))
+               (format nil "~a/evo-lore-cmd-proj-~a/" (tmp-dir) (gen-id))))
          (journal (progn (ensure-directories-exist dir) (make-session-journal dir)))
          (agent (make-agent :journal journal))
          (tui (evo.tui::make-tui :agent agent)))
@@ -1769,13 +1776,13 @@ event: response.completed~%data: {\"type\":\"response.completed\",\"response\":{
                              :key (lambda (e) (getf e :text)) :test #'equal))))
       (evo.port:setenv "EVO_HOME"
                        (namestring (uiop:ensure-directory-pathname
-                                    (format nil "~a/evo-unit-home" (or (uiop:getenv "TMPDIR") "/tmp"))))))))
+                                    (format nil "~a/evo-unit-home" (tmp-dir))))))))
 
 ;;; Memory
 
 (defun test-project-memory ()
   (let* ((dir (uiop:ensure-directory-pathname
-               (format nil "~a/evo-memory-~a/" (uiop:getenv "TMPDIR") (gen-id))))
+               (format nil "~a/evo-memory-~a/" (tmp-dir) (gen-id))))
          (journal (progn (ensure-directories-exist dir) (make-session-journal dir)))
          (agent (make-agent :journal journal)))
     (check "project memory tool registered" (find-tool "project_memory"))
@@ -1873,10 +1880,10 @@ event: response.completed~%data: {\"type\":\"response.completed\",\"response\":{
                             (namestring (evo-home))))
          (global-home (uiop:ensure-directory-pathname
                        (format nil "~a/evo-global-memory-~a/"
-                               (uiop:getenv "TMPDIR") (gen-id))))
+                               (tmp-dir) (gen-id))))
          (dir (uiop:ensure-directory-pathname
                (format nil "~a/evo-global-memory-project-~a/"
-                       (uiop:getenv "TMPDIR") (gen-id)))))
+                       (tmp-dir) (gen-id)))))
     (ensure-directories-exist dir)
     (evo.port:setenv "EVO_HOME" (namestring global-home))
     (unwind-protect
@@ -1949,7 +1956,7 @@ event: response.completed~%data: {\"type\":\"response.completed\",\"response\":{
            (equal (evo.kernel::render-template "{{A}}/{{NOPE}}" bindings)
                   "alpha/{{NOPE}}")))
   (let ((dir (uiop:ensure-directory-pathname
-              (format nil "~a/evo-prompt-~a/" (uiop:getenv "TMPDIR") (gen-id)))))
+              (format nil "~a/evo-prompt-~a/" (tmp-dir) (gen-id)))))
     (ensure-directories-exist dir)
     (write-file-string (merge-pathnames "CLAUDE.md" dir)
                        "keep {{WORKING_DIRECTORY}} literal")
@@ -1989,7 +1996,7 @@ event: response.completed~%data: {\"type\":\"response.completed\",\"response\":{
 
 (defun test-tool-call-events ()
   (let* ((dir (uiop:ensure-directory-pathname
-               (format nil "~a/evo-toolev-~a/" (uiop:getenv "TMPDIR") (gen-id))))
+               (format nil "~a/evo-toolev-~a/" (tmp-dir) (gen-id))))
          (journal (progn (ensure-directories-exist dir) (make-session-journal dir)))
          (events nil)
          (agent (make-agent :journal journal
@@ -2010,7 +2017,7 @@ event: response.completed~%data: {\"type\":\"response.completed\",\"response\":{
 (defun test-interrupt ()
   (let* ((dir (uiop:ensure-directory-pathname
                (format nil "~a/evo-interrupt-~a/"
-                       (or (uiop:getenv "TMPDIR") "/tmp") (gen-id))))
+                       (tmp-dir) (gen-id))))
          (journal (progn (ensure-directories-exist dir) (make-session-journal dir)))
          (agent (make-agent :journal journal))
          (tui (evo.tui::make-tui :agent agent)))
@@ -2029,7 +2036,7 @@ event: response.completed~%data: {\"type\":\"response.completed\",\"response\":{
                (agent-abort-flag agent)))))
   (let* ((dir (uiop:ensure-directory-pathname
                (format nil "~a/evo-select-interrupt-~a/"
-                       (or (uiop:getenv "TMPDIR") "/tmp") (gen-id))))
+                       (tmp-dir) (gen-id))))
          (journal (progn (ensure-directories-exist dir) (make-session-journal dir)))
          (agent (make-agent :journal journal))
          (tui (evo.tui::make-tui :agent agent)))
@@ -2045,7 +2052,7 @@ event: response.completed~%data: {\"type\":\"response.completed\",\"response\":{
                 (not (agent-abort-flag agent)))))
   (let* ((dir (uiop:ensure-directory-pathname
                (format nil "~a/evo-bash-abort-~a/"
-                       (or (uiop:getenv "TMPDIR") "/tmp") (gen-id))))
+                       (tmp-dir) (gen-id))))
          (journal (progn (ensure-directories-exist dir) (make-session-journal dir)))
          (agent (make-agent :journal journal))
          (marker (merge-pathnames "started" dir))
@@ -2123,7 +2130,7 @@ event: response.completed~%data: {\"type\":\"response.completed\",\"response\":{
 
 (defun test-plan-mode ()
   (let* ((dir (uiop:ensure-directory-pathname
-               (format nil "~a/evo-plan-~a/" (uiop:getenv "TMPDIR") (gen-id))))
+               (format nil "~a/evo-plan-~a/" (tmp-dir) (gen-id))))
          (journal (progn (ensure-directories-exist dir) (make-session-journal dir)))
          (agent (make-agent :journal journal))
          (evo:*agent* agent))
