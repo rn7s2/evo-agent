@@ -475,7 +475,19 @@ event: response.completed~%data: {\"type\":\"response.completed\",\"response\":{
                       (string= (getf updated :access-token) "refreshed-at"))
                (check "auto-refresh: stored refresh token updated"
                       (string= (getf updated :refresh-token) "refreshed-rt")))
-             ;; 4. Refresh token expired — should signal provider-error.
+             ;; 4. Expired token can use refresh token from the environment.
+             (evo.port:setenv "CLAUDE_OAUTH_REFRESH_TOKEN" "rt-from-env")
+             (funcall write-tokens-fn "sk-ant-oat-expired-env" nil
+                      now nil)
+             (setf refresh-calls nil)
+             (check "auto-refresh: env refresh token → refreshed"
+                    (string= (funcall refresh-fn) "refreshed-at"))
+             (check "auto-refresh: env refresh token used"
+                    (and refresh-calls
+                         (search "\"refresh_token\":\"rt-from-env\""
+                                 (getf (second (first refresh-calls)) :content))))
+             (evo.port:setenv "CLAUDE_OAUTH_REFRESH_TOKEN" "")
+             ;; 5. Refresh token expired — should signal provider-error.
              (funcall write-tokens-fn "sk-ant-oat-expired2" "rt-expired2"
                       (- now 1000) (- now 1000))
              (setf refresh-calls nil)
@@ -487,7 +499,7 @@ event: response.completed~%data: {\"type\":\"response.completed\",\"response\":{
                                      (funcall (read-from-string "evo.provider::provider-error-message") e)
                                      :test #'char-equal)
                              t))))
-             ;; 5. Auto-refresh disabled — should return stored token without refresh.
+             ;; 6. Auto-refresh disabled — should return stored token without refresh.
              (setf (symbol-value
                     (find-symbol "*CLAUDE-OAUTH-AUTO-REFRESH*" :evo.user)) nil)
              (funcall write-tokens-fn "sk-ant-oat-stale" "rt-stale"
@@ -505,6 +517,107 @@ event: response.completed~%data: {\"type\":\"response.completed\",\"response\":{
       (dolist (pair saved-env)
         (evo.port:setenv (car pair) (or (cdr pair) "")))
       (when (probe-file token-file) (delete-file token-file)))))
+
+(defun test-claude-oauth-model-fetch-refresh ()
+  (let* ((env-names '("HTTPS_PROXY" "https_proxy" "HTTP_PROXY" "http_proxy"
+                      "NO_PROXY" "no_proxy" "CLAUDE_OAUTH_ACCESS_TOKEN"
+                      "CLAUDE_OAUTH_REFRESH_TOKEN" "EVO_HOME"))
+         (saved-env (mapcar (lambda (name) (cons name (getenv name))) env-names))
+         (saved-post (symbol-function 'dex:post))
+         (saved-get (symbol-function 'dex:get))
+         (home (uiop:ensure-directory-pathname
+                (format nil "~a/evo-oauth-models-~a/" (uiop:getenv "TMPDIR") (gen-id))))
+         (refresh-calls nil)
+         (get-auths nil)
+         (next-access-token "sk-ant-oat-refreshed")
+         (next-refresh-token "rt-refreshed"))
+    (labels ((auth-header (args)
+               (cdr (assoc "Authorization" (getf args :headers) :test #'string=)))
+             (unauthorized-expired ()
+               (error 'dexador.error:http-request-failed
+                      :status 401
+                      :body "{\"error\":{\"type\":\"authentication_error\",\"message\":\"OAuth token expired\"}}"
+                      :headers nil
+                      :uri nil
+                      :method :get))
+             (success-body ()
+               "{\"data\":[]}"))
+      (unwind-protect
+           (progn
+             (ensure-directories-exist home)
+             (dolist (name env-names) (evo.port:setenv name ""))
+             (evo.port:setenv "EVO_HOME" (namestring home))
+             (setf (symbol-function 'dex:get)
+                   (lambda (url &rest args)
+                     (declare (ignore url args))
+                     (success-body)))
+             (setf (symbol-function 'dex:post)
+                   (lambda (url &rest args)
+                     (push (list url args) refresh-calls)
+                     (format nil "{\"access_token\":\"~a\",\"refresh_token\":\"~a\",\"expires_in\":3600}"
+                             next-access-token next-refresh-token)))
+             (load (merge-pathnames "extensions/claude-oauth-provider.lisp"
+                                    (uiop:getcwd))
+                   :verbose nil :print nil)
+             (let* ((now (funcall (find-symbol "CLAUDE-OAUTH--NOW-MS" :evo.user)))
+                    (fetch-models-fn (symbol-function
+                                      (find-symbol "CLAUDE-OAUTH--FETCH-MODELS" :evo.user)))
+                    (write-tokens-fn (symbol-function
+                                      (find-symbol "CLAUDE-OAUTH--WRITE-TOKENS" :evo.user))))
+               ;; Fresh stored token: model fetch should not refresh.
+               (funcall write-tokens-fn "sk-ant-oat-fresh" "rt-fresh"
+                        (+ now 3600000) (+ now 2592000000))
+               (setf refresh-calls nil
+                     get-auths nil)
+               (setf (symbol-function 'dex:get)
+                     (lambda (url &rest args)
+                       (declare (ignore url))
+                       (push (auth-header args) get-auths)
+                       (success-body)))
+               (funcall fetch-models-fn)
+               (check "model fetch: fresh token uses existing access token"
+                      (equal get-auths '("Bearer sk-ant-oat-fresh")))
+               (check "model fetch: fresh token does not refresh"
+                      (null refresh-calls))
+               ;; Expired stored token: proactive expiry check should refresh before GET.
+               (setf next-access-token "sk-ant-oat-proactive"
+                     next-refresh-token "rt-proactive-new")
+               (funcall write-tokens-fn "sk-ant-oat-expired" "rt-proactive"
+                        (- now 1000) (+ now 2592000000))
+               (setf refresh-calls nil
+                     get-auths nil)
+               (funcall fetch-models-fn)
+               (check "model fetch: expired token refreshes before GET"
+                      (equal get-auths '("Bearer sk-ant-oat-proactive")))
+               (check "model fetch: expired token calls refresh once"
+                      (= (length refresh-calls) 1))
+               ;; Missing expiry metadata: first GET can fail with an expiry-shaped
+               ;; auth error, then model fetch should refresh and retry once.
+               (setf next-access-token "sk-ant-oat-reactive"
+                     next-refresh-token "rt-reactive-new")
+               (funcall write-tokens-fn "sk-ant-oat-stale" "rt-reactive")
+               (setf refresh-calls nil
+                     get-auths nil)
+               (let ((get-count 0))
+                 (setf (symbol-function 'dex:get)
+                       (lambda (url &rest args)
+                         (declare (ignore url))
+                         (incf get-count)
+                         (push (auth-header args) get-auths)
+                         (if (= get-count 1)
+                             (unauthorized-expired)
+                             (success-body))))
+                 (funcall fetch-models-fn)
+                 (check "model fetch: expired 401 retries with refreshed token"
+                        (equal (nreverse get-auths)
+                               '("Bearer sk-ant-oat-stale"
+                                 "Bearer sk-ant-oat-reactive")))
+                 (check "model fetch: expired 401 refreshes once"
+                        (= (length refresh-calls) 1)))))
+        (setf (symbol-function 'dex:post) saved-post
+              (symbol-function 'dex:get) saved-get)
+        (dolist (pair saved-env)
+          (evo.port:setenv (car pair) (or (cdr pair) "")))))))
 
 ;;; Editor
 
@@ -2466,6 +2579,7 @@ here must be reachable through the public EVO package with no ::."
     (test-env-proxy)
     (test-claude-oauth-proxy-guards)
     (test-claude-oauth-auto-refresh)
+    (test-claude-oauth-model-fetch-refresh)
     (test-init-files)
     (test-preflight)
     (test-parse-args)

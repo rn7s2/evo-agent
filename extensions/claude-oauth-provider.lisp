@@ -191,6 +191,19 @@ before it expires.  Set to NIL to rely on manual /claude-oauth:refresh.")
 (defparameter *claude-oauth-refresh-before-expiry* 360
   "Seconds before access-token expiry to trigger an automatic refresh.")
 
+(declaim (ftype (function (t) t) claude-oauth--refresh-token))
+
+(defun claude-oauth--refresh-and-store (refresh-token)
+  "Refresh the access token with REFRESH-TOKEN, persist the returned token set,
+and return the fresh access token."
+  (let ((tokens (claude-oauth--refresh-token refresh-token)))
+    (claude-oauth--write-tokens (getf tokens :access-token)
+                                (getf tokens :refresh-token)
+                                (getf tokens :expires-at)
+                                (getf tokens :refresh-token-expires-at))
+    (format *error-output* "~&[claude-oauth] Access token auto-refreshed.~%")
+    (getf tokens :access-token)))
+
 (defun claude-oauth--ensure-valid-token ()
   "Return the current OAuth access token, refreshing it first if needed.
 Signals EVO:PROVIDER-ERROR if a refresh is required but fails or the refresh
@@ -211,23 +224,19 @@ token itself is expired."
              ;; Token still fresh.
              (or (getf stored :access-token) (claude-oauth--resolve-token))
              ;; Token is near or past expiry — refresh.
-             (let ((refresh (getf stored :refresh-token)))
+             (let* ((env-refresh (claude-oauth--env "CLAUDE_OAUTH_REFRESH_TOKEN"))
+                    (refresh (or env-refresh (getf stored :refresh-token))))
                (unless refresh
                  (error 'evo:provider-error
-                        :message "Access token expired and no refresh token stored. Run /claude-oauth:login to re-authenticate."))
-               ;; Check refresh-token expiry.
-               (let ((rt-expires (getf stored :refresh-token-expires-at)))
+                        :message "Access token expired and no refresh token stored or set in CLAUDE_OAUTH_REFRESH_TOKEN. Run /claude-oauth:login to re-authenticate."))
+               ;; Check stored refresh-token expiry. Env refresh-token expiry is unknown.
+               (let ((rt-expires (and (not env-refresh)
+                                      (getf stored :refresh-token-expires-at))))
                  (when (and rt-expires (<= rt-expires now))
                    (error 'evo:provider-error
                           :message "Refresh token expired. Run /claude-oauth:login to re-authenticate.")))
                (handler-case
-                   (let ((tokens (claude-oauth--refresh-token refresh)))
-                     (claude-oauth--write-tokens (getf tokens :access-token)
-                                                 (getf tokens :refresh-token)
-                                                 (getf tokens :expires-at)
-                                                 (getf tokens :refresh-token-expires-at))
-                     (format *error-output* "~&[claude-oauth] Access token auto-refreshed.~%")
-                     (getf tokens :access-token))
+                   (claude-oauth--refresh-and-store refresh)
                  (error (e)
                    (error 'evo:provider-error
                           :message (format nil "Auto-refresh failed: ~a" e)))))))))))
@@ -490,22 +499,52 @@ request arrives or 120 seconds elapse."
 (defun claude-oauth--fetch-models ()
   "Fetch the list of available models from the Anthropic API using the OAuth
 access token.  Returns a parsed JSON object (hash-table) or signals an error."
-  (let ((token (claude-oauth--resolve-token)))
-    (unless token
-      (error "No Claude OAuth token: set CLAUDE_OAUTH_ACCESS_TOKEN or run /claude-oauth:login"))
-    (handler-case
-        (let ((response
-                (apply #'dex:get *claude-oauth-models-url*
-                       :headers `(("Authorization" . ,(format nil "Bearer ~a" token))
-                                  ("anthropic-version" . "2023-06-01"))
-                       (let ((proxy (evo.util:env-proxy *claude-oauth-models-url*)))
-                         (when proxy (list :proxy proxy))))))
-          (com.inuoe.jzon:parse response))
-      (dexador.error:http-request-failed (e)
-        (let ((status (dexador.error:response-status e))
-              (body (ignore-errors (dexador.error:response-body e))))
-          (error "Failed to fetch models from Anthropic: HTTP ~a~@[: ~a~]"
-                 status (claude-oauth--extract-error body)))))))
+  (labels ((fetch-with-token (token)
+             (let ((response
+                     (apply #'dex:get *claude-oauth-models-url*
+                            :headers `(("Authorization" . ,(format nil "Bearer ~a" token))
+                                       ("anthropic-version" . "2023-06-01"))
+                            (let ((proxy (evo.util:env-proxy *claude-oauth-models-url*)))
+                              (when proxy (list :proxy proxy))))))
+               (com.inuoe.jzon:parse response)))
+           (try-fetch (token)
+             (handler-case
+                 (values t (fetch-with-token token) nil nil)
+               (dexador.error:http-request-failed (e)
+                 (values nil nil
+                         (dexador.error:response-status e)
+                         (ignore-errors (dexador.error:response-body e))))))
+           (expired-access-token-p (status body)
+             (and (eql status 401)
+                  (let ((message (claude-oauth--extract-error body)))
+                    (and (stringp message)
+                         (or (search "expired" message :test #'char-equal)
+                             (search "invalid_token" message :test #'char-equal)
+                             (search "invalid token" message :test #'char-equal))))))
+           (fail (status body)
+             (error "Failed to fetch models from Anthropic: HTTP ~a~@[: ~a~]"
+                    status (claude-oauth--extract-error body)))
+           (fail-no-refresh (status body)
+             (error "Failed to fetch models from Anthropic: HTTP ~a~@[: ~a~]. Access token looked expired, but no refresh token is available; run /claude-oauth:login to re-authenticate."
+                    status (claude-oauth--extract-error body))))
+    (let ((token (claude-oauth--ensure-valid-token)))
+      (unless token
+        (error "No Claude OAuth token: set CLAUDE_OAUTH_ACCESS_TOKEN or run /claude-oauth:login"))
+      (multiple-value-bind (ok json status body)
+          (try-fetch token)
+        (cond
+          (ok json)
+          ((expired-access-token-p status body)
+           (let ((refresh (claude-oauth--resolve-refresh-token)))
+             (unless refresh
+               (fail-no-refresh status body))
+             (multiple-value-bind (retry-ok retry-json retry-status retry-body)
+                 (try-fetch (claude-oauth--refresh-and-store refresh))
+               (if retry-ok
+                   retry-json
+                   (fail retry-status retry-body)))))
+          (t
+           (fail status body)))))))
 
 (defun claude-oauth--register-fetched-models (json)
   "Register every model in the JSON response (hash-table with \"data\" array).
