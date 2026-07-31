@@ -1,0 +1,92 @@
+name: CI
+
+# Two things this guards:
+#   - pull_request: actions/checkout defaults to the PR's test-merge commit
+#     (head merged into base), so this exercises the PR *as merged with
+#     main*, not just the branch in isolation.
+#   - push to main: catches anything that only breaks once a PR actually
+#     lands (e.g. two PRs that are each fine alone but conflict in effect).
+#
+# Matrix covers both implementations evo builds on (design.md D10): SBCL and
+# ECL each get their own portability surface in evo.port, and either can
+# regress independently of the other.
+"on":
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        lisp: [sbcl, ecl]
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install ${{ matrix.lisp }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ${{ matrix.lisp }}
+
+      - name: Cache Quicklisp
+        id: cache-quicklisp
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/quicklisp
+            ~/.cache/common-lisp
+          key: quicklisp-${{ runner.os }}-${{ matrix.lisp }}-${{ hashFiles('evo.asd') }}
+          restore-keys: |
+            quicklisp-${{ runner.os }}-${{ matrix.lisp }}-
+
+      - name: Bootstrap Quicklisp
+        if: steps.cache-quicklisp.outputs.cache-hit != 'true'
+        run: |
+          curl -o /tmp/quicklisp.lisp https://beta.quicklisp.org/quicklisp.lisp
+          if [ "${{ matrix.lisp }}" = ecl ]; then
+            ecl -q --load /tmp/quicklisp.lisp \
+              --eval '(quicklisp-quickstart:install)' \
+              --eval '(ext:quit 0)' < /dev/null
+          else
+            sbcl --non-interactive --load /tmp/quicklisp.lisp \
+              --eval '(quicklisp-quickstart:install)'
+          fi
+
+      - name: Wire Quicklisp into Lisp init file
+        run: |
+          initfile=~/.sbclrc
+          [ "${{ matrix.lisp }}" = ecl ] && initfile=~/.eclrc
+          cat > "$initfile" <<'EOF'
+          #-quicklisp
+          (let ((quicklisp-init (merge-pathnames "quicklisp/setup.lisp"
+                                                  (user-homedir-pathname))))
+            (when (probe-file quicklisp-init)
+              (load quicklisp-init)))
+          EOF
+
+      - name: Pre-fetch dependencies
+        run: |
+          if [ "${{ matrix.lisp }}" = ecl ]; then
+            ecl -q --eval '(push (uiop:getcwd) asdf:*central-registry*)' \
+              --eval '(ql:quickload :evo)' \
+              --eval '(ext:quit 0)' < /dev/null
+          else
+            sbcl --non-interactive \
+              --eval '(push (uiop:getcwd) asdf:*central-registry*)' \
+              --eval '(ql:quickload :evo)'
+          fi
+
+      - name: make build
+        run: make build LISP=${{ matrix.lisp }}
+
+      - name: make test
+        run: make test LISP=${{ matrix.lisp }}
