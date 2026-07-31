@@ -1715,6 +1715,62 @@ event: response.completed~%data: {\"type\":\"response.completed\",\"response\":{
                        (namestring (uiop:ensure-directory-pathname
                                     (format nil "~a/evo-unit-home" (or (uiop:getenv "TMPDIR") "/tmp"))))))))
 
+;;; /lore vs /global-lore must respect scope, the way /memory and
+;;; /global-memory do — they used to both dump every scope, indistinguishably.
+
+(defun test-lore-slash-commands ()
+  (let* ((home (uiop:ensure-directory-pathname
+                (format nil "~a/evo-lore-cmd-home-~a/" (uiop:getenv "TMPDIR") (gen-id))))
+         (dir (uiop:ensure-directory-pathname
+               (format nil "~a/evo-lore-cmd-proj-~a/" (uiop:getenv "TMPDIR") (gen-id))))
+         (journal (progn (ensure-directories-exist dir) (make-session-journal dir)))
+         (agent (make-agent :journal journal))
+         (tui (evo.tui::make-tui :agent agent)))
+    (evo.port:setenv "EVO_HOME" (namestring home))
+    (unwind-protect
+         (progn
+           (add-lore "always run the whole suite" :scope :global :cwd dir)
+           (add-lore "this repo uses rebase merges" :scope :project :cwd dir)
+           (add-session-lore agent "stay focused on the current bug")
+           (let ((scrollback
+                  (with-output-to-string (fake-tty)
+                    (let ((evo.tui::*tty-out* fake-tty))
+                      (evo.tui::lore-command tui "" :project :cwd dir)))))
+             (check "/lore shows project lore"
+                    (search "this repo uses rebase merges" scrollback))
+             (check "/lore shows session lore"
+                    (search "stay focused on the current bug" scrollback))
+             (check "/lore does not show global lore"
+                    (not (search "always run the whole suite" scrollback))))
+           (let ((scrollback
+                  (with-output-to-string (fake-tty)
+                    (let ((evo.tui::*tty-out* fake-tty))
+                      (evo.tui::lore-command tui "" :global :cwd dir)))))
+             (check "/global-lore shows global lore"
+                    (search "always run the whole suite" scrollback))
+             (check "/global-lore does not show project lore"
+                    (not (search "this repo uses rebase merges" scrollback)))
+             (check "/global-lore does not show session lore"
+                    (not (search "stay focused on the current bug" scrollback))))
+           ;; Adding through each command must land in the right store too.
+           (with-output-to-string (fake-tty)
+             (let ((evo.tui::*tty-out* fake-tty))
+               (evo.tui::lore-command tui "prefer small commits" :project :cwd dir)
+               (evo.tui::lore-command tui "always use two-space indent" :global :cwd dir)))
+           (check "/lore add lands in project scope"
+                  (find "prefer small commits" (all-lore :cwd dir) :test #'equal))
+           (check "/global-lore add lands in global scope"
+                  (find "always use two-space indent" (all-lore-entries :cwd dir)
+                        :key (lambda (e) (getf e :text)) :test #'equal))
+           (check "/global-lore add does not land in project scope"
+                  (not (find "always use two-space indent"
+                             (evo.kernel::read-lore-file
+                              (evo.kernel::lore-file :project dir))
+                             :key (lambda (e) (getf e :text)) :test #'equal))))
+      (evo.port:setenv "EVO_HOME"
+                       (namestring (uiop:ensure-directory-pathname
+                                    (format nil "~a/evo-unit-home" (or (uiop:getenv "TMPDIR") "/tmp"))))))))
+
 ;;; Memory
 
 (defun test-project-memory ()
@@ -2597,6 +2653,7 @@ here must be reachable through the public EVO package with no ::."
     (test-templates)
     (test-compaction)
     (test-lore)
+    (test-lore-slash-commands)
     (test-project-memory)
     (test-global-memory)
     (test-prompt-template)

@@ -14,8 +14,8 @@
   /model [id]          pick the model from a list, or set it directly
   /thinking [level]    off·low·medium·high·xhigh
   /compact [hint]      compact the context now
-  /lore [text]         show lore (with ids), or add project-scope guidance; ask me to edit/remove by id
-  /global-lore [text]  show lore, or add user-scope (every project) guidance
+  /lore [text]         show project+session lore (with ids), or add project-scope guidance; ask me to edit/remove by id
+  /global-lore [text]  show global (every project) lore, or add user-scope guidance
   /memory [request]    show project memory or ask the agent to refine it
   /global-memory [...] show global user memory or ask the agent to refine it
   /eval <sexpr>        evaluate one sexpr in the live image (progn to group;
@@ -302,20 +302,30 @@ here lines up the id column too — provider, id and context each align."
     (scroll tui (format nil "exported to ~a" path))
     t))
 
-(defun lore-command (tui args scope)
-  "Show all lore, or add durable guidance at SCOPE (:project or :global)."
-  (let ((agent (tui-agent tui))
-        (label (if (eq scope :global) "global lore" "lore")))
+(defun lore-command (tui args scope &key (cwd (uiop:getcwd)))
+  "Show lore relevant to SCOPE, or add durable guidance at SCOPE (:project or
+:global). /lore lists project and session lore (what applies here); /global-lore
+lists only global (every project) lore — mirroring /memory vs /global-memory."
+  (let* ((agent (tui-agent tui))
+         (label (if (eq scope :global) "global lore" "lore"))
+         (state (fold-state (agent-journal agent))))
     (if (zerop (length args))
-        (let ((entries (evo.kernel:all-lore-entries)))
+        (let ((entries (remove-if-not
+                        (lambda (e)
+                          (if (eq scope :global)
+                              (eq (getf e :scope) :global)
+                              (member (getf e :scope) '(:project :session))))
+                        (evo.kernel:all-lore-entries :state state :cwd cwd))))
           (scroll tui (if entries
-                          (format nil "lore (ask me to edit/remove by id):~%~{ · [~a] (~(~a~)) ~a~%~}"
+                          (format nil "~a (ask me to edit/remove by id):~%~{ · [~a] (~(~a~)) ~a~%~}"
+                                  label
                                   (loop for e in entries
                                         collect (getf e :id)
                                         collect (getf e :scope)
                                         collect (getf e :text)))
-                          (dim "no lore — /lore <text> adds durable guidance"))))
-        (let ((id (evo.kernel:add-lore args :scope scope)))
+                          (dim (format nil "no ~a — /~a <text> adds durable guidance"
+                                       label (if (eq scope :global) "global-lore" "lore"))))))
+        (let ((id (evo.kernel:add-lore args :scope scope :cwd cwd)))
           (scroll tui (green (format nil "✓ ~a added [~a] (injected every turn)" label id)))
           (when (tui-running tui)
             (queue-steering agent
