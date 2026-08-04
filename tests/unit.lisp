@@ -1025,6 +1025,37 @@ event: response.completed~%data: {\"type\":\"response.completed\",\"response\":{
         (check "wide region line truncated"
                (not (search "中中中中中" out)))))))
 
+;;; Soft-wrap of the still-streaming preview line: a long paragraph must
+;;; render across several one-terminal-row lines (not a single truncated
+;;; row), each within the width, and content must be preserved in order.
+
+(defun test-wrap-visible ()
+  ;; Plain ascii wraps by cell; every row within width; text preserved.
+  (let ((rows (evo.tui::wrap-visible "abcdefghij" 4)))
+    (check "wrap splits into rows" (equal rows '("abcd" "efgh" "ij")))
+    (check "wrap rows within width"
+           (every (lambda (r) (<= (evo.tui::visible-length r) 4)) rows)))
+  ;; Wide chars never overflow: a 3-col width fits one 中 per row.
+  (let ((rows (evo.tui::wrap-visible (make-string 3 :initial-element #\中) 3)))
+    (check "wide wrap one per row" (= 3 (length rows)))
+    (check "wide wrap within width"
+           (every (lambda (r) (<= (evo.tui::visible-length r) 3)) rows)))
+  ;; SGR escapes don't count toward width and are never split.
+  (let* ((styled (concatenate 'string (evo.tui::bold "abcd") "efgh"))
+         (rows (evo.tui::wrap-visible styled 4)))
+    (check "styled wraps by visible width"
+           (every (lambda (r) (<= (evo.tui::visible-length r) 4)) rows))
+    (check "styled preserves sgr"
+           (search (format nil "~c[1m" #\Escape) (first rows))))
+  ;; Short input is a single row; empty input still yields one (empty) row.
+  (check "short stays one row" (equal '("hi") (evo.tui::wrap-visible "hi" 40)))
+  (check "empty yields one row" (equal '("") (evo.tui::wrap-visible "" 40)))
+  ;; Char-based wrap is stable: a prefix's break points don't move when more
+  ;; text is appended (so the streaming preview doesn't jump as it grows).
+  (let ((a (evo.tui::wrap-visible "abcdef" 4))
+        (b (evo.tui::wrap-visible "abcdefghij" 4)))
+    (check "wrap prefix stable" (equal (first a) (first b)))))
+
 ;;; Markdown rendering of agent output
 
 (defun test-markdown ()
@@ -2652,6 +2683,7 @@ here must be reachable through the public EVO package with no ::."
     (test-resume-picker)
     (test-render-anchor)
     (test-display-width)
+    (test-wrap-visible)
     (test-markdown)
     (test-user-prompt-block)
     (test-input-history)

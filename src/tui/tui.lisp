@@ -474,7 +474,18 @@ wrapped between two rules, and the model status line under the editbox."
   (let ((lines nil) (cursor-row 0) (cursor-col 0)
         (sep (separator-line)))
     (when (and (tui-running tui) (plusp (length (tui-partial tui))))
-      (push (md-render-preview (tui-partial tui) (tui-md tui)) lines))
+      ;; Soft-wrap the still-streaming line so a long paragraph shows in full
+      ;; instead of a single truncated row.  Re-wrapped every repaint against
+      ;; the current *cols*, so it tracks resizes; bounded to the tail so a
+      ;; paragraph longer than the screen can't push the editor off it and
+      ;; desync the region's relative-cursor math.
+      (let* ((rows (wrap-visible (md-render-preview (tui-partial tui) (tui-md tui))
+                                 (1- *cols*)))
+             (cap (max 1 (- *rows* 8)))
+             (rows (if (> (length rows) cap)
+                       (nthcdr (- (length rows) cap) rows)
+                       rows)))
+        (dolist (row rows) (push row lines))))
     (push sep lines)
     (push (activity-line tui) lines)
     (when (and (tui-todo-visible tui) (tui-todos tui)
