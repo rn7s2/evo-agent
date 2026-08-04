@@ -150,3 +150,34 @@ columns, so a truncated region line cannot wrap the terminal."
                                   (setf cut i)
                                   (progn (incf n w) (incf i))))))))
         (concatenate 'string (subseq s 0 (or cut len)) (sgr 0) "…"))))
+
+(defun wrap-visible (s width)
+  "Soft-wrap S into a list of rows, each at most WIDTH display columns.
+SGR-aware and wide-character-aware: escape sequences don't count toward
+WIDTH and are never split; a wide char that wouldn't fit starts a new row.
+Always returns at least one row.  Wrapping is by cell, so a prefix's wrap
+points don't move when more text is appended — the streaming preview stays
+stable as it grows.  Callers re-wrap every repaint, so it tracks resizes."
+  (let ((width (max 1 width))
+        (rows nil)
+        (row (make-string-output-stream))
+        (col 0) (i 0) (len (length s)))
+    (flet ((emit-row () (push (get-output-stream-string row) rows) (setf col 0)))
+      (loop while (< i len)
+            do (let ((c (char s i)))
+                 (cond
+                   ((and (char= c #\Escape) (< (1+ i) len)
+                         (char= (char s (1+ i)) #\[))
+                    (let* ((end (position-if (lambda (ch) (char<= #\@ ch #\~))
+                                             s :start (+ i 2)))
+                           (stop (if end (1+ end) len)))
+                      (write-string (subseq s i stop) row)
+                      (setf i stop)))
+                   (t (let ((w (char-display-width c)))
+                        (when (and (plusp col) (> (+ col w) width))
+                          (emit-row))
+                        (write-char c row)
+                        (incf col w)
+                        (incf i))))))
+      (emit-row))
+    (nreverse rows)))
