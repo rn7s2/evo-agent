@@ -682,6 +682,36 @@ event: response.completed~%data: {\"type\":\"response.completed\",\"response\":{
   (check "shift-enter csi-u" (equal (feed-bytes '(27 91 49 51 59 50 117)) '(:shift-enter)))
   (check "modifyOtherKeys shift-enter"
          (equal (feed-bytes '(27 91 50 55 59 50 59 49 51 126)) '(:shift-enter)))
+  ;; TERM-SETUP asks for modifyOtherKeys, so every key it sends back must
+  ;; decode — decoding only Enter and Tab silently killed ctrl+v (image
+  ;; paste) and ctrl+c on the terminals that honour the request.
+  (check "modifyOtherKeys ctrl-v"        ; ESC [ 27;5;118 ~
+         (equal (feed-bytes '(27 91 50 55 59 53 59 49 49 56 126)) '((:ctrl #\v))))
+  (check "modifyOtherKeys ctrl-c"        ; ESC [ 27;5;99 ~
+         (equal (feed-bytes '(27 91 50 55 59 53 59 57 57 126)) '((:ctrl #\c))))
+  (check "modifyOtherKeys ctrl-shift-V folds to ctrl-v"
+         (equal (feed-bytes '(27 91 50 55 59 54 59 56 54 126)) '((:ctrl #\v))))
+  (check "modifyOtherKeys plain char"    ; ESC [ 27;1;97 ~
+         (equal (feed-bytes '(27 91 50 55 59 49 59 57 55 126)) '((:char #\a))))
+  ;; cmd+v, when a terminal reports super instead of eating the key: the
+  ;; paste gesture, and only that one — cmd+c must NOT become ctrl+c (quit).
+  (check "kitty cmd+v is the paste gesture"
+         (equal (feed-bytes '(27 91 49 49 56 59 57 117)) '((:super #\v))))
+  (check "kitty cmd+c is dropped"
+         (null (feed-bytes '(27 91 57 57 59 57 117))))
+  ;; ctrl+alt+v: the second door to the clipboard, for terminals whose own
+  ;; paste binding eats plain ctrl+v (VS Code on Linux/Windows, Windows
+  ;; Terminal under WSL).  It has to survive all three encodings, and the
+  ;; legacy one — ESC then the control byte — used to be dropped as an
+  ;; "unknown alt-key", so the fallback shortcut failed exactly where the
+  ;; shortcut it falls back from was already failing.
+  (check "ctrl+alt+v legacy (ESC + control byte)"
+         (equal (feed-bytes '(27 22)) '((:ctrl #\v))))
+  (check "ctrl+alt+v kitty csi-u"        ; ESC [ 118;7 u  (mod 1+2+4)
+         (equal (feed-bytes '(27 91 49 49 56 59 55 117)) '((:ctrl #\v))))
+  (check "ctrl+alt+v modifyOtherKeys"    ; ESC [ 27;7;118 ~
+         (equal (feed-bytes '(27 91 50 55 59 55 59 49 49 56 126)) '((:ctrl #\v))))
+  (check "alt+letter is still dropped" (null (feed-bytes '(27 118))))
   (check "alt-enter fallback" (equal (feed-bytes '(27 13)) '(:newline)))
   (check "ctrl-c" (equal (feed-bytes '(3)) '((:ctrl #\c))))
   (check "bracketed paste"
@@ -711,7 +741,22 @@ event: response.completed~%data: {\"type\":\"response.completed\",\"response\":{
     (evo.tui::in-push-bytes state (subseq bytes 0 1))
     (check "split utf8 waits" (null (evo.tui::parse-keys state)))
     (evo.tui::in-push-bytes state (subseq bytes 1))
-    (check "split utf8 completes" (equal (evo.tui::parse-keys state) '((:char #\é))))))
+    (check "split utf8 completes" (equal (evo.tui::parse-keys state) '((:char #\é)))))
+  ;; Asking for enhanced key reporting is only graceful where the answer
+  ;; can be understood: a terminal that echoes the request instead of
+  ;; honouring it would litter the transcript, and an emulator that claims
+  ;; a protocol then mangles it needs a way out that is not "stop using
+  ;; evo".  TERM-TEARDOWN pops only what TERM-SETUP pushed.
+  (check "key protocol: asked for on a real terminal"
+         (evo.tui::key-enhancement-wanted-p nil "xterm-256color"))
+  (check "key protocol: not on a dumb terminal"
+         (null (evo.tui::key-enhancement-wanted-p nil "dumb")))
+  (check "key protocol: not without a TERM at all"
+         (null (evo.tui::key-enhancement-wanted-p nil "")))
+  (check "key protocol: EVO_KEY_ENHANCEMENT=0 is the escape hatch"
+         (null (evo.tui::key-enhancement-wanted-p "0" "xterm-256color")))
+  (check "key protocol: EVO_KEY_ENHANCEMENT=1 overrides a dumb TERM"
+         (evo.tui::key-enhancement-wanted-p "1" "dumb")))
 
 ;;; TUI region layout + live context accounting
 
@@ -2958,15 +3003,162 @@ selection journals the provider, and every resolution point honours it."
         (check "clipboard: file reference keeps its own name"
                (and (null reason) (equal (pget block :name) (file-namestring fixture))))
         (check "clipboard: file reference is not deleted" (probe-file fixture))))
+    ;; The Linux tools (wl-paste, xclip) are asked one MIME type at a time,
+    ;; and a file manager's copy offers no image type at all — only
+    ;; text/uri-list naming the file.  Without that fallback the gesture
+    ;; that works from Finder finds nothing from Nautilus/Dolphin.  `printf`
+    ;; stands in for the clipboard tool: same contract (argv in, bytes on
+    ;; stdout), no X server required.
+    (let* ((dir (uiop:ensure-directory-pathname
+                 (format nil "~a/evo-uri-~a/" (tmp-dir) (gen-id 6))))
+           (text-file (format nil "~a/evo-notes-~a.txt" (tmp-dir) (gen-id 6))))
+      (ensure-directories-exist dir)
+      (write-file-string text-file "not an image")
+      (flet ((clipboard-offering (&rest lines)
+               ;; A tool that has no image bytes, only this uri-list.
+               (lambda (type)
+                 (if (equal type "text/uri-list")
+                     (list (format nil "~{~a~%~}" lines))
+                     (list "")))))
+        (check "clipboard: a file-manager copy (text/uri-list) attaches the file"
+               (equal (evo.media::stdout-clipboard-reader
+                       "printf"
+                       (clipboard-offering (format nil "file://~a" (namestring fixture)))
+                       dir)
+                      fixture))
+        (check "clipboard: uri-list skips comments and non-images"
+               (equal (evo.media::stdout-clipboard-reader
+                       "printf"
+                       (clipboard-offering "# comment"
+                                           (format nil "file://~a" text-file)
+                                           (format nil "file://~a" (namestring fixture)))
+                       dir)
+                      fixture))
+        (check "clipboard: a uri-list with no image is still nothing"
+               (null (evo.media::stdout-clipboard-reader
+                      "printf" (clipboard-offering (format nil "file://~a" text-file)) dir)))
+        (check "clipboard: the pointed-at file is never consumed" (probe-file fixture)))
+      (ignore-errors (uiop:delete-directory-tree dir :validate t :if-does-not-exist :ignore)))
+    ;; A tool that is not installed is not an error: that is how the macOS
+    ;; readers behave on Linux and the Linux readers on macOS.  (If xclip
+    ;; happens to be installed here there is nothing to prove.)
+    (check "clipboard: a missing clipboard tool is silent"
+           (or (and (evo.port:program-in-path "xclip") t)
+               (null (evo.media::x11-clipboard-image (tmp-dir)))))
     (let ((evo.media:*clipboard-readers* nil))
       (check "clipboard: no reader says so"
              (multiple-value-bind (block reason) (evo.media:clipboard-image)
                (and (null block) (search "no clipboard reader" reason)))))
     (let ((evo.media:*clipboard-readers*
             (list (cons "empty" (lambda (dir) (declare (ignore dir)) nil)))))
-      (check "clipboard: empty clipboard says so"
+      (check "clipboard: an empty grab always says why"
              (multiple-value-bind (block reason) (evo.media:clipboard-image)
-               (and (null block) (search "no image on the clipboard" reason)))))))
+               (and (null block) (stringp reason) (plusp (length reason))))))
+    ;; "No image on the clipboard" is a lie when nothing in the session can
+    ;; read a clipboard at all: the screenshot IS on the user's clipboard,
+    ;; and blaming the clipboard sends them looking in the wrong place.
+    ;; This is the whole table, so the message names the missing piece.
+    (flet ((gap (&rest args) (apply #'evo.media::clipboard-gap args))
+           (have (&rest names)
+             (lambda (program) (member program names :test #'equal))))
+      (check "clipboard reason: macOS with osascript is a real empty clipboard"
+             (null (gap :macos-p t :installed-p (have "osascript"))))
+      (check "clipboard reason: wayland with no tool at all names the package"
+             (search "wl-clipboard" (gap :wayland-p t :installed-p (have))))
+      (check "clipboard reason: wayland with wl-paste is a real empty clipboard"
+             (null (gap :wayland-p t :installed-p (have "wl-paste"))))
+      ;; A Wayland desktop with only xclip is served by XWayland, and WSLg
+      ;; bridges the Windows clipboard into the Linux tools: neither is a gap.
+      (check "clipboard reason: wayland with only xclip is served by XWayland"
+             (null (gap :wayland-p t :installed-p (have "xclip"))))
+      (check "clipboard reason: X11 without xclip names the tool"
+             (search "xclip" (gap :x11-p t :installed-p (have "wl-paste"))))
+      (check "clipboard reason: WSL with no tool at all says the bridge is missing"
+             (search "powershell" (gap :wsl-p t :installed-p (have))))
+      (check "clipboard reason: WSL with WSLg's linux tools is no gap"
+             (null (gap :wsl-p t :installed-p (have "wl-paste"))))
+      (check "clipboard reason: WSL with powershell is a real empty clipboard"
+             (null (gap :wsl-p t :installed-p (have "powershell.exe"))))
+      (check "clipboard reason: no display at all is an ssh/tty session"
+             (search "ssh" (gap :installed-p (have "xclip" "wl-paste")))))
+    ;; WSL: the session is Linux but the clipboard is Windows', so evo asks
+    ;; PowerShell for it.  `printf`-style stubbing is impossible here (the
+    ;; reader picks a program off *WSL-POWERSHELL-PROGRAMS*), so the stub is
+    ;; a real script with the real contract: argv in, one line out.  The
+    ;; drive letter maps onto *WSL-MOUNT-ROOT*, which wsl.conf can move —
+    ;; pointing it at a temp tree is exactly what a custom automount does.
+    (let* ((root (format nil "~a/evo-wsl-~a" (tmp-dir) (gen-id 6)))
+           (win-dir (format nil "~a/c/Temp" root))
+           (win-file (format nil "~a/shot.png" win-dir))
+           (stub (format nil "~a/evo-fake-powershell-~a" (tmp-dir) (gen-id 6))))
+      (ensure-directories-exist (uiop:ensure-directory-pathname win-dir))
+      (flet ((seed-clipboard-file ()
+               (write-file-octets win-file (read-file-octets fixture)))
+             (fake-powershell (line)
+               (write-file-string stub (format nil "#!/bin/sh~%echo '~a'~%" line))
+               (uiop:run-program (list "/bin/chmod" "+x" stub) :ignore-error-status t)
+               stub))
+        (let ((evo.media::*wsl-session* t)
+              (evo.media::*wsl-mount-root* root)
+              (evo.media::*wsl-path-program* nil)) ; no wslpath here: the fallback rule
+          (check "wsl: a Windows path maps onto the mount root"
+                 (equal (evo.media::windows->wsl-path "C:\\Temp\\shot.png")
+                        (format nil "~a/c/Temp/shot.png" root)))
+          (check "wsl: forward slashes and a lowercase drive map too"
+                 (equal (evo.media::windows->wsl-path "d:/Users/a/x.png")
+                        (format nil "~a/d/Users/a/x.png" root)))
+          (check "wsl: a UNC path has no drive to mount"
+                 (null (evo.media::windows->wsl-path "\\\\server\\share\\x.png")))
+          ;; Pixels: PowerShell wrote them to the Windows temp directory,
+          ;; so they are ours — copied into the scratch dir the caller
+          ;; sweeps, and the Windows-side copy removed.
+          (seed-clipboard-file)
+          (let* ((dir (uiop:ensure-directory-pathname
+                       (format nil "~a/evo-wsl-scratch-~a/" (tmp-dir) (gen-id 6))))
+                 (evo.media::*wsl-powershell-programs*
+                   (list (fake-powershell "image:C:\\Temp\\shot.png"))))
+            (ensure-directories-exist dir)
+            (let ((got (evo.media::wsl-clipboard-image dir)))
+              (check "wsl: clipboard pixels come back as an image"
+                     (and got (evo.media::image-file-p got)))
+              (check "wsl: pixels land in the scratch dir, not Windows temp"
+                     (and got (uiop:subpathp got dir)))
+              (check "wsl: the Windows temp file is not left behind"
+                     (not (probe-file win-file))))
+            (ignore-errors (uiop:delete-directory-tree dir :validate t
+                                                           :if-does-not-exist :ignore)))
+          ;; A file copied in Explorer: the clipboard only points at it, so
+          ;; it is used where it lies and never deleted.
+          (seed-clipboard-file)
+          (let* ((dir (uiop:ensure-directory-pathname
+                       (format nil "~a/evo-wsl-scratch-~a/" (tmp-dir) (gen-id 6))))
+                 (evo.media::*wsl-powershell-programs*
+                   (list (fake-powershell "path:C:\\Temp\\shot.png"))))
+            (ensure-directories-exist dir)
+            (let ((got (evo.media::wsl-clipboard-image dir)))
+              (check "wsl: an Explorer file copy attaches the file itself"
+                     (equal got (probe-file win-file)))
+              (check "wsl: the user's own file survives" (probe-file win-file)))
+            (ignore-errors (uiop:delete-directory-tree dir :validate t
+                                                           :if-does-not-exist :ignore)))
+          ;; Nothing on the clipboard, and nothing pretending otherwise.
+          (let ((evo.media::*wsl-powershell-programs*
+                  (list (fake-powershell "path:C:\\Temp\\gone.png"))))
+            (check "wsl: a path that is not there is not an attachment"
+                   (null (evo.media::wsl-clipboard-image (tmp-dir)))))
+          (let ((evo.media::*wsl-powershell-programs* (list "evo-no-such-powershell")))
+            (check "wsl: no PowerShell on PATH is silent"
+                   (null (evo.media::wsl-clipboard-image (tmp-dir))))))
+        ;; Off WSL the reader must not even shell out.
+        (let ((evo.media::*wsl-session* nil)
+              (evo.media::*wsl-powershell-programs*
+                (list (fake-powershell "image:C:\\Temp\\shot.png"))))
+          (check "wsl: the reader stays out of the way elsewhere"
+                 (null (evo.media::wsl-clipboard-image (tmp-dir)))))
+        (ignore-errors (delete-file stub))
+        (ignore-errors (uiop:delete-directory-tree
+                        (uiop:ensure-directory-pathname root)
+                        :validate t :if-does-not-exist :ignore))))))
 
 (defun test-pasted-image-paths ()
   (let ((fixture (image-fixture))
@@ -2996,7 +3188,32 @@ selection journals the provider, and every resolution point honours it."
     (check "paste: a non-image path stays text"
            (null (evo.media:pasted-image-paths (namestring text))))
     (check "paste: ordinary text stays text"
-           (null (evo.media:pasted-image-paths "just a sentence"))))
+           (null (evo.media:pasted-image-paths "just a sentence")))
+    ;; WSL: Explorer and Windows Terminal hand out Windows spelling for a
+    ;; filesystem evo sees mounted elsewhere, and POSIX quoting rules would
+    ;; eat the backslashes (`C:\Users\a\x.png` -> `C:Usersax.png`) long
+    ;; before anything got to look for the file.
+    (let* ((root (format nil "~a/evo-wslpaste-~a" (tmp-dir) (gen-id 6)))
+           (win-dir (format nil "~a/c/Temp" root))
+           (win-file (format nil "~a/shot.png" win-dir)))
+      (ensure-directories-exist (uiop:ensure-directory-pathname win-dir))
+      (write-file-octets win-file (read-file-octets fixture))
+      (let ((evo.media::*wsl-mount-root* root)
+            (evo.media::*wsl-path-program* nil))
+        (let ((evo.media::*wsl-session* t))
+          (check "paste: a dropped Windows path attaches under WSL"
+                 (equal (evo.media:pasted-image-paths "C:\\Temp\\shot.png")
+                        (list (probe-file win-file))))
+          (check "paste: a quoted Windows path attaches too"
+                 (equal (evo.media:pasted-image-paths "\"C:\\Temp\\shot.png\"")
+                        (list (probe-file win-file))))
+          (check "paste: a Windows path to nothing stays text"
+                 (null (evo.media:pasted-image-paths "C:\\Temp\\gone.png"))))
+        (let ((evo.media::*wsl-session* nil))
+          (check "paste: a Windows path is just text off WSL"
+                 (null (evo.media:pasted-image-paths "C:\\Temp\\shot.png")))))
+      (ignore-errors (uiop:delete-directory-tree (uiop:ensure-directory-pathname root)
+                                                 :validate t :if-does-not-exist :ignore))))
   (check "shell tokens: quotes and escapes"
          (equal (evo.media:split-shell-tokens "/tmp/a\\ b.png '/tmp/c d.png' \"/e f.png\"")
                 (list "/tmp/a b.png" "/tmp/c d.png" "/e f.png"))))
@@ -3162,13 +3379,42 @@ selection journals the provider, and every resolution point honours it."
           (evo.tui::handle-key-edit tui (list :ctrl #\v)))
         (check "tui: ctrl+v attaches the clipboard image"
                (= 2 (length (evo.tui::eb-attachments eb))))
+        ;; cmd+v and right-click -> Paste: the terminal reads the clipboard
+        ;; as text, finds none (it holds a screenshot) and pastes the empty
+        ;; string.  That empty paste is the only trace of the gesture, so it
+        ;; has to mean "look at the clipboard yourself".
+        (let ((evo.media:*clipboard-readers*
+                (list (cons "fake" (lambda (d)
+                                     (let ((p (merge-pathnames "c2.png" d)))
+                                       (write-file-octets p (read-file-octets fixture))
+                                       p))))))
+          (evo.tui::handle-paste tui ""))
+        (check "tui: an empty paste attaches the clipboard image"
+               (= 3 (length (evo.tui::eb-attachments eb))))
+        ;; cmd+v reported as a real key (kitty super) is the same gesture.
+        (let ((evo.media:*clipboard-readers*
+                (list (cons "fake" (lambda (d)
+                                     (let ((p (merge-pathnames "c3.png" d)))
+                                       (write-file-octets p (read-file-octets fixture))
+                                       p))))))
+          (evo.tui::handle-key-edit tui (list :super #\v)))
+        (check "tui: cmd+v attaches the clipboard image"
+               (= 4 (length (evo.tui::eb-attachments eb))))
+        ;; An empty paste with nothing on the clipboard is a message, not a
+        ;; crash and not a stray character in the buffer.
+        (let ((evo.media:*clipboard-readers* nil)
+              (before (evo.tui::eb-text eb)))
+          (evo.tui::handle-paste tui "")
+          (check "tui: an empty paste with an empty clipboard changes nothing"
+                 (and (= 4 (length (evo.tui::eb-attachments eb)))
+                      (equal before (evo.tui::eb-text eb)))))
         ;; /image <path> is the same attach by another door.
         (evo.tui::image-command tui (namestring fixture))
         (check "tui: /image attaches by path"
-               (= 3 (length (evo.tui::eb-attachments eb))))
+               (= 5 (length (evo.tui::eb-attachments eb))))
         (check "tui: /image reports a bad path instead of erroring"
                (progn (evo.tui::image-command tui "/nonexistent/evo/x.png")
-                      (= 3 (length (evo.tui::eb-attachments eb)))))))
+                      (= 5 (length (evo.tui::eb-attachments eb)))))))
     ;; The prompt block in scrollback lists what was actually sent.
     (let* ((evo.tui::*cols* 60)
            (block (evo.media:attach-image-file fixture))

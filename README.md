@@ -217,8 +217,8 @@ the essential ones cannot be disabled.
 - **TUI** — adaptive renderer in normal scrollback + managed bottom region,
   SIGWINCH live reflow, multi-line editor (Enter sends, Shift+Enter newline,
   paste >3 lines collapses to a placeholder, paste-to-expand), image paste
-  (ctrl+v), slash commands, streaming rendering, `--swank` developer
-  side-door.
+  (ctrl+v, cmd+v, drop a path), slash commands, streaming rendering, `--swank`
+  developer side-door.
 - **Todo** — checklist tool rendered in the panel; state rides `:custom`
   entries (invisible to the LLM), survives restart and compaction, embedded in
   goal continuation steering.
@@ -231,16 +231,44 @@ the essential ones cannot be disabled.
 
 ### Images in
 
-Two gestures, one path — both end as a `[Image #n]` token in the editor:
+No terminal hands an application the image on the clipboard — pasting is a
+*text* channel. So every gesture below is really the same one: something tells
+evo the user meant "an image", and evo reads the system pasteboard itself
+(macOS pasteboard, `wl-paste`, `xclip`, PowerShell under WSL). All end as a
+`[Image #n]` token in the editor:
 
-- **ctrl+v** grabs the system clipboard (macOS pasteboard, `wl-paste`,
-  `xclip`); a screenshot, a copied image, or an image file copied in a file
-  manager all work.
-- **Pasting or dropping an image file's path** attaches the file. A paste
-  attaches only when it is *nothing but* paths to images — prose that mentions
-  a `.png` stays prose.
+- **ctrl+v** — the gesture that reaches evo in every terminal. The reader
+  takes pixels (a screenshot, a copied image) or a file the clipboard merely
+  points at, so copying an image *file* in Finder, Nautilus, Dolphin or
+  Explorer works too.
+- **ctrl+alt+v** — the same request, for terminals that keep ctrl+v for their
+  own paste command (VS Code on Linux/Windows, Windows Terminal under WSL).
+- **cmd+v / right-click → Paste** — the terminal finds no text on the
+  clipboard and pastes the empty string; that *empty bracketed paste* is the
+  only trace of the gesture, and evo takes it as one. Emulators built on
+  xterm.js (VS Code, Cursor) send it; Terminal.app and Warp send nothing at
+  all, and there ctrl+v or `/image` is the door.
+- **Pasting or dropping an image file's path** attaches the file — POSIX
+  paths, `file://` URLs, quoted and backslash-escaped paths, and Windows
+  paths inside WSL (mapped through `wslpath`). A paste attaches only when it
+  is *nothing but* paths to images — prose that mentions a `.png` stays prose.
 - **`/image [path ...]`** does the same for a typed path, or the clipboard
   with no argument; `--image` does it for headless runs.
+
+A keystroke only counts if it survives the trip: terminals encode a modified
+key in one of three ways (a legacy control byte, kitty's `CSI u`, xterm's
+`modifyOtherKeys`), evo asks for the latter two at startup, and it decodes all
+three — anything less makes a key silently do nothing on exactly the terminals
+that honoured the request. The request is skipped where the answer cannot be
+understood (`TERM=dumb`, no `TERM` at all), popped exactly as pushed on exit,
+and `EVO_KEY_ENHANCEMENT=0` turns it off for an emulator that claims a
+protocol and then mangles it.
+
+When no image comes back, evo says which of the two things went wrong: the
+clipboard was read and held no image, or nothing in this session can read a
+clipboard at all — no `wl-clipboard`, no `xclip`, no display (a plain ssh
+session), no PowerShell bridge under WSL. "No image on the clipboard" is a
+lie when the image *is* on the user's clipboard and evo simply cannot see it.
 
 The token is the whole interface: it shows the image is attached, marks where
 in the message it sits, and deletes with backspace like any other text — only

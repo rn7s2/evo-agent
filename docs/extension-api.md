@@ -208,7 +208,17 @@ Errors are values here, not conditions: every entry point returns
 `(values BLOCK REASON)` because the callers are keystroke handlers. To support
 a platform evo does not ship a reader for, push onto `*clipboard-readers*` a
 function of one argument (a scratch directory) that returns the pathname of an
-image file it wrote there, or `nil`.
+image file it wrote there — or of a file the clipboard merely points at, which
+is what a file-manager copy offers (`«class furl»` on macOS, `text/uri-list` on
+X11/Wayland, `FileDropList` on Windows via the WSL bridge); only files inside
+the scratch directory are deleted afterwards. Return `nil` for "not this
+platform, or no image on the clipboard".
+
+When every reader returns `nil`, `clipboard-image` explains which of the two
+cases it was — an imageless clipboard, or a session with no way to read one —
+via `evo.media::clipboard-gap`, a pure function of "what is this session" and
+"which tools exist". Shipping a reader for a new platform means teaching that
+function too, or the failure message will blame the clipboard.
 
 ## Ground rules
 

@@ -7,7 +7,7 @@
 ;;;;
 ;;;; Events: (:char c) (:paste string) :enter :shift-enter :newline
 ;;;; :backspace :delete :up :down :left :right :home :end :word-left
-;;;; :word-right :escape (:ctrl char) :delete-word :shift-tab
+;;;; :word-right :escape (:ctrl char) (:super char) :delete-word :shift-tab
 
 (in-package :evo.tui)
 
@@ -36,6 +36,57 @@
 (defun find-subseq (needle haystack start)
   (search needle haystack :start2 start))
 
+;;; Modified keys: one decoder, three spellings.
+;;;
+;;; A key with a modifier reaches us in whichever encoding the terminal
+;;; chose, and TERM-SETUP asks for two of them at once (kitty's CSI-u and
+;;; xterm's modifyOtherKeys), so both must be understood in full.  They
+;;; carry the same pair — a unicode code point and a modifier bitmask —
+;;; only the frame differs:
+;;;
+;;;   legacy            ctrl+v -> #x16
+;;;   kitty CSI-u       ctrl+v -> ESC [ 118 ; 5 u
+;;;   modifyOtherKeys   ctrl+v -> ESC [ 27 ; 5 ; 118 ~
+;;;
+;;; Decoding one spelling and dropping the other is worse than not asking
+;;; for it: the key does nothing at all, silently, on exactly the terminals
+;;; that honour the request.  That bug ate ctrl+v (image paste) wherever
+;;; modifyOtherKeys was live, so this decoder is deliberately total — every
+;;; (code, modifier) pair either maps to an event or is explicitly dropped.
+
+(defun modifier-bits (mod)
+  "Kitty/xterm modifier parameter -> bitmask (1 shift, 2 alt, 4 ctrl, 8 super)."
+  (max 0 (1- (or mod 1))))
+
+(defun modified-key (code mod)
+  "Event for unicode CODE pressed with modifier parameter MOD, or NIL when
+the combination has no meaning here.  Shared by the CSI-u and
+modifyOtherKeys paths."
+  (let* ((bits (modifier-bits mod))
+         (shift (logtest bits 1))
+         (alt (logtest bits 2))
+         (ctrl (logtest bits 4))
+         (super (logtest bits 8)))
+    (cond
+      ;; Named keys keep their meaning under any modifier.
+      ;; (ctrl+enter keeps sending, as it did before this decoder existed.)
+      ((= code 13) (cond (alt :newline) (shift :shift-enter) (t :enter)))
+      ((= code 27) :escape)
+      ((= code 9) (if shift :shift-tab (list :char #\Tab)))
+      ((member code '(8 127)) :backspace)
+      ;; cmd+key, when a terminal reports it instead of eating it: only
+      ;; cmd+v means anything to us (the macOS paste gesture), and mapping
+      ;; the rest onto ctrl would be dangerous — cmd+c is not ctrl+c.
+      (super (when (member code '(86 118)) (list :super #\v)))
+      ;; Ctrl+letter, in either case, matching the legacy C0-byte path.
+      (ctrl (cond ((<= 97 code 122) (list :ctrl (code-char code)))
+                  ((<= 65 code 90) (list :ctrl (code-char (+ code 32))))
+                  (t nil)))
+      ;; A printable key with no modifier that changes it: plain text.
+      ;; (Alt is dropped, as in the legacy path.)
+      ((and (not alt) (<= 32 code 126)) (list :char (code-char code)))
+      (t nil))))
+
 (defun csi-key (params final)
   "Map a CSI sequence (PARAMS: list of integers, FINAL: char) to an event."
   (case final
@@ -46,33 +97,12 @@
     (#\H :home) (#\F :end)
     (#\Z :shift-tab)                    ; CSI Z: back-tab
     (#\u ;; kitty / CSI-u: code;modifiers u  (mod = 1 + shift:1 alt:2 ctrl:4)
-     (let ((code (or (first params) 0))
-           (mod (or (second params) 1)))
-       (case code
-         (13 (case mod (2 :shift-enter) ((3 4) :newline) (t :enter)))
-         (27 :escape)
-         (9 (if (= mod 2) :shift-tab (list :char #\Tab)))
-         ((8 127) :backspace)
-         (t (cond
-              ;; Ctrl+letter (with or without shift): (:ctrl char), matching
-              ;; the legacy C0-byte path.
-              ((and (member mod '(5 6)) (<= 97 code 122))
-               (list :ctrl (code-char code)))
-              ((and (member mod '(5 6)) (<= 65 code 90))
-               (list :ctrl (code-char (+ code 32))))
-              ((and (<= 32 code 126) (member mod '(1 2)))
-               (list :char (code-char code)))
-              (t nil))))))
+     (modified-key (or (first params) 0) (or (second params) 1)))
     (#\~ (let ((n (first params)))
            (case n
              ((1 7) :home) ((4 8) :end) (3 :delete)
-             (27 ;; modifyOtherKeys: 27;mod;code~
-              (let ((mod (or (second params) 1))
-                    (code (or (third params) 0)))
-                (cond
-                  ((= code 13)
-                   (case mod (2 :shift-enter) ((3 4) :newline) (t :enter)))
-                  ((and (= code 9) (= mod 2)) :shift-tab))))
+             (27 ;; modifyOtherKeys: 27;mod;code~ — same pair, other order
+              (modified-key (or (third params) 0) (or (second params) 1)))
              (t nil))))
     (t nil)))
 
@@ -133,6 +163,14 @@ as the Escape key (caller saw quiet ticks).  Returns the list of events."
                  ((= b2 127) (emit :delete-word) (incf i 2)); Alt+Backspace
                  ((= b2 27)                                 ; ESC ESC
                   (emit :escape) (emit :escape) (incf i 2))
+                 ;; Alt+Ctrl+key, legacy spelling: ESC then the control
+                 ;; byte (ctrl+alt+v = ESC SYN).  The alt is dropped and
+                 ;; the ctrl kept, exactly as MODIFIED-KEY does for the
+                 ;; same chord in CSI-u or modifyOtherKeys — otherwise
+                 ;; ctrl+alt+v, the shortcut for terminals that eat plain
+                 ;; ctrl+v, would work in two encodings out of three.
+                 ((and (< b2 27) (not (member b2 '(8 9 10 13))))
+                  (emit (list :ctrl (code-char (+ 96 b2)))) (incf i 2))
                  (t (incf i 2)))))      ; unknown alt-key: drop
             ;; --- plain bytes ---
             ((or (= b 13) (= b 10)) (emit :enter) (incf i))

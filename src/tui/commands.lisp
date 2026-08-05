@@ -35,7 +35,12 @@ keys: enter send · shift+enter/alt+enter/ctrl+j newline · shift+tab auto/plan 
       ctrl+a/e home/end · ctrl+b/f move · ctrl+d delete (quit when empty) ·
       ctrl+k kill to eol · ctrl+w delete word · esc interrupt · esc esc rewind ·
       ctrl+v attach the clipboard image · paste/drop an image path to attach it ·
-      paste >3 lines collapses (paste again to expand)")
+      paste >3 lines collapses (paste again to expand)
+images: no terminal can hand an app the image itself, so evo reads the clipboard
+      when you ask it to: ctrl+v (works everywhere), ctrl+alt+v (where the
+      terminal keeps ctrl+v for its own paste), cmd+v/right-click paste (where
+      the terminal still sends the empty paste — VS Code, Cursor), /image with
+      no argument (works always), or paste/drop the file's path.")
 
 (defun goal-command (tui args)
   (let* ((agent (tui-agent tui))
