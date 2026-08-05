@@ -67,6 +67,7 @@
 ;;; Handoff pass: run at request build time.
 ;;;  - errored/aborted assistant turns are elided
 ;;;  - same-model thinking replays verbatim; cross-model thinking is dropped
+;;;  - images degrade to text for a model without vision
 ;;;  - orphaned tool calls get synthetic error results
 
 (defun message-role (m) (pget m :role))
@@ -74,8 +75,31 @@
 (defun message-stop-reason (m) (pget m :stop-reason))
 (defun message-usage (m) (pget m :usage))
 
-(defun handoff-pass (messages target-model-id)
-  (let* ((live (remove-if (lambda (m)
+(defun image-placeholder-block (block)
+  "What an image degrades to for a model that cannot see it.  The name is
+kept: the model should know something was there and that it is blind to it,
+rather than reading a conversation with a hole in it."
+  (list :type :text
+        :text (format nil "[image not shown: ~a — the current model has no vision]"
+                      (pget block :name "image"))))
+
+(defun degrade-images (content)
+  (mapcar (lambda (block)
+            (if (eq (pget block :type) :image) (image-placeholder-block block) block))
+          content))
+
+(defun handoff-pass (messages target-model-id &key (vision t))
+  "Rewrite MESSAGES for a request to TARGET-MODEL-ID.  VISION nil degrades
+image blocks to text, so a session that collected screenshots survives a
+switch to a text-only model instead of failing every turn from then on."
+  (let* ((messages (if vision
+                       messages
+                       (mapcar (lambda (m)
+                                 (if (find :image (message-content m) :key (lambda (b) (pget b :type)))
+                                     (pput m :content (degrade-images (message-content m)))
+                                     m))
+                               messages)))
+         (live (remove-if (lambda (m)
                             (and (eq (message-role m) :assistant)
                                  (member (message-stop-reason m) '(:error :aborted))))
                           messages))

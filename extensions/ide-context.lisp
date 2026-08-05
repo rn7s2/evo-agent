@@ -196,9 +196,12 @@ the provider prompt cache intact across a turn's tool calls."
             (evo:inject-context text :key "ide-context" :agent agent)
             (setf *ide-context-last-injected* text)))))))
 
-(defun ide-context-submit-wrapper (tui text)
+(defun ide-context-submit-wrapper (tui text &rest args)
+  ;; &rest, not a fixed arity: this wraps a kernel function, and a wrapper
+  ;; that pins its signature breaks the moment the kernel grows an argument
+  ;; (submit-to-agent gained attached images).  Pass whatever came in.
   (ide-context-inject (evo.tui::tui-agent tui))
-  (funcall *ide-context-original-submit* tui text))
+  (apply *ide-context-original-submit* tui text args))
 
 (defun ide-context-label ()
   "Status segment: shown only while a selection exists."

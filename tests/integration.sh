@@ -5,6 +5,8 @@
 #   EVO_TEST_BASE_URL  provider base url
 #   EVO_TEST_API_KEY   bearer / x-api-key
 #   EVO_TEST_MODEL     model id to drive
+#   EVO_TEST_VISION_MODEL  optional: a model that accepts image input, for the
+#                          headless --image test (that test skips without it)
 #
 # NONE of these have defaults: no backend, key, or model id is baked into the
 # repo.  The dev values live in project memory (.evo/, git-ignored).  With any
@@ -14,11 +16,13 @@
 #   streamed tool-call round-trip
 #   multi-turn task in print mode; kill -9 mid-task; resume cleanly
 #   goals: a goal run that terminates via audited update_goal :complete
+#   image input: --image attached to a headless prompt, read by a vision model
 set -u
 
 : "${EVO_TEST_BASE_URL:=}"
 : "${EVO_TEST_API_KEY:=}"
 : "${EVO_TEST_MODEL:=}"
+: "${EVO_TEST_VISION_MODEL:=}"
 
 if [ -z "$EVO_TEST_BASE_URL" ] || [ -z "$EVO_TEST_API_KEY" ] || [ -z "$EVO_TEST_MODEL" ]; then
     echo "integration: set EVO_TEST_BASE_URL, EVO_TEST_API_KEY and EVO_TEST_MODEL" >&2
@@ -51,6 +55,16 @@ cat > "$EVO_HOME/init.lisp" <<EOF
   :api-key "$EVO_TEST_API_KEY")
 EOF
 
+# The vision model is a second registration, so --image can pick it per run
+# without disturbing the model the rest of the suite drives.
+if [ -n "$EVO_TEST_VISION_MODEL" ]; then
+    cat >> "$EVO_HOME/init.lisp" <<EOF
+(evo:register-model "$EVO_TEST_VISION_MODEL"
+  :provider :anthropic :api :anthropic-messages
+  :context-window 1000000 :max-output 64000 :thinking t :vision t)
+EOF
+fi
+
 pass=0; fail=0; skip=0
 report() {
     if [ "$1" -eq 0 ]; then pass=$((pass+1)); echo "PASS: $2"
@@ -60,7 +74,7 @@ report_skip() { skip=$((skip+1)); echo "SKIP: $1"; }
 
 # Preflight: tests 1-5 drive a real model.  If the backend isn't reachable,
 # skip them cleanly (rather than fail) so `make integration` on a box without
-# a backend doesn't masquerade as a code regression.  Test 6 needs no network.
+# a backend doesn't masquerade as a code regression.  Test 7 needs no network.
 if curl -fsS -m 5 "$EVO_TEST_BASE_URL/v1/models" \
         -H "Authorization: Bearer $EVO_TEST_API_KEY" >/dev/null 2>&1; then
     live=1
@@ -153,15 +167,36 @@ session5=$(ls -t "$EVO_HOME"/sessions/*work5*/*.sexp 2>/dev/null | head -1)
     && [ -n "$session5" ] && grep -q "(:type :compaction" "$session5"
 report $? "compaction fires mid-task, task completes"
 
+# --- Test 6: headless --image reaches a vision model ---------------------
+# The image is 64x64 of solid red, written byte for byte: what comes back has
+# to be about the pixels, so a stubbed-out image path cannot pass this.
+work_img="$scratch/work-image"
+mkdir -p "$work_img"
+if [ -n "$EVO_TEST_VISION_MODEL" ] && command -v xxd >/dev/null 2>&1; then
+    printf '%s' '89504e470d0a1a0a0000000d4948445200000040000000400802000000250be6890000007949444154789cedcf410900300cc0c08aa87f651333117b1c8340045ce6ec7edd7041035ad0801634a0050d6841035ad0801634a0050d6841035ad0801634a0050d6841035ad0801634a0050d6841035ad0801634a0050d6841035ad0801634a0050d6841035ad0801634a0058f5daac540f1785aab140000000049454e44ae426082' \
+        | xxd -r -p > "$work_img/red.png"
+    (
+        cd "$work_img"
+        "$evo" --model "$EVO_TEST_VISION_MODEL" --image "$work_img/red.png" \
+            -p "What single colour fills this image? Reply with exactly one line: colour-is-<word>." \
+            >"$scratch/t-img.out" 2>"$scratch/t-img.err"
+    )
+    grep -qi "colour-is-red" "$scratch/t-img.out"
+    report $? "headless --image: a vision model reads the attached image"
+else
+    report_skip "headless --image: a vision model reads the attached image"
+fi
+
 else
     report_skip "print-mode multi-turn tool round-trip"
     report_skip "kill -9 mid-task, resume cleanly"
     report_skip "goal run terminates via update_goal complete"
     report_skip "supervisor: induced crash -> restart -> resume -> goal complete"
     report_skip "compaction fires mid-task, task completes"
+    report_skip "headless --image: a vision model reads the attached image"
 fi
 
-# --- Test 6: two separately launched agents mint distinct ids ------------
+# --- Test 7: two separately launched agents mint distinct ids ------------
 # A save-lisp-and-die image bakes its load-time random state, so this can
 # only be caught against the built binary — in-process tests reseed per
 # process and always pass.  The ids are minted before the first provider

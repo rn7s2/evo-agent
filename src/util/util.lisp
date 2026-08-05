@@ -216,6 +216,72 @@ own :toplevel and ECL with our own :epilogue-code."
     (write-string string out))
   path)
 
+;;; Binary file IO.  Text IO decodes UTF-8 and would mangle image bytes, so
+;;; anything that travels as bytes (images, clipboard grabs) uses these.
+
+(defun read-file-octets (path)
+  "Contents of PATH as a simple (unsigned-byte 8) vector."
+  (with-open-file (in path :direction :input :element-type '(unsigned-byte 8)
+                           :if-does-not-exist :error)
+    (let* ((buffer (make-array (file-length in) :element-type '(unsigned-byte 8)))
+           (n (read-sequence buffer in)))
+      (if (= n (length buffer)) buffer (subseq buffer 0 n)))))
+
+(defun write-file-octets (path octets)
+  (ensure-directories-exist path)
+  (with-open-file (out path :direction :output :element-type '(unsigned-byte 8)
+                            :if-exists :supersede :if-does-not-exist :create)
+    (write-sequence octets out))
+  path)
+
+;;; Base64.
+;;;
+;;; Hand-rolled rather than pulled in as a dependency: it is twenty lines of
+;;; table lookup, and image payloads are the only user (the wire format for
+;;; every provider's image block).  Standard alphabet, always padded.
+
+(defparameter +base64-alphabet+
+  "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/")
+
+(defun octets->base64 (octets)
+  "Base64-encode OCTETS (a byte vector) into a fresh string."
+  (let* ((n (length octets))
+         (out (make-string (* 4 (ceiling n 3))))
+         (j 0))
+    (loop for i from 0 below n by 3
+          for b0 = (aref octets i)
+          for b1 = (if (< (+ i 1) n) (aref octets (+ i 1)) 0)
+          for b2 = (if (< (+ i 2) n) (aref octets (+ i 2)) 0)
+          for word = (logior (ash b0 16) (ash b1 8) b2)
+          do (setf (char out j) (char +base64-alphabet+ (ldb (byte 6 18) word))
+                   (char out (+ j 1)) (char +base64-alphabet+ (ldb (byte 6 12) word))
+                   (char out (+ j 2)) (if (< (+ i 1) n)
+                                          (char +base64-alphabet+ (ldb (byte 6 6) word))
+                                          #\=)
+                   (char out (+ j 3)) (if (< (+ i 2) n)
+                                          (char +base64-alphabet+ (ldb (byte 6 0) word))
+                                          #\=))
+             (incf j 4))
+    out))
+
+(defun base64->octets (string)
+  "Decode STRING (standard alphabet; whitespace ignored) into a byte vector."
+  (let ((out (make-array (* 3 (ceiling (length string) 4))
+                         :element-type '(unsigned-byte 8) :fill-pointer 0))
+        (acc 0) (bits 0))
+    (loop for char across string
+          for value = (position char +base64-alphabet+)
+          do (cond (value
+                    (setf acc (logior (ash acc 6) value))
+                    (incf bits 6)
+                    (when (>= bits 8)
+                      (decf bits 8)
+                      (vector-push (ldb (byte 8 bits) acc) out)))
+                   ((or (char= char #\=) (member char '(#\Space #\Tab #\Newline #\Return)))
+                    nil)
+                   (t (error "base64->octets: invalid character ~s" char))))
+    (coerce out '(simple-array (unsigned-byte 8) (*)))))
+
 (defun evo-home ()
   "Global evo directory (~/.evo/, overridable with EVO_HOME for tests)."
   (let ((env (getenv "EVO_HOME")))

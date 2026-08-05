@@ -1,0 +1,142 @@
+#!/usr/bin/expect -f
+# image-paste.exp — drive image input under a pty, end to end: paste a path,
+# attach it, send it to a real vision model, and read the answer back.
+#
+# The point of a live test here is that nothing else can prove it.  Unit
+# tests show the block is built and the JSON is shaped right; only a real
+# model looking at real bytes proves the bytes that left evo were the image
+# the user attached.  So the assertion is semantic — the model must name the
+# colour that fills the fixture — and it is worth the round trip.
+set timeout 180
+
+set repo [file dirname [file dirname [file normalize $argv0]]]
+set scratch [exec mktemp -d /tmp/evo-image.XXXXXX]
+set env(EVO_HOME) "$scratch/home"
+file mkdir $env(EVO_HOME)
+proc envdef {name default} {
+    global env
+    return [expr {[info exists env($name)] ? $env($name) : $default}]
+}
+set base_url [envdef EVO_TEST_BASE_URL ""]
+set api_key  [envdef EVO_TEST_API_KEY  ""]
+# A VISION model: EVO_TEST_MODEL is free to be text-only, and a text-only
+# endpoint rejects image input outright (that is what :vision nil is for).
+set model    [envdef EVO_TEST_VISION_MODEL ""]
+if {$base_url eq "" || $api_key eq "" || $model eq ""} {
+    puts stderr "image-paste.exp: set EVO_TEST_BASE_URL, EVO_TEST_API_KEY and EVO_TEST_VISION_MODEL (dev values in project memory)"
+    exit 1
+}
+foreach v {EVO_SUPERVISED_CHILD EVO_HEARTBEAT_FILE} {
+    if {[info exists env($v)]} { unset env($v) }
+}
+set f [open "$env(EVO_HOME)/init.lisp" w]
+puts $f "(evo:register-model \"$model\" :provider :anthropic :api :anthropic-messages :context-window 1000000 :max-output 64000 :thinking t :vision t)"
+puts $f "(evo:set-setting :model \"$model\")"
+puts $f {(evo:set-setting :thinking :low)}
+puts $f "(evo:register-provider :anthropic :base-url \"$base_url\" :api-key \"$api_key\")"
+close $f
+
+set workdir "$scratch/work"
+file mkdir $workdir
+cd $workdir
+
+# The fixture: a 64x64 PNG filled with red (#dc1414), written byte for byte
+# so the test has no image tooling dependency.
+set png_hex "89504e470d0a1a0a0000000d4948445200000040000000400802000000250be6890000007949444154789cedcf410900300cc0c08aa87f651333117b1c8340045ce6ec7edd7041035ad0801634a0050d6841035ad0801634a0050d6841035ad0801634a0050d6841035ad0801634a0050d6841035ad0801634a0050d6841035ad0801634a0050d6841035ad0801634a0050d6841035ad0801634a0058f5daac540f1785aab140000000049454e44ae426082"
+set png "$workdir/red-square.png"
+set fh [open $png w]
+fconfigure $fh -translation binary
+puts -nonewline $fh [binary format H* $png_hex]
+close $fh
+
+set pass 0
+set failures {}
+proc check {name} {
+    global pass
+    incr pass
+    puts "\nPASS: $name"
+}
+proc fail {name} {
+    global failures
+    lappend failures $name
+    puts "\nFAIL: $name"
+}
+
+spawn "$repo/build/evo"
+
+expect {
+    -re {ctx \d+k/\d+k} { }
+    timeout { fail "startup"; exit 1 }
+}
+
+# 1. Dropping a file onto a terminal arrives as a bracketed paste of its
+#    path: it must attach, not type the path.
+send "\x1b\[200~$png\x1b\[201~"
+expect {
+    -re {Image #1 attached} { check "pasted path attaches as Image #1" }
+    timeout { fail "pasted path attaches as Image #1" }
+}
+expect {
+    -re {\[Image #1\]} { check "attachment shows as a token in the editor" }
+    timeout { fail "attachment shows as a token in the editor" }
+}
+
+# 2. The model must actually see it: ask a question only the pixels answer,
+#    in a shape no stray word in a spinner or a thought can accidentally
+#    match ("red" alone would also match "hundred", "required", ...).
+send "What single colour fills this image? Reply with exactly one line: colour-is-<word>.\r"
+expect {
+    -nocase -re {colour-is-red} { check "vision model reads the pasted image" }
+    -re {✗ provider error} { fail "vision model reads the pasted image" }
+    timeout { fail "vision model reads the pasted image" }
+}
+
+# 3. The image is in the journal, by value: the session replays without the
+#    original file.
+expect {
+    -re {○ idle} { }
+    timeout { }
+}
+set session ""
+for {set i 0} {$i < 40} {incr i} {
+    catch {set session [exec sh -c "ls -t $env(EVO_HOME)/sessions/*/*.sexp 2>/dev/null | head -1"]}
+    if {$session ne ""} break
+    sleep 0.5
+}
+if {$session eq ""} { fail "session journal written"; exit 1 }
+if {![catch {exec grep -q -- ":type :image" $session}]} {
+    check "image block is journaled with the session"
+} else {
+    fail "image block is journaled with the session"
+}
+if {![catch {exec grep -q -- ":media-type \"image/png\"" $session}]} {
+    check "journaled block carries its media type"
+} else {
+    fail "journaled block carries its media type"
+}
+
+# 4. /image is the other door to the same attach.
+send "/image $png\r"
+expect {
+    -re {Image #2 attached} { check "/image attaches by path" }
+    timeout { fail "/image attaches by path" }
+}
+send "\x03"
+sleep 0.3
+
+# 5. A bad path is a message, not a crash.
+send "/image $workdir/not-here.png\r"
+expect {
+    -re {no such file} { check "/image reports a bad path" }
+    timeout { fail "/image reports a bad path" }
+}
+
+send "/quit\r"
+expect eof
+
+puts "\n$pass passed, [llength $failures] failed"
+if {[llength $failures] > 0} {
+    puts "failures: $failures"
+    exit 1
+}
+exit 0

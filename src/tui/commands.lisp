@@ -15,6 +15,8 @@
   /thinking [level]    low·medium·high·xhigh·max (changing it mid-session
                        drops the provider prompt cache)
   /compact [hint]      compact the context now
+  /image [path ...]    attach an image to the message being typed
+                       (no path: the system clipboard, same as ctrl+v)
   /lore [text]         show project+session lore (with ids), or add project-scope guidance; ask me to edit/remove by id
   /global-lore [text]  show global (every project) lore, or add user-scope guidance
   /memory [request]    show project memory or ask the agent to refine it
@@ -32,6 +34,7 @@ keys: enter send · shift+enter/alt+enter/ctrl+j newline · shift+tab auto/plan 
       tab complete /command or /eval symbol · up/down input history (at buffer edge) ·
       ctrl+a/e home/end · ctrl+b/f move · ctrl+d delete (quit when empty) ·
       ctrl+k kill to eol · ctrl+w delete word · esc interrupt · esc esc rewind ·
+      ctrl+v attach the clipboard image · paste/drop an image path to attach it ·
       paste >3 lines collapses (paste again to expand)")
 
 (defun goal-command (tui args)
@@ -65,6 +68,18 @@ keys: enter send · shift+enter/alt+enter/ctrl+j newline · shift+tab auto/plan 
        (queue-steering agent (goal-continuation-for agent (current-goal agent)))
        (start-worker tui)))
     t))
+
+(defun image-command (tui args)
+  "/image [path ...] — attach images to the message being typed.  With no
+argument it grabs the system clipboard, which is what ctrl+v does; the
+command exists for the cases a keystroke cannot reach: a path you can
+tab-complete-free type, several files at once, or a terminal that eats
+ctrl+v."
+  (if (zerop (length args))
+      (paste-clipboard-image tui)
+      (dolist (path (or (evo.media:split-shell-tokens args) (list args)))
+        (attach-image-path tui path)))
+  t)
 
 (defun switch-journal (tui journal &key note)
   (setf (agent-journal (tui-agent tui)) journal)
@@ -294,18 +309,37 @@ providers are distinct entries, and the journaled choice must say which."
                 0))
     t))
 
+(defun export-image (block path index)
+  "Write an image block beside the export as a sidecar file and return its
+file name.  A markdown transcript that dropped the screenshots would not be
+the transcript; base64 inline would not be readable."
+  (let* ((name (format nil "~a-img~d.~a"
+                       (pathname-name path) index
+                       (evo.media:media-type-extension (pget block :media-type))))
+         (file (merge-pathnames name (uiop:pathname-directory-pathname
+                                      (uiop:ensure-absolute-pathname
+                                       path (uiop:getcwd))))))
+    (write-file-octets file (base64->octets (pget block :data)))
+    name))
+
 (defun export-command (tui args)
   (let* ((state (fold-state (agent-journal (tui-agent tui))))
          (path (if (plusp (length args))
                    args
-                   (format nil "evo-export-~a.md" (gen-id 4)))))
+                   (format nil "evo-export-~a.md" (gen-id 4))))
+         (image-index 0))
     (with-open-file (out path :direction :output :if-exists :supersede
                               :if-does-not-exist :create :external-format :utf-8)
       (dolist (m (evo.journal:state-messages state))
         (case (message-role m)
           (:user (format out "## user~2%~a~2%"
                          (or (pget (find :text (message-content m)
-                                         :key (lambda (b) (pget b :type))) :text) "")))
+                                         :key (lambda (b) (pget b :type))) :text) ""))
+                 (dolist (b (message-content m))
+                   (when (evo.media:image-block-p b)
+                     (let ((file (ignore-errors
+                                  (export-image b path (incf image-index)))))
+                       (format out "~@[![~a](~a)~2%~]" (and file (pget b :name)) file)))))
           (:assistant
            (format out "## assistant~2%")
            (dolist (b (message-content m))
@@ -375,6 +409,7 @@ lists only global (every project) lore — mirroring /memory vs /global-memory."
                   (scroll tui (dim (format nil "thinking → ~(~a~)" level))))
                  (t (scroll tui (dim "levels: low medium high xhigh max")))))
          t)
+        ((cmd "image" "img") (image-command tui args))
         ((cmd "compact")
          (if (require-idle tui "/compact")
              (start-compact-worker tui args)

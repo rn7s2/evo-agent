@@ -59,7 +59,7 @@ degrades instead of failing."
                          collect l))))))
 
 (defun register-model* (id &key provider api context-window max-output (thinking t)
-                             effort (thinking-mode :extended))
+                             (vision t) effort (thinking-mode :extended))
   "Register (or replace, keeping position) a model.  A model's identity is
 its (id, provider) pair: the same id under different providers (direct vs.
 proxy) are distinct, both selectable models; re-registering the same pair
@@ -82,6 +82,7 @@ time, not mid-run."
   (let ((model (list :id id :provider provider :api api
                      :context-window context-window :max-output max-output
                      :thinking (and thinking t)
+                     :vision (and vision t)
                      :thinking-mode thinking-mode
                      :effort (normalize-effort id effort)))
         (tail (member t *models*
@@ -134,6 +135,12 @@ the initial default.  No fallback: an unknown id is a config error."
 (defun model-max-output (model) (pget model :max-output))
 (defun model-effort (model) (pget model :effort))
 (defun model-thinking-mode (model) (or (pget model :thinking-mode) :extended))
+
+(defun model-vision-p (model)
+  "True when MODEL accepts image input.  Defaults to true for a model plist
+that predates the flag: today's frontier models all see, and the alternative
+default would silently blind a correctly-configured session."
+  (if (member :vision model) (and (pget model :vision) t) t))
 
 ;;; Providers: endpoint + credential config.  Re-registration merges
 ;;; field-wise, so a later init file overrides only the keys it gives.

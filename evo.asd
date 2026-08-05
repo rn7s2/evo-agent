@@ -20,6 +20,9 @@
                              (:module "util"
                               :serial t
                               :components ((:file "util")))
+                             (:module "media"
+                              :serial t
+                              :components ((:file "media")))
                              (:module "journal"
                               :serial t
                               :components ((:file "journal")))
