@@ -44,6 +44,7 @@
   (:export #:find-model #:all-models #:model-providers
            #:model-context-window #:model-max-output
            #:model-effort #:model-thinking-mode #:+effort-levels+
+           #:normalize-thinking-level
            #:register-model* #:register-provider* #:provider-config
            #:reset-user-registries
            #:call-provider #:provider-error
@@ -77,7 +78,7 @@
            #:run-hooks #:add-hook #:load-extension* #:boot-extensions
            #:boot-userspace #:load-init-file
            #:replay-loads #:lock-kernel-packages
-           #:effective-model-id #:effective-model-provider
+           #:effective-model-id #:effective-model-provider #:effective-thinking
            ;; goal
            #:current-goal #:goal-continuation-message #:goal-continuation-for
            #:register-goal-tools #:create-goal-entry #:goal-tokens-used

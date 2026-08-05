@@ -22,7 +22,7 @@ Usage:
   evo --events ...               emit line-delimited sexpr events instead of text
   evo --list-sessions            list sessions for this cwd
   evo --model <id>               model id (default: the :model setting from init.lisp)
-  evo --thinking <level>         off|low|medium|high|xhigh|max (default medium)
+  evo --thinking <level>         low|medium|high|xhigh|max (default medium)
   evo --no-userspace             boot without init.lisp, post-init.lisp, or extensions (quarantine mode)
   evo --no-supervisor            run the session in-process, no crash-restart parent
   evo --help
@@ -35,11 +35,12 @@ Config: ~/.evo/init.lisp, then <cwd>/.evo/init.lisp, then extensions, then
 ~/.evo/post-init.lisp, then <cwd>/.evo/post-init.lisp (Lisp, evaluated in order;
 later calls override).  post-init.lisp runs after extensions, so it can reference
 models registered by extensions.  evo ships no built-in model table, e.g.
-  (evo:register-model \"claude-sonnet-5\"
-    :provider :anthropic :api :anthropic-messages
-    :context-window 200000 :max-output 64000 :thinking t)
-  (evo:set-setting :model \"claude-sonnet-5\")
-  (evo:register-provider :anthropic :base-url \"http://127.0.0.1:8787\")")
+  (evo:register-model \"deepseek-v4-pro\"
+    :provider :deepseek :api :anthropic-messages
+    :context-window 1000000 :max-output 192000 :thinking t :effort t)
+  (evo:set-setting :model \"deepseek-v4-pro\")
+  (evo:register-provider :deepseek :base-url \"https://api.deepseek.com/anthropic\"
+    :api-key-env \"DEEPSEEK_API_KEY\")")
 
 (defun parse-args (argv)
   "Parse ARGV into a plist.  Signals on unknown flags."
@@ -64,8 +65,8 @@ models registered by extensions.  evo ships no built-in model table, e.g.
                 (let ((level (intern (string-upcase
                                       (or (pop argv) (error "--thinking needs a level")))
                                      :keyword)))
-                  (unless (member level '(:off :low :medium :high :xhigh :max))
-                    (error "--thinking must be one of off|low|medium|high|xhigh|max"))
+                  (unless (member level +effort-levels+)
+                    (error "--thinking must be one of low|medium|high|xhigh|max"))
                   (setf (getf opts :thinking) level)))
                ((string= arg "--no-userspace") (setf (getf opts :no-userspace) t))
                ((string= arg "--no-supervisor") (setf (getf opts :no-supervisor) t))
@@ -183,10 +184,12 @@ repeat across processes."
 (defun no-model-message (opts)
   (format nil "No model is configured. evo ships no built-in model table: create~%~
 ~a~%(or <project>/.evo/init.lisp) and register the models you use, then pick a default:~%~%  ~
-(evo:register-model \"claude-sonnet-5\"~%    ~
-:provider :anthropic :api :anthropic-messages~%    ~
-:context-window 200000 :max-output 64000 :thinking t)~%  ~
-(evo:set-setting :model \"claude-sonnet-5\")~%~%~
+(evo:register-provider :deepseek~%    ~
+:base-url \"https://api.deepseek.com/anthropic\" :api-key-env \"DEEPSEEK_API_KEY\")~%  ~
+(evo:register-model \"deepseek-v4-pro\"~%    ~
+:provider :deepseek :api :anthropic-messages~%    ~
+:context-window 1000000 :max-output 192000 :thinking t :effort t)~%  ~
+(evo:set-setting :model \"deepseek-v4-pro\")~%~%~
 A commented sample is at docs/examples/init.lisp (installed to~%~
 ~a by `make install-home`).~
 ~@[~%~%~a~]"

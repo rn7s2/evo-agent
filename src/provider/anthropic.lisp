@@ -30,10 +30,15 @@
 ;;; has no effort at all, Opus 4.5 has effort but no xhigh/max and still
 ;;; wants a budget, and 4.6-and-later models take effort with adaptive
 ;;; thinking, where budget_tokens is deprecated or rejected outright.
+;;;
+;;; Third-party endpoints speaking this API split the same way and are worth
+;;; probing rather than assuming: DeepSeek's, for one, accepts budget_tokens
+;;; and ignores it (measured: identical thinking length at 1k and 32k) while
+;;; output_config.effort moves it, so a model registered there without
+;;; :effort has a thinking dial that is wired to nothing.
 
 (defun thinking-budget (level)
   (case level
-    ((nil :off) nil)
     (:low 2048)
     (:medium 8192)
     (:high 16384)
@@ -119,9 +124,7 @@ Consecutive user/tool-result messages merge into a single user message."
 (defun build-request-json (&key model system messages tools thinking-level)
   (let* ((model-id (pget model :id))
          (adaptive (eq (model-thinking-mode model) :adaptive))
-         (thinking-on (and (pget model :thinking)
-                           thinking-level
-                           (not (eq thinking-level :off))))
+         (thinking-on (and (pget model :thinking) thinking-level))
          (budget (and thinking-on (not adaptive) (thinking-budget thinking-level)))
          (effort (and thinking-on (effort-string thinking-level (model-effort model))))
          (req (jobj "model" model-id
@@ -141,6 +144,9 @@ Consecutive user/tool-result messages merge into a single user message."
     ;; Adaptive models decide when to think, so they take a mode rather than
     ;; a budget -- and `display` defaults to omitted there, which returns
     ;; signed but empty thinking blocks, so ask for summaries explicitly.
+    ;; The disabled branch is for a model registered :thinking nil: there is
+    ;; no off level, but a model can still declare it does not think, and on
+    ;; an adaptive model omitting the field would let the server think anyway.
     (cond (budget
            (setf (gethash "thinking" req)
                  (jobj "type" "enabled" "budget_tokens" budget)))

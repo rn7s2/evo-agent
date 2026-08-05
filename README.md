@@ -36,11 +36,13 @@ it — copy the sample at [docs/examples/init.lisp](docs/examples/init.lisp) to
 `~/.evo/init.lisp` and edit:
 
 ```lisp
-(evo:register-model "claude-sonnet-5"
-  :provider :anthropic :api :anthropic-messages
-  :context-window 200000 :max-output 64000
-  :thinking t :effort t :thinking-mode :adaptive)
-(evo:set-setting :model "claude-sonnet-5")
+(evo:register-provider :deepseek
+  :base-url "https://api.deepseek.com/anthropic" :api-key-env "DEEPSEEK_API_KEY")
+(evo:register-model "deepseek-v4-pro"
+  :provider :deepseek :api :anthropic-messages
+  :context-window 1000000 :max-output 192000
+  :thinking t :effort t)
+(evo:set-setting :model "deepseek-v4-pro")
 ```
 
 Without that, evo exits with a pointer to the sample.
@@ -258,22 +260,29 @@ evaluated in that order on every boot — an override is just a later call.
 `EVO_HOME` overrides `~/.evo`. `--no-userspace` skips config and extensions.
 
 ```lisp
-(evo:register-model "claude-sonnet-5"
-  :provider :anthropic :api :anthropic-messages   ; :api = wire protocol
-  :context-window 200000 :max-output 64000 :thinking t
-  :effort t                     ; effort ladder the model accepts (t = all of
-                                ;   low/medium/high/xhigh/max, or a subset);
-                                ;   a level above it is clamped, not rejected
-  :thinking-mode :adaptive)     ; :extended (budget_tokens) on 4.5 and older
-(evo:set-setting :model "claude-sonnet-5")
+(evo:register-model "deepseek-v4-pro"
+  :provider :deepseek :api :anthropic-messages    ; :api = wire protocol
+  :context-window 1000000 :max-output 192000 :thinking t
+  :effort t)                    ; effort ladder the endpoint accepts (t = all
+                                ;   of low/medium/high/xhigh/max, or a subset);
+                                ;   a level above it is clamped, not rejected.
+                                ;   Omit it and the level can only travel as
+                                ;   thinking.budget_tokens — which some
+                                ;   endpoints accept and ignore
+;; :thinking-mode :adaptive lets the model choose when to think (what
+;; Anthropic 4.6+ wants); the default :extended sends budget_tokens.
+(evo:set-setting :model "deepseek-v4-pro")
 
 ;; Optional (kernel defaults exist for all of these):
-(evo:set-setting :thinking :medium)          ; off low medium high xhigh max
+(evo:set-setting :thinking :medium)          ; low medium high xhigh max (no off rung)
 (evo:set-setting :goal-token-budget 2000000) ; per-goal token cap; omit = no limit
 ;; :compact-reserve / :compact-keep-recent tune compaction.
 
 ;; Endpoints: :anthropic/:openai are pre-seeded (ANTHROPIC_API_KEY /
-;; OPENAI_API_KEY); register-provider overrides field-wise, e.g. a proxy:
+;; OPENAI_API_KEY); any other key you register yourself, and re-registering
+;; overrides field-wise, e.g. to point a stock name at a proxy:
+(evo:register-provider :deepseek
+  :base-url "https://api.deepseek.com/anthropic" :api-key-env "DEEPSEEK_API_KEY")
 (evo:register-provider :anthropic :base-url "http://127.0.0.1:8787" :api-key "sk-...")
 ```
 

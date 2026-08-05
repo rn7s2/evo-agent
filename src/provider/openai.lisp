@@ -23,12 +23,12 @@
 (defmethod default-base-url ((api openai-responses-api)) "https://api.openai.com")
 (defmethod default-api-key-env ((api openai-responses-api)) "OPENAI_API_KEY")
 
-;;; Thinking levels -> reasoning effort.  NIL = reasoning off (the adapter
-;;; then sends an explicit effort "none").
+;;; Thinking levels -> reasoning effort.  NIL only for a level off the
+;;; ladder; the adapter then sends no reasoning field and takes the
+;;; endpoint's default.
 
 (defun reasoning-effort (level)
   (case level
-    ((nil :off) nil)
     (:low "low")
     (:medium "medium")
     (:high "high")
@@ -156,15 +156,11 @@ level, not nested under \"function\"."
       (setf (gethash "instructions" req) system))
     (let ((jt (tools->responses-json tools)))
       (when jt (setf (gethash "tools" req) jt)))
-    (cond (effort
-           ;; encrypted_content must be requested explicitly or stateless
-           ;; replay of reasoning is impossible.
-           (setf (gethash "reasoning" req) (jobj "effort" effort "summary" "auto")
-                 (gethash "include" req) (vector "reasoning.encrypted_content")))
-          ((pget model :thinking)
-           ;; Reasoning model with thinking off: say so explicitly rather
-           ;; than inherit the server-side default.
-           (setf (gethash "reasoning" req) (jobj "effort" "none"))))
+    (when effort
+      ;; encrypted_content must be requested explicitly or stateless
+      ;; replay of reasoning is impossible.
+      (setf (gethash "reasoning" req) (jobj "effort" effort "summary" "auto")
+            (gethash "include" req) (vector "reasoning.encrypted_content")))
     (when cache-key
       (setf (gethash "prompt_cache_key" req) cache-key))
     (jzon:stringify req)))

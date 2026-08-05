@@ -187,9 +187,9 @@ A :tool-call hook may return (:block t :reason ...) or (:arguments ...)."
 
 (defun register-model (id &rest args)
   "Register a model in init.lisp:
- (evo:register-model \"claude-sonnet-5\" :provider :anthropic
-   :api :anthropic-messages :context-window 200000 :max-output 64000
-   :thinking t :effort t :thinking-mode :adaptive)
+ (evo:register-model \"deepseek-v4-pro\" :provider :deepseek
+   :api :anthropic-messages :context-window 1000000 :max-output 192000
+   :thinking t :effort t)
 A model's identity is its (id, provider) pair: register the same id under a
 different provider and both are selectable (e.g. direct vs. proxy).
 Re-registering the same pair replaces it in place; evo ships no built-in
@@ -199,7 +199,13 @@ models.
 output_config.effort — t for all of (:low :medium :high :xhigh :max), a
 subset list for models that stop short (Opus 4.5 has no xhigh or max), nil
 (the default) for models without the parameter.  A thinking level above
-what the model supports is clamped down rather than rejected.
+what the model supports is clamped down rather than rejected.  Worth
+checking per endpoint rather than assuming: a third-party API that accepts
+budget_tokens may quietly ignore it and steer on effort alone, and then a
+model registered without :effort has a thinking dial wired to nothing.
+
+:thinking is a capability, not a preference — nil for a model that does not
+think.  There is no off level; the ladder starts at :low.
 
 :thinking-mode is :extended (the default — thinking.budget_tokens) or
 :adaptive, where the model decides when to think and evo sends a mode

@@ -323,15 +323,14 @@ event: response.completed~%data: {\"type\":\"response.completed\",\"response\":{
       (check "oai req cross-model drops item ids"
              (and (null (evo.provider::jget (aref input 1) "id"))
                   (null (evo.provider::jget (aref input 2) "id")))))
-    ;; Thinking off: explicit effort none, no encrypted-content include.
+    ;; No off rung: a level off the ladder sends no reasoning field at all
+    ;; rather than an effort the endpoint would reject.
     (let ((raw3 (evo.provider::build-responses-request-json
                  :model (find-model "gpt-5.6-luna") :messages history
                  :thinking-level :off)))
-      (check "oai req thinking off -> effort none"
-             (equal (evo.provider::jget (com.inuoe.jzon:parse raw3)
-                                        "reasoning" "effort")
-                    "none"))
-      (check "oai req thinking off -> no include"
+      (check "oai req retired :off sends no reasoning field"
+             (not (search "\"reasoning\":" raw3)))
+      (check "oai req retired :off -> no include"
              (not (search "reasoning.encrypted_content" raw3))))))
 
 ;;; Timeouts and proxy env detection
@@ -811,8 +810,8 @@ event: response.completed~%data: {\"type\":\"response.completed\",\"response\":{
                    (search (format nil "~c[2m" #\Escape)
                            (find-if (lambda (r) (search "toggle the todo" r)) rows)))
             (check "popup help text aligned"
-                   (equal (desc-col (find-if (lambda (r) (search "off·low" r)) rows)
-                                    "off·low")
+                   (equal (desc-col (find-if (lambda (r) (search "low·medium" r)) rows)
+                                    "low·medium")
                           (desc-col (find-if (lambda (r) (search "toggle the todo" r)) rows)
                                     "toggle the todo"))))))
       (let ((lines (evo.tui::compose-region tui)))
@@ -2402,12 +2401,12 @@ event: response.completed~%data: {\"type\":\"response.completed\",\"response\":{
   (check-signals "unknown api signals" (find-api :no-such-api))
   (check "anthropic thinking-param is a budget"
          (= 60000 (thinking-param (find-api :anthropic-messages) :max)))
-  (check "anthropic thinking off"
-         (null (thinking-param (find-api :anthropic-messages) :off)))
+  (check "anthropic thinking-param: lowest rung still thinks"
+         (= 2048 (thinking-param (find-api :anthropic-messages) :low)))
   (check "openai thinking-param is an effort string"
          (equal "max" (thinking-param (find-api :openai-responses) :max)))
-  (check "openai thinking off"
-         (null (thinking-param (find-api :openai-responses) :off)))
+  (check "openai thinking-param: lowest rung still thinks"
+         (equal "low" (thinking-param (find-api :openai-responses) :low)))
   (check "endpoint paths"
          (and (equal "/v1/messages" (endpoint-path (find-api :anthropic-messages)))
               (equal "/v1/responses" (endpoint-path (find-api :openai-responses))))))
@@ -2669,8 +2668,10 @@ selection journals the provider, and every resolution point honours it."
                                      "cache_control")))))
     (let ((raw2 (build-request (find-api :anthropic-messages)
                                :model model :system nil :messages history
-                               :tools nil :thinking-level :off)))
-      (check "anth req no thinking at :off" (not (search "budget_tokens" raw2))))
+                               :tools nil :thinking-level :low)))
+      (check "anth req lowest rung is still a budget"
+             (= 2048 (evo.provider::jget (com.inuoe.jzon:parse raw2)
+                                         "thinking" "budget_tokens"))))
     (check "anth req no output_config without :effort"
            (not (search "output_config" raw)))))
 
@@ -2690,6 +2691,16 @@ selection journals the provider, and every resolution point honours it."
                      :api :anthropic-messages :context-window 200000
                      :max-output 64000 :thinking t
                      :effort (:low :medium :high)))
+         ;; No off level, but a model may still declare that it does not
+         ;; think at all -- a capability, not a per-turn dial.
+         (mute-adaptive '(:id "fixture-mute-adaptive" :provider :anthropic
+                          :api :anthropic-messages :context-window 200000
+                          :max-output 64000 :thinking nil
+                          :thinking-mode :adaptive :effort (:low :medium :high)))
+         (mute-extended '(:id "fixture-mute-extended" :provider :anthropic
+                          :api :anthropic-messages :context-window 200000
+                          :max-output 64000 :thinking nil
+                          :effort (:low :medium :high)))
          (req (lambda (model level)
                 (com.inuoe.jzon:parse
                  (build-request (find-api :anthropic-messages)
@@ -2709,20 +2720,26 @@ selection journals the provider, and every resolution point honours it."
              (and (equal "high" (effort capped :max))
                   (equal "high" (effort capped :xhigh))
                   (equal "medium" (effort capped :medium))))
-      (check "effort: none at :off" (null (effort adaptive :off)))
+      (check "effort: every rung maps, none is off"
+             (every (lambda (l) (effort adaptive l)) +effort-levels+))
       (check "adaptive: mode and summaries instead of a budget"
              (let ((th (thinking adaptive :high)))
                (and (equal "adaptive" (evo.provider::jget th "type"))
                     (equal "summarized" (evo.provider::jget th "display"))
                     (null (gethash "budget_tokens" th)))))
-      (check "adaptive: thinking disabled at :off"
-             (equal "disabled" (evo.provider::jget (thinking adaptive :off) "type")))
+      ;; On an adaptive model "does not think" has to be said out loud:
+      ;; omitting the field lets the server think anyway.
+      (check "adaptive: thinking disabled for a :thinking nil model"
+             (equal "disabled"
+                    (evo.provider::jget (thinking mute-adaptive :high) "type")))
+      (check "adaptive: no effort for a :thinking nil model"
+             (null (effort mute-adaptive :high)))
       (check "extended: effort composes with budget_tokens"
              (let ((r (funcall req extended :high)))
                (and (equal "high" (evo.provider::jget r "output_config" "effort"))
                     (= 16384 (evo.provider::jget r "thinking" "budget_tokens")))))
-      (check "extended: no thinking block at :off"
-             (null (thinking extended :off))))))
+      (check "extended: no thinking block for a :thinking nil model"
+             (null (thinking mute-extended :high))))))
 
 ;;; Model registry: effort declarations are validated and canonicalized.
 
@@ -2766,6 +2783,40 @@ selection journals the provider, and every resolution point honours it."
                                   :max-output 100 :thinking-mode :sometimes))
   (reset-user-registries)
   (register-fixture-models))
+
+;;; The retired :off rung.  Thinking is no longer switchable off, but old
+;;; journals and old init.lisp files still say :off -- they must resume on
+;;; the weakest live rung, not crash and not silently drop the dial.
+
+(defun test-retired-off-level ()
+  (reset-settings)
+  (check "normalize: live rungs pass through"
+         (equal +effort-levels+ (mapcar #'normalize-thinking-level +effort-levels+)))
+  (check "normalize: :off folds onto the weakest live rung"
+         (eq :low (normalize-thinking-level :off)))
+  (check "normalize: nonsense is NIL, so callers fall through to their default"
+         (and (null (normalize-thinking-level :sideways))
+              (null (normalize-thinking-level nil))))
+  (let ((journal (make-session-journal "/tmp")))
+    (check "effective-thinking: default without a choice"
+           (eq :medium (evo.kernel:effective-thinking (fold-state journal))))
+    (set-setting :thinking :off)
+    (check "effective-thinking: a stale :off setting still yields a live rung"
+           (eq :low (evo.kernel:effective-thinking (fold-state journal))))
+    (set-setting :thinking :high)
+    (check "effective-thinking: the setting is honoured"
+           (eq :high (evo.kernel:effective-thinking (fold-state journal))))
+    ;; An old session that had thinking switched off mid-run.
+    (append-entry journal '(:type :thinking-change :thinking :off))
+    (check "effective-thinking: a journaled :off resumes on the weakest rung"
+           (eq :low (evo.kernel:effective-thinking (fold-state journal))))
+    (append-entry journal '(:type :thinking-change :thinking :xhigh))
+    (check "effective-thinking: journal outranks the setting"
+           (eq :xhigh (evo.kernel:effective-thinking (fold-state journal))))
+    (check "effective-thinking: the --thinking flag outranks the setting"
+           (eq :max (evo.kernel:effective-thinking
+                     (fold-state (make-session-journal "/tmp")) :max))))
+  (reset-settings))
 
 ;;; Init files (config-as-code) + CLI preflight
 
@@ -2855,6 +2906,7 @@ selection journals the provider, and every resolution point honours it."
     (test-anthropic-request)
     (test-anthropic-effort)
     (test-model-effort-registration)
+    (test-retired-off-level)
     (test-openai-sse)
     (test-openai-request)
     (test-port-timeout)

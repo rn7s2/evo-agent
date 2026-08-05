@@ -18,7 +18,20 @@
 (defparameter +effort-levels+ '(:low :medium :high :xhigh :max)
   "Effort levels an API may accept, weakest first.  A model declares the
 subset it supports with :effort; the adapter clamps a request down to the
-strongest supported level that does not exceed the one asked for.")
+strongest supported level that does not exceed the one asked for.
+
+This is also evo's whole thinking ladder: there is no off rung.  An agent
+that cannot think is not worth driving, and the two ladders being the same
+list is what lets a session-wide level go straight to output_config.effort.")
+
+(defun normalize-thinking-level (level)
+  "Coerce a journaled or configured thinking LEVEL onto the ladder; NIL when
+it names no rung, so callers can fall through to their default.  :off is the
+retired rung: sessions and init.lisp files written when thinking could be
+switched off fold onto the weakest live level instead of failing to resume
+\(or, worse, silently sending no dial at all)."
+  (cond ((member level +effort-levels+) level)
+        ((eq level :off) (first +effort-levels+))))
 
 (defun normalize-effort (id effort)
   "Canonicalize a model's :effort declaration to a subset of +EFFORT-LEVELS+

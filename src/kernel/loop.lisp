@@ -200,13 +200,22 @@ NIL means \"first registration wins\"."
              (member configured (model-providers id))
              configured))))
 
+(defun effective-thinking (state &optional override)
+  "The thinking level for this turn: the journaled /thinking choice, then
+the --thinking flag, then the :thinking setting, then :medium.  Every
+candidate is normalized onto the ladder, so a retired :off left in an old
+journal or init.lisp degrades to the weakest live rung instead of reaching
+an adapter that no longer knows the word."
+  (or (normalize-thinking-level (evo.journal:state-thinking state))
+      (normalize-thinking-level override)
+      (normalize-thinking-level (setting :thinking))
+      :medium))
+
 (defun prepare-next-turn (agent)
   (let* ((state (fold-state (agent-journal agent)))
          (tools (active-tools state))
          (model-id (effective-model-id state agent))
-         (thinking (or (evo.journal:state-thinking state)
-                       (agent-thinking-override agent)
-                       (setting :thinking :medium))))
+         (thinking (effective-thinking state (agent-thinking-override agent))))
     ;; Projection pipeline: journal entries -> agent messages ->
     ;; (transform-context) -> provider messages.  Extensions hook the
     ;; middle stage; output is never written back.
