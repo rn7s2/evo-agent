@@ -5,7 +5,20 @@
 # an EMPTY extensions directory on purpose: everything under test has to
 # come out of the binary.  (The gate itself is unit-tested — model behavior
 # under plan instructions is nondeterministic.)
-set timeout 180
+#
+# STYLE, NOT TASTE: every `expect` below opens its brace and then puts each
+# pattern on its OWN line.  Written as a one-liner —
+#     expect { -re {foo} { check ... } timeout { fail ... } }
+# — expect 5.45 (the one macOS ships) never matches the pattern and never runs
+# either body: the expect just burns its whole timeout and falls through, so
+# the test passes vacuously while asserting nothing.  This file was written
+# that way and was silently checking nothing at all; keep the patterns on
+# their own lines.
+#
+# Patterns are ASCII on purpose too: the status line's mode diamonds and the
+# em dash in "plan mode - read-only" are multibyte, and what expect sees on a
+# pty depends on the channel encoding.  Anchor on the ASCII around them.
+set timeout 120
 
 set repo [file dirname [file dirname [file normalize $argv0]]]
 set scratch [exec mktemp -d /tmp/evo-plan.XXXXXX]
@@ -40,52 +53,100 @@ close $f
 file mkdir "$scratch/work"
 cd "$scratch/work"
 
-set bad 0
-proc check {ok name} {
-    global bad
-    if {!$ok} { incr bad }
-    puts "\nRESULT [expr {$ok ? "PASS" : "FAIL"}] $name"
+set pass 0
+set failures {}
+proc check {name} {
+    global pass
+    incr pass
+    puts "\nPASS: $name"
+}
+proc fail {name} {
+    global failures
+    lappend failures $name
+    puts "\nFAIL: $name"
+}
+# The journal assertions are booleans, not patterns.
+proc check-that {ok name} {
+    if {$ok} { check $name } else { fail $name }
 }
 
 spawn "$repo/build/evo"
-expect { -re {◆ auto} { check 1 startup-mode-indicator } timeout { check 0 startup-mode-indicator; exit 1 } }
+expect {
+    -re {auto[^\n]*ctx \d+k/\d+k} { check "startup mode indicator" }
+    timeout { fail "startup mode indicator"; exit 1 }
+}
 
 # One real turn so the journal flushes to disk.
 send "Reply with exactly the word: zebra-fig\r"
-expect { -re {zebra-fig} {} timeout { check 0 first-turn; exit 1 } }
-expect { -re {zebra-fig} { check 1 first-turn } timeout { check 0 first-turn } }
-sleep 2
+# The first match is our own echo in the editor; the model's reply is the
+# second.  (Matching once would pass without a backend at all.)
+expect {
+    -re {zebra-fig} {}
+    timeout { fail "first turn"; exit 1 }
+}
+expect {
+    -re {zebra-fig} { check "live turn round-trips" }
+    timeout { fail "live turn round-trips"; exit 1 }
+}
+# Let the turn finish so the mode keystroke is not sent into a live stream.
+expect {
+    -re {idle} {}
+    timeout {}
+}
+sleep 1
 
 # shift+tab (CSI Z) toggles into plan mode; indicator follows
 send "\x1b\[Z"
-expect { -re {plan mode} { check 1 shift-tab-plan } timeout { check 0 shift-tab-plan } }
-expect { -re {◇ plan} { check 1 plan-indicator } timeout { check 0 plan-indicator } }
+expect {
+    -re {plan mode} { check "shift+tab enters plan mode" }
+    timeout { fail "shift+tab enters plan mode" }
+}
+expect {
+    -re {plan[^\n]*ctx \d+k/\d+k} { check "plan indicator in the status line" }
+    timeout { fail "plan indicator in the status line" }
+}
 sleep 1
 # /permission auto switches back
 send "/permission auto\r"
-expect { -re {auto mode} { check 1 permission-auto-cmd } timeout { check 0 permission-auto-cmd } }
+expect {
+    -re {auto mode} { check "/permission auto" }
+    timeout { fail "/permission auto" }
+}
 sleep 1
-# /permission opens the choose box; pick plan (second entry)
+# /permission with no argument opens the choose box; pick plan (second entry)
 send "/permission\r"
-expect { -re {permission:} { check 1 permission-choose-box } timeout { check 0 permission-choose-box } }
+expect {
+    -re {permission:} { check "/permission opens the choose box" }
+    timeout { fail "/permission opens the choose box" }
+}
 send "\x1b\[B"
 sleep 0.3
 send "\r"
-expect { -re {plan mode} { check 1 permission-box-select } timeout { check 0 permission-box-select } }
+expect {
+    -re {plan mode} { check "choose box selects plan" }
+    timeout { fail "choose box selects plan" }
+}
 sleep 1
 send "/permission auto\r"
-expect { -re {auto mode} {} timeout {} }
+expect {
+    -re {auto mode} {}
+    timeout {}
+}
 sleep 1
 send "/exit\r"
-expect eof
+expect {
+    eof { check "clean quit" }
+    timeout { fail "clean quit"; catch {close} }
+}
 
 set session [exec sh -c "ls -t $env(EVO_HOME)/sessions/*/*.sexp | head -1"]
-check [expr {![catch {exec grep -q {:key "mode" :data "plan"} $session}]}] journal-plan-state
-check [expr {![catch {exec grep -q {:key "mode" :data "auto"} $session}]}] journal-auto-state
-check [expr {![catch {exec grep -q {:type :tools-change} $session}]}] journal-tools-gated
-check [expr {![catch {exec grep -q {:key "plan-mode"} $session}]}] journal-injection
+check-that [expr {![catch {exec grep -q {:key "mode" :data "plan"} $session}]}] "journal records plan state"
+check-that [expr {![catch {exec grep -q {:key "mode" :data "auto"} $session}]}] "journal records auto state"
+check-that [expr {![catch {exec grep -q {:type :tools-change} $session}]}] "journal records the tool gating"
+check-that [expr {![catch {exec grep -q {:key "plan-mode"} $session}]}] "journal records the plan-mode injection"
 # Nothing was loaded from an extensions directory: plan mode came from the binary.
-check [expr {[catch {exec grep -q {:type :load} $session}]}] no-userspace-load
+check-that [expr {[catch {exec grep -q {:type :load} $session}]}] "plan mode came from the binary"
 
-puts "\nSUMMARY: $bad failures ($scratch)"
-exit [expr {$bad > 0 ? 1 : 0}]
+puts "\n$pass checks passed, [llength $failures] failed ($scratch)"
+if {[llength $failures] > 0} { puts "failures: $failures"; exit 1 }
+exit 0
