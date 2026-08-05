@@ -13,6 +13,7 @@
            #:call-with-timeout #:timeout-error
            #:launch-child #:process-alive-p #:process-kill #:process-kill-tree
            #:process-wait #:process-pid
+           #:program-in-path
            #:lock-package #:unlock-package #:add-package-local-nickname
            #:make-fd-output-stream #:make-fd-input-stream
            #:install-signal-handler #:+sigwinch+
@@ -27,7 +28,21 @@
            #:setting #:set-setting #:reset-settings #:*settings*
            #:string-join #:string-prefix-p #:truncate-string
            #:count-substring #:string-replace
-           #:read-file-string #:write-file-string))
+           #:read-file-string #:write-file-string
+           #:read-file-octets #:write-file-octets
+           #:octets->base64 #:base64->octets))
+
+;; Images in: clipboard grabs, file attachments, media-type sniffing.  Used
+;; by the frontends (TUI, CLI) to build the :image content blocks the
+;; provider adapters already know how to encode.
+(defpackage :evo.media
+  (:use :cl :evo.util)
+  (:export #:*max-image-bytes* #:*max-image-dimension* #:*clipboard-readers*
+           #:*downscalers*
+           #:sniff-media-type #:file-media-type #:image-file-p #:media-type-extension
+           #:make-image-block #:image-block-p #:image-summary #:format-bytes
+           #:attach-image-file #:clipboard-image
+           #:pasted-image-paths #:split-shell-tokens))
 
 (defpackage :evo.journal
   (:use :cl :evo.util)
@@ -43,7 +58,7 @@
   (:use :cl :evo.util)
   (:export #:find-model #:all-models #:model-providers
            #:model-context-window #:model-max-output
-           #:model-effort #:model-thinking-mode #:+effort-levels+
+           #:model-effort #:model-thinking-mode #:model-vision-p #:+effort-levels+
            #:normalize-thinking-level
            #:register-model* #:register-provider* #:provider-config
            #:reset-user-registries

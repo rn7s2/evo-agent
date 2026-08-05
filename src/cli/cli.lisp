@@ -15,6 +15,7 @@
 Usage:
   evo                            interactive TUI (on a terminal)
   evo -p \"prompt\"              run one task in print mode, stream text to stdout
+  evo --image <path> -p ...      attach an image to the first prompt (repeatable)
   evo --goal \"objective\" [-p \"first prompt\"]
                                  create a goal and run until complete/blocked/budget
   evo --resume [path] [-p ...]   resume a session (default: latest for this cwd);
@@ -59,6 +60,10 @@ models registered by extensions.  evo ships no built-in model table, e.g.
                           :latest)))
                ((string= arg "--events") (setf (getf opts :events) t))
                ((string= arg "--list-sessions") (setf (getf opts :list-sessions) t))
+               ((string= arg "--image")
+                (setf (getf opts :images)
+                      (append (getf opts :images)
+                              (list (or (pop argv) (error "--image needs a path"))))))
                ((string= arg "--model")
                 (setf (getf opts :model) (or (pop argv) (error "--model needs an id"))))
                ((string= arg "--thinking")
@@ -262,6 +267,14 @@ where /model and /reload can fix the registry in place."
         (evo.tui:start-tui agent :resumed-p resumed-p))
       (run-headless opts)))
 
+(defun headless-images (opts)
+  "Resolve --image paths to :image content blocks.  A bad path is a usage
+error: headless has no editor to correct it in, and silently running the
+prompt without the image the user asked for is worse than not running."
+  (loop for path in (getf opts :images)
+        collect (multiple-value-bind (block reason) (evo.media:attach-image-file path)
+                  (or block (error 'usage-error :text (format nil "--image: ~a" reason))))))
+
 (defun run-headless (opts)
   (multiple-value-bind (agent resumed-p)
       (setup-agent opts :events-cb (if (getf opts :events)
@@ -274,9 +287,10 @@ where /model and /reload can fix the registry in place."
       (preflight-model agent journal opts)
       ;; Seed the run.
       (let ((prompt (getf opts :prompt))
+            (images (headless-images opts))
             (goal (evo.kernel:current-goal agent)))
         (cond
-          (prompt (queue-steering agent prompt))
+          (prompt (queue-steering agent prompt :images images))
           ((and goal (eq (pget goal :status) :active))
            (queue-steering agent (evo.kernel:goal-continuation-for agent goal)))
           (t (error 'usage-error :text "Nothing to do headless: give -p \"prompt\", --goal, or --resume a session with an active goal"))))

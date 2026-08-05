@@ -120,7 +120,9 @@ idempotent and an override is just a later call.
 ```lisp
 (evo:register-model "deepseek-v4-pro"       ; evo has NO built-in models
   :provider :deepseek :api :anthropic-messages
-  :context-window 1000000 :max-output 192000 :thinking t :effort t)
+  :context-window 1000000 :max-output 192000 :thinking t :effort t
+  :vision nil)                              ; image input; t is the default,
+                                            ; nil degrades images to text
 (evo:register-provider :deepseek            ; :anthropic/:openai are pre-seeded,
   :base-url "https://api.deepseek.com/anthropic"   ; others you register;
   :api-key-env "DEEPSEEK_API_KEY")          ; re-registering merges field-wise
@@ -183,11 +185,30 @@ is what keeps a reloaded extension idempotent.
 ```lisp
 evo:*agent*                       ; the live agent
 (evo:steer "text")                ; queue a steering message (next turn boundary)
+(evo:steer "look" evo:*agent*     ; ... with images: :image content blocks from
+           (list block))          ;     evo.media:attach-image-file / clipboard-image
 (evo:set-active-tools agent '("read" "bash"))  ; gate the tool set (nil = all)
 (evo:all-tools)                   ; every registered tool name
 (evo:current-goal)                ; goal plist or nil
 (evo:load-extension "/path/x.lisp") ; compile+load+journal a source file
 ```
+
+## Images (evo.media)
+
+```lisp
+(evo.media:attach-image-file "/tmp/shot.png")  ; => (values BLOCK REASON)
+(evo.media:clipboard-image)                    ; => (values BLOCK REASON)
+(evo.media:pasted-image-paths text)            ; paths iff TEXT is only paths
+evo.media:*max-image-bytes*                    ; cap before downscaling kicks in
+evo.media:*clipboard-readers*                  ; ordered (NAME . FN) readers
+evo.media:*downscalers*                        ; ordered (PASS PROGRAM ARGS-FN)
+```
+
+Errors are values here, not conditions: every entry point returns
+`(values BLOCK REASON)` because the callers are keystroke handlers. To support
+a platform evo does not ship a reader for, push onto `*clipboard-readers*` a
+function of one argument (a scratch directory) that returns the pathname of an
+image file it wrote there, or `nil`.
 
 ## Ground rules
 

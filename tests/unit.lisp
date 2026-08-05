@@ -2818,6 +2818,377 @@ selection journals the provider, and every resolution point honours it."
                      (fold-state (make-session-journal "/tmp")) :max))))
   (reset-settings))
 
+;;; Images: base64, sniffing, attaching, the clipboard, editor tokens, and
+;;; the wire formats.  Fixtures are real (if tiny) files, because sniffing
+;;; and sizing are the whole point of the read path.
+
+(defparameter *png-1x1-hex*
+  "89504e470d0a1a0a0000000d4948445200000001000000010802000000907753de00~
+   00000c49444154789c63b82322020002d401055970d3c20000000049454e44ae426082"
+  "A valid 1x1 red PNG, 69 bytes.")
+
+(defun hex->octets (hex)
+  (let ((hex (remove-if (lambda (c) (member c '(#\Space #\Newline #\Tab #\~))) hex)))
+    (coerce (loop for i from 0 below (length hex) by 2
+                  collect (parse-integer hex :start i :end (+ i 2) :radix 16))
+            '(vector (unsigned-byte 8)))))
+
+(defun image-fixture (&key (name "shot.png") (hex *png-1x1-hex*))
+  (let ((path (format nil "~a/evo-img-~a-~a" (tmp-dir) (gen-id 6) name)))
+    (write-file-octets path (hex->octets hex))
+    (probe-file path)))
+
+(defun string->octets (string)
+  (map '(vector (unsigned-byte 8)) #'char-code string))
+
+(defun test-base64 ()
+  (flet ((b64 (s) (octets->base64 (string->octets s))))
+    ;; RFC 4648 §10 test vectors: padding is where hand-rolled encoders die.
+    (check "base64 rfc4648 vectors"
+           (and (equal (b64 "") "")
+                (equal (b64 "f") "Zg==")
+                (equal (b64 "fo") "Zm8=")
+                (equal (b64 "foo") "Zm9v")
+                (equal (b64 "foob") "Zm9vYg==")
+                (equal (b64 "fooba") "Zm9vYmE=")
+                (equal (b64 "foobar") "Zm9vYmFy"))))
+  (let ((bytes (coerce (loop for i from 0 below 256 collect i)
+                       '(vector (unsigned-byte 8)))))
+    (check "base64 round-trips every byte value"
+           (equalp (base64->octets (octets->base64 bytes)) bytes)))
+  (check "base64 decode ignores whitespace"
+         (equalp (base64->octets (format nil "Zm9v~%YmFy")) (string->octets "foobar")))
+  (check-signals "base64 decode rejects junk" (base64->octets "Zm9v!!")))
+
+(defun test-image-media-types ()
+  (check "sniff png" (equal (evo.media:sniff-media-type (hex->octets *png-1x1-hex*))
+                            "image/png"))
+  (check "sniff jpeg" (equal (evo.media:sniff-media-type (hex->octets "ffd8ffe000104a464946"))
+                             "image/jpeg"))
+  (check "sniff gif" (equal (evo.media:sniff-media-type (string->octets "GIF89a....."))
+                            "image/gif"))
+  (check "sniff webp" (equal (evo.media:sniff-media-type (string->octets "RIFF\0\0\0\0WEBPVP8 "))
+                             "image/webp"))
+  (check "sniff rejects non-images"
+         (null (evo.media:sniff-media-type (string->octets "not an image at all"))))
+  ;; The extension is a claim; the bytes are the fact.
+  (let ((liar (image-fixture :name "notes.txt")))
+    (check "media type comes from the bytes, not the extension"
+           (equal (evo.media:file-media-type liar) "image/png"))))
+
+(defun test-attach-image ()
+  (let ((fixture (image-fixture)))
+    (multiple-value-bind (block reason) (evo.media:attach-image-file fixture)
+      (check "attach: no reason on success" (null reason))
+      (check "attach: builds an :image block" (evo.media:image-block-p block))
+      (check "attach: carries media type and size"
+             (and (equal (pget block :media-type) "image/png")
+                  (= (pget block :bytes) 69)))
+      (check "attach: data is the file, base64-encoded"
+             (equalp (base64->octets (pget block :data)) (read-file-octets fixture)))
+      (check "attach: names the block after the file"
+             (equal (pget block :name) (file-namestring fixture)))
+      (check "attach: summary reads like a file listing"
+             (search "png" (evo.media:image-summary block))))
+    ;; file:// URLs and ~ are what a terminal drop and a typed path look like.
+    (check "attach: accepts a file:// url"
+           (evo.media:attach-image-file (format nil "file://~a" (namestring fixture))))
+    ;; Failures are values, never signals: the caller is a keystroke handler.
+    (check "attach: missing file reports why"
+           (multiple-value-bind (block reason)
+               (evo.media:attach-image-file "/nonexistent/evo/shot.png")
+             (and (null block) (search "no such file" reason))))
+    (let ((text (format nil "~a/evo-not-an-image-~a.png" (tmp-dir) (gen-id 6))))
+      (write-file-string text "just text")
+      (check "attach: non-image reports the supported formats"
+             (multiple-value-bind (block reason) (evo.media:attach-image-file text)
+               (and (null block) (search "png, jpeg, gif or webp" reason)))))
+    ;; Over the cap with nothing to downscale with: fail loudly, with advice.
+    (let ((evo.media:*max-image-bytes* 10)
+          (evo.media:*downscalers* nil))
+      (check "attach: oversized without a downscaler explains itself"
+             (multiple-value-bind (block reason) (evo.media:attach-image-file fixture)
+               (and (null block)
+                    (search "over the" reason)
+                    (search "imagemagick" reason)))))
+    ;; Over the cap with a downscaler that helps: the small result is sent.
+    (let* ((small (image-fixture))
+           (evo.media:*max-image-bytes* 100)
+           (evo.media:*downscalers*
+             (list (list :keep-format "cp"
+                         (lambda (in out dim)
+                           (declare (ignore in dim))
+                           (list (namestring small) out))))))
+      ;; Make the original bigger than the cap by padding it with a comment
+      ;; chunk-sized tail; sniffing only looks at the head.
+      (let ((padded (format nil "~a/evo-img-big-~a.png" (tmp-dir) (gen-id 6))))
+        (write-file-octets padded
+                           (concatenate '(vector (unsigned-byte 8))
+                                        (hex->octets *png-1x1-hex*)
+                                        (make-array 200 :element-type '(unsigned-byte 8)
+                                                        :initial-element 0)))
+        (multiple-value-bind (block reason) (evo.media:attach-image-file padded)
+          (check "attach: oversized image is downscaled, not rejected"
+                 (and (null reason) (= (pget block :bytes) 69))))))))
+
+(defun test-clipboard-image ()
+  (let ((fixture (image-fixture))
+        (seen-dir nil))
+    (let ((evo.media:*clipboard-readers*
+            (list (cons "fake pasteboard"
+                        (lambda (dir)
+                          (setf seen-dir dir)
+                          (let ((path (merge-pathnames "clip.png" dir)))
+                            (write-file-octets path (read-file-octets fixture))
+                            path))))))
+      (multiple-value-bind (block reason) (evo.media:clipboard-image)
+        (check "clipboard: grabs an image block" (and (null reason)
+                                                      (evo.media:image-block-p block)))
+        (check "clipboard: names an anonymous grab after the clipboard"
+               (equal (pget block :name) "clipboard.png"))
+        (check "clipboard: records where it came from"
+               (equal (pget block :source) "clipboard"))))
+    (check "clipboard: scratch directory is cleaned up"
+           (and seen-dir (not (probe-file seen-dir))))
+    ;; A reader may point at a file the user owns (a file-manager copy):
+    ;; that file must survive the grab.
+    (let ((evo.media:*clipboard-readers*
+            (list (cons "fake file reference" (lambda (dir) (declare (ignore dir)) fixture)))))
+      (multiple-value-bind (block reason) (evo.media:clipboard-image)
+        (check "clipboard: file reference keeps its own name"
+               (and (null reason) (equal (pget block :name) (file-namestring fixture))))
+        (check "clipboard: file reference is not deleted" (probe-file fixture))))
+    (let ((evo.media:*clipboard-readers* nil))
+      (check "clipboard: no reader says so"
+             (multiple-value-bind (block reason) (evo.media:clipboard-image)
+               (and (null block) (search "no clipboard reader" reason)))))
+    (let ((evo.media:*clipboard-readers*
+            (list (cons "empty" (lambda (dir) (declare (ignore dir)) nil)))))
+      (check "clipboard: empty clipboard says so"
+             (multiple-value-bind (block reason) (evo.media:clipboard-image)
+               (and (null block) (search "no image on the clipboard" reason)))))))
+
+(defun test-pasted-image-paths ()
+  (let ((fixture (image-fixture))
+        (spaced (image-fixture :name "a shot.png"))
+        (text (format nil "~a/evo-plain-~a.txt" (tmp-dir) (gen-id 6))))
+    (write-file-string text "hello")
+    (check "paste: a bare image path attaches"
+           (equal (evo.media:pasted-image-paths (namestring fixture)) (list fixture)))
+    (check "paste: a quoted path with spaces attaches"
+           (equal (evo.media:pasted-image-paths (format nil "'~a'" (namestring spaced)))
+                  (list spaced)))
+    (check "paste: a backslash-escaped path attaches"
+           (equal (evo.media:pasted-image-paths
+                   (string-replace " " "\\ " (namestring spaced) :all t))
+                  (list spaced)))
+    (check "paste: a file:// url attaches"
+           (equal (evo.media:pasted-image-paths (format nil "file://~a" (namestring fixture)))
+                  (list fixture)))
+    (check "paste: several dropped files attach in order"
+           (equal (evo.media:pasted-image-paths
+                   (format nil "~a~%~a" (namestring fixture) (namestring fixture)))
+                  (list fixture fixture)))
+    ;; All-or-nothing: prose that merely mentions an image is prose.
+    (check "paste: a sentence mentioning a path stays text"
+           (null (evo.media:pasted-image-paths
+                  (format nil "look at ~a please" (namestring fixture)))))
+    (check "paste: a non-image path stays text"
+           (null (evo.media:pasted-image-paths (namestring text))))
+    (check "paste: ordinary text stays text"
+           (null (evo.media:pasted-image-paths "just a sentence"))))
+  (check "shell tokens: quotes and escapes"
+         (equal (evo.media:split-shell-tokens "/tmp/a\\ b.png '/tmp/c d.png' \"/e f.png\"")
+                (list "/tmp/a b.png" "/tmp/c d.png" "/e f.png"))))
+
+(defun test-editor-attachments ()
+  (let ((eb (evo.tui::make-edit-buffer))
+        (one (evo.media:make-image-block :data "AA==" :media-type "image/png" :name "one.png"))
+        (two (evo.media:make-image-block :data "BB==" :media-type "image/png" :name "two.png")))
+    (evo.tui::eb-attach-image eb one)
+    (evo.tui::eb-insert-text eb "what is this?")
+    (evo.tui::eb-attach-image eb two)
+    (check "editor: attachments show as tokens"
+           (equal (evo.tui::eb-text eb) "[Image #1] what is this? [Image #2] "))
+    (check "editor: submit yields both images"
+           (equal (evo.tui::eb-submit-images eb) (list one two)))
+    ;; The token is the handle: delete it and the image is not sent.
+    (evo.tui::eb-set-text eb "only the second: [Image #2]")
+    (check "editor: deleting a token drops its image"
+           (equal (evo.tui::eb-submit-images eb) (list two)))
+    ;; Order follows the text, not the order they were attached.
+    (evo.tui::eb-set-text eb "[Image #2] then [Image #1]")
+    (check "editor: images are ordered as they appear"
+           (equal (evo.tui::eb-submit-images eb) (list two one)))
+    (evo.tui::eb-clear eb)
+    (check "editor: clearing the buffer drops attachments"
+           (and (null (evo.tui::eb-attachments eb))
+                (null (evo.tui::eb-submit-images eb))))))
+
+(defun test-image-steering ()
+  (let* ((dir (uiop:ensure-directory-pathname
+               (format nil "~a/evo-imgsteer-~a/" (tmp-dir) (gen-id))))
+         (journal (progn (ensure-directories-exist dir) (make-session-journal dir)))
+         (agent (make-agent :journal journal))
+         (fixture (image-fixture))
+         (block (evo.media:attach-image-file fixture)))
+    (queue-steering agent "what is in this screenshot?" :images (list block))
+    (evo.kernel::drain-steering agent)
+    (let* ((message (first (state-messages (fold-state journal))))
+           (content (message-content message)))
+      (check "steering: one user message carries text and image"
+             (and (eq (pget message :role) :user) (= 2 (length content))))
+      (check "steering: the image comes before the question"
+             (and (eq (pget (first content) :type) :image)
+                  (eq (pget (second content) :type) :text)))
+      (check "steering: the image survives the journal round-trip"
+             (equalp (base64->octets (pget (first content) :data))
+                     (read-file-octets fixture))))
+    ;; Text-only steering keeps its one-text-block shape.
+    (queue-steering agent "plain")
+    (evo.kernel::drain-steering agent)
+    (check "steering: text-only messages are unchanged"
+           (equal (message-content (car (last (state-messages (fold-state journal)))))
+                  '((:type :text :text "plain"))))))
+
+(defun test-image-wire ()
+  (let* ((image (evo.media:make-image-block :data "QUJD" :media-type "image/png"
+                                            :name "shot.png" :bytes 3))
+         (history (list (list :role :user
+                              :content (list image (list :type :text :text "what is this?")))))
+         (seeing '(:id "fixture-vision" :provider :anthropic :api :anthropic-messages
+                   :context-window 200000 :max-output 64000 :thinking t :vision t))
+         (blind (pput seeing :vision nil)))
+    ;; Anthropic: a base64 source block.  No thinking level: these assert the
+    ;; shape of the image block, and a request with no dial asked for is the
+    ;; smallest one that shows it.
+    (let* ((req (com.inuoe.jzon:parse
+                 (build-request (find-api :anthropic-messages)
+                                :model seeing :system "sys" :messages history
+                                :tools nil :thinking-level nil)))
+           (block (aref (evo.provider::jget (aref (evo.provider::jget req "messages") 0)
+                                            "content")
+                        0)))
+      (check "anthropic: image goes as a base64 source"
+             (and (equal (evo.provider::jget block "type") "image")
+                  (equal (evo.provider::jget block "source" "type") "base64")
+                  (equal (evo.provider::jget block "source" "media_type") "image/png")
+                  (equal (evo.provider::jget block "source" "data") "QUJD"))))
+    ;; A model without vision must not poison every later request with a 400.
+    (let* ((req (com.inuoe.jzon:parse
+                 (build-request (find-api :anthropic-messages)
+                                :model blind :system "sys" :messages history
+                                :tools nil :thinking-level nil)))
+           (block (aref (evo.provider::jget (aref (evo.provider::jget req "messages") 0)
+                                            "content")
+                        0)))
+      (check "anthropic: no vision degrades the image to text"
+             (and (equal (evo.provider::jget block "type") "text")
+                  (search "image not shown" (evo.provider::jget block "text"))
+                  (search "shot.png" (evo.provider::jget block "text")))))
+    ;; OpenAI Responses: an input_image data URL.
+    (let* ((oai '(:id "fixture-gpt" :provider :openai :api :openai-responses
+                  :context-window 272000 :max-output 128000 :thinking t))
+           (req (com.inuoe.jzon:parse
+                 (build-request (find-api :openai-responses)
+                                :model oai :system "sys" :messages history
+                                :tools nil :thinking-level nil)))
+           (block (aref (evo.provider::jget (aref (evo.provider::jget req "input") 0)
+                                            "content")
+                        0)))
+      (check "openai: image goes as an input_image data url"
+             (and (equal (evo.provider::jget block "type") "input_image")
+                  (equal (evo.provider::jget block "image_url")
+                         "data:image/png;base64,QUJD"))))
+    (let* ((blind-oai '(:id "fixture-gpt-blind" :provider :openai :api :openai-responses
+                        :context-window 272000 :max-output 128000 :thinking t :vision nil))
+           (req (com.inuoe.jzon:parse
+                 (build-request (find-api :openai-responses)
+                                :model blind-oai :system "sys" :messages history
+                                :tools nil :thinking-level nil)))
+           (block (aref (evo.provider::jget (aref (evo.provider::jget req "input") 0)
+                                            "content")
+                        0)))
+      (check "openai: no vision degrades the image to text"
+             (and (equal (evo.provider::jget block "type") "input_text")
+                  (search "image not shown" (evo.provider::jget block "text")))))
+    ;; The registry default: a model registered without the flag can see.
+    (check "registry: vision defaults on, and :vision nil is honoured"
+           (and (model-vision-p '(:id "x"))
+                (model-vision-p (progn (register-model*
+                                        "fixture-sees" :provider :anthropic
+                                        :api :anthropic-messages :context-window 1000
+                                        :max-output 100)
+                                       (find-model "fixture-sees")))
+                (not (model-vision-p (progn (register-model*
+                                             "fixture-blind" :provider :anthropic
+                                             :api :anthropic-messages :context-window 1000
+                                             :max-output 100 :vision nil)
+                                            (find-model "fixture-blind"))))))
+    ;; Compaction accounting knows an image is not free.
+    (check "compaction estimates images as a flat cost"
+           (> (evo.kernel::estimate-message-tokens (first history)) 4000))
+    (reset-user-registries)
+    (register-fixture-models)))
+
+(defun test-image-tui-paste ()
+  (let* ((dir (uiop:ensure-directory-pathname
+               (format nil "~a/evo-imgtui-~a/" (tmp-dir) (gen-id))))
+         (journal (progn (ensure-directories-exist dir) (make-session-journal dir)))
+         (agent (make-agent :journal journal))
+         (tui (evo.tui::make-tui :agent agent))
+         (fixture (image-fixture))
+         (eb (evo.tui::tui-editor tui)))
+    (with-output-to-string (fake-tty)
+      (let ((evo.tui::*tty-out* fake-tty)
+            (evo.tui::*region-height* 0)
+            (evo.tui::*region-cursor-row* 0))
+        ;; Dropping a file onto the terminal arrives as a paste of its path.
+        (evo.tui::handle-paste tui (namestring fixture))
+        (check "tui: pasting an image path attaches it"
+               (and (= 1 (length (evo.tui::eb-attachments eb)))
+                    (search "[Image #1]" (evo.tui::eb-text eb))))
+        ;; Ordinary text still pastes as text.
+        (evo.tui::handle-paste tui "just words")
+        (check "tui: pasting text still types text"
+               (and (= 1 (length (evo.tui::eb-attachments eb)))
+                    (search "just words" (evo.tui::eb-text eb))))
+        ;; ctrl+v with a clipboard that has an image.
+        (let ((evo.media:*clipboard-readers*
+                (list (cons "fake" (lambda (d)
+                                     (let ((p (merge-pathnames "c.png" d)))
+                                       (write-file-octets p (read-file-octets fixture))
+                                       p))))))
+          (evo.tui::handle-key-edit tui (list :ctrl #\v)))
+        (check "tui: ctrl+v attaches the clipboard image"
+               (= 2 (length (evo.tui::eb-attachments eb))))
+        ;; /image <path> is the same attach by another door.
+        (evo.tui::image-command tui (namestring fixture))
+        (check "tui: /image attaches by path"
+               (= 3 (length (evo.tui::eb-attachments eb))))
+        (check "tui: /image reports a bad path instead of erroring"
+               (progn (evo.tui::image-command tui "/nonexistent/evo/x.png")
+                      (= 3 (length (evo.tui::eb-attachments eb)))))))
+    ;; The prompt block in scrollback lists what was actually sent.
+    (let* ((evo.tui::*cols* 60)
+           (block (evo.media:attach-image-file fixture))
+           (rendered (evo.tui::user-prompt-block "[Image #1] what is this?" (list block))))
+      (check "tui: the prompt block lists attached images"
+             (and (search "Image #1" rendered)
+                  (search (file-namestring fixture) rendered))))))
+
+(defun test-image-export ()
+  (let* ((dir (format nil "~a/evo-imgexp-~a" (tmp-dir) (gen-id 6)))
+         (md (format nil "~a/transcript.md" dir))
+         (fixture (image-fixture))
+         (block (evo.media:attach-image-file fixture)))
+    (ensure-directories-exist (uiop:ensure-directory-pathname dir))
+    (let ((name (evo.tui::export-image block md 1)))
+      (check "export: writes the image beside the markdown"
+             (and (equal name "transcript-img1.png")
+                  (equalp (read-file-octets (format nil "~a/~a" dir name))
+                          (read-file-octets fixture)))))))
+
 ;;; Init files (config-as-code) + CLI preflight
 
 (defun test-init-files ()
@@ -2943,5 +3314,15 @@ selection journals the provider, and every resolution point honours it."
     (test-eval)
     (test-eval-completion)
     (test-eval-completion-source)
+    (test-base64)
+    (test-image-media-types)
+    (test-attach-image)
+    (test-clipboard-image)
+    (test-pasted-image-paths)
+    (test-editor-attachments)
+    (test-image-steering)
+    (test-image-wire)
+    (test-image-tui-paste)
+    (test-image-export)
     (format t "~%~d passed, ~d failed~%" *pass* *fail*)
     (if (zerop *fail*) 0 1)))

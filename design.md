@@ -89,9 +89,12 @@ evo (one binary)
    │    compactor            usage-anchored, self-contained checkpoints
    │    budget guard         per-goal and per-session hard stops
    │    extension loader     compile, load, journal the load
+   │    media                images in: clipboard readers, sniffing,
+   │                          size cap + downscale, :image blocks
    ├─ CORE EXTENSIONS  (bundled, hand-written, compiled into the image;
    │                    same API and privileges as user extensions)
-   │    tui        adaptive renderer, multi-line editor, slash commands
+   │    tui        adaptive renderer, multi-line editor (image attachments
+   │               as editable tokens), slash commands
    │    todo       checklist tool + :custom state, rendered by the tui
    │    plan-mode  read-only mode: tool gating + quote-aware bash allowlist
    ├─ USERSPACE  (unlocked: EVO.USER)
@@ -227,6 +230,15 @@ errors signal, and preflight catches them.
   top-level role, so history stays a flat list). Assistant messages
   self-identify with an `:api`/`:provider`/`:model` triple. Usage is tracked
   per message.
+- **Images travel by value**: an `:image` block carries `:media-type` (sniffed
+  from magic bytes, never from the file name) and base64 `:data`, so it is
+  journal data like everything else and a session replays with no side files
+  to lose. Adapters encode it natively (Anthropic `image`/base64 source,
+  OpenAI `input_image` data URL); the handoff pass degrades it to a named text
+  placeholder for a model registered `:vision nil`, so a model switch cannot
+  poison a transcript that contains one. `evo.media` owns the read path —
+  clipboard readers per platform, size cap, downscaling — and nothing above it
+  knows where the bytes came from.
 - **Provider artifacts are a typed variant, not stringly-typed**: an Anthropic
   thinking signature is a base64 scalar accumulated from chunked
   `signature_delta`; an OpenAI reasoning item is the whole item with
@@ -649,7 +661,7 @@ would reopen it.
 | Parallel tool execution | Sequential execution is where the thread-discipline complexity *isn't* (D9) | Measured wall-clock loss on independent calls, plus a thread discipline for the journal writer |
 | MCP | `register-tool` plus a userspace client covers the same ground without a protocol in the kernel | A tool ecosystem that cannot be reached any other way |
 | Permission prompts | Permissiveness is a defining property; the `:tool-call` hook is the seam, and `permission-gate.lisp` is the worked example | A deployment context where the OS boundary is not the trust boundary |
-| Multimodal input | The message model already carries an `:image` block; only the read path is missing | Provider-layer work, not an architectural change |
+| Multimodal *output* (image generation, audio) | Input landed (`evo.media` + `:image` blocks, ctrl+v / paste-a-path / `/image` / `--image`); generation is a different shape — artifacts the agent produces, which the journal-as-text model has no place for yet | An artifact store with the same replay guarantees as the journal |
 | Cost tables | Token accounting is the honest unit; prices go stale | Nothing foreseen |
 
 ### 16.3 What must not break

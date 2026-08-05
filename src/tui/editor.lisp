@@ -6,6 +6,11 @@
 ;;;; Pasting the exact same content again with the cursor right after the
 ;;;; placeholder expands it inline (paste once to keep it compact, paste
 ;;;; twice to edit).
+;;;;
+;;;; Attached images use the same trick from the other direction: the image
+;;;; lives beside the text and a "[Image #n]" token stands in for it, so an
+;;;; attachment is reviewed, moved, and deleted with the ordinary editing
+;;;; keys — and only the ones whose token survives to Enter are sent.
 
 (in-package :evo.tui)
 
@@ -14,7 +19,9 @@
   (line 0)              ; cursor logical line index
   (col 0)               ; cursor column (character index)
   (pastes nil)          ; alist id -> content
-  (paste-counter 0))
+  (paste-counter 0)
+  (attachments nil)     ; alist id -> :image content block
+  (attach-counter 0))
 
 (defun eb-current-line (eb) (nth (eb-line eb) (eb-lines eb)))
 
@@ -29,7 +36,8 @@
        (zerop (length (first (eb-lines eb))))))
 
 (defun eb-clear (eb)
-  (setf (eb-lines eb) (list "") (eb-line eb) 0 (eb-col eb) 0))
+  (setf (eb-lines eb) (list "") (eb-line eb) 0 (eb-col eb) 0
+        (eb-pastes eb) nil (eb-attachments eb) nil))
 
 (defun eb-set-text (eb text)
   (setf (eb-lines eb)
@@ -194,6 +202,40 @@ re-pasting identical content right after its placeholder expands it inline."
           for token = (paste-placeholder id (count-lines content))
           do (setf text (string-replace token content text :all t)))
     text))
+
+;;; Image attachments.
+;;;
+;;; An attached image lives beside the text as a numbered token, "[Image #1]".
+;;; The token is the whole user interface: it shows the image is there, it
+;;; marks where in the message it belongs, and it makes the attachment
+;;; editable with the keys already in the user's fingers — backspace over the
+;;; token and the image does not get sent, because EB-SUBMIT-IMAGES only
+;;; yields attachments whose token survived to submit time.  The token goes to
+;;; the model too, so "the second image" in a follow-up sentence resolves.
+
+(defun image-placeholder (id)
+  (format nil "[Image #~d]" id))
+
+(defun eb-attach-image (eb block)
+  "Attach an :image content block at the cursor.  Returns its token id."
+  (let ((id (incf (eb-attach-counter eb))))
+    (setf (eb-attachments eb) (append (eb-attachments eb) (list (cons id block))))
+    (unless (or (zerop (eb-col eb))
+                (char= (char (eb-current-line eb) (1- (eb-col eb))) #\Space))
+      (eb-insert-char eb #\Space))
+    (eb-insert-text eb (image-placeholder id))
+    (eb-insert-char eb #\Space)
+    id))
+
+(defun eb-submit-images (eb)
+  "Attached image blocks whose token is still in the buffer, ordered as they
+appear in the text."
+  (mapcar #'cdr
+          (sort (loop with text = (eb-text eb)
+                      for (id . block) in (eb-attachments eb)
+                      for position = (search (image-placeholder id) text)
+                      when position collect (cons position block))
+                #'< :key #'car)))
 
 ;;; Display: soft-wrap logical lines into WIDTH-column rows.
 

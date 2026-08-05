@@ -68,7 +68,16 @@ effort parameter."
                       "name" (pget block :name)
                       "input" (let ((args (pget block :arguments)))
                                 (if args (sexpr->json args) (jobj)))))
-    (:image (jobj "type" "text" "text" "[image omitted]"))
+    (:image (let ((data (pget block :data)))
+              (if data
+                  (jobj "type" "image"
+                        "source" (jobj "type" "base64"
+                                       "media_type" (or (pget block :media-type) "image/png")
+                                       "data" data))
+                  ;; A vision-less model had its images degraded to text by
+                  ;; the handoff pass; a data-less block reaching here is a
+                  ;; bug elsewhere, and a placeholder beats a 400.
+                  (content-block->json (image-placeholder-block block)))))
     (t (error 'provider-error :message (format nil "Unknown content block type ~s" (pget block :type))))))
 
 (defun tool-result->json-block (m)
@@ -131,7 +140,9 @@ Consecutive user/tool-result messages merge into a single user message."
                     "max_tokens" (model-max-output model)
                     "stream" t
                     "messages" (add-cache-control
-                                (messages->json (handoff-pass messages model-id))))))
+                                (messages->json
+                                 (handoff-pass messages model-id
+                                               :vision (model-vision-p model)))))))
     (when system
       (setf (gethash "system" req)
             (vector (let ((b (jobj "type" "text" "text" system)))

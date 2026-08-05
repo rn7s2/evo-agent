@@ -141,8 +141,8 @@ fatal — a corrupted runtime is repaired by fixing/removing a source file."
             (warn "Replaying :load of ~a failed: ~a" path e)))))))
 
 (defparameter *kernel-packages*
-  '(:evo.port :evo.util :evo.journal :evo.provider :evo.kernel :evo.cli :evo
-    :evo.todo :evo.plan :evo.memory :evo.eval :evo.tui))
+  '(:evo.port :evo.util :evo.media :evo.journal :evo.provider :evo.kernel
+    :evo.cli :evo :evo.todo :evo.plan :evo.memory :evo.eval :evo.tui))
 
 (defun lock-kernel-packages ()
   "Package locks: permissive but not suicidal — touching the kernel
@@ -210,7 +210,11 @@ think.  There is no off level; the ladder starts at :low.
 :thinking-mode is :extended (the default — thinking.budget_tokens) or
 :adaptive, where the model decides when to think and evo sends a mode
 instead of a budget.  Anthropic models from 4.6 on are :adaptive; on 4.7
-and later budget_tokens is rejected outright."
+and later budget_tokens is rejected outright.
+
+:vision declares image input, and defaults to t.  Give :vision nil to a
+text-only model: pasted images then degrade to a text placeholder for that
+model instead of the endpoint rejecting every request that replays one."
   (apply #'evo.provider:register-model* id args))
 
 (defun register-provider (key &rest args)
@@ -242,9 +246,11 @@ NAMES nil restores the full registered tool set."
 (defun current-goal (&optional (agent *agent*))
   (evo.kernel:current-goal agent))
 
-(defun steer (text &optional (agent *agent*))
-  "Queue a steering message; picked up at the next turn boundary."
-  (evo.kernel:queue-steering agent text))
+(defun steer (text &optional (agent *agent*) (images nil))
+  "Queue a steering message; picked up at the next turn boundary.
+IMAGES, when given, is a list of :image content blocks — build them with
+evo.media:attach-image-file or evo.media:clipboard-image."
+  (evo.kernel:queue-steering agent text :images images))
 
 (defun inject-context (text &key key (agent *agent*))
   "Append a :custom-message entry — content visible to the LLM.  With KEY, a

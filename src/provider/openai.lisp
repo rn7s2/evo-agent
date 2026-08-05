@@ -57,7 +57,15 @@ request clamped to its ladder first — the stock Responses API tops out at
 (defun user-block->input-json (block)
   (case (pget block :type)
     (:text (jobj "type" "input_text" "text" (pget block :text)))
-    (:image (jobj "type" "input_text" "text" "[image omitted]"))
+    (:image (let ((data (pget block :data)))
+              (if data
+                  ;; The Responses API takes an inline image as a data URL.
+                  (jobj "type" "input_image"
+                        "image_url" (format nil "data:~a;base64,~a"
+                                            (or (pget block :media-type) "image/png")
+                                            data)
+                        "detail" "auto")
+                  (user-block->input-json (image-placeholder-block block)))))
     (t (error 'provider-error
               :message (format nil "Unknown user content block type ~s"
                                (pget block :type))))))
@@ -151,7 +159,9 @@ level, not nested under \"function\"."
                     "store" nil
                     "max_output_tokens" (model-max-output model)
                     "input" (messages->input-items
-                             (handoff-pass messages model-id) model-id))))
+                             (handoff-pass messages model-id
+                                           :vision (model-vision-p model))
+                             model-id))))
     (when system
       (setf (gethash "instructions" req) system))
     (let ((jt (tools->responses-json tools)))

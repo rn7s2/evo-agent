@@ -233,16 +233,76 @@ and ESC can interrupt the summarization request."
                    (push-event tui (list :type :worker-done :outcome outcome)))))
              :name "evo-compact")))))
 
-(defun user-prompt-block (text)
+(defun user-prompt-block (text &optional images)
   "User prompts sit between two rules in scrollback — mirroring the
-editbox they were typed in — so they stand out when scanning history."
+editbox they were typed in — so they stand out when scanning history.
+Attached images are listed under the text: the transcript should show what
+was actually sent, and the model saw more than the words."
   (let ((sep (separator-line)))
-    (format nil "~a~%~a~a~%~a" sep (bold (cyan "❯ ")) text sep)))
+    (format nil "~a~%~a~a~{~%~a~}~%~a" sep (bold (cyan "❯ ")) text
+            (loop for block in images
+                  for id from 1
+                  collect (dim (format nil "  ⧉ Image #~d  ~a" id
+                                       (evo.media:image-summary block))))
+            sep)))
 
-(defun submit-to-agent (tui text)
-  (scroll tui (user-prompt-block text))
-  (queue-steering (tui-agent tui) text)
+(defun submit-to-agent (tui text &optional images)
+  (scroll tui (user-prompt-block text images))
+  (queue-steering (tui-agent tui) text :images images)
   (start-worker tui))
+
+;;; Images in.
+;;;
+;;; Two gestures, one path: ctrl+v grabs the system clipboard, and pasting
+;;; (or dropping) an image file's path attaches the file.  Both land in the
+;;; editor as a "[Image #n]" token, so an attachment is reviewable and
+;;; deletable before it is sent, like any other text.
+
+(defun attach-image (tui block)
+  "Put an :image BLOCK in the editor and tell the user it is there."
+  (let ((id (eb-attach-image (tui-editor tui) block)))
+    (scroll tui (dim (format nil "⧉ Image #~d attached — ~a" id
+                             (evo.media:image-summary block))))
+    (unless (model-sees-images-p tui)
+      (scroll tui (yellow (format nil "⚠ ~a is registered without vision (:vision nil) — it will get a text placeholder instead"
+                                  (tui-model-label tui)))))
+    (setf (tui-dirty tui) t)
+    id))
+
+(defun model-sees-images-p (tui)
+  "Whether the session's current model accepts image input.  Unknown models
+(a broken registry, a model gate not yet satisfied) count as capable: the
+warning is a courtesy, and a false alarm is worse than none."
+  (handler-case
+      (let* ((state (fold-state (agent-journal (tui-agent tui))))
+             (id (evo.kernel:effective-model-id state (tui-agent tui))))
+        (model-vision-p (find-model id (evo.kernel:effective-model-provider state id))))
+    (error () t)))
+
+(defun attach-image-path (tui path)
+  "Attach the image file at PATH, reporting the reason if it cannot be."
+  (multiple-value-bind (block reason) (evo.media:attach-image-file path)
+    (cond (block (attach-image tui block) t)
+          (t (scroll tui (red (format nil "✗ ~a" reason)))
+             (setf (tui-dirty tui) t)
+             nil))))
+
+(defun paste-clipboard-image (tui)
+  "ctrl+v: the system clipboard's image, if it holds one.  Terminals send
+text pastes as bracketed paste on their own; ctrl+v is what reaches us when
+the clipboard is not text at all."
+  (multiple-value-bind (block reason) (evo.media:clipboard-image)
+    (cond (block (attach-image tui block))
+          (t (scroll tui (dim (format nil "~a — paste a file path to attach one" reason)))
+             (setf (tui-dirty tui) t)))))
+
+(defun handle-paste (tui text)
+  "A bracketed paste: image file paths attach, anything else is text.
+Dragging a file onto the terminal arrives here as its escaped path."
+  (let ((paths (evo.media:pasted-image-paths text)))
+    (if paths
+        (dolist (path paths) (attach-image-path tui path))
+        (eb-paste (tui-editor tui) text))))
 
 ;;; Tool call display formatting.
 
@@ -585,9 +645,12 @@ wrapped between two rules, and the model status line under the editbox."
       (case (message-role m)
         (:user (let ((text (pget (find :text (message-content m)
                                        :key (lambda (b) (pget b :type)))
-                                 :text)))
-                 (when text
-                   (scroll tui (user-prompt-block (truncate-string text 500))))))
+                                 :text))
+                     (images (remove-if-not #'evo.media:image-block-p
+                                            (message-content m))))
+                 (when (or text images)
+                   (scroll tui (user-prompt-block
+                                (truncate-string (or text "") 500) images)))))
         (:assistant
          (dolist (block (message-content m))
            (case (pget block :type)
@@ -633,6 +696,7 @@ wrapped between two rules, and the model status line under the editbox."
     ("model" . "pick the model from a list, or set it directly")
     ("thinking" . "low·medium·high·xhigh·max")
     ("compact" . "compact the context now")
+    ("image" . "attach an image (path, or the clipboard)")
     ("lore" . "show lore, or add project-scope guidance")
     ("global-lore" . "show lore, or add user-scope guidance")
     ("tree" . "navigate entries, move the leaf (rewind/branch)")
@@ -922,7 +986,7 @@ on it."
          (:char (if (char= (second event) #\Tab)
                     (complete-at-point tui)
                     (eb-insert-char eb (second event))))
-         (:paste (eb-paste eb (second event)))
+         (:paste (handle-paste tui (second event)))
          (:ctrl
           (case (second event)
             (#\c (cond ((not (eb-empty-p eb))
@@ -946,6 +1010,7 @@ on it."
             (#\l (bt:with-lock-held (*tui-lock*)
                    (wr (esc "2J") (esc "H")) (flush)
                    (setf *region-height* 0 *region-cursor-row* 0)))
+            (#\v (paste-clipboard-image tui)) ; clipboard image (not text)
             (#\i (complete-at-point tui)) ; Ctrl+I = Tab on some terminals
             (#\j (eb-newline eb))))     ; Ctrl+J: newline everywhere
          (t nil))
@@ -1023,7 +1088,8 @@ on it."
       (accept-completion tui (car (nth (tui-complete-index tui) matches)) kind)
       (return-from submit)))
   (let ((text (string-trim '(#\Space #\Newline)
-                           (eb-submit-text (tui-editor tui)))))
+                           (eb-submit-text (tui-editor tui))))
+        (images (eb-submit-images (tui-editor tui))))
     (eb-clear (tui-editor tui))
     (cond
       ((zerop (length text)))
@@ -1032,7 +1098,7 @@ on it."
        (if (and (> (length text) 1) (char= (char text 0) #\/)
                 (not (char= (char text 1) #\/)))
            (dispatch-command tui text)
-           (submit-to-agent tui text))))))
+           (submit-to-agent tui text images))))))
 
 (defun dispatch-command (tui text)
   (let* ((space (position #\Space text))

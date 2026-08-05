@@ -55,11 +55,13 @@ integration: build
 	tests/integration.sh
 
 # Expect-driven TUI tests against a freshly built binary: the general smoke
-# test, the same-id/multi-provider model routing test, then the IDE bridge
-# (no backend needed — it drives the state file the editor plugin writes).
+# test, the same-id/multi-provider model routing test, image paste through a
+# real vision model (EVO_TEST_VISION_MODEL), then the IDE bridge (no backend
+# needed — it drives the state file the editor plugin writes).
 tui-test: build
 	tests/tui.exp
 	tests/model-provider.exp
+	tests/image-paste.exp
 	tests/ide-context.exp
 
 # Seed corpus: docs + example extensions into the global evo home.

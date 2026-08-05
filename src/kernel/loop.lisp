@@ -76,9 +76,13 @@ plugs in here.")
       (funcall cb (append event (list :run-id (agent-run-id agent)
                                       :turn (agent-turn-index agent)))))))
 
-(defun queue-steering (agent text)
+(defun queue-steering (agent text &key images)
+  "Queue a user turn for the next turn boundary.  IMAGES is a list of :image
+content blocks (evo.media builds them); they ride the same queue as the text
+so that a message and its screenshots can never be split across turns."
   (bt:with-lock-held ((agent-lock agent))
-    (setf (agent-steering agent) (append (agent-steering agent) (list text)))))
+    (setf (agent-steering agent)
+          (append (agent-steering agent) (list (list :text text :images images))))))
 
 (defun queue-followup (agent text)
   (bt:with-lock-held ((agent-lock agent))
@@ -92,18 +96,34 @@ plugs in here.")
   (bt:with-lock-held ((agent-lock agent))
     (pop (agent-followups agent))))
 
+(defun steering-content (text images)
+  "Content blocks for one queued user turn.  Images come first: both vision
+stacks read an image better when the text that asks about it follows it."
+  (append images
+          (when (plusp (length (or text "")))
+            (list (list :type :text :text text)))))
+
 (defun drain-steering (agent)
-  "Append queued steering texts as user message entries.  Returns count."
-  (let ((texts (bt:with-lock-held ((agent-lock agent))
-                 (prog1 (agent-steering agent)
-                   (setf (agent-steering agent) nil)))))
-    (dolist (text texts)
-      (append-entry (agent-journal agent)
-                    (list :type :message
-                          :message (list :role :user
-                                         :content (list (list :type :text :text text)))))
-      (emit-event agent :type :steering :text text))
-    (length texts)))
+  "Append queued steering turns as user message entries.  Returns count."
+  (let ((queued (bt:with-lock-held ((agent-lock agent))
+                  (prog1 (agent-steering agent)
+                    (setf (agent-steering agent) nil))))
+        (appended 0))
+    (dolist (item queued)
+      (let* ((text (pget item :text))
+             (images (pget item :images))
+             (content (steering-content text images)))
+        ;; An item with neither text nor images journals nothing, and must not
+        ;; be counted either: the count is what tells the run there is new
+        ;; input to answer.
+        (when content
+          (append-entry (agent-journal agent)
+                        (list :type :message
+                              :message (list :role :user :content content)))
+          (incf appended)
+          (emit-event agent :type :steering :text text
+                            :images (length images)))))
+    appended))
 
 (defvar *executing-agent* nil
   "Agent whose tool call is currently executing on this thread, if any.")

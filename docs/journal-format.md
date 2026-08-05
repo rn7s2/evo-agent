@@ -40,7 +40,9 @@ Every entry carries `:id` (short random hex), `:parent-id` (nil for a root),
 ## Message plists
 
 ```lisp
-(:role :user :content ((:type :text :text "...")))
+(:role :user :content ((:type :image :media-type "image/png" :data "<base64>"
+                        :name "shot.png" :bytes 12345 :source "clipboard")
+                       (:type :text :text "...")))
 (:role :assistant :api :anthropic-messages :provider :anthropic :model "..."
  :stop-reason :tool-use   ; :stop :length :tool-use :error :aborted
  :usage (:input i :output o :cache-read r :cache-write w)  ; older journals may add :cost-usd — ignored
@@ -52,6 +54,13 @@ Every entry carries `:id` (short random hex), `:parent-id` (nil for a root),
 ```
 
 JSON arrays are CL **vectors**, JSON objects are plists — never mix.
+
+An `:image` block carries its bytes inline (base64), so a session is
+self-contained: no sidecar files to lose, and a resumed transcript still shows
+the model what it saw. `:name`, `:bytes` and `:source` are for humans and the
+UI; the wire only needs `:media-type` and `:data`. That is also why
+`evo.media:*max-image-bytes*` exists — an unbounded paste would be an
+unbounded session file.
 
 ## Why it matters to you
 

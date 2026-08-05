@@ -28,6 +28,16 @@
 ;;; model registered there without :effort has a /thinking dial connected to
 ;;; nothing.
 
+;;; Vision.  :vision declares image input and defaults to t, because every
+;;; frontier model now sees.  Declare :vision nil for one that does not: evo
+;;; then degrades a pasted image to a named text placeholder for that model,
+;;; instead of the endpoint rejecting every request that replays it — one
+;;; screenshot would otherwise poison the rest of the session.  This is worth
+;;; measuring too, and for the same reason as the thinking knobs: an endpoint
+;;; that advertises multimodal support may still 400 on an image, and one that
+;;; advertises none may accept the request and quietly drop the image, which
+;;; is worse — the model then answers about a picture it never saw.
+
 ;; DeepSeek v4 over the Anthropic API: 1M context, thinking steered by
 ;; effort.  Its ladder is low/medium/high/xhigh/ultra/max, a superset of
 ;; evo's, so every rung passes through unclamped and :effort t is accurate.
@@ -35,17 +45,17 @@
 (evo:register-model "deepseek-v4-flash"
   :provider :deepseek :api :anthropic-messages
   :context-window 1000000 :max-output 192000
-  :thinking t :effort t)
+  :thinking t :effort t :vision nil)
 
 (evo:register-model "deepseek-v4-pro"
   :provider :deepseek :api :anthropic-messages
   :context-window 1000000 :max-output 192000
-  :thinking t :effort t)
+  :thinking t :effort t :vision nil)
 
 ;; OpenAI Responses API models (272k input window; long-context surcharge
 ;; tiers above that are not modeled).  No :effort declaration, so the level
 ;; maps straight to reasoning.effort — declare a subset if your endpoint
-;; rejects the top rungs.
+;; rejects the top rungs.  These take image input, so :vision stays default.
 (evo:register-model "gpt-5.6-sol"
   :provider :openai :api :openai-responses
   :context-window 272000 :max-output 128000 :thinking t)

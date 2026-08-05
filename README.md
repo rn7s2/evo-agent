@@ -55,6 +55,7 @@ evo -p "run ls and summarize"           # print mode: text on stdout
 evo --events -p "..."                  # line-delimited sexpr events
 evo --goal "make ./test.sh pass"       # goal run; survives its own death
 evo --resume                           # reopen the latest session here
+evo --image shot.png -p "what broke?"  # attach an image to the prompt
 evo --list-sessions
 ```
 
@@ -90,7 +91,12 @@ point.
   cooperative abort (flag + socket close, never `interrupt-thread`).
 - **Handoff pass** at request build: same-model thinking replays verbatim;
   cross-model thinking degrades gracefully; orphaned tool calls get synthetic
-  error results; errored and aborted turns are elided.
+  error results; errored and aborted turns are elided; images degrade to a
+  named text placeholder for a model registered `:vision nil`, so switching to
+  a text-only model mid-session costs a screenshot, not every turn after it.
+- **Images are first-class input**: an `:image` block carries base64 bytes and
+  a sniffed media type, encoded as an Anthropic `image` source or an OpenAI
+  `input_image` data URL. See *Images in* below for how one gets there.
 - **Retry** in three layers: in-request HTTP retry with `retry-after` and
   backoff, error normalization on typed codes (not regex), and turn-level retry
   on finished error messages.
@@ -210,8 +216,9 @@ the essential ones cannot be disabled.
 
 - **TUI** — adaptive renderer in normal scrollback + managed bottom region,
   SIGWINCH live reflow, multi-line editor (Enter sends, Shift+Enter newline,
-  paste >3 lines collapses to a placeholder, paste-to-expand), slash commands,
-  streaming rendering, `--swank` developer side-door.
+  paste >3 lines collapses to a placeholder, paste-to-expand), image paste
+  (ctrl+v), slash commands, streaming rendering, `--swank` developer
+  side-door.
 - **Todo** — checklist tool rendered in the panel; state rides `:custom`
   entries (invisible to the LLM), survives restart and compaction, embedded in
   goal continuation steering.
@@ -222,6 +229,27 @@ the essential ones cannot be disabled.
   is off. The reference implementation of the extension API's depth.
 - **Memory** — structured global/project memory, injected once per session.
 
+### Images in
+
+Two gestures, one path — both end as a `[Image #n]` token in the editor:
+
+- **ctrl+v** grabs the system clipboard (macOS pasteboard, `wl-paste`,
+  `xclip`); a screenshot, a copied image, or an image file copied in a file
+  manager all work.
+- **Pasting or dropping an image file's path** attaches the file. A paste
+  attaches only when it is *nothing but* paths to images — prose that mentions
+  a `.png` stays prose.
+- **`/image [path ...]`** does the same for a typed path, or the clipboard
+  with no argument; `--image` does it for headless runs.
+
+The token is the whole interface: it shows the image is attached, marks where
+in the message it sits, and deletes with backspace like any other text — only
+attachments whose token survives to Enter are sent. Images travel by value
+(base64 in the block, and so in the journal), which keeps a session
+self-contained and replayable with no side files to lose. Oversized images are
+downscaled first (`sips`, ImageMagick) rather than rejected, and a model
+registered without vision gets a named placeholder instead of a 400.
+
 ### Skills, templates, slash commands
 
 - **Skills**: the Agent Skills standard (SKILL.md + frontmatter) with
@@ -231,8 +259,8 @@ the essential ones cannot be disabled.
   and `$@` substitution.
 - **Slash command resolution**: extension commands → builtins → skills →
   prompt templates → send to the agent. Built-ins: `/goal /lore /global-lore
-  /memory /global-memory /permission /compact /eval /tree /fork /resume /model
-  /reload /export /help /quit /exit`.
+  /memory /global-memory /permission /compact /image /eval /tree /fork /resume
+  /model /reload /export /help /quit /exit`.
 - **`/eval <sexpr>`**: a REPL into the live image. The content is read and
   evaluated in `EVO.USER` — the same package extensions and agent-written code
   live in — so registered tools, extension state and `evo:*agent*` are all
@@ -263,6 +291,11 @@ evaluated in that order on every boot — an override is just a later call.
 (evo:register-model "deepseek-v4-pro"
   :provider :deepseek :api :anthropic-messages    ; :api = wire protocol
   :context-window 1000000 :max-output 192000 :thinking t
+  :vision nil                   ; text-only endpoint: pasted images degrade to
+                                ;   a text placeholder for it.  :vision
+                                ;   defaults to t, so declare nil for a model
+                                ;   that rejects images — or, worse, accepts
+                                ;   and silently ignores them
   :effort t)                    ; effort ladder the endpoint accepts (t = all
                                 ;   of low/medium/high/xhigh/max, or a subset);
                                 ;   a level above it is clamped, not rejected.
@@ -298,12 +331,15 @@ implement the generics, `evo:register-api` it, and a model can name it via
 make test           # unit: sexpr IO, journal, schema, registries, provider
                     #       APIs, SSE + transport, request builders, handoff,
                     #       init files, preflight, editor, input parser,
-                    #       templates, compaction, lore, plan-mode
+                    #       templates, compaction, lore, plan-mode, images
 make integration    # live e2e: tool round-trip, kill -9 + manual resume,
                     #       goal completion, induced-crash supervision,
-                    #       mid-task compaction. Backend via env (skips if
-                    #       unreachable): EVO_TEST_BASE_URL / _API_KEY / _MODEL
-make tui-test       # expect-driven TUI under a pty
+                    #       mid-task compaction, --image into a vision model.
+                    #       Backend via env (skips if unreachable):
+                    #       EVO_TEST_BASE_URL / _API_KEY / _MODEL
+                    #       (+ optional _VISION_MODEL for the image test)
+make tui-test       # expect-driven TUI under a pty, image paste included
+                    #       (EVO_TEST_VISION_MODEL)
 tests/plan-mode.exp # plan/auto mode wiring e2e
 ```
 
@@ -319,7 +355,10 @@ src/packages.lisp        the whole package graph (kernel locked; EVO.USER open;
 src/port/                EVO.PORT — implementation portability layer, the only
   port.lisp              code allowed to touch sb-* / ext: / si: symbols
 src/util/                EVO.UTIL
-  util.lisp              safe sexpr IO, settings store, ids
+  util.lisp              safe sexpr IO, settings store, ids, base64
+src/media/               EVO.MEDIA
+  media.lisp             images in: clipboard readers, media-type sniffing,
+                         size cap + downscaling, :image block construction
 src/journal/             EVO.JOURNAL
   journal.lisp           entry tree, write-ahead append, fold, fork, sessions
 
