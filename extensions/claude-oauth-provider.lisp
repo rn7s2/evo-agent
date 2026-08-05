@@ -143,7 +143,6 @@ turns: one with text/thinking blocks and one with tool_use blocks."
   (let ((dir (merge-pathnames "claude-oauth/"
                               (or (uiop:getenv "EVO_HOME")
                                   (merge-pathnames ".evo/" (user-homedir-pathname))))))
-    (ensure-directories-exist dir)
     dir))
 
 (defun claude-oauth--token-file ()
@@ -163,6 +162,7 @@ turns: one with text/thinking blocks and one with tool_use blocks."
 
 (defun claude-oauth--write-tokens (access-token refresh-token &optional expires-at refresh-token-expires-at)
   (let ((path (claude-oauth--token-file)))
+    (ensure-directories-exist path)
     (with-open-file (out path :direction :output :if-exists :supersede
                              :if-does-not-exist :create)
       (prin1 (list :access-token access-token
@@ -579,11 +579,15 @@ Returns a list of registered model-id strings."
 ;; init.lisp runs before extensions, so it can pick the default model after
 ;; registration is complete.  The extension only makes models available; it
 ;; never overrides the user's choice.
-(handler-case
-    (claude-oauth--register-fetched-models (claude-oauth--fetch-models))
-  (error (e)
-    (format *error-output* "~&[claude-oauth] Could not fetch models at load time: ~a~%~
-                              Run /claude-oauth:login then /reload to register models.~%" e)))
+;;
+;; Silent when no token is present — users who don't use this provider
+;; shouldn't see any output on every startup.
+(when (claude-oauth--resolve-token)
+  (handler-case
+      (claude-oauth--register-fetched-models (claude-oauth--fetch-models))
+    (error (e)
+      (format *error-output* "~&[claude-oauth] Could not fetch models at load time: ~a~%~
+                              Run /claude-oauth:login then /reload to register models.~%" e))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Slash commands
