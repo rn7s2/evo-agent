@@ -48,9 +48,18 @@ jobs:
           restore-keys: |
             quicklisp-${{ runner.os }}-${{ matrix.lisp }}-
 
+      # Gate on the filesystem, not on cache-hit.  The cache key hashes
+      # evo.asd, so any PR that touches the system definition misses the exact
+      # key -- but restore-keys still restores ~/quicklisp from the prefix
+      # match, and quicklisp-quickstart:install ERRORS on an existing install
+      # ("Quicklisp has already been installed").  Keying the skip on what is
+      # actually on disk is right whichever way the cache resolved.
       - name: Bootstrap Quicklisp
-        if: steps.cache-quicklisp.outputs.cache-hit != 'true'
         run: |
+          if [ -f ~/quicklisp/setup.lisp ]; then
+            echo "Quicklisp restored from cache; skipping install."
+            exit 0
+          fi
           curl -o /tmp/quicklisp.lisp https://beta.quicklisp.org/quicklisp.lisp
           if [ "${{ matrix.lisp }}" = ecl ]; then
             ecl -q --load /tmp/quicklisp.lisp \
