@@ -43,6 +43,7 @@
   (:use :cl :evo.util)
   (:export #:find-model #:all-models #:model-providers
            #:model-context-window #:model-max-output
+           #:model-effort #:model-thinking-mode #:+effort-levels+
            #:register-model* #:register-provider* #:provider-config
            #:reset-user-registries
            #:call-provider #:provider-error

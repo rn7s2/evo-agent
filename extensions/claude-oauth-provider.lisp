@@ -546,6 +546,14 @@ access token.  Returns a parsed JSON object (hash-table) or signals an error."
           (t
            (fail status body)))))))
 
+(defun claude-oauth--cap-supported-p (obj key)
+  "T when OBJ (a capabilities hash-table) has KEY marked supported.  The
+/v1/models response nests one {\"supported\": bool} object per capability,
+including one per effort level, which is where a model's effort ladder and
+thinking mode come from."
+  (let ((sub (and obj (hash-table-p obj) (gethash key obj))))
+    (and sub (hash-table-p sub) (gethash "supported" sub) t)))
+
 (defun claude-oauth--register-fetched-models (json)
   "Register every model in the JSON response (hash-table with \"data\" array).
 Returns a list of registered model-id strings."
@@ -557,13 +565,25 @@ Returns a list of registered model-id strings."
           when id
             collect (let* ((caps (gethash "capabilities" entry))
                            (thinking-obj (and caps (gethash "thinking" caps)))
-                           (thinking (and thinking-obj (gethash "supported" thinking-obj))))
+                           (thinking (and thinking-obj (gethash "supported" thinking-obj)))
+                           (types (and thinking-obj (gethash "types" thinking-obj)))
+                           (adaptive (claude-oauth--cap-supported-p types "adaptive"))
+                           (effort-obj (and caps (gethash "effort" caps)))
+                           (effort (and (claude-oauth--cap-supported-p caps "effort")
+                                        (loop for level in '("low" "medium" "high"
+                                                             "xhigh" "max")
+                                              when (claude-oauth--cap-supported-p
+                                                    effort-obj level)
+                                                collect (intern (string-upcase level)
+                                                                :keyword)))))
                       (evo:register-model id
                                           :provider :anthropic-oauth
                                           :api :anthropic-oauth-messages
                                           :context-window (or (gethash "max_input_tokens" entry) 200000)
                                           :max-output (or (gethash "max_tokens" entry) 64000)
-                                          :thinking (if thinking t nil))
+                                          :thinking (if thinking t nil)
+                                          :effort effort
+                                          :thinking-mode (if adaptive :adaptive :extended))
                       id))))
 
 ;;; ---------------------------------------------------------------------------

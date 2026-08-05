@@ -12,7 +12,8 @@
   /todo                toggle the todo panel
   /permission [auto|plan] switch mode from a list (shift+tab toggles)
   /model [id]          pick the model from a list, or set it directly
-  /thinking [level]    off·low·medium·high·xhigh·max
+  /thinking [level]    off·low·medium·high·xhigh·max (changing it mid-session
+                       drops the provider prompt cache)
   /compact [hint]      compact the context now
   /lore [text]         show project+session lore (with ids), or add project-scope guidance; ask me to edit/remove by id
   /global-lore [text]  show global (every project) lore, or add user-scope guidance

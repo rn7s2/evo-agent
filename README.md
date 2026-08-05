@@ -38,7 +38,8 @@ it — copy the sample at [docs/examples/init.lisp](docs/examples/init.lisp) to
 ```lisp
 (evo:register-model "claude-sonnet-5"
   :provider :anthropic :api :anthropic-messages
-  :context-window 200000 :max-output 64000 :thinking t)
+  :context-window 200000 :max-output 64000
+  :thinking t :effort t :thinking-mode :adaptive)
 (evo:set-setting :model "claude-sonnet-5")
 ```
 
@@ -259,7 +260,11 @@ evaluated in that order on every boot — an override is just a later call.
 ```lisp
 (evo:register-model "claude-sonnet-5"
   :provider :anthropic :api :anthropic-messages   ; :api = wire protocol
-  :context-window 200000 :max-output 64000 :thinking t)
+  :context-window 200000 :max-output 64000 :thinking t
+  :effort t                     ; effort ladder the model accepts (t = all of
+                                ;   low/medium/high/xhigh/max, or a subset);
+                                ;   a level above it is clamped, not rejected
+  :thinking-mode :adaptive)     ; :extended (budget_tokens) on 4.5 and older
 (evo:set-setting :model "claude-sonnet-5")
 
 ;; Optional (kernel defaults exist for all of these):

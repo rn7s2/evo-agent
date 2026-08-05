@@ -189,11 +189,22 @@ A :tool-call hook may return (:block t :reason ...) or (:arguments ...)."
   "Register a model in init.lisp:
  (evo:register-model \"claude-sonnet-5\" :provider :anthropic
    :api :anthropic-messages :context-window 200000 :max-output 64000
-   :thinking t)
+   :thinking t :effort t :thinking-mode :adaptive)
 A model's identity is its (id, provider) pair: register the same id under a
 different provider and both are selectable (e.g. direct vs. proxy).
 Re-registering the same pair replaces it in place; evo ships no built-in
-models."
+models.
+
+:effort declares the levels the model accepts for Anthropic's
+output_config.effort — t for all of (:low :medium :high :xhigh :max), a
+subset list for models that stop short (Opus 4.5 has no xhigh or max), nil
+(the default) for models without the parameter.  A thinking level above
+what the model supports is clamped down rather than rejected.
+
+:thinking-mode is :extended (the default — thinking.budget_tokens) or
+:adaptive, where the model decides when to think and evo sends a mode
+instead of a budget.  Anthropic models from 4.6 on are :adaptive; on 4.7
+and later budget_tokens is rejected outright."
   (apply #'evo.provider:register-model* id args))
 
 (defun register-provider (key &rest args)

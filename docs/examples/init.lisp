@@ -9,18 +9,35 @@
 ;;; :openai-responses); :provider names an endpoint config (see below).
 ;;; The /model picker lists models in registration order.
 
+;;; Anthropic models from 4.6 on take output_config.effort and adaptive
+;;; thinking: declare :effort (t = all of low/medium/high/xhigh/max, or the
+;;; subset the model accepts) and :thinking-mode :adaptive.  Older models
+;;; keep the default :extended mode, where the thinking level becomes a
+;;; thinking.budget_tokens value instead.
+
 (evo:register-model "claude-fable-5"
   :provider :anthropic :api :anthropic-messages
-  :context-window 200000 :max-output 64000 :thinking t)
+  :context-window 200000 :max-output 64000
+  :thinking t :effort t :thinking-mode :adaptive)
 
 (evo:register-model "claude-opus-5"
   :provider :anthropic :api :anthropic-messages
-  :context-window 200000 :max-output 64000 :thinking t)
+  :context-window 200000 :max-output 64000
+  :thinking t :effort t :thinking-mode :adaptive)
 
 (evo:register-model "claude-sonnet-5"
   :provider :anthropic :api :anthropic-messages
-  :context-window 200000 :max-output 64000 :thinking t)
+  :context-window 200000 :max-output 64000
+  :thinking t :effort t :thinking-mode :adaptive)
 
+;; Sonnet 4.6 stops at :max with no :xhigh rung; a request for :xhigh is
+;; clamped to the strongest level below it that the model does support.
+(evo:register-model "claude-sonnet-4-6"
+  :provider :anthropic :api :anthropic-messages
+  :context-window 200000 :max-output 64000
+  :thinking t :effort '(:low :medium :high :max) :thinking-mode :adaptive)
+
+;; Extended-thinking-only: no effort parameter, budget_tokens instead.
 (evo:register-model "claude-haiku-4-5-20251001"
   :provider :anthropic :api :anthropic-messages
   :context-window 200000 :max-output 64000 :thinking t)

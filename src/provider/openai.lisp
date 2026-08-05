@@ -39,6 +39,15 @@
 (defmethod thinking-param ((api openai-responses-api) level)
   (reasoning-effort level))
 
+(defun model-reasoning-effort (model level)
+  "Effort string for MODEL at LEVEL.  A model that declares :effort gets the
+request clamped to its ladder first — the stock Responses API tops out at
+\"high\", so :xhigh and :max are only sent to endpoints that claim them."
+  (let ((declared (model-effort model)))
+    (reasoning-effort (if declared
+                          (or (clamp-effort level declared) level)
+                          level))))
+
 ;;; Request building.
 ;;;
 ;;; History -> `input` items.  One unified message can fan out to several
@@ -135,7 +144,8 @@ level, not nested under \"function\"."
 (defun build-responses-request-json (&key model system messages tools
                                           thinking-level cache-key)
   (let* ((model-id (pget model :id))
-         (effort (and (pget model :thinking) (reasoning-effort thinking-level)))
+         (effort (and (pget model :thinking)
+                      (model-reasoning-effort model thinking-level)))
          (req (jobj "model" model-id
                     "stream" t
                     "store" nil

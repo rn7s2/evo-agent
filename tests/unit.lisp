@@ -2670,7 +2670,102 @@ selection journals the provider, and every resolution point honours it."
     (let ((raw2 (build-request (find-api :anthropic-messages)
                                :model model :system nil :messages history
                                :tools nil :thinking-level :off)))
-      (check "anth req no thinking at :off" (not (search "budget_tokens" raw2))))))
+      (check "anth req no thinking at :off" (not (search "budget_tokens" raw2))))
+    (check "anth req no output_config without :effort"
+           (not (search "output_config" raw)))))
+
+;;; output_config.effort: the level dial on models that have one.
+
+(defun test-anthropic-effort ()
+  (let* ((history (list '(:role :user :content ((:type :text :text "go")))))
+         (adaptive '(:id "fixture-adaptive" :provider :anthropic
+                     :api :anthropic-messages :context-window 200000
+                     :max-output 64000 :thinking t :thinking-mode :adaptive
+                     :effort (:low :medium :high :xhigh :max)))
+         (capped '(:id "fixture-capped" :provider :anthropic
+                   :api :anthropic-messages :context-window 200000
+                   :max-output 64000 :thinking t :thinking-mode :adaptive
+                   :effort (:low :medium :high)))
+         (extended '(:id "fixture-extended" :provider :anthropic
+                     :api :anthropic-messages :context-window 200000
+                     :max-output 64000 :thinking t
+                     :effort (:low :medium :high)))
+         (req (lambda (model level)
+                (com.inuoe.jzon:parse
+                 (build-request (find-api :anthropic-messages)
+                                :model model :system nil :messages history
+                                :tools nil :thinking-level level)))))
+    (flet ((effort (model level)
+             (let ((r (funcall req model level)))
+               (evo.provider::jget r "output_config" "effort")))
+           (thinking (model level)
+             (let ((r (funcall req model level)))
+               (gethash "thinking" r))))
+      (check "effort: level maps straight through"
+             (and (equal "max" (effort adaptive :max))
+                  (equal "xhigh" (effort adaptive :xhigh))
+                  (equal "low" (effort adaptive :low))))
+      (check "effort: clamped to the strongest supported level"
+             (and (equal "high" (effort capped :max))
+                  (equal "high" (effort capped :xhigh))
+                  (equal "medium" (effort capped :medium))))
+      (check "effort: none at :off" (null (effort adaptive :off)))
+      (check "adaptive: mode and summaries instead of a budget"
+             (let ((th (thinking adaptive :high)))
+               (and (equal "adaptive" (evo.provider::jget th "type"))
+                    (equal "summarized" (evo.provider::jget th "display"))
+                    (null (gethash "budget_tokens" th)))))
+      (check "adaptive: thinking disabled at :off"
+             (equal "disabled" (evo.provider::jget (thinking adaptive :off) "type")))
+      (check "extended: effort composes with budget_tokens"
+             (let ((r (funcall req extended :high)))
+               (and (equal "high" (evo.provider::jget r "output_config" "effort"))
+                    (= 16384 (evo.provider::jget r "thinking" "budget_tokens")))))
+      (check "extended: no thinking block at :off"
+             (null (thinking extended :off))))))
+
+;;; Model registry: effort declarations are validated and canonicalized.
+
+(defun test-model-effort-registration ()
+  (reset-user-registries)
+  (register-model* "eff-all" :provider :anthropic :api :anthropic-messages
+                   :context-window 1000 :max-output 100 :effort t
+                   :thinking-mode :adaptive)
+  (register-model* "eff-some" :provider :anthropic :api :anthropic-messages
+                   :context-window 1000 :max-output 100 :effort '(:max :low))
+  (register-model* "eff-none" :provider :anthropic :api :anthropic-messages
+                   :context-window 1000 :max-output 100)
+  (check "registry: :effort t expands to the full ladder"
+         (equal '(:low :medium :high :xhigh :max) (model-effort (find-model "eff-all"))))
+  (check "registry: subset kept in ladder order"
+         (equal '(:low :max) (model-effort (find-model "eff-some"))))
+  (check "registry: no effort by default"
+         (null (model-effort (find-model "eff-none"))))
+  (check "registry: thinking mode recorded"
+         (and (eq :adaptive (model-thinking-mode (find-model "eff-all")))
+              (eq :extended (model-thinking-mode (find-model "eff-none")))))
+  (check-signals "registry: bogus effort level rejected"
+                 (register-model* "eff-bad" :provider :anthropic
+                                  :api :anthropic-messages :context-window 1000
+                                  :max-output 100 :effort '(:huge)))
+  (check "openai: effort clamped to a declared ladder"
+         (let* ((capped '(:id "fixture-capped-oai" :provider :openai
+                          :api :openai-responses :context-window 1000
+                          :max-output 100 :thinking t
+                          :effort (:low :medium :high)))
+                (open '(:id "fixture-open-oai" :provider :openai
+                        :api :openai-responses :context-window 1000
+                        :max-output 100 :thinking t)))
+           (and (equal "high" (evo.provider::model-reasoning-effort capped :max))
+                (equal "medium" (evo.provider::model-reasoning-effort capped :medium))
+                ;; No declaration: the level maps straight through, as before.
+                (equal "xhigh" (evo.provider::model-reasoning-effort open :xhigh)))))
+  (check-signals "registry: bogus thinking mode rejected"
+                 (register-model* "eff-bad-mode" :provider :anthropic
+                                  :api :anthropic-messages :context-window 1000
+                                  :max-output 100 :thinking-mode :sometimes))
+  (reset-user-registries)
+  (register-fixture-models))
 
 ;;; Init files (config-as-code) + CLI preflight
 
@@ -2758,6 +2853,8 @@ selection journals the provider, and every resolution point honours it."
     (test-sse-transport)
     (test-handoff)
     (test-anthropic-request)
+    (test-anthropic-effort)
+    (test-model-effort-registration)
     (test-openai-sse)
     (test-openai-request)
     (test-port-timeout)
