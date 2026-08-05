@@ -33,6 +33,7 @@
     (:medium "medium")
     (:high "high")
     (:xhigh "xhigh")
+    (:max "max")
     (t nil)))
 
 (defmethod thinking-param ((api openai-responses-api) level)

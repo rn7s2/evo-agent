@@ -72,7 +72,7 @@
 ;; registration wins by default; :model-provider names a different one.
 ;; /model overrides both for the session.
 ;; (evo:set-setting :model-provider :ark)
-;; (evo:set-setting :thinking :medium)        ; off|low|medium|high|xhigh
+;; (evo:set-setting :thinking :medium)        ; off|low|medium|high|xhigh|max
 ;; (evo:set-setting :goal-token-budget 500000)
 ;; (evo:set-setting :compact-reserve 16000)
 ;; (evo:set-setting :compact-keep-recent 20000)

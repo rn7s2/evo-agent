@@ -632,7 +632,7 @@ wrapped between two rules, and the model status line under the editbox."
     ("todo" . "toggle the todo panel")
     ("permission" . "switch auto/plan mode (shift+tab toggles)")
     ("model" . "pick the model from a list, or set it directly")
-    ("thinking" . "off·low·medium·high·xhigh")
+    ("thinking" . "off·low·medium·high·xhigh·max")
     ("compact" . "compact the context now")
     ("lore" . "show lore, or add project-scope guidance")
     ("global-lore" . "show lore, or add user-scope guidance")

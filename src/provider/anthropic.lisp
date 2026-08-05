@@ -29,6 +29,7 @@
     (:medium 8192)
     (:high 16384)
     (:xhigh 32768)
+    (:max 60000)
     (t nil)))
 
 (defmethod thinking-param ((api anthropic-messages-api) level)

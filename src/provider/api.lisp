@@ -54,7 +54,7 @@ running the handoff pass over MESSAGES."))
 described in the file header."))
 
 (defgeneric thinking-param (api level)
-  (:documentation "Map a thinking LEVEL (:off :low :medium :high :xhigh) to
+  (:documentation "Map a thinking LEVEL (:off :low :medium :high :xhigh :max) to
 the API's native parameter (Anthropic budget_tokens integer, OpenAI effort
 string).  NIL means thinking off."))
 

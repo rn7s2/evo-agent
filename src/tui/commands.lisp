@@ -12,7 +12,7 @@
   /todo                toggle the todo panel
   /permission [auto|plan] switch mode from a list (shift+tab toggles)
   /model [id]          pick the model from a list, or set it directly
-  /thinking [level]    off·low·medium·high·xhigh
+  /thinking [level]    off·low·medium·high·xhigh·max
   /compact [hint]      compact the context now
   /lore [text]         show project+session lore (with ids), or add project-scope guidance; ask me to edit/remove by id
   /global-lore [text]  show global (every project) lore, or add user-scope guidance
@@ -367,12 +367,12 @@ lists only global (every project) lore — mirroring /memory vs /global-memory."
          t)
         ((cmd "thinking")
          (let ((level (intern (string-upcase args) :keyword)))
-           (cond ((member level '(:off :low :medium :high :xhigh))
+           (cond ((member level '(:off :low :medium :high :xhigh :max))
                   (append-entry (agent-journal agent)
                                 (list :type :thinking-change :thinking level))
                   (refresh-goal tui)
                   (scroll tui (dim (format nil "thinking → ~(~a~)" level))))
-                 (t (scroll tui (dim "levels: off low medium high xhigh")))))
+                 (t (scroll tui (dim "levels: off low medium high xhigh max")))))
          t)
         ((cmd "compact")
          (if (require-idle tui "/compact")

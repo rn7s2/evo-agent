@@ -2401,11 +2401,11 @@ event: response.completed~%data: {\"type\":\"response.completed\",\"response\":{
   (check "find-api openai" (find-api :openai-responses))
   (check-signals "unknown api signals" (find-api :no-such-api))
   (check "anthropic thinking-param is a budget"
-         (= 8192 (thinking-param (find-api :anthropic-messages) :medium)))
+         (= 60000 (thinking-param (find-api :anthropic-messages) :max)))
   (check "anthropic thinking off"
          (null (thinking-param (find-api :anthropic-messages) :off)))
   (check "openai thinking-param is an effort string"
-         (equal "medium" (thinking-param (find-api :openai-responses) :medium)))
+         (equal "max" (thinking-param (find-api :openai-responses) :max)))
   (check "openai thinking off"
          (null (thinking-param (find-api :openai-responses) :off)))
   (check "endpoint paths"

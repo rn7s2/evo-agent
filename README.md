@@ -263,7 +263,7 @@ evaluated in that order on every boot — an override is just a later call.
 (evo:set-setting :model "claude-sonnet-5")
 
 ;; Optional (kernel defaults exist for all of these):
-(evo:set-setting :thinking :medium)          ; off low medium high xhigh
+(evo:set-setting :thinking :medium)          ; off low medium high xhigh max
 (evo:set-setting :goal-token-budget 2000000) ; per-goal token cap; omit = no limit
 ;; :compact-reserve / :compact-keep-recent tune compaction.
 
