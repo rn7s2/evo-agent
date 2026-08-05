@@ -85,16 +85,27 @@ while the run thread is appending to it."
          ;; Defensive: a missing/unregistered model (e.g. /reload removed
          ;; it) must not kill the render thread — /model is the recovery.
          (model-id (handler-case (evo.kernel:effective-model-id state agent)
-                     (error () nil))))
+                     (error () nil)))
+         ;; Resolve once: the label, the context window and the run all have
+         ;; to agree on WHICH registration is live when an id is served by
+         ;; several providers.
+         (model (and model-id
+                     (handler-case
+                         (find-model model-id
+                                     (evo.kernel:effective-model-provider state model-id))
+                       (error () nil)))))
     (setf (tui-goal tui) (evo.journal:state-goal state)
           (tui-todos tui) (custom-state state "todo")
           (tui-agent-mode tui) (or (custom-state state "mode")
                                    evo.plan:*default-mode*)
-          (tui-model-label tui) (or model-id "(no model)")
-          (tui-context-window tui) (and model-id
-                                        (handler-case
-                                            (model-context-window (find-model model-id))
-                                          (error () nil)))
+          ;; Same id under several providers: name the active one, since the
+          ;; bare id no longer identifies the endpoint on its own.
+          (tui-model-label tui) (cond ((null model-id) "(no model)")
+                                      ((and model (cdr (model-providers model-id)))
+                                       (format nil "~a (~(~a~))" model-id
+                                               (pget model :provider)))
+                                      (t model-id))
+          (tui-context-window tui) (and model (model-context-window model))
           (tui-context-tokens tui) (evo.kernel:estimate-context-tokens
                                     (evo.journal:state-messages state))
           (tui-thinking-label tui) (string-downcase
@@ -137,9 +148,10 @@ the config error and the recovery path — the TUI must stay up, /model
 and /reload are how the registry gets fixed."
   (let ((agent (tui-agent tui)))
     (handler-case
-        (progn (find-model (evo.kernel:effective-model-id
-                            (fold-state (agent-journal agent)) agent))
-               t)
+        (let* ((state (fold-state (agent-journal agent)))
+               (id (evo.kernel:effective-model-id state agent)))
+          (find-model id (evo.kernel:effective-model-provider state id))
+          t)
       (error (e)
         (scroll tui (red (format nil "✗ ~a" e)))
         (scroll tui (dim "recover with /model (pick a registered model) or /reload (after fixing init.lisp)"))

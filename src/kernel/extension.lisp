@@ -190,7 +190,10 @@ A :tool-call hook may return (:block t :reason ...) or (:arguments ...)."
  (evo:register-model \"claude-sonnet-5\" :provider :anthropic
    :api :anthropic-messages :context-window 200000 :max-output 64000
    :thinking t)
-Re-registering an id replaces it in place; evo ships no built-in models."
+A model's identity is its (id, provider) pair: register the same id under a
+different provider and both are selectable (e.g. direct vs. proxy).
+Re-registering the same pair replaces it in place; evo ships no built-in
+models."
   (apply #'evo.provider:register-model* id args))
 
 (defun register-provider (key &rest args)

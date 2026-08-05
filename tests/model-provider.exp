@@ -1,0 +1,134 @@
+#!/usr/bin/expect -f
+# model-provider.exp — one model id served by several providers.
+#
+# The regression: the model registry was keyed by id alone, so registering
+# the same id under a second provider REPLACED the first and only one was
+# ever selectable.  Identity is now (id, provider).  This drives the whole
+# user-visible path under a pty:
+#   - both registrations show up as separate rows in the /model picker;
+#   - a bare :model setting resolves to the FIRST registration (so config
+#     that names an ambiguous id still boots);
+#   - picking a row actually switches the endpoint the run talks to.
+#
+# The routing assertion is the point, so the two providers are told apart by
+# behaviour, not just by label: the first is a dead port and the second is
+# the live backend.  A prompt must fail before the switch and succeed after.
+set timeout 180
+
+set repo [file dirname [file dirname [file normalize $argv0]]]
+set scratch [exec mktemp -d /tmp/evo-modelprov.XXXXXX]
+set env(EVO_HOME) "$scratch/home"
+file mkdir $env(EVO_HOME)
+# Backend config comes from the environment (defaults for the local dev proxy).
+proc envdef {name default} {
+    global env
+    return [expr {[info exists env($name)] ? $env($name) : $default}]
+}
+set base_url [envdef EVO_TEST_BASE_URL ""]
+set api_key  [envdef EVO_TEST_API_KEY  ""]
+set model    [envdef EVO_TEST_MODEL    ""]
+# No backend/key/model is baked into the repo (dev values are in project
+# memory, .evo/).  Without full config this live-model test can't run: fail
+# hard rather than pass vacuously.
+if {$base_url eq "" || $api_key eq "" || $model eq ""} {
+    puts stderr "model-provider.exp: set EVO_TEST_BASE_URL, EVO_TEST_API_KEY and EVO_TEST_MODEL (dev values in project memory)"
+    exit 1
+}
+# Don't inherit a parent supervisor's private env (e.g. when run from inside an
+# agent): let the evo under test manage its own lifecycle and heartbeat.
+foreach v {EVO_SUPERVISED_CHILD EVO_HEARTBEAT_FILE} {
+    if {[info exists env($v)]} { unset env($v) }
+}
+# Same id, two providers.  :deadend is registered FIRST so it is what a bare
+# :model setting resolves to — that makes the "before" half of the routing
+# check fail loudly instead of silently working.
+set f [open "$env(EVO_HOME)/init.lisp" w]
+puts $f "(evo:register-model \"$model\" :provider :deadend :api :anthropic-messages :context-window 1000000 :max-output 64000 :thinking t)"
+puts $f "(evo:register-model \"$model\" :provider :liveproxy :api :anthropic-messages :context-window 1000000 :max-output 64000 :thinking t)"
+puts $f "(evo:register-provider :deadend :base-url \"http://127.0.0.1:1\" :api-key \"$api_key\")"
+puts $f "(evo:register-provider :liveproxy :base-url \"$base_url\" :api-key \"$api_key\")"
+puts $f "(evo:set-setting :model \"$model\")"
+puts $f {(evo:set-setting :thinking :off)}
+close $f
+
+set workdir "$scratch/work"
+file mkdir $workdir
+cd $workdir
+
+set pass 0
+set failures {}
+proc check {name} {
+    global pass
+    incr pass
+    puts "\nPASS: $name"
+}
+proc fail {name} {
+    global failures
+    lappend failures $name
+    puts "\nFAIL: $name"
+}
+
+spawn "$repo/build/evo"
+
+# 1. An ambiguous bare id must still boot: first registration wins, and the
+# status line names which provider that is.
+expect {
+    -re "$model \\(deadend\\)" { check "bare id boots, labelled with first provider" }
+    timeout { fail "startup with ambiguous id"; exit 1 }
+}
+
+# 2. Talking to the dead endpoint fails — proof the run really is routed by
+# the resolved provider and not by the id alone.
+send "hello\r"
+expect {
+    -re {✗|failed|refused|error} { check "first provider routes to its (dead) endpoint" }
+    timeout { fail "dead provider should fail the run" }
+}
+
+# 3. The picker lists BOTH registrations of the id — the actual bug.
+send "/model\r"
+expect {
+    -re "deadend\\s+$model" { check "picker lists the first provider" }
+    timeout { fail "picker lists the first provider" }
+}
+expect {
+    -re "liveproxy\\s+$model" { check "picker lists the second provider" }
+    timeout { fail "picker lists the second provider" }
+}
+
+# 4. Pick the second row; the status line must follow.
+send "\x1b\[B"
+expect {
+    -re {●\s+liveproxy} { check "selection moves to the second provider" }
+    timeout { fail "selection moves to the second provider" }
+}
+send "\r"
+expect {
+    -re "$model \\(liveproxy\\)" { check "status line follows the pick" }
+    timeout { fail "status line follows the pick" }
+}
+
+# 5. The same prompt now reaches the live backend: the pick switched the
+# endpoint, which is what the whole fix is for.
+send "Reply with exactly the word: provider-marker-314\r"
+expect {
+    -re {provider-marker-314} {
+        # the first match is our own echoed prompt; wait for the reply
+        expect {
+            -re {provider-marker-314} { check "second provider routes to the live endpoint" }
+            timeout { fail "round-trip through the picked provider" }
+        }
+    }
+    timeout { fail "round-trip through the picked provider" }
+}
+
+# 6. quit cleanly
+send "/quit\r"
+expect {
+    eof { check "clean quit" }
+    timeout { fail "clean quit"; catch {close} }
+}
+
+puts "\n$pass checks passed, [llength $failures] failed ($scratch)"
+if {[llength $failures] > 0} { exit 1 }
+exit 0

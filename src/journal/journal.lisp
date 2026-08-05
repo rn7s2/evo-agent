@@ -140,6 +140,7 @@ Assigns :id/:parent-id/:timestamp.  Returns the completed entry."
 (defstruct state
   (messages nil)   ; list of message plists, chronological
   model
+  model-provider   ; provider keyword disambiguating MODEL, or nil
   thinking
   tools            ; list of active tool name strings, nil = default set
   goal             ; current goal plist or nil
@@ -190,7 +191,8 @@ user message in <summary> tags, then the retained tail."
                            (remove key (state-custom state)
                                    :key #'car :test #'equal))))))
           (:model-change
-           (setf (state-model state) (pget entry :model)))
+           (setf (state-model state) (pget entry :model)
+                 (state-model-provider state) (pget entry :provider)))
           (:thinking-change
            (setf (state-thinking state) (pget entry :thinking)))
           (:tools-change

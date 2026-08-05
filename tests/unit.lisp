@@ -99,7 +99,14 @@ line2")))
     (append-entry journal '(:type :tools-change :tools #("bash")))
     (let ((state (fold-state journal)))
       (check "model fold" (equal (state-model state) "m2"))
-      (check "tools fold" (equal (state-tools state) '("bash"))))))
+      (check "model fold: no provider for a bare-id entry"
+             (null (state-model-provider state)))
+      (check "tools fold" (equal (state-tools state) '("bash"))))
+    (append-entry journal '(:type :model-change :model "m3" :provider :proxy-co))
+    (let ((state (fold-state journal)))
+      (check "model fold: provider-journaled model" (equal (state-model state) "m3"))
+      (check "model fold: provider folds through"
+             (equal (state-model-provider state) :proxy-co)))))
 
 ;;; Schema emission
 
@@ -2337,6 +2344,27 @@ event: response.completed~%data: {\"type\":\"response.completed\",\"response\":{
          (and (= 2 (length (all-models)))
               (equal "reg-a" (pget (first (all-models)) :id))
               (= 5000 (pget (find-model "reg-a") :context-window))))
+  ;; Same id under a second provider: a distinct, selectable model.
+  (register-model* "reg-dupe" :provider :anthropic :api :anthropic-messages
+                   :context-window 1000 :max-output 100)
+  (register-model* "reg-dupe" :provider :proxy-co :api :anthropic-messages
+                   :context-window 2000 :max-output 200)
+  (check "same id, different provider: both registered"
+         (equal '(:anthropic :proxy-co) (model-providers "reg-dupe")))
+  (check "find-model disambiguates by provider"
+         (and (= 1000 (pget (find-model "reg-dupe" :anthropic) :context-window))
+              (= 2000 (pget (find-model "reg-dupe" :proxy-co) :context-window))))
+  (check "bare id resolves to the first registration"
+         (equal :anthropic (pget (find-model "reg-dupe") :provider)))
+  (check "unknown provider for a known id names the registered ones"
+         (handler-case (progn (find-model "reg-dupe" :nope) nil)
+           (error (e) (let ((s (format nil "~a" e)))
+                        (and (search "reg-dupe" s) (search "proxy-co" s))))))
+  (register-model* "reg-dupe" :provider :proxy-co :api :anthropic-messages
+                   :context-window 3000 :max-output 200)
+  (check "re-register same (id, provider) replaces in place"
+         (and (= 2 (length (model-providers "reg-dupe")))
+              (= 3000 (pget (find-model "reg-dupe" :proxy-co) :context-window))))
   (check "find-model passes plists through"
          (equal "x" (pget (find-model '(:id "x")) :id)))
   (check-signals "unknown model id signals" (find-model "no-such-model"))
@@ -2485,6 +2513,68 @@ here must be reachable through the public EVO package with no ::."
            (equal "a          m" (third labels*)))
     (check "widest provider gets no padding, just the separator"
            (equal "anthropic  claude-opus-5" (first labels*)))))
+
+(defun test-same-id-multi-provider ()
+  "The bug: registering one model id under several providers used to keep
+only the last, so only one was selectable.  Identity is (id, provider);
+selection journals the provider, and every resolution point honours it."
+  (reset-user-registries)
+  (reset-settings)
+  (register-provider* :direct :base-url "https://direct.invalid")
+  (register-provider* :proxy :base-url "https://proxy.invalid")
+  (register-model* "shared-id" :provider :direct :api :anthropic-messages
+                   :context-window 200000 :max-output 64000)
+  (register-model* "shared-id" :provider :proxy :api :anthropic-messages
+                   :context-window 500000 :max-output 32000)
+  ;; 1. Both survive registration and both reach the picker.
+  (check "picker lists every provider for the id"
+         (equal '(:direct :proxy)
+                (mapcar (lambda (m) (pget m :provider))
+                        (remove-if-not (lambda (m) (equal "shared-id" (pget m :id)))
+                                       (all-models)))))
+  ;; 2. A journaled /model choice routes to that provider's endpoint.
+  (let ((journal (make-session-journal "/tmp")))
+    (append-entry journal '(:type :model-change :model "shared-id" :provider :proxy))
+    (let* ((state (fold-state journal))
+           (agent (make-agent :journal journal))
+           (id (effective-model-id state agent))
+           (model (find-model id (evo.kernel:effective-model-provider state id))))
+      (check "journaled choice resolves to its provider"
+             (equal :proxy (pget model :provider)))
+      (check "journaled choice carries that provider's config"
+             (equal 500000 (pget model :context-window)))
+      (check "journaled choice hits that provider's endpoint"
+             (equal "https://proxy.invalid"
+                    (pget (provider-config (pget model :provider)) :base-url)))))
+  ;; 3. No journaled provider: first registration wins, so a bare :model
+  ;; setting still boots instead of erroring on the ambiguity.
+  (let* ((journal (make-session-journal "/tmp"))
+         (state (fold-state journal)))
+    (set-setting :model "shared-id")
+    (let* ((agent (make-agent :journal journal))
+           (id (effective-model-id state agent))
+           (model (find-model id (evo.kernel:effective-model-provider state id))))
+      (check "bare default resolves to the first registration"
+             (equal :direct (pget model :provider))))
+    ;; 4. :model-provider names a different default without touching order.
+    (set-setting :model-provider :proxy)
+    (let* ((agent (make-agent :journal journal))
+           (id (effective-model-id state agent))
+           (model (find-model id (evo.kernel:effective-model-provider state id))))
+      (check ":model-provider setting selects the default provider"
+             (equal :proxy (pget model :provider))))
+    ;; 5. A stale setting naming a provider that doesn't serve this id is
+    ;; ignored rather than breaking an unrelated model.
+    (register-model* "solo-id" :provider :direct :api :anthropic-messages
+                     :context-window 1000 :max-output 100)
+    (set-setting :model "solo-id")
+    (let* ((agent (make-agent :journal journal))
+           (id (effective-model-id state agent)))
+      (check "stale :model-provider is ignored for an id it doesn't serve"
+             (equal :direct (pget (find-model id (evo.kernel:effective-model-provider state id))
+                                  :provider)))))
+  (reset-settings)
+  (reset-user-registries))
 
 (defun register-fixture-models ()
   "The unit suite's stand-in for init.lisp: the model registry ships empty."
@@ -2662,6 +2752,7 @@ here must be reachable through the public EVO package with no ::."
     (test-apis)
     (test-extension-apis)
     (test-model-picker-labels)
+    (test-same-id-multi-provider)
     (register-fixture-models)
     (test-sse)
     (test-sse-transport)

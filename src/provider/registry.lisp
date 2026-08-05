@@ -16,8 +16,11 @@
   "Registered model plists, in registration order.")
 
 (defun register-model* (id &key provider api context-window max-output (thinking t))
-  "Register (or replace, keeping position) a model.  Validates eagerly so
-a typo errors at init-load time, not mid-run."
+  "Register (or replace, keeping position) a model.  A model's identity is
+its (id, provider) pair: the same id under different providers (direct vs.
+proxy) are distinct, both selectable models; re-registering the same pair
+replaces it in place.  Validates eagerly so a typo errors at init-load
+time, not mid-run."
   (unless (and (stringp id) (plusp (length id)))
     (error "register-model: id must be a non-empty string, got ~s" id))
   (find-api api)                        ; unknown :api errors here
@@ -32,18 +35,43 @@ a typo errors at init-load time, not mid-run."
   (let ((model (list :id id :provider provider :api api
                      :context-window context-window :max-output max-output
                      :thinking (and thinking t)))
-        (tail (member id *models* :key (lambda (m) (pget m :id)) :test #'string=)))
+        (tail (member t *models*
+                      :key (lambda (m) (and (string= (pget m :id) id)
+                                            (equal (pget m :provider) provider))))))
     (if tail
         (setf (car tail) model)         ; replace in place: picker position stable
         (setf *models* (append *models* (list model))))
     id))
 
+(defun model-providers (id)
+  "Providers registered for ID, in registration order.  More than one means
+the bare id is ambiguous — callers disambiguate with FIND-MODEL's PROVIDER."
+  (mapcar (lambda (m) (pget m :provider))
+          (remove-if-not (lambda (m) (string= (pget m :id) id)) *models*)))
+
 (defun all-models () *models*)
 
-(defun find-model (id)
+(defun find-model (id &optional provider)
   "Resolve a model id to its registered plist.  Plists pass through
-\(call-provider convenience).  No fallback: an unknown id is a config error."
+\(call-provider convenience).  With PROVIDER, match that exact provider —
+how a journaled /model choice names which of several same-id entries it
+meant.  A bare id resolves to the FIRST registration of that id: the same
+id under several providers is legal, so the default has to be a rule, and
+registration order is the one the user wrote.  Session-level selection is
+explicit (the picker journals :provider), so first-wins only ever decides
+the initial default.  No fallback: an unknown id is a config error."
   (cond ((consp id) id)
+        (provider
+         (or (find-if (lambda (m) (and (string= (pget m :id) id)
+                                       (equal (pget m :provider) provider)))
+                      *models*)
+             (error "Unknown model ~s for provider ~(~a~).~%~
+                     Registered providers for ~s: ~:[none~;~:*~{~(~a~)~^, ~}~]~%~
+                     Register it in init.lisp or post-init.lisp:~%  ~
+                     (evo:register-model ~s~%    ~
+                     :provider ~(~s~) :api :anthropic-messages~%    ~
+                     :context-window 200000 :max-output 64000 :thinking t)"
+                    id provider id (model-providers id) id provider)))
         ((find id *models* :key (lambda (m) (pget m :id)) :test #'string=))
         (t (error "Unknown model ~s: no registered model has that id.~%~
                    Registered models: ~:[none — is your init.lisp or post-init.lisp missing?~;~:*~{~a~^, ~}~]~%~

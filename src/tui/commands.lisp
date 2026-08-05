@@ -221,20 +221,24 @@ argument check never go stale against the core extension."
                                 (mapcar #'car evo.plan:*modes*))))))
   t)
 
-(defun set-model (tui id)
-  (handler-case (find-model id)
-    (error (e)
-      (scroll tui (dim (format nil "~a" e)))
-      (return-from set-model)))
-  (append-entry (agent-journal (tui-agent tui))
-                (list :type :model-change :model id))
-  (refresh-goal tui)
-  (scroll tui (dim (format nil "model → ~a (next turn)" id)))
-  ;; A submit blocked by the model gate left its steering queued in
-  ;; memory; a valid model releases it.
-  (when (and (steering-pending-p (tui-agent tui))
-             (not (tui-running tui)))
-    (start-worker tui)))
+(defun set-model (tui model)
+  (let ((resolved (handler-case (find-model model)
+                    (error (e)
+                      (scroll tui (dim (format nil "~a" e)))
+                      (return-from set-model)))))
+    (append-entry (agent-journal (tui-agent tui))
+                  (list :type :model-change :model (pget resolved :id)
+                        :provider (pget resolved :provider)))
+    (refresh-goal tui)
+    (scroll tui (dim (format nil "model → ~a~@[ (~(~a~))~] (next turn)"
+                             (pget resolved :id)
+                             (and (cdr (model-providers (pget resolved :id)))
+                                  (pget resolved :provider)))))
+    ;; A submit blocked by the model gate left its steering queued in
+    ;; memory; a valid model releases it.
+    (when (and (steering-pending-p (tui-agent tui))
+               (not (tui-running tui)))
+      (start-worker tui))))
 
 (defun format-context-window (n)
   "200000 -> \"200k\", 1000000 -> \"1M\": the picker's description column is
@@ -256,8 +260,15 @@ through a proxy differ only by that word."
 (defun model-select-command (tui)
   "Choose box: pick the model from the registry, current one preselected.
 The renderer pads every label to the widest one, so padding the provider
-here lines up the id column too — provider, id and context each align."
-  (let* ((current (tui-model-label tui))
+here lines up the id column too — provider, id and context each align.
+The selection value is the full model plist: the same id under different
+providers are distinct entries, and the journaled choice must say which."
+  (let* ((agent (tui-agent tui))
+         (state (fold-state (agent-journal agent)))
+         (current (handler-case
+                      (let ((id (evo.kernel:effective-model-id state agent)))
+                        (find-model id (evo.kernel:effective-model-provider state id)))
+                    (error () nil)))
          (models (all-models))
          (provider-width
            (reduce #'max models
@@ -266,15 +277,19 @@ here lines up the id column too — provider, id and context each align."
     (enter-select
      tui "model:"
      (loop for m in models
-           for id = (pget m :id)
            collect (list (model-row-label m provider-width)
-                         id
+                         m
                          (format nil "~a ctx~:[~; · current~]"
                                  (format-context-window (pget m :context-window 0))
-                                 (equal id current))))
-     (lambda (id) (set-model tui id))
-     :index (or (position current models
-                          :key (lambda (m) (pget m :id)) :test #'equal)
+                                 (and current
+                                      (equal (pget m :id) (pget current :id))
+                                      (equal (pget m :provider) (pget current :provider))))))
+     (lambda (model) (set-model tui model))
+     :index (or (and current
+                     (position-if (lambda (m)
+                                    (and (equal (pget m :id) (pget current :id))
+                                         (equal (pget m :provider) (pget current :provider))))
+                                  models))
                 0))
     t))
 
