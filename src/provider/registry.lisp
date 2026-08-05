@@ -15,7 +15,38 @@
 (defvar *models* nil
   "Registered model plists, in registration order.")
 
-(defun register-model* (id &key provider api context-window max-output (thinking t))
+(defparameter +effort-levels+ '(:low :medium :high :xhigh :max)
+  "Effort levels an API may accept, weakest first.  A model declares the
+subset it supports with :effort; the adapter clamps a request down to the
+strongest supported level that does not exceed the one asked for.")
+
+(defun normalize-effort (id effort)
+  "Canonicalize a model's :effort declaration to a subset of +EFFORT-LEVELS+
+in ladder order.  NIL means the model has no effort parameter; T means all
+levels."
+  (cond ((null effort) nil)
+        ((eq effort t) +effort-levels+)
+        ((and (listp effort)
+              (every (lambda (l) (member l +effort-levels+)) effort))
+         (remove-if-not (lambda (l) (member l effort)) +effort-levels+))
+        (t (error "register-model ~a: :effort must be nil, t, or a list of ~
+                   ~{~(~s~)~^ ~}, got ~s"
+                  id +effort-levels+ effort))))
+
+(defun clamp-effort (level supported)
+  "The strongest level in SUPPORTED that does not exceed LEVEL, or NIL when
+SUPPORTED is empty or offers nothing that low.  Clamping is what keeps a
+session-wide :max usable on a model whose ladder stops at :high: the request
+degrades instead of failing."
+  (let ((want (position level +effort-levels+)))
+    (when want
+      (car (last (loop for l in +effort-levels+
+                       for i from 0
+                       when (and (<= i want) (member l supported))
+                         collect l))))))
+
+(defun register-model* (id &key provider api context-window max-output (thinking t)
+                             effort (thinking-mode :extended))
   "Register (or replace, keeping position) a model.  A model's identity is
 its (id, provider) pair: the same id under different providers (direct vs.
 proxy) are distinct, both selectable models; re-registering the same pair
@@ -32,9 +63,14 @@ time, not mid-run."
   (unless (and (integerp max-output) (plusp max-output))
     (error "register-model ~a: :max-output must be a positive integer, got ~s"
            id max-output))
+  (unless (member thinking-mode '(:extended :adaptive))
+    (error "register-model ~a: :thinking-mode must be :extended or :adaptive, got ~s"
+           id thinking-mode))
   (let ((model (list :id id :provider provider :api api
                      :context-window context-window :max-output max-output
-                     :thinking (and thinking t)))
+                     :thinking (and thinking t)
+                     :thinking-mode thinking-mode
+                     :effort (normalize-effort id effort)))
         (tail (member t *models*
                       :key (lambda (m) (and (string= (pget m :id) id)
                                             (equal (pget m :provider) provider))))))
@@ -83,6 +119,8 @@ the initial default.  No fallback: an unknown id is a config error."
 
 (defun model-context-window (model) (pget model :context-window))
 (defun model-max-output (model) (pget model :max-output))
+(defun model-effort (model) (pget model :effort))
+(defun model-thinking-mode (model) (or (pget model :thinking-mode) :extended))
 
 ;;; Providers: endpoint + credential config.  Re-registration merges
 ;;; field-wise, so a later init file overrides only the keys it gives.

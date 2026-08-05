@@ -20,7 +20,16 @@
 (defmethod default-base-url ((api anthropic-messages-api)) "https://api.anthropic.com")
 (defmethod default-api-key-env ((api anthropic-messages-api)) "ANTHROPIC_API_KEY")
 
-;;; Thinking levels -> budget_tokens.
+;;; Thinking levels -> the two native knobs.
+;;;
+;;; Newer models take `output_config.effort`, a request-level dial over the
+;;; whole response (thinking, prose, and tool calls alike); the levels are
+;;; exactly evo's ladder.  Older ones only take extended thinking's
+;;; `thinking.budget_tokens`.  Which knob a model has is registry data
+;;; (:effort, :thinking-mode), because support differs per model: Sonnet 4.5
+;;; has no effort at all, Opus 4.5 has effort but no xhigh/max and still
+;;; wants a budget, and 4.6-and-later models take effort with adaptive
+;;; thinking, where budget_tokens is deprecated or rejected outright.
 
 (defun thinking-budget (level)
   (case level
@@ -29,10 +38,17 @@
     (:medium 8192)
     (:high 16384)
     (:xhigh 32768)
+    (:max 60000)
     (t nil)))
 
 (defmethod thinking-param ((api anthropic-messages-api) level)
   (thinking-budget level))
+
+(defun effort-string (level supported)
+  "Wire value for `output_config.effort`, or NIL when the model has no
+effort parameter."
+  (let ((clamped (clamp-effort level supported)))
+    (when clamped (string-downcase (symbol-name clamped)))))
 
 ;;; Request building.
 
@@ -102,7 +118,12 @@ Consecutive user/tool-result messages merge into a single user message."
 
 (defun build-request-json (&key model system messages tools thinking-level)
   (let* ((model-id (pget model :id))
-         (budget (and (pget model :thinking) (thinking-budget thinking-level)))
+         (adaptive (eq (model-thinking-mode model) :adaptive))
+         (thinking-on (and (pget model :thinking)
+                           thinking-level
+                           (not (eq thinking-level :off))))
+         (budget (and thinking-on (not adaptive) (thinking-budget thinking-level)))
+         (effort (and thinking-on (effort-string thinking-level (model-effort model))))
          (req (jobj "model" model-id
                     "max_tokens" (model-max-output model)
                     "stream" t
@@ -115,9 +136,19 @@ Consecutive user/tool-result messages merge into a single user message."
                       b))))
     (let ((jt (tools->json tools)))
       (when jt (setf (gethash "tools" req) jt)))
-    (when budget
-      (setf (gethash "thinking" req)
-            (jobj "type" "enabled" "budget_tokens" budget)))
+    (when effort
+      (setf (gethash "output_config" req) (jobj "effort" effort)))
+    ;; Adaptive models decide when to think, so they take a mode rather than
+    ;; a budget -- and `display` defaults to omitted there, which returns
+    ;; signed but empty thinking blocks, so ask for summaries explicitly.
+    (cond (budget
+           (setf (gethash "thinking" req)
+                 (jobj "type" "enabled" "budget_tokens" budget)))
+          ((and adaptive thinking-on)
+           (setf (gethash "thinking" req)
+                 (jobj "type" "adaptive" "display" "summarized")))
+          (adaptive
+           (setf (gethash "thinking" req) (jobj "type" "disabled"))))
     (jzon:stringify req)))
 
 (defmethod build-request ((api anthropic-messages-api)

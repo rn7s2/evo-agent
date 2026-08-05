@@ -54,9 +54,15 @@ running the handoff pass over MESSAGES."))
 described in the file header."))
 
 (defgeneric thinking-param (api level)
-  (:documentation "Map a thinking LEVEL (:off :low :medium :high :xhigh) to
+  (:documentation "Map a thinking LEVEL (:off :low :medium :high :xhigh :max) to
 the API's native parameter (Anthropic budget_tokens integer, OpenAI effort
-string).  NIL means thinking off."))
+string).  NIL means thinking off.
+
+Level alone is not always enough: where the native knob depends on the
+model as well — Anthropic's output_config.effort ladder differs per model,
+and only some models take adaptive thinking — BUILD-REQUEST consults the
+registry (:effort, :thinking-mode) directly.  This generic stays the
+level-only mapping, which is what a simple adapter needs."))
 
 (defgeneric perform-request (api url headers body &key on-event abort-flag
                                                  abort-cleanup &allow-other-keys)

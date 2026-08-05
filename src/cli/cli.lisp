@@ -22,7 +22,7 @@ Usage:
   evo --events ...               emit line-delimited sexpr events instead of text
   evo --list-sessions            list sessions for this cwd
   evo --model <id>               model id (default: the :model setting from init.lisp)
-  evo --thinking <level>         off|low|medium|high|xhigh (default medium)
+  evo --thinking <level>         off|low|medium|high|xhigh|max (default medium)
   evo --no-userspace             boot without init.lisp, post-init.lisp, or extensions (quarantine mode)
   evo --no-supervisor            run the session in-process, no crash-restart parent
   evo --help
@@ -64,8 +64,8 @@ models registered by extensions.  evo ships no built-in model table, e.g.
                 (let ((level (intern (string-upcase
                                       (or (pop argv) (error "--thinking needs a level")))
                                      :keyword)))
-                  (unless (member level '(:off :low :medium :high :xhigh))
-                    (error "--thinking must be one of off|low|medium|high|xhigh"))
+                  (unless (member level '(:off :low :medium :high :xhigh :max))
+                    (error "--thinking must be one of off|low|medium|high|xhigh|max"))
                   (setf (getf opts :thinking) level)))
                ((string= arg "--no-userspace") (setf (getf opts :no-userspace) t))
                ((string= arg "--no-supervisor") (setf (getf opts :no-supervisor) t))
