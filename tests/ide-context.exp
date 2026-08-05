@@ -1,0 +1,166 @@
+#!/usr/bin/expect -f
+# ide-context.exp — the IDE bridge, end to end without an IDE.
+#
+# The companion VS Code extension is just a writer of one JSON file, so the
+# whole evo side can be driven by writing that file by hand: the status line
+# must grow a selection segment, drop it live when the selection clears
+# (proving the poller marks the TUI dirty), and every submitted prompt must be
+# preceded in the journal by an :ide-context custom message.  No model backend
+# is needed — injection happens at submit, before any provider call.
+set timeout 60
+
+set repo [file dirname [file dirname [file normalize $argv0]]]
+set scratch [exec mktemp -d /tmp/evo-ide.XXXXXX]
+set env(EVO_HOME) "$scratch/home"
+file mkdir $env(EVO_HOME)
+file mkdir "$env(EVO_HOME)/extensions"
+
+# The extension under test, installed the way `make install-home` installs it.
+file copy "$repo/extensions/ide-context.lisp" "$env(EVO_HOME)/extensions/ide-context.lisp"
+
+# A model must exist for the TUI to start; it is never reached (the endpoint
+# is dead on purpose — this test asserts journal state, not model replies).
+set f [open "$env(EVO_HOME)/init.lisp" w]
+puts $f {(evo:register-model "ide-test-model" :provider :anthropic :api :anthropic-messages :context-window 200000 :max-output 4096)}
+puts $f {(evo:set-setting :model "ide-test-model")}
+puts $f {(evo:register-provider :anthropic :base-url "http://127.0.0.1:9/dead" :api-key "none")}
+close $f
+
+foreach v {EVO_SUPERVISED_CHILD EVO_HEARTBEAT_FILE} {
+    if {[info exists env($v)]} { unset env($v) }
+}
+
+set workdir "$scratch/work"
+file mkdir $workdir
+cd $workdir
+exec mkdir -p "$workdir/src"
+exec touch "$workdir/src/demo.lisp"
+
+set statefile "$scratch/ide-state.json"
+set env(EVO_IDE_CONTEXT) $statefile
+
+proc write_state {path json} {
+    # Atomic rename, exactly as the VS Code extension writes it.
+    set f [open "$path.tmp" w]
+    puts -nonewline $f $json
+    close $f
+    file rename -force "$path.tmp" $path
+}
+
+set selected "{
+  \"v\": 1,
+  \"ide\": \"VS Code\",
+  \"pid\": [pid],
+  \"workspace_folder\": \"$workdir\",
+  \"file\": \"$workdir/src/demo.lisp\",
+  \"language_id\": \"lisp\",
+  \"dirty\": false,
+  \"untitled\": false,
+  \"cursor_line\": 12,
+  \"selection\": {\"start_line\": 10, \"end_line\": 12, \"line_count\": 3},
+  \"selected_text\": \"(defun demo-marker-471 ()\\n  :ok)\",
+  \"selected_text_truncated\": false
+}"
+set cleared "{
+  \"v\": 1,
+  \"ide\": \"VS Code\",
+  \"pid\": [pid],
+  \"workspace_folder\": \"$workdir\",
+  \"file\": \"$workdir/src/other.lisp\",
+  \"language_id\": \"lisp\",
+  \"dirty\": false,
+  \"untitled\": false,
+  \"cursor_line\": 1,
+  \"selection\": null,
+  \"selected_text\": null
+}"
+
+write_state $statefile $selected
+
+set pass 0
+set failures {}
+proc check {name} {
+    global pass
+    incr pass
+    puts "\nPASS: $name"
+}
+proc fail {name} {
+    global failures
+    lappend failures $name
+    puts "\nFAIL: $name"
+}
+
+spawn "$repo/build/evo"
+
+# 1. the selection segment appears, and the core status line survives wrapping
+expect {
+    -re {ctx \d+k.*3 lines selected} { check "status segment with selection" }
+    timeout { fail "status segment with selection"; exit 1 }
+}
+
+# 2. clearing the selection in the IDE drops the segment without any keypress:
+#    the poller has to notice the file changed and mark the TUI dirty
+write_state $statefile $cleared
+set gone 0
+for {set i 0} {$i < 20} {incr i} {
+    sleep 0.3
+    expect {
+        -timeout 1
+        -re {lines selected} { set gone 0 }
+        timeout { set gone 1 }
+    }
+    if {$gone} break
+}
+# Force one repaint and confirm the segment is really gone from the fresh paint.
+send "x"
+sleep 0.5
+send "\x03"
+expect {
+    -timeout 3
+    -re {lines selected} { fail "segment cleared live" }
+    timeout { check "segment cleared live" }
+}
+
+# 3. a submitted prompt is preceded by the injected context in the journal
+write_state $statefile $selected
+sleep 0.6
+send "ide-probe-8842\r"
+sleep 2
+send "/quit\r"
+expect {
+    eof { check "clean quit" }
+    timeout { fail "clean quit"; catch {close} }
+}
+
+set journal [lindex [glob -nocomplain "$env(EVO_HOME)/sessions/*/*.sexp"] 0]
+if {$journal eq ""} {
+    fail "journal written"
+} else {
+    check "journal written"
+    set fh [open $journal r]
+    set body [read $fh]
+    close $fh
+    if {[string match "*:KEY \"ide-context\"*" [string toupper $body]] ||
+        [string match "*ide-context*" $body]} {
+        check "ide context journaled"
+    } else {
+        fail "ide context journaled"
+    }
+    if {[string match "*demo-marker-471*" $body]} {
+        check "selected text reached the journal"
+    } else {
+        fail "selected text reached the journal"
+    }
+    # The block must precede the user's message, not trail it.
+    set ctx [string first "ide-context" $body]
+    set usr [string first "ide-probe-8842" $body]
+    if {$ctx >= 0 && $usr >= 0 && $ctx < $usr} {
+        check "context precedes the prompt"
+    } else {
+        fail "context precedes the prompt"
+    }
+}
+
+puts "\n$pass checks passed, [llength $failures] failed ($scratch)"
+if {[llength $failures] > 0} { exit 1 }
+exit 0
