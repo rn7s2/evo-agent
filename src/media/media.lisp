@@ -310,9 +310,10 @@ only a «class furl» on the pasteboard, and that gesture should work too.")
          (and path (image-file-p path) path)))
       (t nil))))
 
-(defun stdout-clipboard-reader (program args-for-type dir)
+(defun stdout-clipboard-bytes (program args-for-type dir)
   "Try each image media type against a clipboard tool that writes the data
-to stdout (wl-paste, xclip, xsel)."
+to stdout (wl-paste, xclip).  The tool is asked for one MIME type at a time
+because that is the only question these tools answer."
   (loop for (type . ext) in '(("image/png" . "png") ("image/jpeg" . "jpg")
                               ("image/webp" . "webp") ("image/gif" . "gif"))
         for out = (merge-pathnames (format nil "clip-~a.~a" (gen-id 8) ext) dir)
@@ -320,6 +321,34 @@ to stdout (wl-paste, xclip, xsel)."
              (if (and (eql 0 code) (image-file-p out))
                  (return out)
                  (ignore-errors (delete-file out))))))
+
+(defun stdout-clipboard-uri-list (program args-for-type dir)
+  "The file-manager copy: Nautilus, Dolphin and Thunar put no pixels on the
+clipboard, only `text/uri-list` naming the files.  This is the X11/Wayland
+twin of Finder's «class furl», and without it the same gesture that works on
+macOS silently finds nothing on Linux.  Returns the first URI that is an
+image the user owns — never a copy, so the file is not deleted afterwards."
+  (let ((out (merge-pathnames (format nil "uris-~a.txt" (gen-id 8)) dir)))
+    (unwind-protect
+         (when (eql 0 (run-child program (funcall args-for-type "text/uri-list")
+                                 :output out))
+           (loop for line in (uiop:split-string (or (ignore-errors (read-file-string out)) "")
+                                                :separator '(#\Newline #\Return))
+                 for token = (string-trim '(#\Space #\Tab) line)
+                 ;; Skip blanks, RFC 2483 comments, and the verb line a
+                 ;; file manager's own cut/copy flavour starts with.
+                 unless (or (zerop (length token))
+                            (string-prefix-p "#" token)
+                            (member token '("copy" "cut") :test #'string-equal))
+                   do (let* ((path (token->path token))
+                             (file (and path (ignore-errors (probe-file path)))))
+                        (when (and file (image-file-p file)) (return file)))))
+      (ignore-errors (delete-file out)))))
+
+(defun stdout-clipboard-reader (program args-for-type dir)
+  "Pixels first, then the files the clipboard merely points at."
+  (or (stdout-clipboard-bytes program args-for-type dir)
+      (stdout-clipboard-uri-list program args-for-type dir)))
 
 (defun wayland-clipboard-image (dir)
   (stdout-clipboard-reader
@@ -329,13 +358,170 @@ to stdout (wl-paste, xclip, xsel)."
   (stdout-clipboard-reader
    "xclip" (lambda (type) (list "-selection" "clipboard" "-t" type "-o")) dir))
 
+;;; WSL: the clipboard is on the other side of the kernel.
+;;;
+;;; A WSL session is Linux — evo runs there unchanged — but the clipboard
+;;; the user copies into belongs to Windows, and no Linux tool can see it
+;;; unless WSLg is bridging one.  Without this reader the most common
+;;; Windows workflow of all (Win+Shift+S, screenshot to clipboard) hits a
+;;; wall in a session that is otherwise perfectly ordinary, so evo asks
+;;; Windows itself: PowerShell is reachable from WSL by name, and interop
+;;; gives it back a Windows path that maps onto the Linux filesystem.
+
+(defparameter *wsl-powershell-programs*
+  '("powershell.exe" "pwsh.exe" "pwsh" "powershell")
+  "PowerShell spellings tried, in order, to reach the Windows clipboard.
+Rebindable so a test can stand a stub in for the real thing.")
+
+(defparameter *wsl-mount-root* "/mnt"
+  "Where WSL mounts the Windows drives.  Configurable in wsl.conf
+(automount.root), so it is a parameter here rather than a constant — and
+that makes the Windows-to-Linux path mapping testable off WSL.")
+
+(defvar *wsl-session* :unknown
+  "T / NIL once WSL-P has looked, :UNKNOWN before.  Tests bind it.")
+
+(defun wsl-p ()
+  "Is this a WSL session?  /proc/version names the Microsoft kernel; the
+env vars catch custom kernels where it does not."
+  (when (eq *wsl-session* :unknown)
+    (setf *wsl-session*
+          (let ((version (or (ignore-errors (read-file-string "/proc/version")) "")))
+            (and (or (search "microsoft" version :test #'char-equal)
+                     (search "wsl" version :test #'char-equal)
+                     (uiop:getenv "WSL_DISTRO_NAME")
+                     (uiop:getenv "WSL_INTEROP"))
+                 t))))
+  *wsl-session*)
+
+(defun windows-path-p (token)
+  "Is TOKEN shaped like a Windows path (`C:\\...`, `C:/...`)?  It matters
+in a WSL session, where Explorer and Windows Terminal hand out paths in
+Windows spelling for a filesystem evo sees mounted somewhere else."
+  (and (>= (length token) 3)
+       (alpha-char-p (char token 0))
+       (char= (char token 1) #\:)
+       (member (char token 2) '(#\\ #\/))))
+
+(defun windows->wsl-path (path)
+  "Map `C:\\Users\\a\\x.png` onto `/mnt/c/Users/a/x.png`.  NIL for a UNC
+path (\\\\server\\share) or anything that is not drive-letter shaped: those
+have no drive to mount, and guessing would hand the caller a wrong file."
+  (let ((path (string-trim '(#\Space #\Tab #\Return #\Newline) path)))
+    (when (windows-path-p path)
+      (format nil "~a/~a/~{~a~^/~}"
+              (string-right-trim "/" *wsl-mount-root*)
+              (char-downcase (char path 0))
+              (remove-if (lambda (part) (zerop (length part)))
+                         (uiop:split-string (subseq path 3)
+                                            :separator '(#\\ #\/)))))))
+
+(defparameter *wsl-path-program* "wslpath"
+  "The tool that maps Windows paths to Linux ones.  A parameter so a test
+can take it away and exercise the fallback rule.")
+
+(defun wsl-linux-path (windows-path)
+  "The Linux path for a Windows one: ask wslpath, which knows the real
+mount table, and fall back to the drive-letter rule when it is missing."
+  (let ((mapped (and *wsl-path-program*
+                     (run-child-output *wsl-path-program* (list "-u" windows-path)))))
+    (or (and mapped (plusp (length mapped)) mapped)
+        (windows->wsl-path windows-path))))
+
+(defun windows-clipboard-script ()
+  "PowerShell one-liner: save the clipboard's image to a temp PNG and print
+`image:<path>`, or print `path:<path>` for a file copied in Explorer (the
+Windows twin of Finder's «class furl»).  Exit 1 means neither was there."
+  (concatenate
+   'string
+   "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; "
+   "Add-Type -AssemblyName System.Windows.Forms; "
+   "$img = Get-Clipboard -Format Image; "
+   "if ($img -ne $null) { "
+   "$p = [System.IO.Path]::ChangeExtension([System.IO.Path]::GetTempFileName(), 'png'); "
+   "$img.Save($p, [System.Drawing.Imaging.ImageFormat]::Png); "
+   "Write-Output ('image:' + $p); exit 0 }; "
+   "$files = Get-Clipboard -Format FileDropList; "
+   "if ($files -ne $null -and $files.Count -gt 0) { "
+   "Write-Output ('path:' + $files[0]); exit 0 }; "
+   "exit 1"))
+
+(defun wsl-clipboard-image (dir)
+  "Read the Windows clipboard from a WSL session.  Pixels are moved into
+DIR (so they are cleaned up like any other scratch image); a file the
+clipboard merely points at is returned where it lies, untouched."
+  (when (wsl-p)
+    ;; The first PowerShell that exists gets the question and its answer is
+    ;; final: "the bridge ran and found nothing" is a real answer, and
+    ;; asking three more spellings of the same interpreter would only cost
+    ;; a second each to hear it again.
+    (let ((result (loop for program in *wsl-powershell-programs*
+                        when (evo.port:program-in-path program)
+                          return (run-child-output program
+                                                   (list "-NoProfile" "-Command"
+                                                         (windows-clipboard-script))))))
+      (when result
+        (let* ((image (string-prefix-p "image:" result))
+               (windows (cond (image (subseq result 6))
+                              ((string-prefix-p "path:" result) (subseq result 5))))
+               (mapped (and windows (wsl-linux-path windows)))
+               (file (and mapped (ignore-errors (probe-file mapped)))))
+          (when (and file (image-file-p file))
+            (if image
+                ;; Ours to own: move it out of the Windows temp directory
+                ;; into the scratch dir, which the caller sweeps.
+                (let ((out (merge-pathnames (format nil "clip-~a.png" (gen-id 8)) dir)))
+                  (ignore-errors (uiop:copy-file file out))
+                  (ignore-errors (delete-file file))
+                  (and (image-file-p out) out))
+                file)))))))
+
 (defvar *clipboard-readers*
   (list (cons "macOS pasteboard" #'macos-clipboard-image)
         (cons "wayland (wl-paste)" #'wayland-clipboard-image)
-        (cons "X11 (xclip)" #'x11-clipboard-image))
+        (cons "X11 (xclip)" #'x11-clipboard-image)
+        (cons "WSL (powershell.exe)" #'wsl-clipboard-image))
   "Ordered (NAME . FUNCTION) clipboard readers, tried in turn.  Rebind or
 push onto this to teach evo a platform it does not ship support for; tests
 inject a fake reader here rather than a real pasteboard.")
+
+;;; Why nothing came back.
+;;;
+;;; "No image on the clipboard" is a lie when nothing in the session can
+;;; read a clipboard at all — the user's screenshot IS on their clipboard,
+;;; and evo blaming the clipboard sends them looking in the wrong place.
+;;; The two cases are told apart by asking what this session is and which
+;;; tools it has, and the answer names the missing piece.
+
+(defun clipboard-gap (&key macos-p wsl-p wayland-p x11-p (installed-p (constantly nil)))
+  "Pure core of CLIPBOARD-REASON: the reason no reader could even try, or
+NIL when one could (and the clipboard was simply imageless).  A session is
+only in a gap when *none* of the tools that could serve it exist — a
+Wayland desktop with xclip is served by XWayland, and WSLg bridges the
+Windows clipboard into the Linux tools — so each case asks about every
+reader that might have run, not just its own."
+  (let ((unix-tools (or (funcall installed-p "wl-paste")
+                        (funcall installed-p "xclip"))))
+    (cond
+      (macos-p (unless (funcall installed-p "osascript")
+                 "no osascript on PATH — the macOS pasteboard is unreachable"))
+      (wsl-p (unless (or unix-tools (some installed-p *wsl-powershell-programs*))
+               "no powershell.exe on PATH — the Windows clipboard is unreachable from WSL"))
+      (wayland-p (unless unix-tools
+                   "no clipboard tool here — install wl-clipboard for wl-paste"))
+      (x11-p (unless (funcall installed-p "xclip")
+               "no clipboard tool here — install xclip"))
+      (t "this session has no clipboard (ssh or a bare tty)"))))
+
+(defun clipboard-reason ()
+  "Why CLIPBOARD-IMAGE found nothing, in the user's terms."
+  (or (clipboard-gap :macos-p (uiop:os-macosx-p)
+                     :wsl-p (and (uiop:os-unix-p) (not (uiop:os-macosx-p)) (wsl-p))
+                     :wayland-p (uiop:getenv "WAYLAND_DISPLAY")
+                     :x11-p (uiop:getenv "DISPLAY")
+                     :installed-p (lambda (program)
+                                    (and (evo.port:program-in-path program) t)))
+      "no image on the clipboard"))
 
 (defun clipboard-image ()
   "Grab an image off the system clipboard as an :image block.
@@ -357,7 +543,7 @@ Returns (values BLOCK NIL) or (values NIL REASON)."
                          :source "clipboard")
                finally
                   (return (values nil (if *clipboard-readers*
-                                          "no image on the clipboard"
+                                          (clipboard-reason)
                                           "no clipboard reader on this platform"))))
       (ignore-errors (uiop:delete-directory-tree dir :validate t :if-does-not-exist :ignore)))))
 
@@ -418,11 +604,15 @@ Returns (values BLOCK NIL) or (values NIL REASON)."
                    (progn (write-char char out) (incf i)))))))
 
 (defun token->path (token)
-  "Resolve a pasted token to a pathname: file:// URLs, ~ expansion, and
-plain paths.  NIL when it cannot be a path at all."
+  "Resolve a pasted token to a pathname: file:// URLs, ~ expansion,
+Windows paths under WSL, and plain paths.  NIL when it cannot be a path at
+all."
   (let ((token (string-trim '(#\Space #\Tab #\Return) token)))
     (cond
       ((zerop (length token)) nil)
+      ;; A Windows path names a real file only from inside WSL; anywhere
+      ;; else it is a string that happens to have a colon in it.
+      ((windows-path-p token) (and (wsl-p) (wsl-linux-path token)))
       ((string-prefix-p "file://" token)
        (let ((rest (subseq token 7)))
          ;; file://localhost/x and file:///x both mean /x
@@ -438,9 +628,27 @@ plain paths.  NIL when it cannot be a path at all."
                         token))))
       (t token))))
 
+(defun strip-quotes (token)
+  "TOKEN without a matching pair of surrounding quotes."
+  (let ((n (length token)))
+    (if (and (>= n 2)
+             (member (char token 0) '(#\" #\'))
+             (char= (char token (1- n)) (char token 0)))
+        (subseq token 1 (1- n))
+        token)))
+
 (defun pasted-image-paths (text)
   "The image files TEXT names, if TEXT is nothing but paths to images.
 NIL for ordinary text — including text that merely mentions an image path."
+  ;; A Windows path must skip the shell splitter: POSIX quoting rules read
+  ;; `C:\Users\a\shot.png` as an escape sequence and hand back
+  ;; `C:Usersashot.png`.  It is one token, backslashes and all.
+  (let ((windows (strip-quotes (string-trim '(#\Space #\Tab #\Newline #\Return) text))))
+    (when (windows-path-p windows)
+      (let ((file (let ((path (token->path windows)))
+                    (and path (ignore-errors (probe-file path))))))
+        (return-from pasted-image-paths
+          (and file (image-file-p file) (list file))))))
   (let ((tokens (loop for line in (uiop:split-string (string-trim
                                                       '(#\Space #\Tab #\Newline #\Return)
                                                       text)

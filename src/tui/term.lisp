@@ -60,25 +60,64 @@
 (defun yellow (s) (concatenate 'string (sgr 33) s (sgr 0)))
 (defun reverse-video (s) (concatenate 'string (sgr 7) s (sgr 0)))
 
+;;; Key reporting: ask for more than ASCII, and take back what you ask for.
+;;;
+;;; A modified key (ctrl+v, shift+enter, cmd+v) only reaches an application
+;;; if the terminal is asked to report it, and there are two live requests
+;;; for that: kitty's progressive enhancement (CSI > 1 u) and xterm's
+;;; modifyOtherKeys (CSI > 4 ; 2 m).  Terminals ignore the one they do not
+;;; implement, so evo asks for both and decodes both (see MODIFIED-KEY);
+;;; the pair covers every modern emulator, and the legacy control byte
+;;; covers the rest.
+;;;
+;;; Two rules keep that graceful.  Ask only where the answer can be
+;;; understood: TERM=dumb (and CI capture, and an editor's "terminal" that
+;;; is really a log pane) gets no request, because a terminal that echoes
+;;; the request instead of honouring it litters the transcript.  And pop
+;;; exactly what was pushed, so the shell evo exits into is not left in a
+;;; mode its own line editor never asked for.
+
+(defvar *key-enhancement* nil
+  "T while the kitty/modifyOtherKeys requests of TERM-SETUP are in force.")
+
+(defun key-enhancement-wanted-p (&optional (flag (uiop:getenv "EVO_KEY_ENHANCEMENT"))
+                                           (term (or (uiop:getenv "TERM") "")))
+  "Should evo ask this terminal for enhanced key reporting?
+EVO_KEY_ENHANCEMENT=0 is the escape hatch for an emulator that claims a
+protocol and then mangles it — the TUI stays fully usable without it, only
+ctrl+v and shift+enter fall back to their legacy spellings."
+  (let ((flag flag)
+        (term (or term "")))
+    (cond ((and flag (member flag '("0" "off" "no" "false") :test #'string-equal)) nil)
+          ((and flag (member flag '("1" "on" "yes" "true") :test #'string-equal)) t)
+          ((zerop (length term)) nil)
+          ((string-equal term "dumb") nil)
+          (t t))))
+
 (defun term-setup ()
   "Enter raw mode; enable bracketed paste, kitty key disambiguation and
-xterm modifyOtherKeys (Shift+Enter detection); returns t on a tty."
+xterm modifyOtherKeys (ctrl+v, cmd+v, Shift+Enter detection); returns t on
+a tty."
   (setf *tty-out* (evo.port:make-fd-output-stream 1))
   (setf *saved-stty* (stty "-g"))
   (stty "raw" "-echo")
   (refresh-size)
   (install-sigwinch)
-  (wr (esc "?2004h")                    ; bracketed paste
-      (format nil "~c[>1u" #\Escape)    ; kitty: disambiguate escape codes
-      (esc ">4;2m"))                    ; xterm modifyOtherKeys
+  (wr (esc "?2004h"))                   ; bracketed paste
+  (setf *key-enhancement* (key-enhancement-wanted-p))
+  (when *key-enhancement*
+    (wr (format nil "~c[>1u" #\Escape)  ; kitty: disambiguate escape codes
+        (esc ">4;2m")))                 ; xterm modifyOtherKeys
   (flush)
   t)
 
 (defun term-teardown ()
   (when *tty-out*
-    (wr (esc ">4;0m")
-        (format nil "~c[<u" #\Escape)
-        (esc "?2004l")
+    (when *key-enhancement*
+      (wr (esc ">4;0m")
+          (format nil "~c[<u" #\Escape))
+      (setf *key-enhancement* nil))
+    (wr (esc "?2004l")
         (show-cursor))
     (flush))
   (when *saved-stty*

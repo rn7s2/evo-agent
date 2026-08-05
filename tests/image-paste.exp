@@ -131,6 +131,60 @@ expect {
     timeout { fail "/image reports a bad path" }
 }
 
+# 6. The clipboard gestures, byte for byte as terminals send them.
+#
+# This is the half that broke in the field: ctrl+v did *nothing at all* —
+# no attach, no message — because the key never reached the handler, and
+# cmd+v (the paste gesture people actually use on macOS) was invisible.  So
+# the assertion here is deliberately weak on outcome and strong on reaching
+# the code: with an image on the pasteboard the gesture must attach, and
+# without one it must say so.  Silence is the failure.
+#
+# On macOS the pasteboard is seeded for real (this DOES take over your
+# clipboard while the test runs); elsewhere there is nothing to seed, and
+# the "no image" message is the proof the gesture was heard.
+set seeded 0
+if {![catch {exec osascript -e "set the clipboard to (read (POSIX file \"$png\") as «class PNGf»)"}]} {
+    set seeded 1
+}
+set heard {Image #\d+ attached}
+# Without a pasteboard to seed, the proof is the answer: either the
+# clipboard was read and held no image, or evo named the piece this
+# session is missing (no wl-clipboard/xclip, no display at all, ...).
+# Any of them means the keystroke arrived; none of them is silence.
+if {!$seeded} {
+    set heard {(no image on the clipboard|no clipboard tool|has no clipboard|unreachable)}
+}
+
+proc gesture {name bytes} {
+    global heard
+    send $bytes
+    expect {
+        -re $heard { check $name }
+        timeout { fail $name }
+    }
+    send "\x03"
+    sleep 0.3
+}
+
+# ctrl+v, in each of the three encodings a terminal may choose for it.  The
+# last two are not hypothetical: evo asks for both protocols at startup.
+gesture "ctrl+v (legacy C0 byte)"        "\x16"
+gesture "ctrl+v (kitty CSI-u)"           "\x1b\[118;5u"
+gesture "ctrl+v (modifyOtherKeys)"       "\x1b\[27;5;118~"
+# ctrl+alt+v: the same request, for terminals that keep ctrl+v for their
+# own paste (VS Code on Linux/Windows, Windows Terminal under WSL).  The
+# legacy spelling is ESC then the control byte, which evo used to drop.
+gesture "ctrl+alt+v (legacy ESC + C0)"   "\x1b\x16"
+gesture "ctrl+alt+v (kitty CSI-u)"       "\x1b\[118;7u"
+gesture "ctrl+alt+v (modifyOtherKeys)"   "\x1b\[27;7;118~"
+# cmd+v / right-click Paste with an image on the clipboard: the terminal
+# has no text to paste and sends an empty bracketed paste.  That is the
+# whole gesture, and it must reach the clipboard.
+gesture "cmd+v (empty bracketed paste)"  "\x1b\[200~\x1b\[201~"
+# cmd+v reported as a key, by a terminal that forwards super.
+gesture "cmd+v (kitty super modifier)"   "\x1b\[118;9u"
+
 send "/quit\r"
 expect eof
 

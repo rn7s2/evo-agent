@@ -613,6 +613,9 @@ public API and not disableable.
     is indistinguishable from Enter in legacy terminals, so the kitty keyboard
     protocol or `modifyOtherKeys` (CSI-u) is used where available, with a
     documented fallback of Alt+Enter or backslash-then-Enter elsewhere.
+- **Image input across terminals** (§15.1): the one feature whose plumbing is
+  entirely terminal-dependent, so it is specified as a ladder rather than a
+  gesture.
 - Non-interactive modes are first-class: `evo -p "prompt"` for print mode and
   a line-delimited-sexpr event stream on stdout. They make evo scriptable and
   give the supervisor and the tests a UI-less harness.
@@ -620,6 +623,47 @@ public API and not disableable.
   partial accumulator).
 - `--swank <port>` is the developer side-door for live image inspection, off
   by default.
+
+### 15.1 Image input is a ladder, not a gesture
+
+No terminal hands an application the image on the clipboard; the paste channel
+carries text. Every gesture therefore reduces to the same act — *something*
+tells evo the user meant "an image", and evo reads the system pasteboard
+itself. The design consequence is that both halves must degrade
+independently: the **trigger** (a keystroke or a paste that has to survive
+whatever the emulator does with it) and the **read** (a platform tool that may
+not exist in this session).
+
+Triggers, in the order they are tried by a user and each covering terminals the
+one before it does not:
+
+| Trigger | Reaches evo as | Covers |
+|---|---|---|
+| ctrl+v | `0x16`, `CSI 118;5u`, or `CSI 27;5;118~` | every terminal — one of the three encodings always arrives |
+| ctrl+alt+v | `ESC 0x16`, `CSI 118;7u`, `CSI 27;7;118~` | emulators that keep ctrl+v for their own paste (VS Code on Linux/Windows, Windows Terminal under WSL) |
+| cmd+v, right-click → Paste | an *empty* bracketed paste | xterm.js emulators (VS Code, Cursor); Terminal.app and Warp send nothing at all and cannot be reached this way |
+| cmd+v reported as a key | `CSI 118;9u` (super) | terminals that forward super instead of eating it |
+| paste or drop a path | bracketed paste of a POSIX path, `file://` URL, quoted/escaped path, or a Windows path under WSL | every terminal with bracketed paste |
+| `/image [path]`, `--image` | typed text | the floor: always available, including where every keystroke above is intercepted |
+
+Two rules keep the trigger half honest. **Never request a key-encoding mode
+you do not decode in full** — a half-decoded protocol makes a key do nothing
+at all on exactly the terminals that honoured the request, which is worse than
+never asking; `modified-key` is therefore one total decoder shared by the
+CSI-u and `modifyOtherKeys` paths. And **ask only where the answer can be
+understood**: no request under `TERM=dumb` or with no `TERM`, popped exactly as
+pushed on exit, with `EVO_KEY_ENHANCEMENT=0` as the escape hatch.
+
+The read half is `*clipboard-readers*`, tried in order: macOS pasteboard
+(osascript), Wayland (`wl-paste`), X11 (`xclip`), Windows-from-WSL
+(`powershell.exe`). Each takes pixels first and then the file the clipboard
+merely *points* at, because a file-manager copy puts no pixels anywhere
+(`«class furl»`, `text/uri-list`, `FileDropList`). When all of them come back
+empty, the failure message distinguishes "the clipboard holds no image" from
+"nothing here can read a clipboard" and names the missing piece — a session
+over ssh with no display, or a missing `wl-clipboard`/`xclip`, is not the
+user's clipboard being empty, and saying so sends them looking in the wrong
+place.
 
 ## 16. How evo evolves
 
@@ -714,6 +758,20 @@ evo is not designed from scratch, and the borrowings are deliberate:
   added, and the runtime loader needs no queued reload.
 - **codex** (`~/Projects/codex`, `codex-rs/ext/goal/`) — the goal system:
   persisted objective, idle continuation, audited completion, budgets.
+- **codex** again (`codex-rs/tui/src/clipboard_paste.rs`,
+  `tui/keyboard_modes.rs`) — the image-paste ladder of §15.1. Taken: ctrl+v
+  *and* ctrl+alt+v as two doors to one clipboard read; pasted-path
+  normalization (`file://`, quotes, shell escapes, Windows paths mapped into
+  WSL); the PowerShell bridge that reaches the Windows clipboard from a WSL
+  session, including the file-copy case; an env escape hatch for terminals
+  that mishandle enhanced key reporting. Left behind: the paste-burst state
+  machine that reconstructs pastes from a rapid stream of keypresses, which
+  exists for Windows consoles without bracketed paste — evo is POSIX-only and
+  every terminal it runs on brackets its pastes, so the machine would be
+  untestable weight with `/image` already the floor. Added beyond it: reading
+  the empty bracketed paste as the cmd+v gesture, downscaling oversized
+  images rather than failing at the provider, and images by value in the
+  journal (D2) instead of paths that can go stale.
 - **lisp-references/** (repo root) — Common Lisp and SBCL reference material
   for whoever is implementing evo, human or agent. If you lack the CL or SBCL
   knowledge for a task, read here before guessing. Browse it fresh each time;

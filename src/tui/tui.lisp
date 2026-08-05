@@ -253,10 +253,22 @@ was actually sent, and the model saw more than the words."
 
 ;;; Images in.
 ;;;
-;;; Two gestures, one path: ctrl+v grabs the system clipboard, and pasting
-;;; (or dropping) an image file's path attaches the file.  Both land in the
-;;; editor as a "[Image #n]" token, so an attachment is reviewable and
-;;; deletable before it is sent, like any other text.
+;;; Three gestures, one path: ctrl+v grabs the system clipboard, an ordinary
+;;; paste that turns out to be empty grabs it too, and pasting (or dropping)
+;;; an image file's path attaches the file.  All land in the editor as a
+;;; "[Image #n]" token, so an attachment is reviewable and deletable before
+;;; it is sent, like any other text.
+;;;
+;;; Why the empty paste matters: no terminal hands an application image
+;;; bytes.  cmd+v (and right-click -> Paste) is the paste gesture on macOS,
+;;; and a terminal answers it by reading the *text* on the clipboard — which
+;;; is empty when the clipboard holds a screenshot.  Emulators built on
+;;; xterm.js (VS Code, Cursor, and friends) still send the bracketed-paste
+;;; wrapper around that empty string, so the gesture is visible to us even
+;;; though its payload is not: an empty paste means "the user pasted
+;;; something that is not text", and the clipboard is where the something
+;;; is.  Terminals that send nothing at all (Terminal.app, Warp) cannot be
+;;; reached this way; for them ctrl+v and /image are the doors.
 
 (defun attach-image (tui block)
   "Put an :image BLOCK in the editor and tell the user it is there."
@@ -287,22 +299,29 @@ warning is a courtesy, and a false alarm is worse than none."
              (setf (tui-dirty tui) t)
              nil))))
 
-(defun paste-clipboard-image (tui)
-  "ctrl+v: the system clipboard's image, if it holds one.  Terminals send
-text pastes as bracketed paste on their own; ctrl+v is what reaches us when
-the clipboard is not text at all."
+(defun paste-clipboard-image (tui &key (quiet-reason nil))
+  "The system clipboard's image, if it holds one — ctrl+v, an empty paste,
+and /image with no argument all land here.  QUIET-REASON downgrades the
+failure message for the empty-paste caller, which is a guess about intent
+rather than a request: nothing was on the clipboard, and saying so at full
+volume every time a stray paste arrives would be noise."
   (multiple-value-bind (block reason) (evo.media:clipboard-image)
     (cond (block (attach-image tui block))
-          (t (scroll tui (dim (format nil "~a — paste a file path to attach one" reason)))
+          (t (scroll tui (dim (format nil "~a — ~a" reason
+                                      (if quiet-reason
+                                          "ctrl+v, /image <path>, or paste a file path"
+                                          "paste a file path to attach one"))))
              (setf (tui-dirty tui) t)))))
 
 (defun handle-paste (tui text)
-  "A bracketed paste: image file paths attach, anything else is text.
-Dragging a file onto the terminal arrives here as its escaped path."
+  "A bracketed paste: image file paths attach, an empty paste means the
+clipboard held something that is not text (an image, we hope), and anything
+else is text.  Dragging a file onto the terminal arrives here as its escaped
+path."
   (let ((paths (evo.media:pasted-image-paths text)))
-    (if paths
-        (dolist (path paths) (attach-image-path tui path))
-        (eb-paste (tui-editor tui) text))))
+    (cond (paths (dolist (path paths) (attach-image-path tui path)))
+          ((zerop (length text)) (paste-clipboard-image tui :quiet-reason t))
+          (t (eb-paste (tui-editor tui) text)))))
 
 ;;; Tool call display formatting.
 
@@ -1013,6 +1032,11 @@ on it."
             (#\v (paste-clipboard-image tui)) ; clipboard image (not text)
             (#\i (complete-at-point tui)) ; Ctrl+I = Tab on some terminals
             (#\j (eb-newline eb))))     ; Ctrl+J: newline everywhere
+         ;; cmd+v, from the rare terminal that reports it instead of
+         ;; swallowing it: the same gesture, so the same handler.
+         (:super
+          (case (second event)
+            (#\v (paste-clipboard-image tui))))
          (t nil))
        (when (eq (first event) :ctrl)
          (setf (tui-last-ctrl-c tui) (if (eql (second event) #\c) (now-ms) 0))))
