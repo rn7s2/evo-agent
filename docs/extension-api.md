@@ -118,12 +118,13 @@ model/provider/settings registries reset first — so re-running them is
 idempotent and an override is just a later call.
 
 ```lisp
-(evo:register-model "claude-sonnet-5"       ; evo has NO built-in models
-  :provider :anthropic :api :anthropic-messages
-  :context-window 200000 :max-output 64000 :thinking t)
-(evo:register-provider :anthropic           ; stock endpoints pre-seeded;
-  :base-url "http://127.0.0.1:8787")        ; re-register merges field-wise
-(evo:set-setting :model "claude-sonnet-5")  ; required — no default model
+(evo:register-model "deepseek-v4-pro"       ; evo has NO built-in models
+  :provider :deepseek :api :anthropic-messages
+  :context-window 1000000 :max-output 192000 :thinking t :effort t)
+(evo:register-provider :deepseek            ; :anthropic/:openai are pre-seeded,
+  :base-url "https://api.deepseek.com/anthropic"   ; others you register;
+  :api-key-env "DEEPSEEK_API_KEY")          ; re-registering merges field-wise
+(evo:set-setting :model "deepseek-v4-pro")  ; required — no default model
 (evo:setting :model)                        ; read a setting
 ```
 

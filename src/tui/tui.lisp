@@ -109,9 +109,8 @@ while the run thread is appending to it."
           (tui-context-tokens tui) (evo.kernel:estimate-context-tokens
                                     (evo.journal:state-messages state))
           (tui-thinking-label tui) (string-downcase
-                                    (or (evo.journal:state-thinking state)
-                                        (agent-thinking-override agent)
-                                        (setting :thinking :medium))))
+                                    (evo.kernel:effective-thinking
+                                     state (agent-thinking-override agent))))
     (when reset-goal-run-tokens
       (setf (tui-goal-run-tokens tui) 0))))
 
@@ -632,7 +631,7 @@ wrapped between two rules, and the model status line under the editbox."
     ("todo" . "toggle the todo panel")
     ("permission" . "switch auto/plan mode (shift+tab toggles)")
     ("model" . "pick the model from a list, or set it directly")
-    ("thinking" . "off·low·medium·high·xhigh·max")
+    ("thinking" . "low·medium·high·xhigh·max")
     ("compact" . "compact the context now")
     ("lore" . "show lore, or add project-scope guidance")
     ("global-lore" . "show lore, or add user-scope guidance")

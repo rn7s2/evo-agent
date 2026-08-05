@@ -1,6 +1,6 @@
 #!/usr/bin/expect -f
 # tui.exp — drive the TUI under a pty: startup paint, /help, paste collapse,
-# a live model round-trip, todo panel, and /quit.
+# the /thinking ladder, a live model round-trip, todo panel, and /quit.
 set timeout 180
 
 set repo [file dirname [file dirname [file normalize $argv0]]]
@@ -76,7 +76,21 @@ expect {
 send "\x03"
 sleep 0.3
 
-# 4. live round trip through the model
+# 4. /thinking: the ladder has no off rung, and a real rung reaches the
+# status line.  init.lisp above sets :xhigh, so "max" in the status line can
+# only come from the command (xhigh contains "high", not "max").
+send "/thinking off\r"
+expect {
+    -re {levels: low medium high xhigh max} { check "/thinking off is refused" }
+    timeout { fail "/thinking off is refused" }
+}
+send "/thinking max\r"
+expect {
+    -re {max.*ctx \d+k} { check "/thinking max reaches the status line" }
+    timeout { fail "/thinking max reaches the status line" }
+}
+
+# 5. live round trip through the model
 send "Reply with exactly the word: tui-marker-747\r"
 expect {
     -re {tui-marker-747} {
@@ -89,7 +103,7 @@ expect {
     timeout { fail "model round-trip" }
 }
 
-# 5. todo tool drives the panel
+# 6. todo tool drives the panel
 send "Use the todo tool to create a two-item checklist: first item 'demo-item-one' pending, second 'demo-item-two' in-progress. Then say done.\r"
 expect {
     -re {demo-item-one} { check "todo panel renders" }
@@ -101,7 +115,7 @@ expect {
     timeout {}
 }
 
-# 6. quit cleanly
+# 7. quit cleanly
 send "/quit\r"
 expect {
     eof { check "clean quit" }

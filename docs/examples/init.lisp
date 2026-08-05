@@ -9,41 +9,43 @@
 ;;; :openai-responses); :provider names an endpoint config (see below).
 ;;; The /model picker lists models in registration order.
 
-;;; Anthropic models from 4.6 on take output_config.effort and adaptive
-;;; thinking: declare :effort (t = all of low/medium/high/xhigh/max, or the
-;;; subset the model accepts) and :thinking-mode :adaptive.  Older models
-;;; keep the default :extended mode, where the thinking level becomes a
-;;; thinking.budget_tokens value instead.
+;;; Thinking.  :thinking is a capability (t = this model reasons), not a
+;;; preference; the level comes from /thinking — low, medium, high, xhigh,
+;;; max, with no off rung.  How that level reaches the wire is per-model:
+;;;
+;;;   :effort        the levels the endpoint accepts for Anthropic's
+;;;                  output_config.effort — t for all five, or a subset list
+;;;                  for a model that stops short (a level above the subset
+;;;                  is clamped down, not rejected).  nil (the default) means
+;;;                  the model has no effort parameter at all.
+;;;   :thinking-mode :extended (the default) sends thinking.budget_tokens;
+;;;                  :adaptive lets the model decide when to think and sends
+;;;                  a mode instead of a budget — what Anthropic models from
+;;;                  4.6 on want, since budget_tokens is deprecated there.
+;;;
+;;; Which knob an endpoint honours is worth measuring rather than assuming:
+;;; DeepSeek's, for one, accepts budget_tokens and quietly ignores it, so a
+;;; model registered there without :effort has a /thinking dial connected to
+;;; nothing.
 
-(evo:register-model "claude-fable-5"
-  :provider :anthropic :api :anthropic-messages
-  :context-window 200000 :max-output 64000
-  :thinking t :effort t :thinking-mode :adaptive)
+;; DeepSeek v4 over the Anthropic API: 1M context, thinking steered by
+;; effort.  Its ladder is low/medium/high/xhigh/ultra/max, a superset of
+;; evo's, so every rung passes through unclamped and :effort t is accurate.
+;; The :deepseek endpoint is registered under Providers below.
+(evo:register-model "deepseek-v4-flash"
+  :provider :deepseek :api :anthropic-messages
+  :context-window 1000000 :max-output 192000
+  :thinking t :effort t)
 
-(evo:register-model "claude-opus-5"
-  :provider :anthropic :api :anthropic-messages
-  :context-window 200000 :max-output 64000
-  :thinking t :effort t :thinking-mode :adaptive)
-
-(evo:register-model "claude-sonnet-5"
-  :provider :anthropic :api :anthropic-messages
-  :context-window 200000 :max-output 64000
-  :thinking t :effort t :thinking-mode :adaptive)
-
-;; Sonnet 4.6 stops at :max with no :xhigh rung; a request for :xhigh is
-;; clamped to the strongest level below it that the model does support.
-(evo:register-model "claude-sonnet-4-6"
-  :provider :anthropic :api :anthropic-messages
-  :context-window 200000 :max-output 64000
-  :thinking t :effort '(:low :medium :high :max) :thinking-mode :adaptive)
-
-;; Extended-thinking-only: no effort parameter, budget_tokens instead.
-(evo:register-model "claude-haiku-4-5-20251001"
-  :provider :anthropic :api :anthropic-messages
-  :context-window 200000 :max-output 64000 :thinking t)
+(evo:register-model "deepseek-v4-pro"
+  :provider :deepseek :api :anthropic-messages
+  :context-window 1000000 :max-output 192000
+  :thinking t :effort t)
 
 ;; OpenAI Responses API models (272k input window; long-context surcharge
-;; tiers above that are not modeled).
+;; tiers above that are not modeled).  No :effort declaration, so the level
+;; maps straight to reasoning.effort — declare a subset if your endpoint
+;; rejects the top rungs.
 (evo:register-model "gpt-5.6-sol"
   :provider :openai :api :openai-responses
   :context-window 272000 :max-output 128000 :thinking t)
@@ -61,35 +63,21 @@
 ;;; need register-provider for a proxy, a literal key, or a custom endpoint.
 ;;; Re-registering merges field-wise.
 
-;; (evo:register-provider :anthropic
-;;   :base-url "http://127.0.0.1:8787"
-;;   :api-key "sk-...")
-
-;; A separate provider key for a local proxy speaking a stock API:
-;; (evo:register-provider :ark
-;;   :base-url "http://127.0.0.1:8787" :api-key "sk-...")
-;; (evo:register-model "ark-deepseek-v4-pro"
-;;   :provider :ark :api :anthropic-messages
-;;   :context-window 1000000 :max-output 64000 :thinking t)
-
-;;; The same model served by several providers.  A model's identity is its
-;;; (id, provider) pair, so registering one id twice under different
-;;; providers gives two entries — both listed in /model, each routing to its
-;;; own endpoint.  (Re-registering the SAME pair replaces it in place.)
-
-;; (evo:register-model "claude-sonnet-5"
-;;   :provider :ark :api :anthropic-messages
-;;   :context-window 200000 :max-output 64000 :thinking t)
+;; The endpoint the DeepSeek models above route to.  :api-key-env reads the
+;; key at request time; :api-key takes a literal string instead.
+(evo:register-provider :deepseek
+  :base-url "https://api.deepseek.com/anthropic"
+  :api-key-env "DEEPSEEK_API_KEY")
 
 ;;; Settings.  :model is required (there is no default); the rest have
 ;;; kernel defaults.
 
-(evo:set-setting :model "claude-sonnet-5")
+(evo:set-setting :model "deepseek-v4-pro")
 ;; When that id is registered under several providers, the first
 ;; registration wins by default; :model-provider names a different one.
 ;; /model overrides both for the session.
 ;; (evo:set-setting :model-provider :ark)
-;; (evo:set-setting :thinking :medium)        ; off|low|medium|high|xhigh|max
+;; (evo:set-setting :thinking :medium)        ; low|medium|high|xhigh|max
 ;; (evo:set-setting :goal-token-budget 500000)
 ;; (evo:set-setting :compact-reserve 16000)
 ;; (evo:set-setting :compact-keep-recent 20000)

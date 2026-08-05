@@ -48,7 +48,7 @@ puts $f "(evo:register-model \"$model\" :provider :liveproxy :api :anthropic-mes
 puts $f "(evo:register-provider :deadend :base-url \"http://127.0.0.1:1\" :api-key \"$api_key\")"
 puts $f "(evo:register-provider :liveproxy :base-url \"$base_url\" :api-key \"$api_key\")"
 puts $f "(evo:set-setting :model \"$model\")"
-puts $f {(evo:set-setting :thinking :off)}
+puts $f {(evo:set-setting :thinking :low)}
 close $f
 
 set workdir "$scratch/work"

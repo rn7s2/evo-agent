@@ -169,7 +169,8 @@ retain the tail on the :compaction entry.  Returns the entry."
       (error "Nothing to compact: the whole context is within the keep-recent tail"))
     (multiple-value-bind (text usage)
         (summarize model
-                   (or (evo.journal:state-thinking state) :low)
+                   (or (normalize-thinking-level (evo.journal:state-thinking state))
+                       :low)
                    dropped
                    (and previous (pget previous :summary))
                    (and (plusp (length (or hint ""))) hint)
