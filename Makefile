@@ -54,9 +54,11 @@ test:
 integration: build
 	tests/integration.sh
 
-# Expect-driven TUI smoke test against a freshly built binary.
+# Expect-driven TUI tests against a freshly built binary: the general smoke
+# test, then the same-id/multi-provider model routing test.
 tui-test: build
 	tests/tui.exp
+	tests/model-provider.exp
 
 # Seed corpus: docs + example extensions into the global evo home.
 # Everything installed under docs/ is reference-only — nothing ships active in

@@ -34,13 +34,15 @@
   (:export #:journal #:make-session-journal #:open-journal #:journal-path
            #:journal-entries #:journal-leaf-id #:journal-header #:journal-started-p
            #:append-entry #:find-entry #:entry-path #:fold-state #:fork-session
-           #:state-messages #:state-model #:state-thinking #:state-tools
+           #:state-messages #:state-model #:state-model-provider #:state-thinking
+           #:state-tools
            #:state-goal #:state-loads #:state-name #:state-custom #:custom-state
            #:list-sessions #:latest-session #:sessions-directory))
 
 (defpackage :evo.provider
   (:use :cl :evo.util)
-  (:export #:find-model #:all-models #:model-context-window #:model-max-output
+  (:export #:find-model #:all-models #:model-providers
+           #:model-context-window #:model-max-output
            #:register-model* #:register-provider* #:provider-config
            #:reset-user-registries
            #:call-provider #:provider-error
@@ -73,7 +75,8 @@
            ;; extension api internals
            #:run-hooks #:add-hook #:load-extension* #:boot-extensions
            #:boot-userspace #:load-init-file
-           #:replay-loads #:lock-kernel-packages #:effective-model-id
+           #:replay-loads #:lock-kernel-packages
+           #:effective-model-id #:effective-model-provider
            ;; goal
            #:current-goal #:goal-continuation-message #:goal-continuation-for
            #:register-goal-tools #:create-goal-entry #:goal-tokens-used

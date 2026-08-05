@@ -55,10 +55,23 @@
 ;;   :provider :ark :api :anthropic-messages
 ;;   :context-window 1000000 :max-output 64000 :thinking t)
 
+;;; The same model served by several providers.  A model's identity is its
+;;; (id, provider) pair, so registering one id twice under different
+;;; providers gives two entries — both listed in /model, each routing to its
+;;; own endpoint.  (Re-registering the SAME pair replaces it in place.)
+
+;; (evo:register-model "claude-sonnet-5"
+;;   :provider :ark :api :anthropic-messages
+;;   :context-window 200000 :max-output 64000 :thinking t)
+
 ;;; Settings.  :model is required (there is no default); the rest have
 ;;; kernel defaults.
 
 (evo:set-setting :model "claude-sonnet-5")
+;; When that id is registered under several providers, the first
+;; registration wins by default; :model-provider names a different one.
+;; /model overrides both for the session.
+;; (evo:set-setting :model-provider :ark)
 ;; (evo:set-setting :thinking :medium)        ; off|low|medium|high|xhigh
 ;; (evo:set-setting :goal-token-budget 500000)
 ;; (evo:set-setting :compact-reserve 16000)

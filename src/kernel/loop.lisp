@@ -188,6 +188,18 @@ guaranteed by the CLI preflight)."
       (setting :model)
       (error "No model is configured — set one in init.lisp: (evo:set-setting :model \"...\")")))
 
+(defun effective-model-provider (state id)
+  "Which provider serves model ID this session, when the id is registered
+under more than one.  A journaled /model choice names its provider; failing
+that the :model-provider setting names the config default, but only if it
+actually serves ID — a stale setting must not break an unrelated model.
+NIL means \"first registration wins\"."
+  (or (evo.journal:state-model-provider state)
+      (let ((configured (setting :model-provider)))
+        (and configured
+             (member configured (model-providers id))
+             configured))))
+
 (defun prepare-next-turn (agent)
   (let* ((state (fold-state (agent-journal agent)))
          (tools (active-tools state))
@@ -208,7 +220,7 @@ guaranteed by the CLI preflight)."
       (list :state state
             :tools tools
             :messages messages
-            :model (find-model model-id)
+            :model (find-model model-id (effective-model-provider state model-id))
             :thinking thinking
             ;; Session id = OpenAI prompt_cache_key (cache affinity).
             :cache-key (pget (evo.journal:journal-header (agent-journal agent)) :id)
@@ -299,9 +311,11 @@ Returns :stop :length :error :aborted."
             (drain-steering agent)
             (emit-event agent :type :turn-start)
             ;; Threshold compaction check at the save point.
-            (let ((state (fold-state (agent-journal agent))))
+            (let* ((state (fold-state (agent-journal agent)))
+                   (id (effective-model-id state agent)))
               (when (compaction-needed-p state (find-model
-                                                (effective-model-id state agent)))
+                                                id
+                                                (effective-model-provider state id)))
                 (emit-event agent :type :compaction-start)
                 (unwind-protect
                      (handler-case (compact-now agent)

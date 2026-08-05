@@ -202,12 +202,13 @@ restart/quarantine loop.  Runs after SETUP-AGENT has journaled a --model
 choice, so it validates the id the first turn will actually use.  The TUI
 never preflights — it gates at run start instead (CHECK-MODEL-READY),
 where /model and /reload can fix the registry in place."
-  (let ((id (or (evo.journal:state-model (fold-state journal))
-                (evo.kernel:agent-model-override agent)
-                (setting :model))))
+  (let* ((state (fold-state journal))
+         (id (or (evo.journal:state-model state)
+                 (evo.kernel:agent-model-override agent)
+                 (setting :model))))
     (unless id
       (error 'usage-error :text (no-model-message opts)))
-    (handler-case (find-model id)
+    (handler-case (find-model id (evo.kernel:effective-model-provider state id))
       (error (e)
         (error 'usage-error
                :text (format nil "~a~@[~%~%~a~]" e
