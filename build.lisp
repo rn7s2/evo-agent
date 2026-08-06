@@ -1,10 +1,13 @@
 ;;;; build.lisp — build the single evo executable (images are build
 ;;;; artifacts only).  Run via: make build [LISP=sbcl|ecl]
+;;;; on Unix, or `./make.ps1 build` on Windows (SBCL only there).
 ;;;;
 ;;;; SBCL: the Makefile invokes sbcl with --dynamic-space-size 4096 and we
 ;;;; save with :save-runtime-options t, so the heap size is baked into the
 ;;;; binary and ALL argv goes to evo's own main — no launcher, no
-;;;; --end-runtime-options.
+;;;; --end-runtime-options.  On Windows the artifact must be named .exe:
+;;;; the loader dispatches on the extension, and an extensionless image is
+;;;; a file Windows will not run.
 ;;;;
 ;;;; ECL: monolithic-lib-op archives evo plus every dependency, and
 ;;;; c:build-program links that against libasdf.a (the compiled asdf+uiop
@@ -19,7 +22,8 @@
 (ensure-directories-exist "build/")
 
 #+sbcl
-(sb-ext:save-lisp-and-die "build/evo"
+(sb-ext:save-lisp-and-die #+(or win32 windows mswindows) "build/evo.exe"
+                          #-(or win32 windows mswindows) "build/evo"
                           :executable t
                           :save-runtime-options t
                           :toplevel #'evo.cli:toplevel)

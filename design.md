@@ -769,7 +769,7 @@ a refactor.
 | D7 | The goal system follows **codex's design**: persisted goal, idle-continuation steering, explicit audited completion, budgets. Optional Lisp acceptance predicate as a kernel-side verifier. | See §8. |
 | D8 | The kernel/userspace split is enforced with **package locks** (SBCL native, ECL `si:package-lock`, both behind `evo.port`). | Permissive but not suicidal: touching the kernel requires an explicit, auditable unlock. |
 | D9 | Tool execution is **sequential**. | Parallelism is where the thread-discipline complexity lives, and nothing yet demands it. |
-| D10 | **SBCL and ECL**, through a single portability layer (`evo.port` — the only package permitted to touch `sb-*`, `ext:`, or `si:` symbols). | The implementation-specific surface proved small: env/argv/exit, processes, locks, fd streams, signals. Everything else is portable CL plus uiop. |
+| D10 | **SBCL and ECL on Unix, SBCL on Windows**, through a single portability layer (`evo.port` — the only package permitted to touch `sb-*`, `ext:`, or `si:` symbols, and now the only one that may branch on the platform). Two axes, not one: implementation *and* platform. Windows branches read on an `:evo-windows` feature the layer pushes itself, so a new implementation is one form, not fifty. | The implementation-specific surface proved small: env/argv/exit, processes, locks, fd streams, signals. Windows added a second small one — console mode instead of stty, no SIGWINCH (poll), `taskkill` instead of `pgrep`+`kill`, PowerShell instead of `/bin/sh`, PATHEXT — and asking the console for VT input/output means the key parser, the escape sequences and the renderer are untouched by it. ECL on Windows stays unsupported: it would need its own copy of that surface with no user waiting for it. |
 | D11 | Naming: binary `evo`, directories `~/.evo/` and `<project>/.evo/`, package prefix `EVO.`. | Settled to stop revisiting it. |
 | D12 | The TUI editor is a **plain multi-line text editor**: Enter sends, Shift+Enter inserts a newline, pastes over three lines collapse to a placeholder that re-pasting expands. No completions or highlighting. | Multi-line editing is crucial UX; editor sophistication is not where the novelty is. |
 | D13 | **Slim core: everything outside the core loop ships as a core extension** — bundled, on the same API, with the same control as user extensions; essential ones cannot be disabled. | Dogfooding proves the API's depth and keeps the kernel small and honest. See §13. |
@@ -795,11 +795,11 @@ evo is not designed from scratch, and the borrowings are deliberate:
   normalization (`file://`, quotes, shell escapes, Windows paths mapped into
   WSL); the PowerShell bridge that reaches the Windows clipboard from a WSL
   session, including the file-copy case; an env escape hatch for terminals
-  that mishandle enhanced key reporting. Left behind: the paste-burst state
-  machine that reconstructs pastes from a rapid stream of keypresses, which
-  exists for Windows consoles without bracketed paste — evo is POSIX-only and
-  every terminal it runs on brackets its pastes, so the machine would be
-  untestable weight with `/image` already the floor. Added beyond it: reading
+  that mishandle enhanced key reporting. Taken later, once the same failure
+  showed up on POSIX terminals and Windows joined the target list (D10): the
+  idea of reconstructing a paste that arrived as a rapid stream of keypresses
+  — though evo reads it off the poll batch rather than running codex's timer
+  state machine (§15). Added beyond it: reading
   the empty bracketed paste as the cmd+v gesture, downscaling oversized
   images rather than failing at the provider, and images by value in the
   journal (D2) instead of paths that can go stale.

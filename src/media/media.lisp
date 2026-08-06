@@ -476,11 +476,37 @@ clipboard merely points at is returned where it lies, untouched."
                   (and (image-file-p out) out))
                 file)))))))
 
+(defun windows-clipboard-image (dir)
+  "Read the clipboard of the Windows evo is running *on* (not the one it is
+running under, which is WSL-CLIPBOARD-IMAGE above).  Same PowerShell
+question, no path mapping: the answer is already a native path."
+  (when (evo.port:windows-p)
+    (let ((result (loop for program in *wsl-powershell-programs*
+                        when (evo.port:program-in-path program)
+                          return (run-child-output program
+                                                   (list "-NoProfile" "-Command"
+                                                         (windows-clipboard-script))))))
+      (when result
+        (let* ((image (string-prefix-p "image:" result))
+               (path (cond (image (subseq result 6))
+                           ((string-prefix-p "path:" result) (subseq result 5))))
+               (file (and path (ignore-errors (probe-file (string-trim '(#\Space #\Return #\Newline) path))))))
+          (when (and file (image-file-p file))
+            (if image
+                ;; Ours to own: move it out of the Windows temp directory
+                ;; into the scratch dir, which the caller sweeps.
+                (let ((out (merge-pathnames (format nil "clip-~a.png" (gen-id 8)) dir)))
+                  (ignore-errors (uiop:copy-file file out))
+                  (ignore-errors (delete-file file))
+                  (and (image-file-p out) out))
+                file)))))))
+
 (defvar *clipboard-readers*
   (list (cons "macOS pasteboard" #'macos-clipboard-image)
         (cons "wayland (wl-paste)" #'wayland-clipboard-image)
         (cons "X11 (xclip)" #'x11-clipboard-image)
-        (cons "WSL (powershell.exe)" #'wsl-clipboard-image))
+        (cons "WSL (powershell.exe)" #'wsl-clipboard-image)
+        (cons "Windows (powershell.exe)" #'windows-clipboard-image))
   "Ordered (NAME . FUNCTION) clipboard readers, tried in turn.  Rebind or
 push onto this to teach evo a platform it does not ship support for; tests
 inject a fake reader here rather than a real pasteboard.")
@@ -493,7 +519,8 @@ inject a fake reader here rather than a real pasteboard.")
 ;;; The two cases are told apart by asking what this session is and which
 ;;; tools it has, and the answer names the missing piece.
 
-(defun clipboard-gap (&key macos-p wsl-p wayland-p x11-p (installed-p (constantly nil)))
+(defun clipboard-gap (&key macos-p windows-p wsl-p wayland-p x11-p
+                        (installed-p (constantly nil)))
   "Pure core of CLIPBOARD-REASON: the reason no reader could even try, or
 NIL when one could (and the clipboard was simply imageless).  A session is
 only in a gap when *none* of the tools that could serve it exist — a
@@ -505,6 +532,8 @@ reader that might have run, not just its own."
     (cond
       (macos-p (unless (funcall installed-p "osascript")
                  "no osascript on PATH — the macOS pasteboard is unreachable"))
+      (windows-p (unless (some installed-p *wsl-powershell-programs*)
+                   "no powershell on PATH — the Windows clipboard is unreachable"))
       (wsl-p (unless (or unix-tools (some installed-p *wsl-powershell-programs*))
                "no powershell.exe on PATH — the Windows clipboard is unreachable from WSL"))
       (wayland-p (unless unix-tools
@@ -516,6 +545,7 @@ reader that might have run, not just its own."
 (defun clipboard-reason ()
   "Why CLIPBOARD-IMAGE found nothing, in the user's terms."
   (or (clipboard-gap :macos-p (uiop:os-macosx-p)
+                     :windows-p (evo.port:windows-p)
                      :wsl-p (and (uiop:os-unix-p) (not (uiop:os-macosx-p)) (wsl-p))
                      :wayland-p (uiop:getenv "WAYLAND_DISPLAY")
                      :x11-p (uiop:getenv "DISPLAY")
@@ -610,9 +640,12 @@ all."
   (let ((token (string-trim '(#\Space #\Tab #\Return) token)))
     (cond
       ((zerop (length token)) nil)
-      ;; A Windows path names a real file only from inside WSL; anywhere
-      ;; else it is a string that happens to have a colon in it.
-      ((windows-path-p token) (and (wsl-p) (wsl-linux-path token)))
+      ;; A Windows path names a real file on Windows, and from inside WSL
+      ;; through the mount table; anywhere else it is a string that happens
+      ;; to have a colon in it.
+      ((windows-path-p token)
+       (cond ((evo.port:windows-p) token)
+             ((wsl-p) (wsl-linux-path token))))
       ((string-prefix-p "file://" token)
        (let ((rest (subseq token 7)))
          ;; file://localhost/x and file:///x both mean /x

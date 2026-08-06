@@ -272,6 +272,7 @@ You have been invoked in the following environment:
 - Is a git repository: {{IS_GIT_REPO}}
 - Current branch: {{GIT_BRANCH}}
 - Platform: {{PLATFORM}}
+- Shell used by the bash tool: {{SHELL}}
 - OS version: {{OS_VERSION}}
 - Today's date: {{TODAY_DATE}}
 - You are powered by the model: {{MODEL}}")
@@ -400,6 +401,10 @@ it becomes available to every section evo owns."
         (cons "IS_GIT_REPO" (if (git-dir cwd) "yes" "no"))
         (cons "GIT_BRANCH" (or (git-branch cwd) "n/a"))
         (cons "PLATFORM" (string (software-type)))
+        ;; Named explicitly because the tool is called `bash` everywhere and
+        ;; is not bash anywhere: a model that assumes /bin/sh on Windows
+        ;; writes commands that cannot run, and it has no other way to know.
+        (cons "SHELL" (evo.port:shell-name))
         (cons "OS_VERSION" (string (software-version)))
         (cons "TODAY_DATE" (today-string))
         (cons "MODEL" (or model "unknown"))

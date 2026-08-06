@@ -13,10 +13,13 @@
            #:call-with-timeout #:timeout-error
            #:launch-child #:process-alive-p #:process-kill #:process-kill-tree
            #:process-wait #:process-pid
-           #:program-in-path
+           #:program-in-path #:windows-p #:path-separator
+           #:shell-invocation #:shell-name
            #:lock-package #:unlock-package #:add-package-local-nickname
            #:make-fd-output-stream #:make-fd-input-stream
            #:install-signal-handler #:+sigwinch+
+           #:terminal-raw-mode #:restore-terminal-mode #:terminal-sane
+           #:terminal-size
            #:tty-p #:disable-debugger #:ensure-in-image-compiler))
 
 (defpackage :evo.util

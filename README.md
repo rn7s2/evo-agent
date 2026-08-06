@@ -31,6 +31,14 @@ make install              # copies to /usr/local/bin/evo (PREFIX=…)
 make install-home         # seeds ~/.evo with docs + example extensions
 ```
 
+On Windows, `make.ps1` beside the Makefile takes the same targets, with the
+variables as parameters (SBCL only — see [Windows](#windows)):
+
+```powershell
+.\make.ps1 build          # requires SBCL + Quicklisp
+.\make.ps1 install        # builds, seeds $HOME\.evo, installs $HOME\.evo\bin\evo.exe
+```
+
 evo ships **no built-in model table**. At minimum, register one model and pick
 it — copy the sample at [docs/examples/init.lisp](docs/examples/init.lisp) to
 `~/.evo/init.lisp` and edit:
@@ -368,6 +376,49 @@ make tui-test       # expect-driven TUI under a pty: image paste
                     #       terminal sends it, model routing, the IDE bridge
 ```
 
+`.\make.ps1 test` runs the unit suite on Windows. The integration and TUI
+suites are POSIX-only (a shell script and expect against a pty), and CI
+builds Windows without testing it — see below.
+
+## Windows
+
+Supported, SBCL only: `src/port/port.lisp` is the whole platform surface, and
+its ECL branches are Unix facilities (fork+setsid, pgrep, stty, isatty) with
+no Windows twin. `make.ps1` refuses `-Lisp ecl` rather than failing halfway
+through a build.
+
+What the port layer swaps out on Windows:
+
+| Facility | Unix | Windows |
+| --- | --- | --- |
+| Terminal mode/size | `/bin/stty` | `SetConsoleMode` + `GetConsoleScreenBufferInfo` (kernel32 via `sb-alien`) |
+| Keys and colour | raw mode + ANSI | `ENABLE_VIRTUAL_TERMINAL_INPUT`/`_PROCESSING`, so the same parser and the same escapes work unchanged |
+| Live resize | `SIGWINCH` | polled once per tick — there is no such signal |
+| The `bash` tool | `/bin/sh -c` | PowerShell (`cmd.exe` fallback), and the tool description says so, because a model told it has `/bin/sh` writes commands that cannot run |
+| Killing a process tree | `pgrep -P` + `kill -9` | `taskkill /F /T` |
+| `PATH` lookup | `:`-separated | `;`-separated, `PATHEXT` suffixes |
+| Environment | `environ` | the Win32 environment block |
+| Session file names | `/` → `-` | drive colon and `\` go too (`C:\Users\me` is not a legal file name) |
+| Clipboard images | `osascript` / `wl-paste` / `xclip` | PowerShell (`Get-Clipboard`), natively as well as through WSL |
+
+Requirements and caveats:
+
+- 64-bit SBCL. The kernel32 calls are declared without an explicit calling
+  convention, which is right for x64 and wrong for 32-bit builds.
+- Windows 10 1607 or newer, for the virtual-terminal console modes. Windows
+  Terminal is the comfortable place to run it; conhost works.
+- A shell command runs through a temp script file rather than an argv,
+  because the Windows command line is one string that each interpreter
+  re-splits by its own rules — and most commands an agent writes contain
+  quotes.
+- No `--new-session` equivalent: on Unix a tool's child is detached from the
+  controlling terminal so a `sudo` prompt fails fast instead of hanging. A
+  Windows console process that wants to prompt opens its own window instead,
+  so there is nothing to detach from.
+- Untested on real hardware so far: CI builds `evo.exe` and checks it starts,
+  and no test asserts anything about running it. Treat the TUI on Windows as
+  new, and report what breaks.
+
 ## Layout
 
 Every directory under `src/` is one component owning exactly one package;
@@ -377,8 +428,9 @@ Every directory under `src/` is one component owning exactly one package;
 src/packages.lisp        the whole package graph (kernel locked; EVO.USER open;
                          EVO = public API) — the one file shared by all components
 
-src/port/                EVO.PORT — implementation portability layer, the only
-  port.lisp              code allowed to touch sb-* / ext: / si: symbols
+src/port/                EVO.PORT — implementation AND platform portability
+  port.lisp              layer, the only code allowed to touch sb-* / ext: /
+                         si: symbols or to branch on the OS
 src/util/                EVO.UTIL
   util.lisp              safe sexpr IO, settings store, ids, base64
 src/media/               EVO.MEDIA
@@ -430,6 +482,10 @@ extensions/              vendored user extensions — copied ACTIVE into
 extensions/examples/     reference-only example extensions (installed to
                          ~/.evo/docs/examples) — user extensions, distinct from
                          the bundled core extensions in src/core-ext/
+
+Makefile                 build/install on Unix
+make.ps1                 the same targets on Windows (SBCL only)
+build.lisp               shared by both: saves build/evo (build/evo.exe)
 ```
 
 ## License

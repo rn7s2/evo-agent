@@ -85,7 +85,8 @@ agent can read it selectively (read tool offset/limit, grep, sed, head/tail).")
                        (or (pget args :timeout) *bash-default-timeout*)))
          (out-file (uiop:with-temporary-file (:pathname p :keep t) p))
          (keep nil)          ; leave OUT-FILE on disk when output is large
-         (agent *executing-agent*))
+         (agent *executing-agent*)
+         (script nil))       ; scratch shell script, on platforms that need one
     (unless (and (stringp command) (plusp (length command)))
       (error "command must be a non-empty string"))
     (unwind-protect
@@ -96,13 +97,16 @@ agent can read it selectively (read tool offset/limit, grep, sed, head/tail).")
          ;; to answer such a prompt.  INPUT NIL (null device) covers the
          ;; separate stdin-EOF case.  EVO_PID names this (the worker) process,
          ;; since NEW-SESSION means $PPID points at the wrapper, not evo.
-         (let ((process (evo.port:launch-child
-                         "/bin/sh" (list "-c" command)
-                         :input nil :output out-file :error-output :output
-                         :new-session t
-                         :environment (list* (format nil "EVO_PID=~d"
-                                                     (evo.port:getpid))
-                                             (evo.port:environ)))))
+         (let ((process (multiple-value-bind (program shell-args scratch)
+                            (evo.port:shell-invocation command)
+                          (setf script scratch)
+                          (evo.port:launch-child
+                           program shell-args
+                           :input nil :output out-file :error-output :output
+                           :new-session t
+                           :environment (list* (format nil "EVO_PID=~d"
+                                                       (evo.port:getpid))
+                                               (evo.port:environ))))))
            (when agent
              ;; The worker that launched PROCESS remains its sole owner.  The
              ;; TUI thread only sets the abort flag; cross-thread kill/wait on
@@ -171,7 +175,9 @@ agent can read it selectively (read tool offset/limit, grep, sed, head/tail).")
                             (if (zerop (length output)) "(no output)" output)
                             (and (/= code 0) code))
                     (list :exit-code code))))))
-      (unless keep (ignore-errors (delete-file out-file))))))
+      (progn
+        (when script (ignore-errors (delete-file script)))
+        (unless keep (ignore-errors (delete-file out-file)))))))
 
 (defun register-builtin-tools ()
   (register-tool*
@@ -200,7 +206,10 @@ agent can read it selectively (read tool offset/limit, grep, sed, head/tail).")
    :execute #'tool-edit)
   (register-tool*
    :name "bash"
-   :description "Run a shell command via /bin/sh -c in the working directory. Returns combined stdout/stderr and exit code. Output at or above 1 MiB is not returned inline: it is written to a temp file and the tool returns that path plus a short head preview — read it back selectively (this read tool with offset/limit, or grep/sed/head/tail) rather than dumping it whole."
+   ;; The shell is named, not assumed: on Windows this is PowerShell, and a
+   ;; model told it is talking to /bin/sh writes commands that cannot run.
+   :description (format nil "Run a shell command via ~a in the working directory. Returns combined stdout/stderr and exit code. Output at or above 1 MiB is not returned inline: it is written to a temp file and the tool returns that path plus a short head preview — read it back selectively (this read tool with offset/limit, or grep/sed/head/tail) rather than dumping it whole."
+                        (evo.port:shell-name))
    :schema '(:object
              (:command :type :string :description "Shell command to run")
              (:timeout :type :integer :optional t

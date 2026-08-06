@@ -35,12 +35,10 @@
 
 (defun reset-tty ()
   "Best-effort cooked-mode restore.  A child that dies abnormally can die
-inside the TUI's raw mode; without this the next child's stty snapshot
+inside the TUI's raw mode; without this the next child's terminal snapshot
 captures raw as the state to \"restore\", and the user's shell inherits a
 raw terminal when the supervisor finally exits."
-  (ignore-errors
-   (uiop:run-program '("/bin/stty" "sane")
-                     :input :interactive :ignore-error-status t)))
+  (ignore-errors (evo.port:terminal-sane)))
 
 (defun monitor-child (process heartbeat-file start-time hang-timeout)
   "Poll until PROCESS exits; kill -9 on a stale heartbeat.
