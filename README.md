@@ -400,6 +400,7 @@ What the port layer swaps out on Windows:
 | Environment | `environ` | the Win32 environment block |
 | Session file names | `/` → `-` | drive colon and `\` go too (`C:\Users\me` is not a legal file name) |
 | Clipboard images | `osascript` / `wl-paste` / `xclip` | PowerShell (`Get-Clipboard`), natively as well as through WSL |
+| The TUI's own stdout/stdin | descriptors 0 and 1 | whichever descriptor SBCL used for its own standard streams — on Windows an OS handle, and a literal 1 there is an invalid handle, not stdout |
 
 Requirements and caveats:
 
@@ -427,6 +428,14 @@ Requirements and caveats:
 - Untested on real hardware so far: CI builds `evo.exe` and checks it starts,
   and no test asserts anything about running it. Treat the TUI on Windows as
   new, and report what breaks.
+- `tests/windows-probe.lisp` is for exactly that: a self-contained SBCL script
+  (no evo, no quicklisp) that answers what a Unix box cannot be asked — which
+  descriptor the standard streams use, what `GetStdHandle` returns, which of
+  those a fresh fd-stream can actually write to, whether a spawned child
+  inherits the console. Run it both ways, since the answers may differ: in a
+  console with `sbcl --script`, and as `%USERPROFILE%\.evo\extensions\000-probe.lisp`
+  so it runs inside the supervised child. Both append to
+  `%USERPROFILE%\evo-windows-probe.txt`.
 
 ## Layout
 

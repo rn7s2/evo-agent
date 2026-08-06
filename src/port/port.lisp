@@ -456,20 +456,46 @@ taskkill /T in one call and never needs to walk it."
 
 ;;; Fd streams (the TUI talks to the tty directly, bypassing *standard-io*).
 
-(defun make-fd-output-stream (fd &key (external-format :utf-8))
-  "A fully-buffered character stream writing to file descriptor FD."
-  #+sbcl (sb-sys:make-fd-stream fd :output t :buffering :full
-                                   :external-format external-format)
-  #+ecl (ext:make-stream-from-fd fd :output :buffering :full
-                                    :element-type 'character
-                                    :external-format external-format))
+(defun std-descriptor (role)
+  "What this implementation's fd-stream constructor wants for ROLE, :stdin
+or :stdout — asked of the implementation rather than assumed.
 
-(defun make-fd-input-stream (fd)
-  "An unbuffered (unsigned-byte 8) stream reading file descriptor FD."
-  #+sbcl (sb-sys:make-fd-stream fd :input t :buffering :none
-                                   :element-type '(unsigned-byte 8))
-  #+ecl (ext:make-stream-from-fd fd :input :buffering :none
-                                    :element-type '(unsigned-byte 8)))
+A literal 0 and 1 is right on Unix and wrong on Windows, where SBCL's I/O
+layer talks to OS handles: handle 1 belongs to no one, and the TUI's first
+write died with
+
+  Couldn't write to #<SB-SYS:FD-STREAM for \"descriptor 1\">:
+    The handle is invalid.
+
+Rather than encode a belief about what SBCL means by \"fd\" on each platform,
+take the number out of the standard stream SBCL built for itself at startup:
+whatever it put there is, by construction, the thing that works here.  It is
+also right when stdout is a pipe or a file."
+  #+sbcl
+  (let ((stream (ecase role
+                  (:stdin sb-sys:*stdin*)
+                  (:stdout sb-sys:*stdout*))))
+    (if (typep stream 'sb-sys:fd-stream)
+        (sb-sys:fd-stream-fd stream)
+        (ecase role (:stdin 0) (:stdout 1))))
+  #+ecl (ecase role (:stdin 0) (:stdout 1)))
+
+(defun make-stdout-stream (&key (external-format :utf-8))
+  "A fully-buffered character stream writing to this process's stdout."
+  (let ((where (std-descriptor :stdout)))
+    #+sbcl (sb-sys:make-fd-stream where :output t :buffering :full
+                                        :external-format external-format)
+    #+ecl (ext:make-stream-from-fd where :output :buffering :full
+                                         :element-type 'character
+                                         :external-format external-format)))
+
+(defun make-stdin-stream ()
+  "An unbuffered (unsigned-byte 8) stream reading this process's stdin."
+  (let ((where (std-descriptor :stdin)))
+    #+sbcl (sb-sys:make-fd-stream where :input t :buffering :none
+                                        :element-type '(unsigned-byte 8))
+    #+ecl (ext:make-stream-from-fd where :input :buffering :none
+                                         :element-type '(unsigned-byte 8))))
 
 ;;; Signals & tty.
 
