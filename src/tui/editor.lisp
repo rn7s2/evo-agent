@@ -155,51 +155,71 @@
         (eb-delete eb))))
 
 ;;; Paste placeholders.
+;;;
+;;; A paste too big to read in the editbox stands in as one token: the text
+;;; lives beside the buffer and goes back in whole on submit.  "Too big" is
+;;; measured in both directions — a dozen lines and a single 5000-character
+;;; line are equally unreadable in a three-line editbox, and both would push
+;;; the region past the bottom of the screen.
 
-(defun paste-placeholder (id line-count)
-  (format nil "[paste #~d: ~d lines]" id line-count))
+(defparameter *large-paste-lines* 3
+  "Pasted lines that still read as text in the editbox.")
+
+(defparameter *large-paste-chars* 1000
+  "Pasted characters that still read as text in the editbox.")
 
 (defun count-lines (text)
   (1+ (count #\Newline text)))
+
+(defun large-paste-p (text)
+  (or (> (count-lines text) *large-paste-lines*)
+      (> (length text) *large-paste-chars*)))
+
+(defun paste-placeholder (id text)
+  "The token standing in for TEXT: sized in whichever unit describes it."
+  (let ((lines (count-lines text)))
+    (if (> lines 1)
+        (format nil "[paste #~d: ~d lines]" id lines)
+        (format nil "[paste #~d: ~d chars]" id (length text)))))
 
 (defun eb-placeholder-before-cursor (eb)
   "If the text immediately before the cursor is a placeholder token, return
 (values id token), else nil."
   (let ((line (subseq (eb-current-line eb) 0 (eb-col eb))))
     (loop for (id . content) in (eb-pastes eb)
-          for token = (paste-placeholder id (count-lines content))
+          for token = (paste-placeholder id content)
           when (and (>= (length line) (length token))
                     (string= token line :start2 (- (length line) (length token))))
             do (return (values id token)))))
 
 (defun eb-paste (eb text)
-  "Bracketed paste arrived.  >3 lines collapses to a placeholder;
-re-pasting identical content right after its placeholder expands it inline."
-  (let ((text (remove #\Return text)))
-    (multiple-value-bind (id token) (eb-placeholder-before-cursor eb)
-      (cond
-        ;; paste-to-expand
-        ((and id (equal (cdr (assoc id (eb-pastes eb))) text))
-         (let ((line (eb-current-line eb)))
-           (setf (eb-current-line eb)
-                 (concatenate 'string
-                              (subseq line 0 (- (eb-col eb) (length token)))
-                              (subseq line (eb-col eb))))
-           (decf (eb-col eb) (length token)))
-         (setf (eb-pastes eb) (remove id (eb-pastes eb) :key #'car))
-         (eb-insert-text eb text))
-        ;; collapse
-        ((> (count-lines text) 3)
-         (let ((id (incf (eb-paste-counter eb))))
-           (push (cons id text) (eb-pastes eb))
-           (eb-insert-text eb (paste-placeholder id (count-lines text)))))
-        (t (eb-insert-text eb text))))))
+  "Insert pasted TEXT — already normalized by HANDLE-PASTE, its only
+caller.  A large paste collapses to a placeholder; re-pasting identical
+content right after its placeholder expands it inline."
+  (multiple-value-bind (id token) (eb-placeholder-before-cursor eb)
+    (cond
+      ;; paste-to-expand
+      ((and id (equal (cdr (assoc id (eb-pastes eb))) text))
+       (let ((line (eb-current-line eb)))
+         (setf (eb-current-line eb)
+               (concatenate 'string
+                            (subseq line 0 (- (eb-col eb) (length token)))
+                            (subseq line (eb-col eb))))
+         (decf (eb-col eb) (length token)))
+       (setf (eb-pastes eb) (remove id (eb-pastes eb) :key #'car))
+       (eb-insert-text eb text))
+      ;; collapse
+      ((large-paste-p text)
+       (let ((id (incf (eb-paste-counter eb))))
+         (push (cons id text) (eb-pastes eb))
+         (eb-insert-text eb (paste-placeholder id text))))
+      (t (eb-insert-text eb text)))))
 
 (defun eb-submit-text (eb)
   "Text to send: buffer content with placeholders substituted back in full."
   (let ((text (eb-text eb)))
     (loop for (id . content) in (eb-pastes eb)
-          for token = (paste-placeholder id (count-lines content))
+          for token = (paste-placeholder id content)
           do (setf text (string-replace token content text :all t)))
     text))
 
@@ -237,7 +257,18 @@ appear in the text."
                       when position collect (cons position block))
                 #'< :key #'car)))
 
-;;; Display: soft-wrap logical lines into WIDTH-column rows.
+;;; Display: soft-wrap logical lines into WIDTH-column rows, then show at
+;;; most as many of them as the screen can hold.
+;;;
+;;; The managed region is painted with relative cursor movement, which is
+;;; only sound while the whole region fits on the screen: a region taller
+;;; than the terminal scrolls its own top off, the next frame's "up N rows"
+;;; hits the top of the screen and stops short, and clear-below then wipes
+;;; the wrong rows — leaving the stranded ones in scrollback and duplicating
+;;; them on every repaint.  The editor is the one part of the region that
+;;; grows without bound, and a paste is how it grows: two pasted paragraphs
+;;; soft-wrap to more rows than a small terminal has.  So the editor gets a
+;;; viewport instead of the whole screen.
 
 (defun eb-display-rows (eb width)
   "Returns (values rows cursor-row cursor-col); every row is at most WIDTH
@@ -266,3 +297,30 @@ terminal width and ANSI cursor movement lands on the right cell."
              (setf cursor-row (+ base (1- (length chunks))) cursor-col col))
            (setf rows (append rows (nreverse chunks)))))
     (values rows cursor-row cursor-col)))
+
+(defun viewport-marker (n where)
+  (format nil "⋯ ~d more line~:p ~(~a~)" n where))
+
+(defun editor-viewport (rows cursor-row budget)
+  "The at most BUDGET rows of ROWS to paint, always including CURSOR-ROW.
+Returns (values rows cursor-row).  When rows are hidden one of the returned
+rows is a marker saying how many and in which direction — the editor
+scrolls, it never silently truncates."
+  (let ((n (length rows))
+        (budget (max 1 budget)))
+    (cond
+      ((<= n budget) (values rows cursor-row))
+      ;; No room for both a marker and a row: show the cursor's row.
+      ((< budget 2) (values (list (nth cursor-row rows)) 0))
+      (t
+       (let ((window (1- budget)))         ; one row goes to the marker
+         (if (< cursor-row window)
+             ;; Cursor still in the head: show the head, mark the rest.
+             (values (append (subseq rows 0 window)
+                             (list (viewport-marker (- n window) :below)))
+                     cursor-row)
+             ;; Otherwise scroll so the cursor sits on the last row.
+             (let ((start (1+ (- cursor-row window))))
+               (values (cons (viewport-marker start :above)
+                             (subseq rows start (+ start window)))
+                       window))))))))

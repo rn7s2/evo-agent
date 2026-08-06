@@ -661,12 +661,47 @@ event: response.completed~%data: {\"type\":\"response.completed\",\"response\":{
   (let ((eb (evo.tui::make-edit-buffer)))
     (evo.tui::eb-paste eb (format nil "a~%b"))
     (check "small paste literal" (equal (evo.tui::eb-text eb) (format nil "a~%b"))))
+  ;; "Too big to read in the editbox" is measured in both directions: one
+  ;; enormous line is as unreadable as a dozen short ones, and either would
+  ;; push the region past the bottom of the screen.
+  (let ((eb (evo.tui::make-edit-buffer))
+        (wide (make-string 1500 :initial-element #\x)))
+    (evo.tui::eb-paste eb wide)
+    (check "a single huge line collapses too"
+           (search "[paste #1: 1500 chars]" (evo.tui::eb-text eb)))
+    (check "huge line submits in full" (equal (evo.tui::eb-submit-text eb) wide)))
+  (let ((eb (evo.tui::make-edit-buffer)))
+    (evo.tui::eb-paste eb (make-string 900 :initial-element #\x))
+    (check "a merely long line stays text"
+           (= 900 (length (evo.tui::eb-text eb)))))
   ;; Wrapping math.
   (let ((eb (evo.tui::make-edit-buffer)))
     (evo.tui::eb-insert-text eb "0123456789")
     (multiple-value-bind (rows crow ccol) (evo.tui::eb-display-rows eb 4)
       (check "wrap rows" (equal rows '("0123" "4567" "89")))
-      (check "wrap cursor" (and (= crow 2) (= ccol 2))))))
+      (check "wrap cursor" (and (= crow 2) (= ccol 2)))))
+  ;; Viewport: the editor scrolls inside its budget instead of painting a
+  ;; region taller than the screen (which strands rows in scrollback).
+  (let ((rows '("r0" "r1" "r2" "r3" "r4" "r5")))
+    (multiple-value-bind (shown crow) (evo.tui::editor-viewport rows 2 10)
+      (check "viewport: everything fits, nothing changes"
+             (and (equal shown rows) (= crow 2))))
+    (multiple-value-bind (shown crow) (evo.tui::editor-viewport rows 1 4)
+      (check "viewport: cursor in the head keeps the head" (equal (first shown) "r0"))
+      (check "viewport: hidden tail is announced"
+             (search "3 more lines below" (car (last shown))))
+      (check "viewport: budget respected" (= 4 (length shown)))
+      (check "viewport: cursor row unmoved" (= crow 1)))
+    (multiple-value-bind (shown crow) (evo.tui::editor-viewport rows 5 4)
+      (check "viewport: cursor past the window scrolls it"
+             (equal (last shown) '("r5")))
+      (check "viewport: hidden head is announced"
+             (search "3 more lines above" (first shown)))
+      (check "viewport: scrolled budget respected" (= 4 (length shown)))
+      (check "viewport: cursor lands on the last row" (= crow 3)))
+    (multiple-value-bind (shown crow) (evo.tui::editor-viewport rows 4 1)
+      (check "viewport: no room for a marker shows the cursor's row"
+             (and (equal shown '("r4")) (zerop crow))))))
 
 ;;; Input parser
 
@@ -719,6 +754,14 @@ event: response.completed~%data: {\"type\":\"response.completed\",\"response\":{
                                     (map 'list #'char-code "x")
                                     '(27 91 50 48 49 126)))
                 '((:paste "x"))))
+  ;; The payload crosses the parser untouched: normalizing it is HANDLE-PASTE's
+  ;; job and hers alone, so a bracketed paste and a burst cannot drift apart.
+  (check "bracketed paste payload is handed over raw"
+         (equal (feed-bytes (append '(27 91 50 48 48 126)
+                                    (map 'list #'char-code
+                                         (format nil "a~cb" #\Return))
+                                    '(27 91 50 48 49 126)))
+                (list (list :paste (format nil "a~cb" #\Return)))))
   ;; Incomplete sequences wait...
   (let ((state (evo.tui::make-input-state)))
     (evo.tui::in-push-bytes state #(27 91))
@@ -757,6 +800,173 @@ event: response.completed~%data: {\"type\":\"response.completed\",\"response\":{
          (null (evo.tui::key-enhancement-wanted-p "0" "xterm-256color")))
   (check "key protocol: EVO_KEY_ENHANCEMENT=1 overrides a dumb TERM"
          (evo.tui::key-enhancement-wanted-p "1" "dumb")))
+
+;;; Pasting
+;;;
+;;; Two shapes reach the editor and both have to arrive intact: a bracketed
+;;; paste (payload handed over as data) and a paste from a terminal that
+;;; brackets nothing, which is just the clipboard typed at us at machine
+;;; speed.  The bug that motivated all of this: line breaks inside a paste
+;;; are usually CR — xterm.js (VS Code, Cursor) rewrites every newline in
+;;; the clipboard to CR, and raw mode does no CR->LF translation — and evo
+;;; dropped them, welding every pasted line into one.
+
+(defun paste-events (tui &rest byte-batches)
+  "BYTE-BATCHES, one per poll tick 20ms apart, through the exact path TICK
+takes: parse, then fold pasted batches.  A quiet tick is appended, standing
+for the moment the user stops feeding the terminal.  A batch given as
+(:after MS . BYTES) arrives that many milliseconds after the previous one —
+that is how a human's next keystroke differs from a paste's last chunk."
+  (loop with clock = 0
+        for batch in (append byte-batches (list nil))
+        for gap = (if (and (consp batch) (eq (first batch) :after)) (second batch) 20)
+        for bytes = (if (and (consp batch) (eq (first batch) :after)) (cddr batch) batch)
+        append (progn
+                 (incf clock gap)
+                 (evo.tui::in-push-bytes (evo.tui::tui-input tui)
+                                         (coerce bytes 'vector))
+                 (evo.tui::tick-key-events
+                  tui (evo.tui::parse-keys (evo.tui::tui-input tui)) clock))))
+
+(defun bytes-of (string)
+  (coerce (flexi-streams:string-to-octets string :external-format :utf-8) 'list))
+
+(defun bracketed (string)
+  (append '(27 91 50 48 48 126) (bytes-of string) '(27 91 50 48 49 126)))
+
+(defun test-paste ()
+  ;; 1. Normalization: line breaks in every spelling terminals use, and
+  ;; nothing that could steer the terminal on the next repaint.
+  (flet ((norm (text) (evo.tui::normalize-paste text)))
+    (check "normalize: CR is a line break, not a dropped byte"
+           (equal (norm (format nil "one~ctwo" #\Return)) (format nil "one~%two")))
+    (check "normalize: CRLF is one line break"
+           (equal (norm (format nil "one~c~ctwo" #\Return #\Newline))
+                  (format nil "one~%two")))
+    (check "normalize: LF passes through"
+           (equal (norm (format nil "one~%two")) (format nil "one~%two")))
+    (check "normalize: blank lines survive"
+           (equal (norm (format nil "a~c~cb" #\Return #\Return))
+                  (format nil "a~%~%b")))
+    (check "normalize: indentation survives"
+           (equal (norm (format nil "def f():~c    return 1" #\Return))
+                  (format nil "def f():~%    return 1")))
+    (check "normalize: tabs survive"
+           (equal (norm (format nil "a~cb" #\Tab)) (format nil "a~cb" #\Tab)))
+    ;; A stray ESC would be painted straight back at the terminal by the next
+    ;; repaint (SANITIZE-LINE keeps ESC) and swallow the text after it.
+    (check "normalize: ANSI sequences are dropped whole"
+           (equal (norm (format nil "a~c[31mred~c[0m" #\Escape #\Escape)) "ared"))
+    (check "normalize: other control bytes are dropped"
+           (equal (norm (format nil "a~cb" (code-char 7))) "ab")))
+  ;; 2. A bracketed paste: normalized at the door, then the editor.
+  (let ((tui (evo.tui::make-tui)))
+    (evo.tui::handle-paste tui (format nil "alpha~cbravo" #\Return))
+    (check "bracketed CR paste keeps its lines"
+           (equal (evo.tui::eb-text (evo.tui::tui-editor tui))
+                  (format nil "alpha~%bravo"))))
+  (let ((tui (evo.tui::make-tui)))
+    (evo.tui::handle-paste tui (format nil "l1~cl2~cl3~cl4~cl5"
+                                       #\Return #\Return #\Return #\Return))
+    (check "bracketed CR paste collapses like any other"
+           (search "[paste #1: 5 lines]"
+                   (evo.tui::eb-text (evo.tui::tui-editor tui))))
+    (check "collapsed CR paste submits with real newlines"
+           (equal (evo.tui::eb-submit-text (evo.tui::tui-editor tui))
+                  (format nil "l1~%l2~%l3~%l4~%l5"))))
+  ;; 3. Unbracketed paste: the clipboard typed at us.  Every line break in
+  ;; it is the byte Enter sends, so without burst detection the first line
+  ;; is submitted as a prompt and the rest race in behind it.
+  (let ((tui (evo.tui::make-tui)))
+    (check "unbracketed multi-line paste is one paste, and no submit"
+           (equal (paste-events tui (bytes-of (format nil "one~ctwo~cthree"
+                                                      #\Return #\Return)))
+                  (list (list :paste (format nil "one~%two~%three"))))))
+  (let ((tui (evo.tui::make-tui)))
+    (check "a paste split across ticks stays one paste"
+           (equal (paste-events tui
+                                (bytes-of (format nil "one~ctw" #\Return))
+                                (bytes-of (format nil "o~cthree" #\Return))
+                                (bytes-of "!"))
+                  (list (list :paste (format nil "one~%two~%three!"))))))
+  ;; A line break at the very end is ambiguous: it is either the paste's
+  ;; last newline or the user's Enter.  Held for a tick, then released as
+  ;; Enter — which is what keeps `tmux send-keys "/help\r"` and every
+  ;; scripted driver working.
+  (let ((tui (evo.tui::make-tui)))
+    (check "a trailing break is the user's Enter"
+           (equal (paste-events tui (bytes-of (format nil "one~ctwo~c"
+                                                      #\Return #\Return)))
+                  (list (list :paste (format nil "one~%two")) :enter))))
+  (let ((tui (evo.tui::make-tui)))
+    (check "a held break followed by more text was interior after all"
+           (equal (paste-events tui
+                                (bytes-of (format nil "one~ctwo~c" #\Return #\Return))
+                                (bytes-of "three"))
+                  (list (list :paste (format nil "one~%two~%three"))))))
+  ;; Typing is not pasting: one or two characters per poll batch is a human.
+  (let ((tui (evo.tui::make-tui)))
+    (check "typing passes through untouched"
+           (equal (paste-events tui '(104) '(105) '(13))
+                  (list '(:char #\h) '(:char #\i) :enter))))
+  (let ((tui (evo.tui::make-tui)))
+    (check "a burst of control keys is not a paste"
+           (equal (paste-events tui '(27 91 65 27 91 66 27 91 65))
+                  (list :up :down :up))))
+  ;; Anything that is not text closes the burst, in order.
+  (let ((tui (evo.tui::make-tui)))
+    (check "a keystroke after a burst ends it, text first"
+           (equal (paste-events tui (bytes-of "abcd") '(27 91 68))
+                  (list (list :paste "abcd") :left))))
+  ;; The burst is not a mode: what a human types after a paste is typing,
+  ;; and a human is at least a tenth of a second away.
+  (let ((tui (evo.tui::make-tui)))
+    (check "typing right after a paste is typing"
+           (equal (paste-events tui (bytes-of "abcd") '(:after 400 101) '(:after 400 102))
+                  (list (list :paste "abcd") '(:char #\e) '(:char #\f)))))
+  ;; ...while the paste's own last chunk, still arriving, belongs to it.
+  (let ((tui (evo.tui::make-tui)))
+    (check "a short trailing chunk still belongs to the paste"
+           (equal (paste-events tui (bytes-of "abcd") (bytes-of "ef"))
+                  (list (list :paste "abcdef")))))
+  ;; A bracketed paste is a whole event; it must not be re-read as a burst.
+  (let ((tui (evo.tui::make-tui)))
+    (check "a bracketed paste stays one paste"
+           (equal (paste-events tui (bracketed (format nil "a~cb" #\Return)))
+                  (list (list :paste (format nil "a~cb" #\Return))))))
+  ;; EVO_PASTE_BURST=0: the raw key stream, for input that arrives fast and
+  ;; is not a paste.
+  (let ((tui (evo.tui::make-tui)))
+    (setf (evo.tui::pb-enabled (evo.tui::tui-burst tui)) nil)
+    (check "burst detection can be turned off"
+           (equal (paste-events tui (bytes-of "ab") '(13))
+                  (list '(:char #\a) '(:char #\b) :enter))))
+  (check "EVO_PASTE_BURST=0 is the escape hatch"
+         (null (evo.tui::paste-burst-wanted-p "0")))
+  (check "burst detection is on by default"
+         (evo.tui::paste-burst-wanted-p nil))
+  ;; A select popup has nothing to paste into: it takes keys raw, and any
+  ;; burst in flight is closed out rather than left to reappear later.
+  (let ((tui (evo.tui::make-tui)))
+    (evo.tui::in-push-bytes (evo.tui::tui-input tui) (coerce (bytes-of "abcd") 'vector))
+    (evo.tui::tick-key-events tui (evo.tui::parse-keys (evo.tui::tui-input tui)))
+    (setf (evo.tui::tui-mode tui) :select)
+    (check "entering a popup releases the burst in flight"
+           (equal (evo.tui::tick-key-events tui '(:down))
+                  (list (list :paste "abcd") :down))))
+  ;; End to end, the way it actually happens: a paste too big for the
+  ;; editbox, typed at a terminal that brackets nothing, lands as one
+  ;; placeholder and submits in full.
+  (let* ((tui (evo.tui::make-tui))
+         (text (format nil "def f():~c    return 1~c~cf()" #\Return #\Return #\Return))
+         (events (paste-events tui (bytes-of text))))
+    (dolist (event events) (evo.tui::handle-key-edit tui event))
+    (check "unbracketed paste reaches the editor whole"
+           (equal (evo.tui::eb-submit-text (evo.tui::tui-editor tui))
+                  (format nil "def f():~%    return 1~%~%f()")))
+    (check "unbracketed paste collapsed to a token"
+           (search "[paste #1: 4 lines]"
+                   (evo.tui::eb-text (evo.tui::tui-editor tui))))))
 
 ;;; Status-line segment registry
 ;;;
@@ -883,6 +1093,40 @@ event: response.completed~%data: {\"type\":\"response.completed\",\"response\":{
       (let ((lines (evo.tui::compose-region tui)))
         (check "separators for activity/todo/editbox"
                (= 4 (count-if (lambda (l) (search "─" l)) lines)))))
+    ;; The region is painted with relative cursor movement, so it must never
+    ;; be taller than the screen: one frame taller than the terminal scrolls
+    ;; its own top away and every later frame then clears the wrong rows and
+    ;; strands copies in scrollback.  A paste is what makes the editor big
+    ;; enough to matter, so the editor is budgeted and the whole region is
+    ;; clamped.
+    (let ((evo.tui::*rows* 12)
+          (tui (evo.tui::make-tui)))
+      (setf (evo.tui::tui-model-label tui) "m"
+            (evo.tui::tui-thinking-label tui) "medium")
+      (evo.tui::eb-paste (evo.tui::tui-editor tui)
+                         (format nil "~a~%~a~%~a"
+                                 (make-string 170 :initial-element #\a)
+                                 (make-string 170 :initial-element #\b)
+                                 (make-string 170 :initial-element #\c)))
+      (multiple-value-bind (lines crow) (evo.tui::compose-region tui)
+        (check "a big paste cannot outgrow the screen"
+               (<= (length lines) evo.tui::*rows*))
+        (check "the cursor stays inside the region"
+               (< -1 crow (length lines)))
+        (check "the editor says it is scrolled"
+               (some (lambda (l) (search "more lines above" l)) lines)))
+      ;; Same guarantee with a full todo panel and a long streaming tail
+      ;; under it — nothing in the region may push it past the screen.
+      (setf (evo.tui::tui-running tui) t
+            (evo.tui::tui-partial tui) (make-string 900 :initial-element #\z)
+            (evo.tui::tui-todo-visible tui) t
+            (evo.tui::tui-todos tui)
+            (coerce (loop repeat 10 collect '(:status "pending" :text "item")) 'vector))
+      (multiple-value-bind (lines crow) (evo.tui::compose-region tui)
+        (check "a full region still fits the screen"
+               (<= (length lines) evo.tui::*rows*))
+        (check "the cursor still stays inside the region"
+               (< -1 crow (length lines)))))
     ;; Live context: message usage re-anchors, tool results grow the estimate.
     (let ((tui (evo.tui::make-tui)))
       (with-output-to-string (fake-tty)
@@ -3630,6 +3874,7 @@ selection journals the provider, and every resolution point honours it."
     (test-parse-args)
     (test-editor)
     (test-input)
+    (test-paste)
     (test-status-segments)
     (test-tui-compose)
     (test-resume-picker)

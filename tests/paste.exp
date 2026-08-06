@@ -1,0 +1,141 @@
+#!/usr/bin/expect -f
+# paste.exp — pasting, through a real pty, in every shape a terminal sends it.
+#
+# No backend: nothing here submits anything to a model, and that is half the
+# point — a paste must land in the editor and stay there.  The terminal is
+# deliberately short (12 rows) so an oversized paste has to be handled rather
+# than painted over the screen.
+set timeout 15
+
+set repo [file dirname [file dirname [file normalize $argv0]]]
+set scratch [exec mktemp -d /tmp/evo-paste.XXXXXX]
+set env(EVO_HOME) "$scratch/home"
+file mkdir $env(EVO_HOME)
+foreach v {EVO_SUPERVISED_CHILD EVO_HEARTBEAT_FILE} {
+    if {[info exists env($v)]} { unset env($v) }
+}
+# A model has to be registered for the TUI to start; it is never called.
+set f [open "$env(EVO_HOME)/init.lisp" w]
+puts $f {(evo:register-model "paste-test" :provider :none :api :anthropic-messages :context-window 100000 :max-output 4000)}
+puts $f {(evo:set-setting :model "paste-test")}
+puts $f {(evo:register-provider :none :base-url "http://127.0.0.1:1/unused" :api-key "unused")}
+close $f
+
+set workdir "$scratch/work"
+file mkdir $workdir
+cd $workdir
+
+set pass 0
+set failures {}
+proc check {name} {
+    global pass
+    incr pass
+    puts "\nPASS: $name"
+}
+proc fail {name} {
+    global failures
+    lappend failures $name
+    puts "\nFAIL: $name"
+}
+# Wait a beat while still draining the pty (expect only reads inside expect).
+proc settle {seconds} {
+    set timeout $seconds
+    expect {
+        timeout {}
+    }
+}
+
+set stty_init "rows 12 cols 80"
+spawn "$repo/build/evo"
+
+expect {
+    -re {ctx \d+k/\d+k} { check "startup" }
+    timeout { fail "startup"; exit 1 }
+}
+
+# 1. Bracketed paste, line breaks spelled CR.  This is what xterm.js sends
+# (VS Code, Cursor) and what most emulators send: CR is the byte Enter
+# produces, and raw mode does no CR->LF translation.  Dropping those CRs
+# welded every pasted line into one.
+send "\x1b\[200~bracketalpha\rbracketbravo\x1b\[201~"
+expect {
+    -re {bracketalpha\r\n  bracketbravo} { check "bracketed CR paste keeps its line break" }
+    timeout { fail "bracketed CR paste keeps its line break" }
+}
+send "\x03"
+settle 1
+
+# 2. The same, long enough to collapse to a token.
+send "\x1b\[200~l1\rl2\rl3\rl4\rl5\x1b\[201~"
+expect {
+    -re {\[paste #1: 5 lines\]} { check "bracketed CR paste collapses" }
+    timeout { fail "bracketed CR paste collapses" }
+}
+send "\x03"
+settle 1
+
+# 3. No brackets at all: the clipboard typed at us, which is what a terminal
+# without bracketed paste — or `tmux send-keys`, or any driver script —
+# delivers.  Every line break is the byte Enter sends, so without burst
+# detection the first line is submitted as a prompt and the rest race in
+# behind it.
+send "burstalpha\rburstbravo\rburstcharlie"
+expect {
+    -re {burstalpha\r\n  burstbravo\r\n  burstcharlie} { check "unbracketed paste keeps its lines" }
+    timeout { fail "unbracketed paste keeps its lines" }
+}
+# And it is still sitting in the editor: nothing was submitted.
+set timeout 3
+expect {
+    -re {working} { fail "unbracketed paste submitted itself" }
+    timeout { check "unbracketed paste did not submit itself" }
+}
+set timeout 15
+send "\x03"
+settle 1
+
+# 4. A line break at the very end of an unbracketed burst is the user's
+# Enter, not the paste's: this is the shape every scripted driver uses, and
+# it must still submit.
+send "/help\r"
+expect {
+    -re {/tree} { check "a trailing break still submits" }
+    timeout { fail "a trailing break still submits" }
+}
+settle 1
+
+# 5. A paste too tall for a 12-row terminal scrolls the editor instead of
+# painting a region taller than the screen (which strands rows in scrollback
+# and duplicates them on every repaint).  Three lines just under the collapse
+# threshold: too big for the screen, too small for a token.
+send "\x1b\[200~"
+send "[string repeat "a" 290]\r[string repeat "b" 290]\r[string repeat "c" 290]"
+send "\x1b\[201~"
+expect {
+    -re {more lines above} { check "an oversized paste scrolls the editor" }
+    timeout { fail "an oversized paste scrolls the editor" }
+}
+send "\x03"
+settle 1
+
+# 6. A single enormous line is as unreadable as many short ones, and it
+# collapses on its character count.
+send "\x1b\[200~"
+send "[string repeat "wide-paste-filler " 100]"
+send "\x1b\[201~"
+expect {
+    -re {\[paste #\d+: \d\d\d\d chars\]} { check "a huge single line collapses on chars" }
+    timeout { fail "a huge single line collapses on chars" }
+}
+send "\x03"
+settle 1
+
+send "/quit\r"
+expect {
+    eof { check "clean quit" }
+    timeout { fail "clean quit"; catch {close} }
+}
+
+puts "\n$pass checks passed, [llength $failures] failed ($scratch)"
+if {[llength $failures] > 0} { exit 1 }
+exit 0
