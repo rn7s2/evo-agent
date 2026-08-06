@@ -34,7 +34,7 @@ keys: enter send · shift+enter/alt+enter/ctrl+j newline ·
       ctrl+a/e home/end · ctrl+b/f move · ctrl+d delete (quit when empty) ·
       ctrl+k kill to eol · ctrl+w delete word · esc interrupt · esc esc rewind ·
       ctrl+v attach the clipboard image · paste/drop an image path to attach it ·
-      paste >3 lines collapses (paste again to expand)
+      a big paste collapses to a token (paste it again to expand it)
 images: no terminal can hand an app the image itself, so evo reads the clipboard
       when you ask it to: ctrl+v (works everywhere), ctrl+alt+v (where the
       terminal keeps ctrl+v for its own paste), cmd+v/right-click paste (where
@@ -478,8 +478,9 @@ lists only global (every project) lore — mirroring /memory vs /global-memory."
   ;; Input.
   (let ((got (read-pending-bytes tui)))
     (setf (tui-quiet-ticks tui) (if got 0 (1+ (tui-quiet-ticks tui))))
-    (let ((events (parse-keys (tui-input tui)
-                              :flush-escape (>= (tui-quiet-ticks tui) 2))))
+    (let ((events (tick-key-events tui
+                                   (parse-keys (tui-input tui)
+                                               :flush-escape (>= (tui-quiet-ticks tui) 2)))))
       (dolist (event events)
         (case (tui-mode tui)
           (:select (handle-key-select tui event))

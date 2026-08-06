@@ -218,9 +218,9 @@ the essential ones cannot be disabled.
 
 - **TUI** — adaptive renderer in normal scrollback + managed bottom region,
   SIGWINCH live reflow, multi-line editor (Enter sends, Shift+Enter newline,
-  paste >3 lines collapses to a placeholder, paste-to-expand), image paste
-  (ctrl+v, cmd+v, drop a path), slash commands, streaming rendering, `--swank`
-  developer side-door.
+  a big paste collapses to a placeholder, paste-to-expand), pasting with or
+  without bracketed paste, image paste (ctrl+v, cmd+v, drop a path), slash
+  commands, streaming rendering, `--swank` developer side-door.
 - **Todo** — checklist tool rendered in the panel; state rides `:custom`
   entries (invisible to the LLM), survives restart and compaction, embedded in
   goal continuation steering.
@@ -363,8 +363,9 @@ make integration    # live e2e: tool round-trip, kill -9 + manual resume,
                     #       Backend via env (skips if unreachable):
                     #       EVO_TEST_BASE_URL / _API_KEY / _MODEL
                     #       (+ optional _VISION_MODEL for the image test)
-make tui-test       # expect-driven TUI under a pty, image paste included
-                    #       (EVO_TEST_VISION_MODEL)
+make tui-test       # expect-driven TUI under a pty: image paste
+                    #       (EVO_TEST_VISION_MODEL), pasting in every shape a
+                    #       terminal sends it, model routing, the IDE bridge
 ```
 
 ## Layout

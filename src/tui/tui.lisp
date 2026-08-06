@@ -12,6 +12,7 @@
   agent
   stdin
   (input (make-input-state))
+  (burst (make-paste-burst))
   (editor (make-edit-buffer))
   (events nil) (events-lock (bt:make-lock "tui-events"))
   worker
@@ -59,9 +60,6 @@
 (defun drain-events (tui)
   (bt:with-lock-held ((tui-events-lock tui))
     (nreverse (shiftf (tui-events tui) nil))))
-
-(defun now-ms ()
-  (round (* 1000 (/ (get-internal-real-time) internal-time-units-per-second))))
 
 ;;; Scrollback helpers.
 
@@ -287,11 +285,14 @@ volume every time a stray paste arrives would be noise."
              (setf (tui-dirty tui) t)))))
 
 (defun handle-paste (tui text)
-  "A bracketed paste: image file paths attach, an empty paste means the
-clipboard held something that is not text (an image, we hope), and anything
-else is text.  Dragging a file onto the terminal arrives here as its escaped
-path."
-  (let ((paths (evo.media:pasted-image-paths text)))
+  "The one door pasted text comes through — a bracketed paste and an
+unbracketed burst (see COALESCE-PASTE-BURST) alike.  TEXT is normalized
+here and nowhere else, so the two cannot drift apart; then image file paths
+attach, an empty paste means the clipboard held something that is not text
+(an image, we hope), and everything else is text for the editor.  Dragging
+a file onto the terminal arrives here as its escaped path."
+  (let* ((text (normalize-paste text))
+         (paths (evo.media:pasted-image-paths text)))
     (cond (paths (dolist (path paths) (attach-image-path tui path)))
           ((zerop (length text)) (paste-clipboard-image tui :quiet-reason t))
           (t (eb-paste (tui-editor tui) text)))))
@@ -739,19 +740,36 @@ wrapped between two rules, and the model status line under the editbox."
            (eb-display-rows (tui-editor tui) (max 10 (- *cols* 3)))
          (multiple-value-bind (cprefix cmatches ckind) (completion-context tui)
            (declare (ignore cprefix))
-           (let ((base (1+ (length lines)))) ; editor rows start after the top rule
-             (setf lines
-                   (append lines
-                           (list sep)
-                           (loop for row in rows
-                                 for i from 0
-                                 collect (concatenate 'string
-                                                      (if (zerop i) (cyan "❯ ") "  ")
-                                                      row))
-                           (when cmatches (completion-rows tui cmatches ckind))
-                           (list sep (status-line tui))))
-             (setf cursor-row (+ base crow)
-                   cursor-col (+ 2 ccol)))))))
+           (let* ((popup (when cmatches (completion-rows tui cmatches ckind)))
+                  (base (1+ (length lines))) ; editor rows start after the top rule
+                  ;; What the editor may spend: the screen, less everything
+                  ;; already composed and the two rules + status line still
+                  ;; to come.  Nothing else in the region grows with what
+                  ;; the user types, so this is where the region is kept
+                  ;; inside the screen it is painted with.
+                  (budget (- *rows* (length lines) (length popup) 3)))
+             (multiple-value-bind (rows crow) (editor-viewport rows crow budget)
+               (setf lines
+                     (append lines
+                             (list sep)
+                             (loop for row in rows
+                                   for i from 0
+                                   collect (concatenate 'string
+                                                        (if (zerop i) (cyan "❯ ") "  ")
+                                                        row))
+                             popup
+                             (list sep (status-line tui))))
+               (setf cursor-row (+ base crow)
+                     cursor-col (+ 2 ccol))))))))
+    ;; Last guard on the invariant the region math rests on: never hand
+    ;; DRAW-REGION more lines than the terminal has rows.  The editor is
+    ;; already budgeted above; this catches the rest (a long streaming tail
+    ;; under a full todo panel on a short terminal) by dropping from the
+    ;; top, which is the oldest content and the furthest from the cursor.
+    (let ((over (- (length lines) *rows*)))
+      (when (plusp over)
+        (setf lines (nthcdr over lines)
+              cursor-row (max 0 (- cursor-row over)))))
     (values lines cursor-row cursor-col)))
 
 (defun repaint (tui)
@@ -1095,6 +1113,16 @@ on it."
         (t (history-next tui))))))
 
 ;;; Key handling.
+
+(defun tick-key-events (tui events &optional (now (now-ms)))
+  "One poll batch of key events, ready to dispatch: while the editor has
+focus, a batch that was pasted rather than typed is folded into a single
+:PASTE event (COALESCE-PASTE-BURST).  A select popup takes its keys raw —
+there is nothing there to paste into — so any burst in flight is closed out
+first rather than left to reappear later."
+  (if (and (pb-enabled (tui-burst tui)) (eq (tui-mode tui) :edit))
+      (coalesce-paste-burst (tui-burst tui) events now)
+      (append (paste-burst-flush (tui-burst tui)) events)))
 
 (defun handle-key-edit (tui event)
   (let ((eb (tui-editor tui)))

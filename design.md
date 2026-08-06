@@ -598,16 +598,22 @@ public API and not disableable.
   - The editor region grows and reflows with content, as part of the managed
     bottom region.
   - **Enter sends; Shift+Enter inserts a newline.**
-  - **Paste collapse**: a paste over three lines becomes a placeholder token
-    such as `[paste #1: 42 lines]`, with the content held in a side buffer and
-    substituted back in full when the message is sent.
+  - The editor never paints more rows than the screen has: it scrolls with
+    the cursor, marking the lines it is hiding, because the managed region is
+    drawn with relative cursor movement and a region taller than the terminal
+    strands its own top in scrollback and duplicates it on every repaint.
+  - **Paste collapse**: a paste too big to read in a three-line editbox —
+    over three lines, or over a thousand characters — becomes a placeholder
+    token such as `[paste #1: 42 lines]` (`[paste #1: 4200 chars]` for one
+    long line), with the content held in a side buffer and substituted back
+    in full when the message is sent.
   - **Paste-to-expand**: pasting the exact same content again with the cursor
     right after the placeholder replaces it with the real lines, editable in
     place. Paste once to keep it compact, twice to edit.
-  - Paste detection requires bracketed paste mode (`CSI ?2004h`). Shift+Enter
-    is indistinguishable from Enter in legacy terminals, so the kitty keyboard
-    protocol or `modifyOtherKeys` (CSI-u) is used where available, with a
-    documented fallback of Alt+Enter or backslash-then-Enter elsewhere.
+  - Shift+Enter is indistinguishable from Enter in legacy terminals, so the
+    kitty keyboard protocol or `modifyOtherKeys` (CSI-u) is used where
+    available, with a documented fallback of Alt+Enter or
+    backslash-then-Enter elsewhere.
 - **Image input across terminals** (§15.1): the one feature whose plumbing is
   entirely terminal-dependent, so it is specified as a ladder rather than a
   gesture.
@@ -618,6 +624,36 @@ public API and not disableable.
   partial accumulator).
 - `--swank <port>` is the developer side-door for live image inspection, off
   by default.
+
+#### 15.0.1 A paste arrives in one of two shapes
+
+Bracketed paste (`CSI ?2004h`) is a request, not a guarantee: a terminal may
+ignore it, a multiplexer or ssh hop may eat it, and `tmux send-keys` and every
+driver script bracket nothing at all. Both shapes must work, so evo reads
+both, and normalizes at one door — `handle-paste`, which every gesture goes
+through, so no two of them can drift apart.
+
+- **Bracketed**: the payload arrives as data, between `ESC[200~` and
+  `ESC[201~`.
+- **Unbracketed**: the clipboard is simply typed at us as fast as the pty will
+  carry it, with every line break spelled as the byte Enter sends. Naively
+  read, the first line is submitted as a prompt and the rest of the clipboard
+  races into the model behind it. Evo recovers the paste from its *arrival
+  rate*: the poll loop drains the tty every ~20ms, so one batch of key events
+  is one 20ms window — a human fills it with a character or two, a paste fills
+  it with as many as the pty will carry. A batch that is nothing but text and
+  line breaks and holds at least three characters was pasted, not typed, and
+  is folded into the same `:paste` event a bracketed terminal would have sent.
+  A line break *inside* the burst is part of the text; one at the very end is
+  held for a tick and released as a real Enter, which is what keeps scripted
+  drivers (`send-keys "/help\r"`) submitting. `EVO_PASTE_BURST=0` turns the
+  detection off.
+- **Line endings**: inside a paste, a line break is CR (xterm.js — VS Code,
+  Cursor — rewrites every newline in the clipboard to CR, and raw mode does no
+  CR→LF translation), CRLF (Windows clipboards), or LF. All three mean *new
+  line*; dropping CR instead of translating it welds every pasted line into
+  one. ANSI escape sequences and other control characters are dropped: a paste
+  is text, not keystrokes.
 
 ### 15.1 Image input is a ladder, not a gesture
 
