@@ -480,7 +480,22 @@ also right when stdout is a pipe or a file."
         (ecase role (:stdin 0) (:stdout 1))))
   #+ecl (ecase role (:stdin 0) (:stdout 1)))
 
-(defun make-stdout-stream (&key (external-format :utf-8))
+(defun std-external-format ()
+  "The external format to write the terminal with.
+
+Unix: UTF-8, deliberately, whatever the locale says — the TUI's box drawing
+is not negotiable and a C/POSIX locale would otherwise downgrade it.
+
+Windows: whatever SBCL chose for its own console stream, because there the
+choice is not ours to make.  A console handle is written through the wide
+console API, so a stream forced to :utf-8 hands it UTF-8 bytes that the
+console reads as UTF-16 code units: writing \"[probe marker]\" comes out as
+\"灛潲敢洠牡敫...\", each pair of ASCII bytes rendered as one CJK glyph.
+Measured on Windows 11, SBCL 2.6.7, console codepage 936."
+  #-evo-windows :utf-8
+  #+evo-windows (stream-external-format sb-sys:*stdout*))
+
+(defun make-stdout-stream (&key (external-format (std-external-format)))
   "A fully-buffered character stream writing to this process's stdout."
   (let ((where (std-descriptor :stdout)))
     #+sbcl (sb-sys:make-fd-stream where :output t :buffering :full
