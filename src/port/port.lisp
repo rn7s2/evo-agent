@@ -505,12 +505,59 @@ Measured on Windows 11, SBCL 2.6.7, console codepage 936."
                                          :external-format external-format)))
 
 (defun make-stdin-stream ()
-  "An unbuffered (unsigned-byte 8) stream reading this process's stdin."
+  "Where the TUI reads keys from.
+
+Unix: an unbuffered byte stream on stdin's descriptor.  Windows: SBCL's own
+console stream, because the console is read through a wide API just as it is
+written through one.  A byte stream on the handle there returns UTF-16LE --
+typing abc arrives as 97 0 98 0 99 0, and an arrow key as 27 0 91 0 65 0, so
+the key parser sees a NUL after every byte it understands.  Measured on
+Windows 11, SBCL 2.6.7.  READ-AVAILABLE-INPUT turns the characters back into
+the UTF-8 bytes the parser is written against."
+  #+evo-windows sb-sys:*stdin*
+  #-evo-windows
   (let ((where (std-descriptor :stdin)))
     #+sbcl (sb-sys:make-fd-stream where :input t :buffering :none
                                         :element-type '(unsigned-byte 8))
     #+ecl (ext:make-stream-from-fd where :input :buffering :none
                                          :element-type '(unsigned-byte 8))))
+
+(defun push-utf8 (char vector)
+  "Encode CHAR as UTF-8 onto VECTOR, an adjustable vector of octets."
+  (let ((code (char-code char)))
+    (macrolet ((out (form) `(vector-push-extend ,form vector)))
+      (cond ((< code #x80) (out code))
+            ((< code #x800)
+             (out (logior #xC0 (ash code -6)))
+             (out (logior #x80 (logand code #x3F))))
+            ((< code #x10000)
+             (out (logior #xE0 (ash code -12)))
+             (out (logior #x80 (logand (ash code -6) #x3F)))
+             (out (logior #x80 (logand code #x3F))))
+            (t
+             (out (logior #xF0 (ash code -18)))
+             (out (logior #x80 (logand (ash code -12) #x3F)))
+             (out (logior #x80 (logand (ash code -6) #x3F)))
+             (out (logior #x80 (logand code #x3F))))))))
+
+(defun read-available-input (source vector)
+  "Push every byte currently readable from SOURCE onto VECTOR.  True if any
+arrived.  The platform difference lives here, not in the key parser: bytes
+straight off the descriptor on Unix, characters re-encoded to UTF-8 on
+Windows (see MAKE-STDIN-STREAM)."
+  (let ((got nil))
+    (loop while (listen source)
+          do #+evo-windows
+             (let ((char (read-char-no-hang source nil nil)))
+               (if char
+                   (progn (push-utf8 char vector) (setf got t))
+                   (loop-finish)))
+             #-evo-windows
+             (let ((byte (read-byte source nil nil)))
+               (if byte
+                   (progn (vector-push-extend byte vector) (setf got t))
+                   (loop-finish))))
+    got))
 
 ;;; Signals & tty.
 
