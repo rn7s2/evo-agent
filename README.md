@@ -110,7 +110,7 @@ point.
   read with `*read-eval*` nil over a restricted value vocabulary. No Lisp image
   carries session state.
 - **State is a fold, never a mutable field.** Context, model, thinking level,
-  active tools, goal, todo list, mode — all derived by folding the root→leaf
+  active tools, goal, todo list — all derived by folding the root→leaf
   path. Branching, rewind, resume, and pause fall out of the data structure.
 - **Write-ahead**: the entry is appended before it is acted on. A crash mid-turn
   loses at most the in-flight provider stream.
@@ -185,7 +185,7 @@ This is the evolution engine. Four mechanisms make it work:
    rebuild the system prompt, so a newly registered tool is callable on the next
    request. The `:tool-call` hook may mutate arguments or return
    `(:block t :reason ...)` — the single interception point that permission
-   gates, plan mode, and sandboxing all build on.
+   gates, read-only policies, and sandboxing all build on.
 3. **Filesystem convention.** `~/.evo/extensions/` and
    `<project>/.evo/extensions/` load at boot and are writable by the agent.
    File name is load order: `NNN-name.lisp`, `000`–`099` foundations,
@@ -224,11 +224,6 @@ the essential ones cannot be disabled.
 - **Todo** — checklist tool rendered in the panel; state rides `:custom`
   entries (invisible to the LLM), survives restart and compaction, embedded in
   goal continuation steering.
-- **Plan mode** — `auto` (fully permissive default) and `plan` (read-only).
-  Mode is journal state, not a flag. Switching applies policy through the public
-  API: tool gating down to an allowlist, quote-aware bash segment scanning, and
-  a `:transform-context` filter that removes injected instructions when the mode
-  is off. The reference implementation of the extension API's depth.
 - **Memory** — structured global/project memory, injected once per session.
 
 ### Images in
@@ -289,7 +284,7 @@ registered without vision gets a named placeholder instead of a 400.
   and `$@` substitution.
 - **Slash command resolution**: extension commands → builtins → skills →
   prompt templates → send to the agent. Built-ins: `/goal /lore /global-lore
-  /memory /global-memory /permission /compact /image /eval /tree /fork /resume
+  /memory /global-memory /compact /image /eval /tree /fork /resume
   /model /reload /export /help /quit /exit`.
 - **`/eval <sexpr>`**: a REPL into the live image. The content is read and
   evaluated in `EVO.USER` — the same package extensions and agent-written code
@@ -361,7 +356,7 @@ implement the generics, `evo:register-api` it, and a model can name it via
 make test           # unit: sexpr IO, journal, schema, registries, provider
                     #       APIs, SSE + transport, request builders, handoff,
                     #       init files, preflight, editor, input parser,
-                    #       templates, compaction, lore, plan-mode, images
+                    #       templates, compaction, lore, images
 make integration    # live e2e: tool round-trip, kill -9 + manual resume,
                     #       goal completion, induced-crash supervision,
                     #       mid-task compaction, --image into a vision model.
@@ -370,7 +365,6 @@ make integration    # live e2e: tool round-trip, kill -9 + manual resume,
                     #       (+ optional _VISION_MODEL for the image test)
 make tui-test       # expect-driven TUI under a pty, image paste included
                     #       (EVO_TEST_VISION_MODEL)
-tests/plan-mode.exp # plan/auto mode wiring e2e
 ```
 
 ## Layout
@@ -411,7 +405,6 @@ src/kernel/              EVO.KERNEL — the core loop and nothing else
 
 src/core-ext/            core extensions: bundled, but built on the same public
   todo.lisp              API as user ones — EVO.TODO: todo checklists
-  plan-mode.lisp         EVO.PLAN: plan/auto modes, policy + enforcement hooks
   memory.lisp            EVO.MEMORY: global/project memory stores
 
 src/tui/                 EVO.TUI — also a core extension, essential so

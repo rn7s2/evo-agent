@@ -10,7 +10,6 @@
   /help                this list
   /goal [objective]    show, create, or refine the goal
   /todo                toggle the todo panel
-  /permission [auto|plan] switch mode from a list (shift+tab toggles)
   /model [id]          pick the model from a list, or set it directly
   /thinking [level]    low·medium·high·xhigh·max (changing it mid-session
                        drops the provider prompt cache)
@@ -30,7 +29,7 @@
   /export [path]       export the transcript as markdown
   /reload              re-evaluate init.lisp + extensions + post-init.lisp
   /quit /exit          exit (ctrl+c ctrl+c, ctrl+d)
-keys: enter send · shift+enter/alt+enter/ctrl+j newline · shift+tab auto/plan mode ·
+keys: enter send · shift+enter/alt+enter/ctrl+j newline ·
       tab complete /command or /eval symbol · up/down input history (at buffer edge) ·
       ctrl+a/e home/end · ctrl+b/f move · ctrl+d delete (quit when empty) ·
       ctrl+k kill to eol · ctrl+w delete word · esc interrupt · esc esc rewind ·
@@ -224,24 +223,6 @@ ctrl+v."
                (refresh-goal tui))))))
     t))
 
-(defun permission-command (tui args)
-  "The modes themselves come from EVO.PLAN:*MODES* — the picker and the
-argument check never go stale against the core extension."
-  (cond
-    ((evo.plan:mode-name args) (set-mode tui args))
-    ((zerop (length args))
-     (enter-select
-      tui "permission:"
-      (loop for (name . description) in evo.plan:*modes*
-            collect (list name name description))
-      (lambda (mode) (set-mode tui mode))
-      :index (or (position (current-mode tui) evo.plan:*modes*
-                           :key #'car :test #'equal)
-                 0)))
-    (t (scroll tui (dim (format nil "modes: ~{~a~^ ~}"
-                                (mapcar #'car evo.plan:*modes*))))))
-  t)
-
 (defun set-model (tui model)
   (let ((resolved (handler-case (find-model model)
                     (error (e)
@@ -399,7 +380,6 @@ lists only global (every project) lore — mirroring /memory vs /global-memory."
          (setf (tui-todo-visible tui) (not (tui-todo-visible tui))
                (tui-dirty tui) t)
          t)
-        ((cmd "permission") (permission-command tui args))
         ((cmd "model")
          (if (zerop (length args))
              (model-select-command tui)

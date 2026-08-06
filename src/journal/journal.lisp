@@ -178,7 +178,7 @@ user message in <summary> tags, then the retained tail."
           (:custom-message
            ;; Extension-injected content, visible to the LLM.  Tagged with
            ;; the entry's :key so a transform-context hook can filter it
-           ;; back out (e.g. plan mode turning off).
+           ;; back out when it stops being relevant.
            (push (if (pget entry :key)
                      (pput (pget entry :message) :meta (list :key (pget entry :key)))
                      (pget entry :message))

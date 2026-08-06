@@ -26,7 +26,6 @@
   (todo-visible t)
   (todos nil)
   (goal nil)
-  (agent-mode "auto")   ; cached "mode" custom state: "auto" | "plan"
   (model-label "") (thinking-label "")
   ;; Live context accounting: authoritative at idle (estimated from the
   ;; fold), advanced event-by-event while a run streams so the status line
@@ -96,8 +95,6 @@ while the run thread is appending to it."
                        (error () nil)))))
     (setf (tui-goal tui) (evo.journal:state-goal state)
           (tui-todos tui) (custom-state state "todo")
-          (tui-agent-mode tui) (or (custom-state state "mode")
-                                   evo.plan:*default-mode*)
           ;; Same id under several providers: name the active one, since the
           ;; bare id no longer identifies the endpoint on its own.
           (tui-model-label tui) (cond ((null model-id) "(no model)")
@@ -113,30 +110,6 @@ while the run thread is appending to it."
                                      state (agent-thinking-override agent))))
     (when reset-goal-run-tokens
       (setf (tui-goal-run-tokens tui) 0))))
-
-;;; Plan/auto mode.  Policy — tool gating, instruction injection, the
-;;; enforcement hooks — belongs to the plan-mode core extension (EVO.PLAN);
-;;; the TUI is presentation: switch, announce, indicate.
-
-(defun current-mode (tui)
-  (or (tui-agent-mode tui) evo.plan:*default-mode*))
-
-(defun mode-announcement (mode)
-  (yellow (if (equal mode "plan")
-              "◇ plan mode — read-only; shift+tab or /permission to execute"
-              "◆ auto mode — full permissions")))
-
-(defun set-mode (tui mode)
-  "Switch modes and announce it.  A switch to the current mode is a no-op —
-EVO.PLAN:SET-MODE returns NIL and nothing is journaled or scrolled."
-  (let ((mode (evo.plan:set-mode mode (tui-agent tui))))
-    (when mode
-      (setf (tui-agent-mode tui) mode
-            (tui-dirty tui) t)
-      (scroll tui (mode-announcement mode)))))
-
-(defun toggle-mode (tui)
-  (set-mode tui (if (equal (current-mode tui) "plan") "auto" "plan")))
 
 ;;; Worker thread.
 
@@ -510,20 +483,12 @@ inside the TUI tick loop and on session resume, so malformed ARGUMENTS
             (fmt-ktokens (+ (pget goal :tokens-used 0) live-tokens))
             (and budget (fmt-ktokens budget)))))
 
-(defun mode-indicator (tui)
-  "Leftmost status element; plan mode stands out."
-  (if (equal (current-mode tui) "plan")
-      (yellow "◇ plan")
-      (dim "◆ auto")))
-
 (defun status-line (tui)
   (let ((goal (tui-goal tui)))
-    (concatenate 'string
-                 (mode-indicator tui)
-                 (dim (format nil " · ~a · ~a · ~a~@[ · ~a~]"
-                              (tui-model-label tui) (tui-thinking-label tui)
-                              (context-label tui)
-                              (and goal (goal-label goal (tui-goal-run-tokens tui))))))))
+    (dim (format nil "~a · ~a · ~a~@[ · ~a~]"
+                 (tui-model-label tui) (tui-thinking-label tui)
+                 (context-label tui)
+                 (and goal (goal-label goal (tui-goal-run-tokens tui)))))))
 
 (defparameter *working-frames* "|/-\\"
   "Rotating slash while the agent is executing.")
@@ -702,16 +667,10 @@ wrapped between two rules, and the model status line under the editbox."
 
 ;;; Slash-command completion (Tab).
 
-(defun mode-argument-command-p (name)
-  "Mode names are accepted only as /permission arguments, never as standalone
-/commands — the registry of them is EVO.PLAN:*MODES*."
-  (and (evo.plan:mode-name name) t))
-
 (defparameter *builtin-commands*
   '(("help" . "commands and keys")
     ("goal" . "show, create, or refine the goal")
     ("todo" . "toggle the todo panel")
-    ("permission" . "switch auto/plan mode (shift+tab toggles)")
     ("model" . "pick the model from a list, or set it directly")
     ("thinking" . "low·medium·high·xhigh·max")
     ("compact" . "compact the context now")
@@ -735,19 +694,18 @@ wrapped between two rules, and the model status line under the editbox."
 (defun all-commands ()
   "Completion candidates as (name . description), mirroring dispatch order:
 extension commands, builtins, skills, prompt templates (first wins)."
-  (sort (remove-if (lambda (entry) (mode-argument-command-p (car entry)))
-                   (remove-duplicates
-                    (append (loop for name being the hash-keys of evo::*commands*
-                                    using (hash-value cmd)
-                                  collect (cons name (or (pget cmd :description)
-                                                         "extension command")))
-                            (copy-alist *builtin-commands*)
-                            (mapcar (lambda (s) (cons (format nil "skill:~a" (pget s :name))
-                                                      (or (pget s :description) "skill")))
-                                    (available-skills))
-                            (mapcar (lambda (name) (cons name "prompt template"))
-                                    (template-names)))
-                    :key #'car :test #'string= :from-end t))
+  (sort (remove-duplicates
+         (append (loop for name being the hash-keys of evo::*commands*
+                         using (hash-value cmd)
+                       collect (cons name (or (pget cmd :description)
+                                              "extension command")))
+                 (copy-alist *builtin-commands*)
+                 (mapcar (lambda (s) (cons (format nil "skill:~a" (pget s :name))
+                                           (or (pget s :description) "skill")))
+                         (available-skills))
+                 (mapcar (lambda (name) (cons name "prompt template"))
+                         (template-names)))
+         :key #'car :test #'string= :from-end t)
         #'string< :key #'car))
 
 (defparameter *completion-max-rows* 6)
@@ -1044,7 +1002,6 @@ on it."
        (case event
          (:enter (submit tui))
          ((:shift-enter :newline) (eb-newline eb))
-         (:shift-tab (toggle-mode tui))
          (:backspace (eb-backspace eb))
          (:delete (eb-delete eb))
          (:delete-word (eb-delete-word eb))
@@ -1129,13 +1086,6 @@ on it."
          (name (subseq text 1 space))
          (args (string-trim " " (if space (subseq text (1+ space)) ""))))
     (cond
-      ;; Mode names are only /permission arguments.  Keep stale userspace
-      ;; extensions or templates named "plan"/"auto" from resurrecting
-      ;; standalone slash commands after an upgrade.
-      ((mode-argument-command-p name)
-       (scroll tui (dim (format nil "/~a is not a command — use /permission ~a"
-                               name (string-downcase name))))
-       t)
       ;; 1. extension commands
       ((gethash name evo::*commands*)
        (let ((fn (pget (gethash name evo::*commands*) :fn)))
