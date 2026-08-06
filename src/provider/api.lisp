@@ -126,7 +126,7 @@ stays idempotent."
 
 (defun find-api (key)
   (or (cdr (assoc key *apis*))
-      (error "Unknown provider API ~s. Registered APIs: ~{~s~^, ~}.~%~
-              Bundled APIs are always present; an extension-defined one is~%~
-              only there once its extension has run (evo:register-api)."
+      (error (cat "Unknown provider API ~s. Registered APIs: ~{~s~^, ~}.~%"
+                  "Bundled APIs are always present; an extension-defined one is~%"
+                  "only there once its extension has run (evo:register-api).")
              key (api-keys))))

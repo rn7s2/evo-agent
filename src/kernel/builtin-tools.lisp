@@ -10,7 +10,7 @@
          (limit (pget args :limit)))
     (unless (and path (probe-file path))
       (error "File not found: ~a" path))
-    (let* ((content (read-file-string path))
+    (let* ((content (normalize-newlines (read-file-string path)))
            (lines (uiop:split-string content :separator '(#\Newline)))
            (start (max 0 (1- (or offset 1))))
            (end (min (length lines) (+ start (or limit (length lines)))))
@@ -25,10 +25,35 @@
                *read-max-chars*)))))
 
 (defun tool-write (args)
-  (let ((path (pget args :path))
-        (content (or (pget args :content) "")))
-    (write-file-string path content)
-    (format nil "Wrote ~d chars to ~a" (length content) path)))
+  (let* ((path (pget args :path))
+         (content (or (pget args :content) ""))
+         ;; Rewriting a file should not restyle every line of it: a CR-LF
+         ;; file stays CR-LF (the agent writes LF, and git would otherwise
+         ;; show the whole file as changed).  New files get what they are
+         ;; given.
+         (existing (and (probe-file path)
+                        (ignore-errors (read-file-string path))))
+         (crlf (and existing (crlf-p existing) (not (crlf-p content))))
+         (written (if crlf (crlf-newlines content) content)))
+    (write-file-string path written)
+    (format nil "Wrote ~d chars to ~a~@[ ~a~]" (length written) path
+            (and crlf "(kept the file's CR-LF line endings)"))))
+
+(defun eol-respelled (old new content)
+  "(values OLD NEW) written with the line endings CONTENT actually uses.
+
+The agent sees LF — that is what the read tool shows it, and what a model
+writes back — while the file on disk may be CR-LF, so a literal search for
+OLD would miss every string that spans a line break.  We do not convert the
+file: we respell the needle (and the replacement with it, so the edit keeps
+the file's convention) and leave every other byte alone.  Files with mixed
+endings therefore stay mixed."
+  (cond ((search old content) (values old new))
+        ((search (crlf-newlines old) content)
+         (values (crlf-newlines old) (crlf-newlines new)))
+        ((search (normalize-newlines old) content)
+         (values (normalize-newlines old) (normalize-newlines new)))
+        (t (values old new))))
 
 (defun tool-edit (args)
   (let* ((path (pget args :path))
@@ -39,16 +64,17 @@
       (error "File not found: ~a" path))
     (unless (and (stringp old) (plusp (length old)))
       (error "old_string must be a non-empty string"))
-    (let* ((content (read-file-string path))
-           (n (count-substring old content)))
-      (cond ((zerop n)
-             (error "old_string not found in ~a" path))
-            ((and (> n 1) (not all))
-             (error "old_string occurs ~d times in ~a; make it unique or set replace_all"
-                    n path))
-            (t
-             (write-file-string path (string-replace old new content :all all))
-             (format nil "Edited ~a (~d replacement~:p)" path (if all n 1)))))))
+    (let ((content (read-file-string path)))
+      (multiple-value-setq (old new) (eol-respelled old new content))
+      (let ((n (count-substring old content)))
+        (cond ((zerop n)
+               (error "old_string not found in ~a" path))
+              ((and (> n 1) (not all))
+               (error "old_string occurs ~d times in ~a; make it unique or set replace_all"
+                      n path))
+              (t
+               (write-file-string path (string-replace old new content :all all))
+               (format nil "Edited ~a (~d replacement~:p)" path (if all n 1))))))))
 
 (defparameter *bash-default-timeout* 120)
 (defparameter *bash-max-timeout* 600)
@@ -78,6 +104,13 @@ agent can read it selectively (read tool offset/limit, grep, sed, head/tail).")
        (let* ((buf (make-string max-chars))
               (n (read-sequence buf in)))
          (subseq buf 0 n))))))
+
+(defun partial-output (out-file &optional (max-chars 10000))
+  "What a killed command had printed so far — LF, whatever the platform's
+console spells its line breaks with."
+  (truncate-string (normalize-newlines
+                    (or (ignore-errors (read-file-string out-file)) ""))
+                   max-chars))
 
 (defun tool-bash (args)
   (let* ((command (pget args :command))
@@ -119,23 +152,17 @@ agent can read it selectively (read tool offset/limit, grep, sed, head/tail).")
                      do (evo.port:process-kill-tree process)
                         (evo.port:process-wait process)
                         (error "Command aborted by user. Partial output:~%~a"
-                               (truncate-string
-                                (or (ignore-errors (read-file-string out-file)) "")
-                                10000))
+                               (partial-output out-file))
                    when (> (get-internal-real-time) deadline)
                      do (evo.port:process-kill-tree process)
                         (evo.port:process-wait process)
                         (error "Command timed out after ~ds. Partial output:~%~a"
-                               timeout (truncate-string
-                                        (or (ignore-errors (read-file-string out-file)) "")
-                                        10000))
+                               timeout (partial-output out-file))
                    do (sleep 0.05))
              (when (agent-abort-flag agent)
                (evo.port:process-wait process)
                (error "Command aborted by user. Partial output:~%~a"
-                      (truncate-string
-                       (or (ignore-errors (read-file-string out-file)) "")
-                       10000))))
+                      (partial-output out-file))))
            (unless agent
              (loop with deadline = (+ (get-internal-real-time)
                                       (* timeout internal-time-units-per-second))
@@ -144,9 +171,7 @@ agent can read it selectively (read tool offset/limit, grep, sed, head/tail).")
                      do (evo.port:process-kill-tree process)
                         (evo.port:process-wait process)
                         (error "Command timed out after ~ds. Partial output:~%~a"
-                               timeout (truncate-string
-                                        (or (ignore-errors (read-file-string out-file)) "")
-                                        10000))
+                               timeout (partial-output out-file))
                    do (sleep 0.05)))
            (let ((code (nth-value 1 (evo.port:process-wait process)))
                  (bytes (or (file-byte-length out-file) 0)))
@@ -156,20 +181,24 @@ agent can read it selectively (read tool offset/limit, grep, sed, head/tail).")
                    (setf keep t)
                    (values
                     (format nil
-                            "Output was large (~d bytes) — left on disk ~
-                             instead of returned inline.~%Saved to: ~a~%~
-                             Read it selectively (don't cat the whole file): ~
-                             the read tool with offset/limit, or grep/sed/~
-                             head/tail on that path.~%~%--- first ~d chars ---~%~
-                             ~a~%--- end of preview ---~@[~%(exit code ~d)~]"
+                            (cat "Output was large (~d bytes) — left on disk "
+                                 "instead of returned inline.~%Saved to: ~a~%"
+                                 "Read it selectively (don't cat the whole file): "
+                                 "the read tool with offset/limit, or grep/sed/"
+                                 "head/tail on that path.~%~%--- first ~d chars ---~%"
+                                 "~a~%--- end of preview ---~@[~%(exit code ~d)~]")
                             bytes (namestring out-file) *bash-preview-chars*
-                            (or (read-file-head-string out-file *bash-preview-chars*)
-                                "(non-UTF-8 output; preview unavailable)")
+                            (normalize-newlines
+                             (or (read-file-head-string out-file *bash-preview-chars*)
+                                 "(non-UTF-8 output; preview unavailable)"))
                             (and (/= code 0) code))
                     (list :exit-code code
                           :output-file (namestring out-file)
                           :output-bytes bytes)))
-                 (let ((output (or (ignore-errors (read-file-string out-file)) "")))
+                 ;; A console program spells line breaks the platform's way
+                 ;; (CR-LF on Windows); the agent reads LF everywhere.
+                 (let ((output (normalize-newlines
+                                (or (ignore-errors (read-file-string out-file)) ""))))
                    (values
                     (format nil "~a~@[~%(exit code ~d)~]"
                             (if (zerop (length output)) "(no output)" output)

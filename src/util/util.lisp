@@ -159,6 +159,56 @@ own :toplevel and ECL with our own :epilogue-code."
 
 ;;; Strings
 
+(defmacro cat (&rest parts)
+  "Concatenate PARTS into one string — at compile time when they are all
+literals, which is the point.
+
+A long control string wants to be written as several source lines, and CL
+offers exactly one way to do that inside a literal: end the line with the
+~<newline> FORMAT directive.  That directive reads the character after the
+tilde, so its meaning depends on the file's line endings — a CR-LF checkout
+turns every one of them into \"error in FORMAT: Unknown directive
+(character: Return)\", at compile time.  Writing the pieces as separate
+literals keeps the line breaks outside the strings, where CR is only
+whitespace, and the expansion is still a single constant so FORMAT's
+compile-time checking and optimization apply as before."
+  (if (every #'stringp parts)
+      (apply #'concatenate 'string parts)
+      `(concatenate 'string ,@parts)))
+
+;;; Newlines.  Text reaches us from places that spell a line break their own
+;;; way: a file written by a Windows editor, a console program's output, the
+;;; clipboard, an HTTP body.  Nothing downstream should have to care, so
+;;; foreign text is normalized where it enters and respelled, if the
+;;; destination has an opinion, where it leaves.
+
+(defun normalize-newlines (text)
+  "TEXT with CR-LF and lone CR line breaks turned into LF.
+Returns TEXT itself when there is nothing to change."
+  (if (find #\Return text)
+      (with-output-to-string (out)
+        (loop with n = (length text)
+              for i from 0 below n
+              for char = (char text i)
+              do (cond ((char/= char #\Return) (write-char char out))
+                       ((and (< (1+ i) n) (char= (char text (1+ i)) #\Newline)))
+                       (t (write-char #\Newline out)))))
+      text))
+
+(defun crlf-p (text)
+  "Does TEXT use CR-LF line breaks?"
+  (and (search (coerce '(#\Return #\Newline) 'string) text) t))
+
+(defun crlf-newlines (text)
+  "TEXT with every line break spelled CR-LF."
+  (let ((lf (normalize-newlines text)))
+    (if (find #\Newline lf)
+        (with-output-to-string (out)
+          (loop for char across lf
+                do (when (char= char #\Newline) (write-char #\Return out))
+                   (write-char char out)))
+        lf)))
+
 (defun string-join (separator strings)
   (with-output-to-string (out)
     (loop for s in strings

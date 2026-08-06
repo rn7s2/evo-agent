@@ -411,6 +411,15 @@ Requirements and caveats:
   because the Windows command line is one string that each interpreter
   re-splits by its own rules — and most commands an agent writes contain
   quotes.
+- Line endings are not depended on. The repo is LF (`.gitattributes`), but
+  nothing that has to build assumes it: the sources use no `~<newline>` FORMAT
+  continuation — the one construct a CR breaks, with "Unknown directive
+  (character: Return)" at compile time — writing long control strings as
+  `(cat "..." "...")` instead, and a unit test fails if one reappears. Text
+  that crosses a boundary is normalized (`evo.util:normalize-newlines`): what
+  the model is sent, what `read` shows it, what `bash` returns from a Windows
+  console. `edit` matches whichever endings the file itself uses and preserves
+  them. The `.sh`/`.exp` suites are Unix-only and rely on `.gitattributes`.
 - No `--new-session` equivalent: on Unix a tool's child is detached from the
   controlling terminal so a `sudo` prompt fails fast instead of hanging. A
   Windows console process that wants to prompt opens its own window instead,

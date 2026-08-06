@@ -230,7 +230,22 @@ evo:*agent*                       ; the live agent
 (evo:all-tools)                   ; every registered tool name
 (evo:current-goal)                ; goal plist or nil
 (evo:load-extension "/path/x.lisp") ; compile+load+journal a source file
+
+(evo:cat "long control " "string")  ; constant-folded concatenation
+(evo:normalize-newlines text)       ; CR-LF / lone CR -> LF
+(evo:crlf-newlines text)            ; ... and back
 ```
+
+`cat` is how long FORMAT control strings are written here. The obvious
+alternative — ending a source line with `~` inside the literal — makes the
+string's meaning depend on the file's line endings, and a CR-LF copy of your
+extension will not compile ("Unknown directive (character: Return)"). Write
+the pieces as separate literals; `cat` folds them at compile time, so FORMAT
+still sees one constant.
+
+`normalize-newlines` is for text your tool did not write: a subprocess's
+output, a file, an HTTP body. Everything downstream of a tool result — the
+model, the renderer, the edit tool's matching — reads LF.
 
 ## Images (evo.media)
 
