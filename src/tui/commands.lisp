@@ -505,7 +505,7 @@ lists only global (every project) lore — mirroring /memory vs /global-memory."
 (defun start-tui (agent &key resumed-p)
   "Run the interactive TUI until quit.  Returns an exit code."
   (let ((tui (make-tui :agent agent
-                       :stdin (evo.port:make-fd-input-stream 0))))
+                       :stdin (evo.port:make-stdin-stream))))
     (setf *tui* tui)
     (setf (agent-events-cb agent) (lambda (event) (push-event tui event)))
     (evo:on :todo-changed

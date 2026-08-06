@@ -2107,10 +2107,14 @@ that is how a human's next keystroke differs from a paste's last chunk."
 (defun format-continuation-p (string)
   "Does STRING use the ~<newline> FORMAT continuation — the one construct
 whose validity depends on the file's line endings?  (An even run of tildes
-before the newline is an escaped ~, not a directive.)"
+before the newline is an escaped ~, not a directive.)
+
+CR counts as well as LF: in a CR-LF file the continuation reads ~ CR LF, and
+a lint that only looked for ~ LF would be blind on exactly the files that
+have the problem."
   (loop for i from 0 below (1- (length string))
         thereis (and (char= (char string i) #\~)
-                     (char= (char string (1+ i)) #\Newline)
+                     (member (char string (1+ i)) '(#\Newline #\Return))
                      (oddp (loop for k downfrom i
                                  while (and (>= k 0) (char= (char string k) #\~))
                                  count t)))))
@@ -2162,6 +2166,8 @@ a lint that can go blind without saying so is worse than none."
          (format-continuation-p (format nil "a~~~%b")))
   (check "the continuation lint ignores an escaped tilde"
          (not (format-continuation-p (format nil "a~~~~~%b"))))
+  (check "the continuation lint sees the CR-LF spelling too"
+         (format-continuation-p (format nil "a~~~c~%b" #\Return)))
   (multiple-value-bind (offenders scanned unreadable)
       (format-continuation-offenders)
     (check "the suite actually scanned the tree" (> scanned 30))
@@ -4350,6 +4356,41 @@ selection journals the provider, and every resolution point honours it."
   (reset-user-registries)
   (register-fixture-models))
 
+(defun test-restart-and-resume ()
+  "The supervisor's restart guess, and what a child does when the guess is
+wrong.  Windows found this the hard way: one crash in the TUI turned into
+five identical restarts, each reporting a different error than the real one."
+  ;; The TUI's own streams: on Unix these stay plain descriptors 0 and 1.
+  ;; (On Windows STD-DESCRIPTOR returns a GetStdHandle handle instead — a
+  ;; literal 1 there is an invalid handle, not stdout.)
+  #-evo-windows
+  (progn
+    (check "stdin is descriptor 0" (eql 0 (evo.port:std-descriptor :stdin)))
+    (check "stdout is descriptor 1" (eql 1 (evo.port:std-descriptor :stdout))))
+  (let ((saved (getenv "EVO_HOME"))
+        (home (format nil "~a/evo-resume-~a/" (tmp-dir) (gen-id))))
+    (unwind-protect
+         (progn
+           (evo.port:setenv "EVO_HOME" home)
+           (ensure-directories-exist (sessions-directory))
+           (check "nothing to resume: restart fresh, no --resume"
+                  (null (evo.cli::restart-argv nil)))
+           (check "--events survives a restart"
+                  (equal '("--events") (evo.cli::restart-argv '("--events"))))
+           (check "resume with nothing to resume is a usage error, not a crash"
+                  (handler-case (progn (evo.cli::resolve-journal '(:resume :latest)) nil)
+                    (evo.cli::usage-error () t)
+                    (error () nil)))
+           ;; A session reaches disk only once the model has answered — which
+           ;; is exactly why an early crash leaves nothing to resume.
+           (append-entry (make-session-journal)
+                         '(:type :message :message (:role :assistant :content "hi")))
+           (check "a session on disk: restart resumes it"
+                  (equal '("--resume") (evo.cli::restart-argv nil)))
+           (check "and --events still rides along"
+                  (equal '("--resume" "--events") (evo.cli::restart-argv '("--events")))))
+      (evo.port:setenv "EVO_HOME" (or saved "")))))
+
 (defun test-parse-args ()
   (check "parse: thinking level keyword"
          (eq :high (getf (evo.cli::parse-args '("--thinking" "high")) :thinking)))
@@ -4386,6 +4427,7 @@ selection journals the provider, and every resolution point honours it."
     (test-init-files)
     (test-extension-load-order)
     (test-preflight)
+    (test-restart-and-resume)
     (test-parse-args)
     (test-editor)
     (test-input)

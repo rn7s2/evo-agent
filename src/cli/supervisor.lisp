@@ -23,6 +23,17 @@
   (- (get-universal-time)
      (or (ignore-errors (file-write-date path)) start-time)))
 
+(defun restart-argv (argv)
+  "Arguments for a restarted child.
+
+--resume is a guess the supervisor makes on the user's behalf, so it has to
+check the guess: a child that died before it journalled anything leaves
+nothing to resume, and passing --resume then only turns one failure into
+\"No sessions to resume\" — a different, misleading error, once per attempt.
+With no session on disk, restart fresh instead."
+  (append (when (latest-session) '("--resume"))
+          (when (member "--events" argv :test #'equal) '("--events"))))
+
 (defun spawn-child (args heartbeat-file)
   (evo.port:launch-child
    (namestring (evo.port:runtime-pathname)) args
@@ -61,9 +72,6 @@ Returns (values exit-code hung-p)."
         (boot-grace (supervisor-setting "EVO_BOOT_GRACE" 20))
         (max-boot-failures (supervisor-setting "EVO_MAX_BOOT_FAILURES" 3))
         (max-restarts (supervisor-setting "EVO_SUPERVISOR_MAX_RESTARTS" 50))
-        (restart-args (append '("--resume")
-                              (when (member "--events" argv :test #'equal)
-                                '("--events"))))
         (restarts 0) (boot-failures 0) (quarantined nil) (extra nil)
         (first t))
     (loop
@@ -71,10 +79,12 @@ Returns (values exit-code hung-p)."
                          (format nil "evo-heartbeat-~a" (gen-id))
                          (uiop:temporary-directory)))
              (start (get-universal-time))
-             (args (append (if first argv restart-args) extra)))
+             (args (append (if first argv (restart-argv argv)) extra)))
         (unless first
-          (format *error-output* "~&evo: restarting with --resume (attempt ~d)~%"
-                  restarts))
+          ;; Name the actual arguments: "restarting with --resume" while
+          ;; quietly restarting without it is how a supervisor lies.
+          (format *error-output* "~&evo: restarting~{ ~a~} (attempt ~d)~%"
+                  args restarts))
         (multiple-value-bind (code hung)
             (monitor-child (spawn-child args heartbeat) heartbeat start hang-timeout)
           (ignore-errors (delete-file heartbeat))

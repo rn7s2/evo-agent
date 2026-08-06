@@ -102,7 +102,7 @@ ctrl+v and shift+enter fall back to their legacy spellings."
   "Enter raw mode; enable bracketed paste, kitty key disambiguation and
 xterm modifyOtherKeys (ctrl+v, cmd+v, Shift+Enter detection); returns t on
 a tty."
-  (setf *tty-out* (evo.port:make-fd-output-stream 1))
+  (setf *tty-out* (evo.port:make-stdout-stream))
   (setf *saved-term-mode* (evo.port:terminal-raw-mode))
   (refresh-size)
   (install-sigwinch)

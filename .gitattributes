@@ -24,3 +24,8 @@
 # To renormalize a checkout that already has CR-LF in it:
 #   git add --renormalize . && git checkout .
 * text=auto eol=lf
+
+# The one exception, on purpose: the Windows probe is meant to be dropped on
+# a Windows box, and keeping it CR-LF in every checkout makes it a standing
+# check that CR-LF Lisp source still compiles and reads here.
+tests/windows-probe.lisp text eol=crlf

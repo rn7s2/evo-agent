@@ -136,6 +136,10 @@ models registered by extensions.  evo ships no built-in model table, e.g.
         (dolist (s sessions)
           (format t "~a  ~a~%" (pget s :timestamp) (pget s :path))))))
 
+(define-condition usage-error (error)
+  ((text :initarg :text :reader usage-error-text))
+  (:report (lambda (c s) (format s "~a" (usage-error-text c)))))
+
 (defun resolve-journal (opts)
   "Open or create the session journal per OPTS."
   (let ((resume (getf opts :resume)))
@@ -143,13 +147,14 @@ models registered by extensions.  evo ships no built-in model table, e.g.
       ((null resume) (make-session-journal))
       ((eq resume :latest)
        (let ((path (latest-session)))
-         (unless path (error "No sessions to resume for ~a" (namestring (uiop:getcwd))))
+         ;; A usage error, not a crash: exit 64 is the code the supervisor
+         ;; never restarts, and restarting cannot conjure a session.
+         (unless path
+           (error 'usage-error
+                  :text (format nil "No sessions to resume for ~a"
+                                (namestring (uiop:getcwd)))))
          (open-journal path)))
       (t (open-journal resume)))))
-
-(define-condition usage-error (error)
-  ((text :initarg :text :reader usage-error-text))
-  (:report (lambda (c s) (format s "~a" (usage-error-text c)))))
 
 (defun main (&optional (argv (evo.port:argv)))
   "Exit codes are supervisor protocol: 0 done, 1 error (restart-eligible),
