@@ -1496,6 +1496,34 @@ event: response.completed~%data: {\"type\":\"response.completed\",\"response\":{
     (check "frontmatter parse"
            (and (equal (cdr (assoc "name" front :test #'equal)) "demo")
                 (equal (cdr (assoc "description" front :test #'equal)) "a demo skill"))))
+  ;; Real skills in the wild write descriptions as YAML block scalars and
+  ;; quoted strings; a line-based reader used to hand back ">-" or keep quotes.
+  (let ((front (evo.kernel::parse-frontmatter
+                (format nil "---~%name: rl-goal~%description: >-~%  Set a goal in the~%  workspace. Reads goals/.~%metadata:~%  loop: work-harness~%  step: 1-goal~%---~%body"))))
+    (check "folded block scalar folds into one line"
+           (equal (cdr (assoc "description" front :test #'equal))
+                  "Set a goal in the workspace. Reads goals/."))
+    (check "block scalar does not eat the next key"
+           (equal (cdr (assoc "name" front :test #'equal)) "rl-goal"))
+    (check "nested mapping stays under its own key"
+           (and (equal (cdr (assoc "metadata" front :test #'equal))
+                       "loop: work-harness step: 1-goal")
+                (null (assoc "loop" front :test #'equal)))))
+  (let ((front (evo.kernel::parse-frontmatter
+                (format nil "---~%description: |~%  line one~%  line two~%name: lit~%---~%body"))))
+    (check "literal block scalar keeps its line breaks"
+           (equal (cdr (assoc "description" front :test #'equal))
+                  (format nil "line one~%line two")))
+    (check "literal block scalar stops at the next key"
+           (equal (cdr (assoc "name" front :test #'equal)) "lit")))
+  (let ((front (evo.kernel::parse-frontmatter
+                (format nil "---~%name: \"quoted: name\"~%description: 'it''s fine'~%other: plain~%  continued~%---~%body"))))
+    (check "double-quoted value loses its quotes"
+           (equal (cdr (assoc "name" front :test #'equal)) "quoted: name"))
+    (check "single-quoted value unescapes ''"
+           (equal (cdr (assoc "description" front :test #'equal)) "it's fine"))
+    (check "plain value wrapped over lines folds"
+           (equal (cdr (assoc "other" front :test #'equal)) "plain continued")))
   (let* ((old-home (uiop:getenv "HOME"))
          (home (uiop:ensure-directory-pathname
                 (format nil "~a/evo-agents-home-~a/" (tmp-dir) (gen-id))))
