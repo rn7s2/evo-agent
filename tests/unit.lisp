@@ -758,6 +758,93 @@ event: response.completed~%data: {\"type\":\"response.completed\",\"response\":{
   (check "key protocol: EVO_KEY_ENHANCEMENT=1 overrides a dumb TERM"
          (evo.tui::key-enhancement-wanted-p "1" "dumb")))
 
+;;; Status-line segment registry
+;;;
+;;; The regression behind this: two extensions each wrapped EVO.TUI::STATUS-LINE
+;;; and appended to the previous one's string.  The inner wrapper padded to the
+;;; full terminal width to right-align itself, so everything the outer one
+;;; appended landed past the right edge and DRAW-REGION truncated it away — the
+;;; segment was computed correctly every frame and thrown away every frame.
+
+(defun test-status-segments ()
+  ;; Core segments are registered at load time, like anybody else's.
+  (let ((core (mapcar #'evo.tui::status-segment-name (evo.tui::status-segments :left))))
+    (check "core model segment registered" (member :model core))
+    (check "core context segment registered" (member :context core)))
+  ;; A fresh dynamic binding isolates the rest from the core registrations.
+  (let ((evo.tui::*status-segments* nil)
+        (evo.tui::*cols* 41)                    ; renderer width = 40
+        (tui (evo.tui::make-tui)))
+    (flet ((seg (text) (lambda (tui) (declare (ignore tui)) text)))
+      (evo.tui:add-status-segment :l1 (seg "L1") :side :left :order 100)
+      (evo.tui:add-status-segment :l2 (seg "L2") :side :left :order 200)
+      (evo.tui:add-status-segment :r1 (seg "R1") :side :right :order 100)
+      (evo.tui:add-status-segment :r2 (seg "R2") :side :right :order 200)
+      (let ((line (evo.tui::status-line tui)))
+        (check "left: ascending order runs left to right"
+               (< (search "L1" line) (search "L2" line)))
+        (check "right: ascending order counts inward from the right edge"
+               (< (search "R2" line) (search "R1" line)))
+        (check "right group sits flush against the right edge"
+               (= (evo.tui::visible-length line) 40))
+        (check "a right-aligned segment no longer eats the left ones"
+               (and (search "L1" line) (search "L2" line)))
+        (check "same-side neighbours are separated by the renderer"
+               (search " · " line)))
+      ;; Registering a name again replaces it: extension reloads are idempotent.
+      (evo.tui:add-status-segment :l2 (seg "L2-NEW") :side :left :order 200)
+      (let ((line (evo.tui::status-line tui)))
+        (check "re-registering a name replaces it" (search "L2-NEW" line))
+        (check "re-registering does not duplicate"
+               (= 4 (length (evo.tui::status-segments)))))
+      ;; A segment rendering nothing leaves no dangling separator or padding.
+      (evo.tui::remove-status-segment :l2)
+      (evo.tui::remove-status-segment :r1)
+      (evo.tui::remove-status-segment :r2)
+      (evo.tui:add-status-segment :quiet (seg nil) :side :left :order 300)
+      (check "an empty segment contributes nothing at all"
+             (string= "L1" (evo.tui::status-line tui)))
+      ;; A signalling segment is skipped, not fatal to the whole line.
+      (evo.tui:add-status-segment :boom (lambda (tui) (declare (ignore tui))
+                                          (error "segment blew up"))
+                                  :side :left :order 350)
+      (check "a signalling segment is skipped, the line survives"
+             (string= "L1" (evo.tui::status-line tui))))
+    ;; Overflow: drop from the middle outward, so the segments nearest each
+    ;; edge are the last to go.
+    (let ((evo.tui::*status-segments* nil)
+          (evo.tui::*cols* 21))                 ; renderer width = 20
+      (flet ((seg (text) (lambda (tui) (declare (ignore tui)) text)))
+        (evo.tui:add-status-segment :l1 (seg "LEFT-ONE") :side :left :order 100)
+        (evo.tui:add-status-segment :l2 (seg "LEFT-TWO") :side :left :order 200)
+        (evo.tui:add-status-segment :r1 (seg "RIGHT-ONE") :side :right :order 100)
+        (evo.tui:add-status-segment :r2 (seg "RIGHT-TWO") :side :right :order 200)
+        (let ((line (evo.tui::status-line tui)))
+          (check "overflow keeps the segment nearest the left edge"
+                 (search "LEFT-ONE" line))
+          (check "overflow keeps the segment nearest the right edge"
+                 (search "RIGHT-ONE" line))
+          (check "overflow drops the inboard left segment"
+                 (null (search "LEFT-TWO" line)))
+          (check "overflow drops the inboard right segment"
+                 (null (search "RIGHT-TWO" line)))
+          (check "the fitted line never paints past the width"
+                 (<= (evo.tui::visible-length line) 20)))))
+    ;; One segment that cannot fit is truncated, not blanked.
+    (let ((evo.tui::*status-segments* nil)
+          (evo.tui::*cols* 6))                  ; renderer width = 10 (floor)
+      (evo.tui:add-status-segment :only (lambda (tui) (declare (ignore tui))
+                                          "ABCDEFGHIJKLMNOP")
+                                  :side :left :order 100)
+      (let ((line (evo.tui::status-line tui)))
+        (check "an unfittable lone segment is truncated, not dropped"
+               (and (search "ABC" line) (<= (evo.tui::visible-length line) 10)))))
+    (check "SIDE is validated"
+           (handler-case (progn (evo.tui:add-status-segment :bad (lambda (tui) tui)
+                                                           :side :middle)
+                                nil)
+             (error () t)))))
+
 ;;; TUI region layout + live context accounting
 
 (defun test-tui-compose ()
@@ -3543,6 +3630,7 @@ selection journals the provider, and every resolution point honours it."
     (test-parse-args)
     (test-editor)
     (test-input)
+    (test-status-segments)
     (test-tui-compose)
     (test-resume-picker)
     (test-render-anchor)
