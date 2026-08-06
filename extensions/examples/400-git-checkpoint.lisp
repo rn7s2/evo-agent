@@ -1,4 +1,4 @@
-;;;; git-checkpoint.lisp — example extension (seed corpus).
+;;;; 400-git-checkpoint.lisp — example extension (seed corpus).
 ;;;;
 ;;;; File-state undo via `git stash create`, keyed by turn: after every turn
 ;;;; a stash commit captures the working tree without touching the index or

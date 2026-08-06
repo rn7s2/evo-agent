@@ -45,8 +45,16 @@ always recompiled (ECL may skip if the fasl is newer than the source)."
     path))
 
 (defun extension-files (directory)
+  "The .lisp files of DIRECTORY in load order — sorted by file name, which
+is the whole ordering mechanism.  Hence the naming convention: every
+extension file starts with a fixed-width three-digit rank, `NNN-name.lisp`,
+so the order is visible in `ls` instead of hiding in the alphabet.
+000-099 foundations others build on (providers, credentials, settings);
+100-899 ordinary tools, commands, hooks, prompt text; 900-999 the last
+word — a wrapper loaded last is the outermost one.  Files without a rank
+still load, sorting wherever their name falls."
   (sort (directory (merge-pathnames "*.lisp" directory))
-        #'string< :key #'namestring))
+        #'string< :key #'file-namestring))
 
 (defun boot-extensions (&key journal (cwd (uiop:getcwd)))
   "Load global then project extension directories, journaling each."

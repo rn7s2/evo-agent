@@ -17,10 +17,15 @@ your extensions survive crashes and restarts as long as the file stays on
 disk. Prefer `<project>/.evo/extensions/` for project-specific tools (they
 also auto-load at boot) and one-off paths for experiments.
 
+Boot-loaded files are loaded in file-name order, so name them
+`NNN-name.lisp`: `000`–`099` for foundations others build on, `100`–`899`
+for ordinary tools and hooks, `900`–`999` for wrappers that must load last.
+Hooks run in registration order, so the rank orders those too.
+
 ## Example: a tool that fetches HTTP headers
 
 ```lisp
-;; file: .evo/extensions/http-head.lisp
+;; file: .evo/extensions/300-http-head.lisp
 (in-package :evo.user)
 
 (evo:register-tool "http_head"
@@ -45,7 +50,7 @@ When you create a goal whose objective is mechanically checkable, formalize
 it FIRST — before doing the work:
 
 ```lisp
-;; file: .evo/extensions/goal-predicates.lisp
+;; file: .evo/extensions/300-goal-predicates.lisp
 (in-package :evo.user)
 (defun tests-pass-p ()
   (zerop (nth-value 2 (uiop:run-program "./test.sh"

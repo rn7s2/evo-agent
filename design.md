@@ -492,6 +492,12 @@ This is the evolution engine. Four mechanisms make it work.
    permission gates, plan mode, and sandboxing all build on.
 3. **Filesystem convention.** `~/.evo/extensions/` and
    `<project>/.evo/extensions/` load at boot and are writable by the agent.
+   Load order is the sorted file name and nothing else, so the name carries a
+   fixed-width rank — `NNN-name.lisp`, `000`–`099` foundations, `100`–`899`
+   ordinary extensions, `900`–`999` wrappers that must load last. Hooks fire
+   in registration order, so one rank orders both loading and dispatch.
+   (Core extensions need no rank: their order is declared in `evo.asd`, and a
+   second source of truth could only disagree with it.)
 4. **Docs as part of the runtime.** The system prompt names absolute paths to
    evo's own documentation and worked examples, enumerated from what is
    actually installed. Beyond that, CL introspection — `describe`, `apropos`,

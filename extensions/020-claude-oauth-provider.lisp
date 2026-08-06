@@ -1,4 +1,4 @@
-;;;; claude-oauth-provider.lisp — vendored user extension, installed by make.
+;;;; 020-claude-oauth-provider.lisp — vendored user extension, installed by make.
 ;;;;
 ;;;; Lives in extensions/ and is installed to $(EVO_HOME)/extensions/ by
 ;;;; `make install` (via install-home).  Loaded automatically at evo startup.

@@ -188,6 +188,8 @@ This is the evolution engine. Four mechanisms make it work:
    gates, plan mode, and sandboxing all build on.
 3. **Filesystem convention.** `~/.evo/extensions/` and
    `<project>/.evo/extensions/` load at boot and are writable by the agent.
+   File name is load order: `NNN-name.lisp`, `000`–`099` foundations,
+   `100`–`899` ordinary extensions, `900`–`999` wrappers that must load last.
 4. **Docs as part of the runtime.** The system prompt names absolute paths to
    evo's own documentation and worked examples. CL introspection (`describe`,
    `apropos`, `macroexpand`) lets the agent interrogate the runtime it is

@@ -98,7 +98,11 @@ it — not as a last resort but as ordinary practice.
   Redefinition takes effect from the next call, not in frames already
   running.
 - Keep what is worth keeping in `~/.evo/extensions/` or
-  `<project>/.evo/extensions/`, which load at boot.  Every load is
+  `<project>/.evo/extensions/`, which load at boot in file-name order.
+  Name those files `NNN-name.lisp` with a three-digit rank — 000-099
+  foundations others build on, 100-899 ordinary tools and hooks, 900-999
+  wrappers that must load last — since that rank is the only thing
+  deciding load order, and hook order with it.  Every load is
   journaled and replayed when a session resumes, so the tools you build
   outlive the turn that built them.  In-memory state does not survive a
   restart — rebuild it from journal entries on `:session-start`.

@@ -227,6 +227,14 @@ function too, or the failure message will blame the clipboard.
   requires an explicit `evo.port:unlock-package` — allowed, journaled by your
   own actions, and on your head.
 - Extension files live in `~/.evo/extensions/` (global) and
-  `<project>/.evo/extensions/` — loaded at boot alphabetically, each load
-  journaled as a `:load` entry and replayed on session resume.
+  `<project>/.evo/extensions/` — the global directory first, then the
+  project one, each load journaled as a `:load` entry and replayed on
+  session resume.
+- **Load order is the file name**, sorted, so name every file
+  `NNN-name.lisp` with a fixed-width three-digit rank: `000`–`099`
+  foundations others build on (providers, credentials, settings), `100`–`899`
+  ordinary tools, commands, hooks and prompt text, `900`–`999` the last word
+  (a wrapper loaded last is the outermost one). Leave gaps; renumbering is
+  a rename. Event hooks run in registration order, so the rank orders those
+  too: `010-…`'s `:tool-call` hook sees a call before `900-…`'s does.
 - Introspect the live image freely: `describe`, `apropos`, `macroexpand`.

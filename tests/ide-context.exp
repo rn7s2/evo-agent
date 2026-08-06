@@ -16,7 +16,7 @@ file mkdir $env(EVO_HOME)
 file mkdir "$env(EVO_HOME)/extensions"
 
 # The extension under test, installed the way `make install-home` installs it.
-file copy "$repo/extensions/ide-context.lisp" "$env(EVO_HOME)/extensions/ide-context.lisp"
+file copy "$repo/extensions/900-ide-context.lisp" "$env(EVO_HOME)/extensions/900-ide-context.lisp"
 
 # A model must exist for the TUI to start; it is never reached (the endpoint
 # is dead on purpose — this test asserts journal state, not model replies).

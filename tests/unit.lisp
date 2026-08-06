@@ -400,7 +400,7 @@ event: response.completed~%data: {\"type\":\"response.completed\",\"response\":{
                  (lambda (url &rest args)
                    (push (list :post url args) calls)
                    "{\"access_token\":\"access\",\"refresh_token\":\"refresh\",\"expires_in\":3600}"))
-           (load (merge-pathnames "extensions/claude-oauth-provider.lisp"
+           (load (merge-pathnames "extensions/020-claude-oauth-provider.lisp"
                                   (uiop:getcwd))
                  :verbose nil :print nil)
            (setf calls nil)
@@ -450,7 +450,7 @@ event: response.completed~%data: {\"type\":\"response.completed\",\"response\":{
                  (lambda (url &rest args)
                    (push (list url args) refresh-calls)
                    "{\"access_token\":\"refreshed-at\",\"refresh_token\":\"refreshed-rt\",\"expires_in\":3600}"))
-           (load (merge-pathnames "extensions/claude-oauth-provider.lisp"
+           (load (merge-pathnames "extensions/020-claude-oauth-provider.lisp"
                                   (uiop:getcwd))
                  :verbose nil :print nil)
            (let* ((now (funcall (find-symbol "CLAUDE-OAUTH--NOW-MS" :evo.user)))
@@ -569,7 +569,7 @@ event: response.completed~%data: {\"type\":\"response.completed\",\"response\":{
                      (push (list url args) refresh-calls)
                      (format nil "{\"access_token\":\"~a\",\"refresh_token\":\"~a\",\"expires_in\":3600}"
                              next-access-token next-refresh-token)))
-             (load (merge-pathnames "extensions/claude-oauth-provider.lisp"
+             (load (merge-pathnames "extensions/020-claude-oauth-provider.lisp"
                                     (uiop:getcwd))
                    :verbose nil :print nil)
              (let* ((now (funcall (find-symbol "CLAUDE-OAUTH--NOW-MS" :evo.user)))
@@ -2306,8 +2306,9 @@ event: response.completed~%data: {\"type\":\"response.completed\",\"response\":{
     ;; boot loader sweeps.
     (when (probe-file (merge-pathnames "src/core-ext/plan-mode.lisp" (uiop:getcwd)))
       (check "plan mode is not also shipped as a userspace extension"
-             (not (probe-file (merge-pathnames "extensions/plan-mode.lisp"
-                                               (uiop:getcwd))))))))
+             (notany (lambda (path) (search "plan-mode" (file-namestring path)))
+                     (directory (merge-pathnames "extensions/*.lisp"
+                                                 (uiop:getcwd))))))))
 
 ;;; /eval
 
@@ -3478,6 +3479,47 @@ selection journals the provider, and every resolution point honours it."
       (reset-settings)
       (register-fixture-models))))
 
+;;; Extension load order.  The file name is the entire ordering mechanism,
+;;; hence the NNN- rank convention: these checks are what make it canonical
+;;; rather than folklore.
+
+(defun ranked-extension-name-p (name)
+  (and (> (length name) 4)
+       (every #'digit-char-p (subseq name 0 3))
+       (char= (char name 3) #\-)))
+
+(defun test-extension-load-order ()
+  (let ((dir (merge-pathnames (format nil "ext-order-~a/" (gen-id))
+                              (uiop:ensure-directory-pathname (tmp-dir)))))
+    (ensure-directory dir)
+    (unwind-protect
+         (progn
+           (dolist (name '("900-wrapper.lisp" "020-provider.lisp"
+                           "100-tool.lisp" "unranked.lisp"))
+             (write-file-string (merge-pathnames name dir) ";; probe"))
+           (check "extensions load in file-name rank order"
+                  (equal '("020-provider.lisp" "100-tool.lisp"
+                           "900-wrapper.lisp" "unranked.lisp")
+                         (mapcar #'file-namestring
+                                 (evo.kernel::extension-files dir)))))
+      (uiop:delete-directory-tree dir :validate t :if-does-not-exist :ignore)))
+  ;; Hooks fire in registration order, so load order orders them too — a
+  ;; push would invert the ranks and make the numbering lie.
+  (let ((evo.kernel::*event-hooks* (make-hash-table)))
+    (evo.kernel:add-hook :order-probe (lambda (p) (declare (ignore p)) :first))
+    (evo.kernel:add-hook :order-probe (lambda (p) (declare (ignore p)) :second))
+    (check "hooks run in registration order"
+           (equal '(:first :second) (evo.kernel:run-hooks :order-probe nil))))
+  ;; Everything this repo ships carries a rank.
+  (let ((vendored (append (directory (merge-pathnames "extensions/*.lisp"
+                                                      (uiop:getcwd)))
+                          (directory (merge-pathnames "extensions/examples/*.lisp"
+                                                      (uiop:getcwd))))))
+    (when vendored
+      (check "vendored extensions are all ranked NNN-name.lisp"
+             (every #'ranked-extension-name-p
+                    (mapcar #'file-namestring vendored))))))
+
 (defun test-preflight ()
   (reset-user-registries)
   (reset-settings)
@@ -3532,6 +3574,7 @@ selection journals the provider, and every resolution point honours it."
     (test-claude-oauth-auto-refresh)
     (test-claude-oauth-model-fetch-refresh)
     (test-init-files)
+    (test-extension-load-order)
     (test-preflight)
     (test-parse-args)
     (test-editor)

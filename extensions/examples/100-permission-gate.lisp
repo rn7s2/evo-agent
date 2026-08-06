@@ -1,4 +1,4 @@
-;;;; permission-gate.lisp — example extension (seed corpus).
+;;;; 100-permission-gate.lisp — example extension (seed corpus).
 ;;;;
 ;;;; Evo is permissive by design — there are no permission prompts.  This
 ;;;; example shows how the ONE interception point (:tool-call hooks)
