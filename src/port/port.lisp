@@ -646,8 +646,8 @@ the cmd.exe fallback in WRITE-SHELL-SCRIPT is for images that stripped it."
          ;; program's exit code, which -File otherwise swallows.
          (write-char (code-char #xFEFF) out)
          (format out "$ErrorActionPreference = 'Continue'~%")
-         (format out "$OutputEncoding = [Console]::OutputEncoding = ~
-                      [System.Text.Encoding]::UTF8~%")
+         (format out "$OutputEncoding = [Console]::OutputEncoding")
+         (format out " = [System.Text.Encoding]::UTF8~%")
          (format out "~a~%" command)
          (format out "if ($LASTEXITCODE -ne $null) { exit $LASTEXITCODE }~%exit 0~%"))
         (t

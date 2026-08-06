@@ -1,0 +1,14 @@
+# Line endings are not a matter of taste here.
+#
+# Git on Windows checks out with core.autocrlf=true by default — GitHub's
+# windows runners do — and a Lisp FORMAT string that ends a line with ~
+# (the directive that swallows the newline and the indentation after it)
+# then meets a CR instead: "error in FORMAT: Unknown directive (character:
+# Return)", at compile time, in every one of the ~48 places the codebase
+# uses that continuation.  The .sh and .exp suites have the same allergy
+# for the same reason.
+#
+# So: every text file in this repo is LF in the working tree, on every
+# platform.  That includes make.ps1 — PowerShell reads LF-only scripts
+# without complaint.
+* text=auto eol=lf
