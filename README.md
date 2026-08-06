@@ -422,6 +422,11 @@ src/cli/                 EVO.CLI
   supervisor.lisp        in-binary supervision
 
 docs/                    seed corpus (also installed to ~/.evo/docs)
+extensions/              vendored user extensions — copied ACTIVE into
+  020-claude-oauth-provider.lisp     ~/.evo/extensions by `make install-home`
+  020-kimi-provider.lisp             (Claude OAuth; Moonshot AI Kimi K3 over
+  400-efficiency.lisp                 chat completions; prompt section; the
+  900-ide-context.lisp                editor/IDE bridge)
 extensions/examples/     reference-only example extensions (installed to
                          ~/.evo/docs/examples) — user extensions, distinct from
                          the bundled core extensions in src/core-ext/

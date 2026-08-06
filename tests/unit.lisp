@@ -333,6 +333,362 @@ event: response.completed~%data: {\"type\":\"response.completed\",\"response\":{
       (check "oai req retired :off -> no include"
              (not (search "reasoning.encrypted_content" raw3))))))
 
+;;; Kimi (Moonshot AI) provider — extensions/020-kimi-provider.lisp
+;;;
+;;; The vendored extension owns a whole wire protocol (OpenAI-compatible chat
+;;; completions plus Kimi's extensions), so it is tested like a bundled
+;;; adapter: request shape, thinking dial, dynamically loaded tools, and SSE
+;;; parsing, each against what the Kimi API docs specify.
+
+(defparameter *kimi-sse-sample*
+  (format nil "data: {\"id\":\"cmpl-1\",\"object\":\"chat.completion.chunk\",\"model\":\"kimi-k3\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"},\"finish_reason\":null}]}~%~%~
+data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"think \"},\"finish_reason\":null}]}~%~%~
+data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"hard\"},\"finish_reason\":null}]}~%~%~
+data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"},\"finish_reason\":null}]}~%~%~
+data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"bash\",\"arguments\":\"{\\\"comm\"}}]},\"finish_reason\":null}]}~%~%~
+data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"and\\\":\\\"ls\\\"}\"}}]},\"finish_reason\":null}]}~%~%~
+data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}~%~%~
+data: {\"choices\":[],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":10,\"total_tokens\":110,\"cached_tokens\":40}}~%~%~
+data: [DONE]~%~%"))
+
+(defun kimi-fn (name)
+  "The extension's own function NAME, resolved after the file is loaded."
+  (symbol-function (find-symbol name :evo.user)))
+
+(defun kimi-history ()
+  (list '(:role :user :content ((:type :text :text "go")))
+        (list :role :assistant :model "kimi-k3" :stop-reason :tool-use
+              :usage '(:input 1 :output 1 :cache-read 0 :cache-write 0)
+              :content (list '(:type :thinking :thinking "let me look")
+                             '(:type :text :text "working")
+                             '(:type :tool-call :id "call_a" :name "bash"
+                               :arguments (:command "ls"))))
+        '(:role :tool-result :tool-call-id "call_a" :tool-name "bash"
+          :is-error nil :content ((:type :text :text "ok")))
+        (list :role :user
+              :content (list '(:type :text :text "and this?")
+                             '(:type :image :media-type "image/png" :data "AAAA"
+                               :name "shot.png")))))
+
+(defun kimi-tool (name)
+  (list :name name :description "run"
+        :input-schema (schema->json-schema
+                       '(:object (:command :type :string :description "c")))))
+
+(defun test-kimi-provider ()
+  (let ((saved-models evo.provider::*models*)
+        (saved-providers (copy-alist evo.provider::*providers*))
+        (saved-apis (copy-alist evo.provider::*apis*))
+        (env-names '("MOONSHOT_API_KEY" "KIMI_API_KEY"
+                     "MOONSHOT_BASE_URL" "KIMI_BASE_URL"))
+        (key "sk-kimi-test-key-0123456789"))
+    (let ((saved-env (mapcar (lambda (name) (cons name (getenv name))) env-names)))
+      (unwind-protect
+           (progn
+             (dolist (name env-names) (evo.port:setenv name ""))
+             (evo.port:setenv "MOONSHOT_API_KEY" key)
+             (load (merge-pathnames "extensions/020-kimi-provider.lisp"
+                                    (uiop:getcwd))
+                   :verbose nil :print nil)
+             ;; Registration: api, provider endpoint, model metadata.
+             (check "kimi api registered"
+                    (member :kimi-chat-completions (api-keys)))
+             (let ((config (provider-config :moonshotai)))
+               (check "kimi provider base url"
+                      (equal (pget config :base-url) "https://api.moonshot.ai"))
+               (check "kimi provider key from MOONSHOT_API_KEY"
+                      (equal (pget config :api-key) key)))
+             (let ((model (find-model "kimi-k3" :moonshotai))
+                   (api (find-api :kimi-chat-completions)))
+               (check "kimi model context window"
+                      (= (model-context-window model) 1048576))
+               (check "kimi model max output" (= (model-max-output model) 131072))
+               (check "kimi model reasons" (pget model :thinking))
+               (check "kimi model takes images" (model-vision-p model))
+               (check "kimi model effort ladder"
+                      (equal (model-effort model) '(:low :high :max)))
+               (check "kimi endpoint path"
+                      (equal (endpoint-path api) "/v1/chat/completions"))
+               (check "kimi bearer auth"
+                      (equal (cdr (assoc "authorization"
+                                         (auth-headers api (provider-config :moonshotai))
+                                         :test #'equal))
+                             (concatenate 'string "Bearer " key)))
+               ;; thinkingLevelMap verbatim: only low/high/max name a rung.
+               (check "kimi thinking level map"
+                      (equal (mapcar (lambda (level) (thinking-param api level))
+                                     +effort-levels+)
+                             '("low" nil "high" nil "max")))
+               ;; A trailing /v1 in a configured base URL would double the
+               ;; endpoint path, so it is stripped.
+               (check "kimi base url normalizes a trailing /v1"
+                      (equal (funcall (kimi-fn "KIMI--NORMALIZE-BASE-URL")
+                                      "https://api.moonshot.cn/v1")
+                             "https://api.moonshot.cn"))
+               ;; No key is a loud provider error, not a mystery 401.
+               (evo.port:setenv "MOONSHOT_API_KEY" "")
+               (check-signals "kimi missing api key signals"
+                              (auth-headers api (list :base-url "x" :api-key "")))
+               (evo.port:setenv "MOONSHOT_API_KEY" key)
+               ;; Request building.
+               (let* ((build (kimi-fn "KIMI--BUILD-REQUEST-JSON"))
+                      (history (kimi-history))
+                      (tools (list (kimi-tool "bash")))
+                      (raw (funcall build :model model :system "sys"
+                                          :messages history :tools tools
+                                          :thinking-level :medium
+                                          :cache-key "kimi-sess-1"))
+                      (req (com.inuoe.jzon:parse raw)))
+                 (flet ((jget (&rest keys) (apply #'evo.provider::jget req keys)))
+                   (check "kimi req model" (equal (jget "model") "kimi-k3"))
+                   (check "kimi req streams" (eq (jget "stream") t))
+                   (check "kimi req asks for usage"
+                          (eq (jget "stream_options" "include_usage") t))
+                   (check "kimi req max_tokens field"
+                          (= (jget "max_tokens") 131072))
+                   (check "kimi req cache key"
+                          (equal (jget "prompt_cache_key") "kimi-sess-1"))
+                   ;; supportsStore false, and K3 fixes the sampling knobs.
+                   (check "kimi req sends no store/sampling fields"
+                          (notany (lambda (field) (search field raw))
+                                  '("\"store\"" "\"temperature\"" "\"top_p\""
+                                    "\"presence_penalty\"" "\"frequency_penalty\"")))
+                   ;; An unmapped rung clamps down the ladder rather than
+                   ;; falling through to the server default (which is max).
+                   (check "kimi req clamps :medium to low"
+                          (equal (jget "reasoning_effort") "low"))
+                   (check "kimi req tool is a strict-free function"
+                          (let ((tl (aref (jget "tools") 0)))
+                            (and (equal (evo.provider::jget tl "type") "function")
+                                 (equal (evo.provider::jget tl "function" "name") "bash")
+                                 (eq (evo.provider::jget tl "function" "strict") nil)
+                                 (evo.provider::jget tl "function" "parameters"))))
+                   (let ((messages (jget "messages")))
+                     (check "kimi req message roles"
+                            (equal (map 'list (lambda (m) (evo.provider::jget m "role"))
+                                        messages)
+                                   '("system" "user" "assistant" "tool" "user")))
+                     (check "kimi req system prompt is a system message"
+                            (equal (evo.provider::jget (aref messages 0) "content") "sys"))
+                     (check "kimi req assistant replays reasoning_content"
+                            (equal (evo.provider::jget (aref messages 2) "reasoning_content")
+                                   "let me look"))
+                     (check "kimi req assistant text kept"
+                            (equal (evo.provider::jget (aref messages 2) "content")
+                                   "working"))
+                     (check "kimi req tool call wire form"
+                            (let ((tc (aref (evo.provider::jget (aref messages 2)
+                                                                "tool_calls")
+                                            0)))
+                              (and (equal (evo.provider::jget tc "id") "call_a")
+                                   (equal (evo.provider::jget tc "type") "function")
+                                   (equal (evo.provider::jget tc "function" "name") "bash")
+                                   (equal (pget (evo.provider::json->sexpr
+                                                 (com.inuoe.jzon:parse
+                                                  (evo.provider::jget tc "function"
+                                                                      "arguments")))
+                                                :command)
+                                          "ls"))))
+                     (check "kimi req tool result"
+                            (and (equal (evo.provider::jget (aref messages 3) "tool_call_id")
+                                        "call_a")
+                                 (equal (evo.provider::jget (aref messages 3) "content")
+                                        "ok")))
+                     (check "kimi req image is an inline data url"
+                            (let ((block (aref (evo.provider::jget (aref messages 4)
+                                                                   "content")
+                                               1)))
+                              (and (equal (evo.provider::jget block "type") "image_url")
+                                   (equal (evo.provider::jget block "image_url" "url")
+                                          "data:image/png;base64,AAAA"))))))
+                 ;; :xhigh clamps to high, :max passes through.
+                 (check "kimi req clamps :xhigh to high"
+                        (equal (evo.provider::jget
+                                (com.inuoe.jzon:parse
+                                 (funcall build :model model :messages history
+                                                :thinking-level :xhigh))
+                                "reasoning_effort")
+                               "high"))
+                 (check "kimi req sends :max"
+                        (equal (evo.provider::jget
+                                (com.inuoe.jzon:parse
+                                 (funcall build :model model :messages history
+                                                :thinking-level :max))
+                                "reasoning_effort")
+                               "max"))
+                 ;; NIL is JSON `false`, not "absent": an optional string the
+                 ;; caller did not supply has to be left out of the object
+                 ;; entirely, or the endpoint sees a boolean where it wants a
+                 ;; string.
+                 (let ((raw (funcall build :model model
+                                           :messages (list '(:role :tool-result
+                                                             :tool-call-id "call_a"
+                                                             :content ((:type :text
+                                                                        :text "ok"))))
+                                           :tools (list (list :name "bash"
+                                                              :input-schema
+                                                              (schema->json-schema
+                                                               '(:object)))))))
+                   (check "kimi req omits absent optional strings"
+                          (and (not (search "\"description\":false" raw))
+                               (not (search "\"name\":false" raw))
+                               (search "\"content\":\"ok\"" raw))))
+                 ;; Deferred tools: a tool that shows up mid-session is
+                 ;; declared in a trailing dynamic-tools system message, so the
+                 ;; cached prefix (and the top-level tool array) does not move.
+                 (funcall (kimi-fn "KIMI--FORGET-TOOL-BASELINE") "kimi-sess-2")
+                 (funcall build :model model :messages history
+                                :tools (list (kimi-tool "bash"))
+                                :cache-key "kimi-sess-2")
+                 (let* ((raw2 (funcall build :model model :messages history
+                                             :tools (list (kimi-tool "bash")
+                                                          (kimi-tool "web"))
+                                             :cache-key "kimi-sess-2"))
+                        (req2 (com.inuoe.jzon:parse raw2))
+                        (messages (evo.provider::jget req2 "messages"))
+                        (last (aref messages (1- (length messages)))))
+                   (check "kimi deferred: top-level tools unchanged"
+                          (and (= 1 (length (evo.provider::jget req2 "tools")))
+                               (equal (evo.provider::jget
+                                       (aref (evo.provider::jget req2 "tools") 0)
+                                       "function" "name")
+                                      "bash")))
+                   (check "kimi deferred: new tool in a trailing system message"
+                          (and (equal (evo.provider::jget last "role") "system")
+                               (null (evo.provider::jget last "content"))
+                               (equal (evo.provider::jget
+                                       (aref (evo.provider::jget last "tools") 0)
+                                       "function" "name")
+                                      "web")))
+                   ;; No cache key (a one-shot call) defers nothing.
+                   (check "kimi deferred: off without a session key"
+                          (let ((req3 (com.inuoe.jzon:parse
+                                       (funcall build :model model :messages history
+                                                      :tools (list (kimi-tool "bash")
+                                                                   (kimi-tool "web"))))))
+                            (= 2 (length (evo.provider::jget req3 "tools"))))))))
+             ;; SSE parsing.
+             (let* ((api (find-api :kimi-chat-completions))
+                    (events nil)
+                    (result (with-input-from-string (in *kimi-sse-sample*)
+                              (parse-stream api in
+                                            :on-event (lambda (ev) (push ev events))))))
+               (check "kimi sse stopped" (pget result :stopped-p))
+               (check "kimi sse model" (equal (pget result :model) "kimi-k3"))
+               (check "kimi sse stop reason" (eq (pget result :stop-reason) :tool-use))
+               (check "kimi sse usage unbundles cached tokens"
+                      (let ((u (pget result :usage)))
+                        (and (= (pget u :input) 60) (= (pget u :output) 10)
+                             (= (pget u :cache-read) 40) (= (pget u :cache-write) 0))))
+               (let ((blocks (pget result :content)))
+                 (check "kimi sse three blocks" (= 3 (length blocks)))
+                 (check "kimi sse reasoning_content becomes thinking"
+                        (and (eq (pget (first blocks) :type) :thinking)
+                             (equal (pget (first blocks) :thinking) "think hard")))
+                 (check "kimi sse text" (equal (pget (second blocks) :text) "hello"))
+                 (check "kimi sse tool call across chunks"
+                        (and (equal (pget (third blocks) :id) "call_1")
+                             (equal (pget (third blocks) :name) "bash")
+                             (equal (pget (pget (third blocks) :arguments) :command)
+                                    "ls"))))
+               (check "kimi sse emits deltas"
+                      (equal (remove-duplicates
+                              (mapcar (lambda (e) (pget e :type)) (reverse events))
+                              :from-end t)
+                             '(:message-start :thinking-delta :text-delta)))
+               (check "kimi sse leaves tool-call-start to the kernel"
+                      (not (find :tool-call-start events
+                                 :key (lambda (e) (pget e :type))))))
+             ;; A stream that ends without a finish_reason is truncation.
+             (let ((result (with-input-from-string
+                               (in (format nil "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}~%~%"))
+                             (parse-stream (find-api :kimi-chat-completions) in))))
+               (check "kimi sse truncation detected" (not (pget result :stopped-p))))
+             ;; finish_reason length -> :length; an error chunk is data.
+             (let ((result (with-input-from-string
+                               (in (format nil "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"length\"}]}~%~%data: [DONE]~%~%"))
+                             (parse-stream (find-api :kimi-chat-completions) in))))
+               (check "kimi sse length stop" (eq (pget result :stop-reason) :length)))
+             (let ((result (with-input-from-string
+                               (in (format nil "data: {\"error\":{\"type\":\"content_filter\",\"message\":\"nope\"}}~%~%"))
+                             (parse-stream (find-api :kimi-chat-completions) in))))
+               (check "kimi sse error chunk is data"
+                      (search "content_filter" (pget result :error-message))))
+             ;; Chat-completions chunks are full of explicit JSON nulls, which
+             ;; parse to a symbol rather than NIL: none of them may reach the
+             ;; transcript as a value, and a missing tool-call id still has to
+             ;; produce a callable block.
+             (let* ((result (with-input-from-string
+                                (in (format nil "data: {\"model\":null,\"choices\":[{\"index\":0,\"delta\":{\"role\":null,\"content\":\"hi\",\"reasoning_content\":null,\"tool_calls\":[{\"index\":0,\"id\":null,\"function\":{\"name\":\"bash\",\"arguments\":null}}]},\"finish_reason\":null}],\"usage\":null}~%~%~
+data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}~%~%data: [DONE]~%~%"))
+                              (parse-stream (find-api :kimi-chat-completions) in)))
+                    (blocks (pget result :content)))
+               (check "kimi sse nulls never become values"
+                      (and (null (pget result :model))
+                           (= 2 (length blocks))
+                           (equal (pget (first blocks) :text) "hi")
+                           (equal (pget (second blocks) :name) "bash")
+                           (null (pget (second blocks) :arguments))))
+               (check "kimi sse synthesizes a missing tool call id"
+                      (equal (pget (second blocks) :id) "call_0"))
+               (check "kimi sse null usage counts as zero"
+                      (zerop (usage-total-tokens (pget result :usage)))))
+             ;; The config's cost block has no home in the model registry;
+             ;; /kimi:cost is where it is spent (USD per 1M tokens).
+             (check "kimi cost from usage"
+                    (< (abs (- (funcall (kimi-fn "KIMI--COST")
+                                        '(:input 1000000 :output 1000000
+                                          :cache-read 1000000 :cache-write 1000000))
+                               18.3d0))
+                       1d-4))
+             ;; End to end: model -> api -> endpoint -> assistant message.
+             (let ((saved-post (symbol-function 'dex:post))
+                   (seen nil))
+               (unwind-protect
+                    (progn
+                      (setf (symbol-function 'dex:post)
+                            (lambda (url &rest args)
+                              (setf seen (list :url url :args args))
+                              (flexi-streams:make-in-memory-input-stream
+                               (flexi-streams:string-to-octets
+                                *kimi-sse-sample* :external-format :utf-8))))
+                      (let ((message (call-provider
+                                      :model (find-model "kimi-k3" :moonshotai)
+                                      :system "sys" :messages (kimi-history)
+                                      :tools (list (kimi-tool "bash"))
+                                      :thinking-level :high
+                                      :cache-key "kimi-sess-3")))
+                        (check "kimi call: endpoint url"
+                               (equal (pget seen :url)
+                                      "https://api.moonshot.ai/v1/chat/completions"))
+                        (check "kimi call: bearer + json headers"
+                               (let ((headers (pget (pget seen :args) :headers)))
+                                 (and (equal (cdr (assoc "content-type" headers
+                                                         :test #'equal))
+                                             "application/json")
+                                      (equal (cdr (assoc "authorization" headers
+                                                         :test #'equal))
+                                             (concatenate 'string "Bearer " key)))))
+                        (check "kimi call: assistant message"
+                               (and (eq (pget message :role) :assistant)
+                                    (eq (pget message :provider) :moonshotai)
+                                    (equal (pget message :model) "kimi-k3")
+                                    (eq (pget message :stop-reason) :tool-use)
+                                    (= 3 (length (pget message :content)))))
+                        (check "kimi call: usage recorded"
+                               (= 110 (usage-total-tokens (pget message :usage))))))
+                 (setf (symbol-function 'dex:post) saved-post)))
+             ;; Unknown finish reasons are loud rather than guessed.
+             (check-signals "kimi sse unknown finish reason signals"
+                            (with-input-from-string
+                                (in (format nil "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"wat\"}]}~%~%data: [DONE]~%~%"))
+                              (parse-stream (find-api :kimi-chat-completions) in))))
+        (dolist (pair saved-env)
+          (evo.port:setenv (car pair) (or (cdr pair) "")))
+        (setf evo.provider::*models* saved-models
+              evo.provider::*providers* saved-providers
+              evo.provider::*apis* saved-apis)))))
+
 ;;; Timeouts and proxy env detection
 
 (defun test-port-timeout ()
@@ -3863,6 +4219,7 @@ selection journals the provider, and every resolution point honours it."
     (test-retired-off-level)
     (test-openai-sse)
     (test-openai-request)
+    (test-kimi-provider)
     (test-port-timeout)
     (test-env-proxy)
     (test-claude-oauth-proxy-guards)
