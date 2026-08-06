@@ -4366,6 +4366,34 @@ selection journals the provider, and every resolution point honours it."
   (reset-user-registries)
   (register-fixture-models))
 
+(defun test-proxy-plumbing ()
+  "WITH-PROXY resolves the proxy once and publishes it for the WinHTTP shim,
+which is the only way dexador's Windows backend can be made to use one: it
+ignores :proxy and tells WinHTTP explicitly to go direct (see
+ENSURE-WINHTTP-PROXY)."
+  (let ((saved-http (getenv "http_proxy"))
+        (saved-https (getenv "https_proxy"))
+        (saved-no (getenv "no_proxy")))
+    (unwind-protect
+         (progn
+           (evo.port:setenv "https_proxy" "http://127.0.0.1:10808")
+           (evo.port:setenv "http_proxy" "")
+           (evo.port:setenv "no_proxy" "internal.example")
+           (with-proxy (proxy "https://api.anthropic.com/v1/messages")
+             (check "with-proxy resolves the environment's proxy"
+                    (equal proxy "http://127.0.0.1:10808"))
+             (check "and publishes it where the shim reads it"
+                    (equal *request-proxy* "http://127.0.0.1:10808")))
+           (with-proxy (proxy "https://internal.example/v1")
+             (check "no_proxy still wins" (null proxy))
+             (check "and nothing is published for it" (null *request-proxy*)))
+           (check "outside the form nothing is left behind" (null *request-proxy*))
+           (check "the shim is a no-op off Windows"
+                  (or (evo.port:windows-p) (progn (ensure-winhttp-proxy) t))))
+      (evo.port:setenv "https_proxy" (or saved-https ""))
+      (evo.port:setenv "http_proxy" (or saved-http ""))
+      (evo.port:setenv "no_proxy" (or saved-no "")))))
+
 (defun test-restart-and-resume ()
   "The supervisor's restart guess, and what a child does when the guess is
 wrong.  Windows found this the hard way: one crash in the TUI turned into
@@ -4437,6 +4465,7 @@ five identical restarts, each reporting a different error than the real one."
     (test-init-files)
     (test-extension-load-order)
     (test-preflight)
+    (test-proxy-plumbing)
     (test-restart-and-resume)
     (test-parse-args)
     (test-editor)

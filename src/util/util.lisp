@@ -50,6 +50,51 @@ is stale on top of missing the lowercase Unix convention."
            (not (proxy-bypass-p (url-host url)))
            proxy))))
 
+(defvar *request-proxy* nil
+  "The proxy for the request in flight, read by the WinHTTP shim below.")
+
+(defvar *winhttp-proxy-shim* nil
+  "True once ENSURE-WINHTTP-PROXY has wrapped WINHTTP:HTTP-OPEN.")
+
+(defun ensure-winhttp-proxy ()
+  "Teach dexador's Windows backend to use a proxy.  Idempotent, and a no-op
+anywhere else.
+
+dexador speaks WinHTTP on Windows, and that backend ignores :proxy outright
+-- its own issue #66 closed with \"Proxy support: winhttp doesn't support
+it\", and the argument is still in the DECLARE IGNORE.  Worse than ignoring
+it: the library it calls passes WINHTTP_ACCESS_TYPE_NO_PROXY when given no
+proxy, so every request is told explicitly to go direct, and no system-wide
+setting (netsh winhttp, IE, http_proxy) can override that.
+
+The library has since grown the argument WINHTTP:HTTP-OPEN takes -- with a
+proxy it passes WINHTTP_ACCESS_TYPE_NAMED_PROXY -- so the fix is to hand it
+the proxy evo has already resolved for this request.  Wrapped rather than
+copied, because upstream (#202) is implementing this properly and the wrap
+disappears when they do."
+  (when (and (evo.port:windows-p) (not *winhttp-proxy-shim*))
+    (setf *winhttp-proxy-shim* t)
+    (let* ((package (find-package "WINHTTP"))
+           (name (and package (find-symbol "HTTP-OPEN" package))))
+      (when (and name (fboundp name))
+        (let ((original (symbol-function name)))
+          (setf (symbol-function name)
+                (lambda (&optional user-agent proxy)
+                  (let ((proxy (or proxy *request-proxy*)))
+                    (or (and proxy
+                             ;; An older winhttp takes no proxy argument.
+                             (ignore-errors (funcall original user-agent proxy)))
+                        (funcall original user-agent))))))))))
+
+(defmacro with-proxy ((var url) &body body)
+  "Bind VAR to the proxy for URL, and make it visible to the WinHTTP shim.
+Every HTTP call evo makes goes through here: passing :proxy to dexador is
+enough on Unix and is ignored on Windows (see ENSURE-WINHTTP-PROXY)."
+  `(let* ((,var (env-proxy ,url))
+          (*request-proxy* ,var))
+     (ensure-winhttp-proxy)
+     ,@body))
+
 (defun iso8601-now ()
   "Current UTC time as an ISO-8601 string."
   (multiple-value-bind (sec min hour day month year)
