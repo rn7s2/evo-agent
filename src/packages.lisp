@@ -16,7 +16,8 @@
            #:program-in-path #:windows-p #:path-separator
            #:shell-invocation #:shell-name
            #:lock-package #:unlock-package #:add-package-local-nickname
-           #:make-stdout-stream #:make-stdin-stream #:std-descriptor
+           #:make-stdout-stream #:make-stdin-stream
+           #:std-descriptor #:std-external-format
            #:install-signal-handler #:+sigwinch+
            #:terminal-raw-mode #:restore-terminal-mode #:terminal-sane
            #:terminal-size
