@@ -293,9 +293,12 @@ own :toplevel and ECL with our own :epilogue-code."
   (merge-pathnames ".evo/" (uiop:ensure-directory-pathname cwd)))
 
 (defun encode-cwd (cwd)
-  "Encode a directory path into a flat file-system-safe name (pi style)."
-  (let ((s (string-right-trim "/" (namestring (uiop:ensure-directory-pathname cwd)))))
-    (substitute #\- #\/ s)))
+  "Encode a directory path into a flat file-system-safe name (pi style).
+Both separators and the drive colon go: a Windows cwd encodes to
+`C-Users-me-project`, and a name with a colon in it is not creatable on
+NTFS at all (it names an alternate data stream)."
+  (let ((s (string-right-trim "/\\" (namestring (uiop:ensure-directory-pathname cwd)))))
+    (map 'string (lambda (c) (if (member c '(#\/ #\\ #\:)) #\- c)) s)))
 
 ;;; Safe sexpr IO (journal format rules)
 ;;;

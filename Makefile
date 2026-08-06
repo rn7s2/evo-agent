@@ -1,4 +1,7 @@
-# evo — build & install
+# evo — build & install (Unix: macOS, Linux).
+#
+# Windows has no make and no /bin/sh: use make.ps1 beside this file, which
+# takes the same targets and the same knobs as parameters (SBCL only there).
 #
 # Configuration variables (override on the command line, e.g. `make LISP=ecl`):
 #   LISP     — Common Lisp implementation used to build and run scripts.

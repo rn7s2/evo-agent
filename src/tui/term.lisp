@@ -1,39 +1,43 @@
 ;;;; term.lisp — terminal control for the tui core extension.
 ;;;;
-;;;; Raw mode + size via /bin/stty (no curses, no FFI: variadic ioctl is not
-;;;; safely callable through implementation FFIs on arm64 Darwin, and stty is
-;;;; exercised only at startup/exit/resize).  Output is ANSI escapes on a
-;;;; dedicated fd-stream.  SIGWINCH sets a flag the main loop polls
-;;;; (mandatory live resize).
+;;;; Raw mode + size come from evo.port (stty on Unix, SetConsoleMode on
+;;;; Windows) — the platform lives there, the escape sequences live here.
+;;;; Output is ANSI escapes on a dedicated fd-stream.  Live resize is
+;;;; mandatory: SIGWINCH sets a flag the main loop polls, and where there is
+;;;; no SIGWINCH (Windows) the main loop asks the terminal its size instead.
 
 (in-package :evo.tui)
 
 (defvar *tty-out* nil)
-(defvar *saved-stty* nil)
+(defvar *saved-term-mode* nil)
 (defvar *resized* nil)
 (defvar *rows* 24)
 (defvar *cols* 80)
 
-(defun stty (&rest args)
-  (string-trim '(#\Newline #\Space)
-               (with-output-to-string (out)
-                 (uiop:run-program (cons "/bin/stty" args)
-                                   :input :interactive :output out
-                                   :ignore-error-status t))))
+(defvar *poll-for-resize* nil
+  "T when this platform has no resize signal, so TICK must look for one.")
 
 (defun refresh-size ()
-  (let* ((size (ignore-errors (stty "size")))
-         (parts (and size (uiop:split-string size :separator '(#\Space)))))
-    (when (= 2 (length parts))
-      (let ((r (parse-integer (first parts) :junk-allowed t))
-            (c (parse-integer (second parts) :junk-allowed t)))
-        (when (and r c (plusp r) (plusp c))
-          (setf *rows* r *cols* c)))))
+  (multiple-value-bind (rows cols) (evo.port:terminal-size)
+    (when (and rows cols)
+      (setf *rows* rows *cols* cols)))
   (values *rows* *cols*))
 
 (defun install-sigwinch ()
-  (evo.port:install-signal-handler evo.port:+sigwinch+
-                                   (lambda () (setf *resized* t))))
+  "Ask for SIGWINCH; fall back to polling when the platform has no such
+signal.  Either way *RESIZED* is what the main loop reads."
+  (setf *poll-for-resize*
+        (not (evo.port:install-signal-handler
+              evo.port:+sigwinch+
+              (lambda () (setf *resized* t))))))
+
+(defun poll-terminal-resize ()
+  "Notice a resize the hard way, where no signal announces it.  One console
+call per tick, and only on the platforms that need it."
+  (when *poll-for-resize*
+    (multiple-value-bind (rows cols) (evo.port:terminal-size)
+      (when (and rows cols (or (/= rows *rows*) (/= cols *cols*)))
+        (setf *resized* t)))))
 
 (defun wr (&rest strings)
   (dolist (s strings)
@@ -99,8 +103,7 @@ ctrl+v and shift+enter fall back to their legacy spellings."
 xterm modifyOtherKeys (ctrl+v, cmd+v, Shift+Enter detection); returns t on
 a tty."
   (setf *tty-out* (evo.port:make-fd-output-stream 1))
-  (setf *saved-stty* (stty "-g"))
-  (stty "raw" "-echo")
+  (setf *saved-term-mode* (evo.port:terminal-raw-mode))
   (refresh-size)
   (install-sigwinch)
   (wr (esc "?2004h"))                   ; bracketed paste
@@ -120,9 +123,9 @@ a tty."
     (wr (esc "?2004l")
         (show-cursor))
     (flush))
-  (when *saved-stty*
-    (stty *saved-stty*))
-  (setf *saved-stty* nil))
+  (when *saved-term-mode*
+    (evo.port:restore-terminal-mode *saved-term-mode*))
+  (setf *saved-term-mode* nil))
 
 (defun char-display-width (c)
   "Terminal columns C occupies (wcwidth approximation).  The region's

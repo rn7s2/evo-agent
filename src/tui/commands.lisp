@@ -466,7 +466,9 @@ lists only global (every project) lore — mirroring /memory vs /global-memory."
   ;; Keep the supervisor's hang detector fed even while idle at the editor
   ;; (throttled internally to 1/sec).
   (evo.kernel::heartbeat-touch)
-  ;; Live resize.
+  ;; Live resize.  Signal-driven where there is a signal for it, polled
+  ;; where there is not (Windows) — both land in *RESIZED*.
+  (poll-terminal-resize)
   (when *resized*
     (setf *resized* nil)
     (refresh-size)

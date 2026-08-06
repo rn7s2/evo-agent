@@ -99,9 +99,13 @@ absent."
 ;;; Rendering the injected block.
 
 (defun ide-context-alive-p (pid)
-  "True unless PID is known to be gone.  One fork per submitted prompt, and
-only there — the status poller never runs this."
+  "True unless PID is known to be *gone*.  One fork per submitted prompt,
+and only there — the status poller never runs this.  Fail-open on purpose:
+where the probe itself cannot run (no kill(1), i.e. Windows) the editor's
+own liveness is unknown, and dropping its context on an unanswerable
+question is the worse of the two mistakes."
   (or (not (integerp pid))
+      (evo.port:windows-p)
       (ignore-errors
         (zerop (nth-value 2 (uiop:run-program (list "kill" "-0" (princ-to-string pid))
                                               :ignore-error-status t

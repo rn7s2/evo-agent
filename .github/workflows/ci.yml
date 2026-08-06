@@ -99,3 +99,128 @@ jobs:
 
       - name: make test
         run: make test LISP=${{ matrix.lisp }}
+
+  # Windows is SBCL-only (src/port/port.lisp: the ECL branches are Unix
+  # facilities with no Windows twin) and build-only for now — by decision,
+  # not by omission.  The unit suite is Lisp-portable but unproven here, and
+  # the .exp suites need a pty; wiring either in as a red gate before anyone
+  # has run evo on Windows would only teach people to ignore the badge.
+  # What this job does guard is the thing that silently rots: that every
+  # #+/#- branch in the port layer still READS and COMPILES on Windows, and
+  # that the artifact is a runnable evo.exe.
+  build-windows:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+
+      # Chocolatey's SBCL is an installer, not a shimmed package: it puts
+      # sbcl.exe somewhere the *machine* PATH knows about, and the runner
+      # process does not re-read that mid-job.  So find it and publish the
+      # directory (plus SBCL_HOME, which is how the runtime finds its core
+      # and contribs) through the files GitHub does re-read between steps.
+      - name: Install SBCL
+        shell: pwsh
+        run: |
+          choco install sbcl --no-progress -y
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $sbclHome = @(
+            "$env:ProgramFiles\Steel Bank Common Lisp",
+            "${env:ProgramFiles(x86)}\Steel Bank Common Lisp"
+          ) | Where-Object { Test-Path (Join-Path $_ 'sbcl.exe') } | Select-Object -First 1
+          if (-not $sbclHome) {
+            $found = Get-ChildItem -Path "$env:ProgramFiles", 'C:\ProgramData\chocolatey' `
+              -Filter sbcl.exe -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($found) { $sbclHome = $found.DirectoryName }
+          }
+          if (-not $sbclHome) { throw 'sbcl.exe not found after choco install sbcl' }
+          Add-Content -Path $env:GITHUB_PATH -Value $sbclHome
+          Add-Content -Path $env:GITHUB_ENV -Value "SBCL_HOME=$sbclHome"
+
+      # dexador pulls in cl+ssl, which dlopens libssl/libcrypto when the
+      # system is LOADED, not when a request is made — with no OpenSSL on
+      # PATH the build dies at quickload, long before any code of ours runs.
+      - name: Put OpenSSL on PATH
+        shell: pwsh
+        run: |
+          # Look for the DLL, not the directory: an OpenSSL folder with
+          # nothing cl+ssl recognises in it would let this step pass and the
+          # build fail three steps later with a foreign-library error.
+          function Find-LibSsl {
+            @("C:\Program Files\OpenSSL\bin",
+              "C:\Program Files\OpenSSL-Win64\bin") |
+              Where-Object { Test-Path $_ } |
+              Where-Object { Get-ChildItem -Path $_ -Filter 'libssl*.dll' -ErrorAction SilentlyContinue } |
+              Select-Object -First 1
+          }
+          $dir = Find-LibSsl
+          if (-not $dir) {
+            choco install openssl --no-progress -y
+            $dir = Find-LibSsl
+          }
+          if (-not $dir) { throw 'no OpenSSL libssl*.dll found; cl+ssl (via dexador) cannot load without it' }
+          Write-Host "OpenSSL: $dir"
+          Add-Content -Path $env:GITHUB_PATH -Value $dir
+
+      - name: Cache Quicklisp
+        id: cache-quicklisp
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~\quicklisp
+            ~\AppData\Local\common-lisp
+          key: quicklisp-${{ runner.os }}-sbcl-${{ hashFiles('evo.asd') }}
+          restore-keys: |
+            quicklisp-${{ runner.os }}-sbcl-
+
+      # Same reasoning as the Unix job: gate on the filesystem, not on
+      # cache-hit, because quicklisp-quickstart:install ERRORS on an
+      # existing install and restore-keys can restore it without an exact
+      # key match.
+      - name: Bootstrap Quicklisp
+        shell: pwsh
+        run: |
+          $setup = Join-Path $HOME 'quicklisp\setup.lisp'
+          if (Test-Path $setup) {
+            Write-Host "Quicklisp restored from cache; skipping install."
+            exit 0
+          }
+          Invoke-WebRequest -Uri https://beta.quicklisp.org/quicklisp.lisp -OutFile $env:TEMP\quicklisp.lisp
+          sbcl --non-interactive --load $env:TEMP\quicklisp.lisp --eval '(quicklisp-quickstart:install)'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Wire Quicklisp into the SBCL init file
+        shell: pwsh
+        run: |
+          $init = Join-Path $HOME '.sbclrc'
+          @'
+          #-quicklisp
+          (let ((quicklisp-init (merge-pathnames "quicklisp/setup.lisp"
+                                                  (user-homedir-pathname))))
+            (when (probe-file quicklisp-init)
+              (load quicklisp-init)))
+          '@ | Set-Content -Path $init -Encoding ASCII
+
+      - name: Pre-fetch dependencies
+        shell: pwsh
+        run: |
+          sbcl --non-interactive `
+            --eval '(push (uiop:getcwd) asdf:*central-registry*)' `
+            --eval '(ql:quickload :evo)'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: .\make.ps1 build
+        shell: pwsh
+        run: .\make.ps1 build
+
+      - name: .\make.ps1 install
+        shell: pwsh
+        run: .\make.ps1 install
+
+      # The binary must at least start, parse argv and exit cleanly — a
+      # build that produces an evo.exe which dies on startup is not a build.
+      - name: evo.exe --version
+        shell: pwsh
+        run: |
+          & (Join-Path $HOME '.evo\bin\evo.exe') --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
