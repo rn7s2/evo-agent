@@ -5,36 +5,31 @@
 ;;;; it is written, so even a hard crash leaves on disk everything learned up
 ;;;; to that point.
 ;;;;
-;;;; ROUND 2.  Round 1 settled two things, by measurement, on Windows 11 with
-;;;; SBCL 2.6.7 and console codepage 936:
+;;;; ROUND 3 -- the input half.  Settled so far, by measurement on Windows 11,
+;;;; SBCL 2.6.7, console codepage 936:
 ;;;;
-;;;;   * an "fd" is an OS handle here.  *stdout* fd = 116 = GetStdHandle
-;;;;     (STD_OUTPUT_HANDLE), and a stream on the literal 1 dies with "The
-;;;;     handle is invalid" -- which is what the TUI did.
-;;;;   * a console handle is written through the wide console API, so a stream
-;;;;     forced to :external-format :utf-8 hands it UTF-8 bytes that come out
-;;;;     as UTF-16: "[probe marker...]" rendered as "灛潲敢洠牡敫...".
+;;;;   * an "fd" is an OS handle.  In the console: *stdout* fd = 116 =
+;;;;     GetStdHandle(STD_OUTPUT_HANDLE).  In the supervised child, the same
+;;;;     stream is 12 -- handles are per process, so nothing may be hardcoded;
+;;;;     taking the number out of SBCL's own stream is right in both.
+;;;;   * the console external format is (UCS-2LE REPLACEMENT ...), not UTF-8.
+;;;;     A stream built with SBCL's own format printed ASCII and the TUI's box
+;;;;     drawing correctly; a stream forced to :utf-8 printed UTF-16 mojibake
+;;;;     and then killed the process outright -- three runs, same place, no
+;;;;     Lisp condition.  Both are now fixed in evo.port.
 ;;;;
-;;;; What is still unknown, and what this round asks: which external format
-;;;; SBCL picked for the console, whether a stream built that way prints both
-;;;; ASCII and the box-drawing the TUI needs, and -- the one that decides
-;;;; whether the TUI can read keys at all -- whether a byte stream on the
-;;;; console handle returns the bytes you type.
+;;;; What is left is the half that decides whether the TUI can read keys: the
+;;;; console is written through a wide API, so is it read through one too?  evo
+;;;; asks for raw (unsigned-byte 8) and parses ESC sequences out of the bytes.
 ;;;;
-;;;; Two ways to run it, and BOTH are wanted:
+;;;; Run it in a console with plain SBCL (the round-2 answers say the child
+;;;; behaves the same, so once is enough):
 ;;;;
-;;;;   1) In a console, with plain SBCL:
-;;;;        sbcl --script windows-probe.lisp
+;;;;    sbcl --script windows-probe.lisp
 ;;;;
-;;;;   2) Inside the real binary, as a boot extension -- this runs it in the
-;;;;      supervised child, which is where the TUI dies:
-;;;;        copy windows-probe.lisp %USERPROFILE%\.evo\extensions\000-probe.lisp
-;;;;        .\evo.exe          (let it fail, then delete that file again)
-;;;;
-;;;; Both runs append to  %USERPROFILE%\evo-windows-probe.txt  -- send that file.
-;;;; Garbled text on the console is a result, not a problem: the report file is
-;;;; written UTF-8 and stays readable.  The last probe waits for you to type;
-;;;; skipping it (ctrl-c, or just closing the window) loses nothing else.
+;;;; It asks you to press a few keys and appends to
+;;;; %USERPROFILE%\evo-windows-probe.txt -- send that file.  Nothing here
+;;;; writes a mismatched encoding, so the console should stay readable.
 ;;;;
 ;;;; The file is deliberately kept in CR-LF (see .gitattributes): it doubles as
 ;;;; a standing check that CR-LF Lisp source compiles and reads.
@@ -72,35 +67,25 @@
       (sb-sys:fd-stream-fd stream)
       :not-an-fd-stream))
 
-;;; The two strings the TUI actually needs to put on screen: plain ASCII, and
-;;; the box drawing plus prompt glyph it paints every frame.
-
-(defparameter *ascii-sample* "ABC-123")
-(defparameter *tui-sample*
-  (coerce (list (code-char #x2500) (code-char #x2500)   ; horizontal rule
-                #\Space
-                (code-char #x276F)                      ; the prompt chevron
-                #\Space
-                (code-char #x25CB))                     ; the idle spinner
-          'string))
+(defun describe-codes (codes)
+  "Numbers plus their printable spelling, which is how an ESC sequence is
+recognised at a glance."
+  (format nil "~a  [~a]" codes
+          (map 'string (lambda (n) (if (< 31 n 127) (code-char n) #\.)) codes)))
 
 #+win32
 (progn
   (sb-alien:define-alien-routine ("GetStdHandle" %std-handle)
       sb-alien:system-area-pointer
     (which sb-alien:int))
-  (sb-alien:define-alien-routine ("GetConsoleOutputCP" %console-output-cp)
-      sb-alien:unsigned-int)
-  (sb-alien:define-alien-routine ("SetConsoleOutputCP" %set-console-output-cp)
-      sb-alien:int (codepage sb-alien:unsigned-int))
-  (sb-alien:define-alien-routine ("SetConsoleMode" %set-console-mode)
-      sb-alien:int
-    (handle sb-alien:system-area-pointer)
-    (mode sb-alien:unsigned-int))
   (sb-alien:define-alien-routine ("GetConsoleMode" %get-console-mode)
       sb-alien:int
     (handle sb-alien:system-area-pointer)
     (mode (* sb-alien:unsigned-int)))
+  (sb-alien:define-alien-routine ("SetConsoleMode" %set-console-mode)
+      sb-alien:int
+    (handle sb-alien:system-area-pointer)
+    (mode sb-alien:unsigned-int))
 
   (defun std-handle (which)
     (sb-sys:sap-int (%std-handle which)))
@@ -109,21 +94,43 @@
     (sb-alien:with-alien ((mode sb-alien:unsigned-int))
       (if (zerop (%get-console-mode (sb-sys:int-sap handle) (sb-alien:addr mode)))
           nil
-          mode))))
+          mode)))
 
-(defun try-write (label where external-format)
-  "Build a stream the way the TUI does and print both samples through it.
-Whether they are legible on the console is the answer; the report only says
-that the write itself did not signal."
+  (defun set-console-mode-of (handle mode)
+    (not (zerop (%set-console-mode (sb-sys:int-sap handle) mode)))))
+
+;;; Reading, with a deadline.  LISTEN before every read: a blocking read on a
+;;; console that never delivers would hang the probe with nothing to show.
+
+(defun read-codes-with-deadline (stream reader seconds limit)
+  (let ((codes nil)
+        (deadline (+ (get-universal-time) seconds)))
+    (loop while (and (< (get-universal-time) deadline) (< (length codes) limit))
+          do (if (listen stream)
+                 (let ((item (funcall reader stream)))
+                   (if (or (null item) (eq item :eof))
+                       (return)
+                       (push item codes)))
+                 (sleep 0.05)))
+    (nreverse codes)))
+
+(defun probe-char-read (label seconds)
   (probe label
-    (let ((stream (sb-sys:make-fd-stream where :output t :buffering :full
-                                               :external-format external-format)))
-      (write-string (format nil "[~a] ascii=~a tui=~a~%"
-                            label *ascii-sample* *tui-sample*)
-                    stream)
-      (finish-output stream)
-      (format nil "wrote without error, external-format=~a"
-              (stream-external-format stream)))))
+    (let ((codes (read-codes-with-deadline
+                  sb-sys:*stdin*
+                  (lambda (s) (let ((c (read-char-no-hang s nil :eof)))
+                                (if (characterp c) (char-code c) c)))
+                  seconds 12)))
+      (if codes (describe-codes codes) "nothing arrived"))))
+
+(defun probe-byte-read (label seconds)
+  (probe label
+    (let* ((stream (sb-sys:make-fd-stream (stream-fd sb-sys:*stdin*)
+                                          :input t :buffering :none
+                                          :element-type '(unsigned-byte 8)))
+           (codes (read-codes-with-deadline
+                   stream (lambda (s) (read-byte s nil :eof)) seconds 12)))
+      (if codes (describe-codes codes) "nothing arrived"))))
 
 (defun run-probe ()
   (with-open-file (out *probe-report* :direction :output
@@ -131,82 +138,52 @@ that the write itself did not signal."
                                       :if-does-not-exist :create
                                       :external-format :utf-8)
     (let ((*probe-stream* out))
-      (probe-say "============ evo windows probe, round 2 ============")
+      (probe-say "============ evo windows probe, round 3 ============")
       (probe "when"
         (multiple-value-bind (sec min hour day month year) (get-decoded-time)
           (format nil "~d-~2,'0d-~2,'0d ~2,'0d:~2,'0d:~2,'0d"
                   year month day hour min sec)))
-      (probe "implementation" (format nil "~a ~a on ~a"
-                                      (lisp-implementation-type)
-                                      (lisp-implementation-version)
-                                      (machine-type)))
-      (probe "role" (format nil "supervised child=~a, EVO_HOME=~a, TERM=~a"
-                            (env "EVO_SUPERVISED_CHILD") (env "EVO_HOME") (env "TERM")))
-
-      (probe-say "---- what SBCL chose for its own streams ----")
-      (probe "*stdout* fd" (hex (stream-fd sb-sys:*stdout*)))
-      (probe "*stdout* external-format" (stream-external-format sb-sys:*stdout*))
+      (probe "implementation" (format nil "~a ~a" (lisp-implementation-type)
+                                      (lisp-implementation-version)))
+      (probe "role" (format nil "supervised child=~a" (env "EVO_SUPERVISED_CHILD")))
       (probe "*stdin* fd" (hex (stream-fd sb-sys:*stdin*)))
-      (probe "*stdin* external-format" (stream-external-format sb-sys:*stdin*))
       (probe "*stdin* element-type" (stream-element-type sb-sys:*stdin*))
       #+win32
-      (probe "console output codepage" (%console-output-cp))
+      (probe "console input mode at start" (hex (console-mode-of (std-handle -10))))
 
-      (probe-say "---- printing: which stream shows readable text? ----")
-      (probe "via *standard-output*"
-        (progn (format t "[via *standard-output*] ascii=~a tui=~a~%"
-                       *ascii-sample* *tui-sample*)
-               (finish-output)
-               "wrote without error"))
-      (try-write "own stream, SBCL's own external-format"
-                 (stream-fd sb-sys:*stdout*)
-                 (stream-external-format sb-sys:*stdout*))
-      (try-write "own stream, forced :utf-8 (round 1 showed this garbles)"
-                 (stream-fd sb-sys:*stdout*)
-                 :utf-8)
-      #+win32
-      (probe "SetConsoleOutputCP(65001), then :utf-8 again"
-        (progn (%set-console-output-cp 65001)
-               (try-write "own stream, :utf-8 at codepage 65001"
-                          (stream-fd sb-sys:*stdout*) :utf-8)
-               (format nil "codepage now ~a" (%console-output-cp))))
+      ;; Bytes first, in both modes: SBCL's own character stream buffers, and
+      ;; a buffered read on the same handle would swallow what the byte probe
+      ;; is waiting for.  The byte answer is the one that decides the design.
 
-      ;; The TUI's key reading: raw bytes off the console handle, with the
-      ;; console in the mode evo puts it in (VT input, no line editing, no
-      ;; echo).  If this returns nothing or returns UTF-16, the input half
-      ;; needs the same treatment the output half just got.
-      (probe-say "---- reading keys: does a byte stream see them? ----")
+      ;; 1. Cooked mode, raw bytes off the handle: what evo does today.
+      (probe-say "")
+      (probe-say ">>> STEP 1 of 4.  Type   abc   and press Enter.")
+      (probe-byte-read "cooked mode, bytes via our own fd-stream" 25)
+
+      ;; 2. Cooked mode, characters through SBCL's own stream: the control.
+      (probe-say "")
+      (probe-say ">>> STEP 2 of 4.  Type   abc   and press Enter again.")
+      (probe-char-read "cooked mode, chars via SBCL's *stdin*" 25)
+
+      ;; 3+4. The mode evo actually runs in: VT input, no line editing, no
+      ;; echo -- so keys arrive as they are pressed and arrows arrive as ESC
+      ;; sequences.  Nothing will be echoed; type blind.
       #+win32
-      (probe "console input mode before"
-        (hex (console-mode-of (std-handle -10))))
-      (probe "byte stream on stdin's descriptor"
-        (let ((stream (sb-sys:make-fd-stream (stream-fd sb-sys:*stdin*)
-                                             :input t :buffering :none
-                                             :element-type '(unsigned-byte 8))))
-          (format nil "constructed, open-stream-p=~a" (open-stream-p stream))))
-      (probe-say "NOW: type  abc  and press Enter (or ctrl-c to stop here).")
+      (probe "switch to ENABLE_VIRTUAL_TERMINAL_INPUT (evo's mode)"
+        (set-console-mode-of (std-handle -10) #x200))
+
+      (probe-say "")
+      (probe-say ">>> STEP 3 of 4.  Press   a   then the UP ARROW.  No echo now,")
+      (probe-say ">>> and no Enter needed.  ESC [ A would be 27 91 65.")
+      (probe-byte-read "raw VT mode, bytes via our own fd-stream" 25)
+
+      (probe-say "")
+      (probe-say ">>> STEP 4 of 4.  Press   a   then the UP ARROW once more.")
+      (probe-char-read "raw VT mode, chars via SBCL's *stdin*" 25)
+
       #+win32
-      (probe "set raw VT input mode"
-        (let ((ok (%set-console-mode (sb-sys:int-sap (std-handle -10)) #x200)))
-          (format nil "SetConsoleMode(ENABLE_VIRTUAL_TERMINAL_INPUT)=~a" ok)))
-      (probe "bytes read"
-        (let ((stream (sb-sys:make-fd-stream (stream-fd sb-sys:*stdin*)
-                                             :input t :buffering :none
-                                             :element-type '(unsigned-byte 8)))
-              (bytes nil)
-              (deadline (+ (get-universal-time) 20)))
-          (loop while (and (< (get-universal-time) deadline) (< (length bytes) 8))
-                do (let ((b (read-byte stream nil :eof)))
-                     (when (eq b :eof) (return))
-                     (push b bytes)))
-          (format nil "~a  (as characters: ~s)"
-                  (reverse bytes)
-                  (map 'string (lambda (b) (if (< 31 b 127) (code-char b) #\.))
-                       (reverse bytes)))))
-      #+win32
-      (probe "restore console input mode"
-        (hex (%set-console-mode (sb-sys:int-sap (std-handle -10)) #x7)))
-      (probe-say "============ end of round 2 ============")))
+      (probe "restore console input mode" (set-console-mode-of (std-handle -10) #x7))
+      (probe-say "============ end of round 3 ============")))
   (ignore-errors
    (format *error-output* "~&probe report appended to: ~a~%" (namestring *probe-report*))
    (finish-output *error-output*))
