@@ -489,10 +489,10 @@ request arrives or 120 seconds elapse."
                        :state state)))
          (response
            (handler-case
-               (apply #'dex:post *claude-oauth-token-url*
-                      :headers `(("Content-Type" . "application/json"))
-                      :content body
-                      (let ((proxy (evo.util:env-proxy *claude-oauth-token-url*)))
+               (evo:with-proxy (proxy *claude-oauth-token-url*)
+                 (apply #'dex:post *claude-oauth-token-url*
+                        :headers `(("Content-Type" . "application/json"))
+                        :content body
                         (when proxy (list :proxy proxy))))
              (dexador.error:http-request-failed (e)
                (let ((resp-body (ignore-errors (dexador.error:response-body e))))
@@ -523,10 +523,10 @@ request arrives or 120 seconds elapse."
                        :client_id (claude-oauth--client-id))))
          (response
            (handler-case
-               (apply #'dex:post *claude-oauth-token-url*
-                      :headers `(("Content-Type" . "application/json"))
-                      :content body
-                      (let ((proxy (evo.util:env-proxy *claude-oauth-token-url*)))
+               (evo:with-proxy (proxy *claude-oauth-token-url*)
+                 (apply #'dex:post *claude-oauth-token-url*
+                        :headers `(("Content-Type" . "application/json"))
+                        :content body
                         (when proxy (list :proxy proxy))))
              (dexador.error:http-request-failed (e)
                (let ((resp-body (ignore-errors (dexador.error:response-body e))))
@@ -561,10 +561,10 @@ request arrives or 120 seconds elapse."
 access token.  Returns a parsed JSON object (hash-table) or signals an error."
   (labels ((fetch-with-token (token)
              (let ((response
-                     (apply #'dex:get *claude-oauth-models-url*
-                            :headers `(("Authorization" . ,(format nil "Bearer ~a" token))
-                                       ("anthropic-version" . "2023-06-01"))
-                            (let ((proxy (evo.util:env-proxy *claude-oauth-models-url*)))
+                     (evo:with-proxy (proxy *claude-oauth-models-url*)
+                       (apply #'dex:get *claude-oauth-models-url*
+                              :headers `(("Authorization" . ,(format nil "Bearer ~a" token))
+                                         ("anthropic-version" . "2023-06-01"))
                               (when proxy (list :proxy proxy))))))
                (com.inuoe.jzon:parse response)))
            (try-fetch (token)

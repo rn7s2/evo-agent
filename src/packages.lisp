@@ -26,7 +26,8 @@
 
 (defpackage :evo.util
   (:use :cl)
-  (:export #:getenv #:env-proxy #:iso8601-now #:format-local-timestamp #:local-timezone-name
+  (:export #:getenv #:env-proxy #:with-proxy #:*request-proxy*
+           #:ensure-winhttp-proxy #:iso8601-now #:format-local-timestamp #:local-timezone-name
            #:gen-id #:reseed-ids #:pget #:pput #:plist-merge
            #:evo-home #:project-evo-dir #:encode-cwd #:ensure-directory
            #:write-sexpr-line #:read-sexpr #:read-sexpr-stream #:validate-journal-value
@@ -116,14 +117,14 @@
 ;; subclass and specialize the wire protocol without naming a kernel package.
 (defpackage :evo
   (:use :cl)
-  (:import-from :evo.util #:cat #:normalize-newlines #:crlf-newlines)
+  (:import-from :evo.util #:cat #:normalize-newlines #:crlf-newlines #:with-proxy)
   (:import-from :evo.provider
                 #:provider-api #:register-api #:find-api #:api-keys
                 #:endpoint-path #:auth-headers #:build-request #:parse-stream
                 #:thinking-param #:perform-request #:map-sse-events
                 #:default-provider-key #:default-base-url #:default-api-key-env
                 #:provider-error)
-  (:export #:cat #:normalize-newlines #:crlf-newlines
+  (:export #:cat #:normalize-newlines #:crlf-newlines #:with-proxy
            #:register-tool #:register-command #:on #:load-extension
            #:register-model #:register-provider #:set-setting #:setting
            #:set-active-tools #:all-tools #:*agent* #:current-goal

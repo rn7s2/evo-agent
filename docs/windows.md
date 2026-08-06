@@ -91,6 +91,25 @@ suites have no such shield — a `#!/bin/sh` with a CR is a bad interpreter.
 
 `tests/windows-probe.lisp` is deliberately kept CR-LF as a standing check.
 
+### dexador ignores `:proxy` on Windows
+
+dexador speaks WinHTTP there (`dex:*default-backend*` is `:winhttp`; the
+usocket backend is not even compiled, because it would need OpenSSL). That
+backend has the argument in a `declare ignore` and a `;; TODO: proxy support`
+beside it — its own issue #66 closed with *"Proxy support: winhttp doesn't
+support it"*. Worse than ignoring it: the library it calls passes
+`WINHTTP_ACCESS_TYPE_NO_PROXY` when given no proxy, so every request is told
+explicitly to go direct and no system setting (`netsh winhttp`, IE,
+`http_proxy`) can override it. The symptom is quiet: reachable hosts work,
+blocked ones time out with `ERROR 12002`, and the proxy log stays empty.
+
+The library grew the argument since: `WINHTTP:HTTP-OPEN` takes a proxy and
+then passes `WINHTTP_ACCESS_TYPE_NAMED_PROXY`. `EVO.UTIL:ENSURE-WINHTTP-PROXY`
+wraps that one function and hands it the proxy evo already resolved for the
+request; `EVO.UTIL:WITH-PROXY` is what every HTTP call in evo (and in an
+extension) goes through. Upstream is implementing this properly in #202 —
+when it lands, the wrapper goes.
+
 ### A running evo.exe cannot be rebuilt over
 
 Windows locks a running image. `save-lisp-and-die` then reports

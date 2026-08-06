@@ -219,13 +219,13 @@ else :done."
                               (progn
                                 (when (aborted-p)
                                   (return-from request-body (setf result (aborted-result))))
-                                (setf stream (apply #'dex:post url
-                                                    :headers headers :content body
-                                                    :want-stream t :force-binary t
-                                                    :keep-alive nil
-                                                    :connect-timeout 15
-                                                    :read-timeout 600
-                                                    (let ((proxy (env-proxy url)))
+                                (with-proxy (proxy url)
+                                  (setf stream (apply #'dex:post url
+                                                      :headers headers :content body
+                                                      :want-stream t :force-binary t
+                                                      :keep-alive nil
+                                                      :connect-timeout 15
+                                                      :read-timeout 600
                                                       (when proxy (list :proxy proxy)))))
                                 (if (aborted-p)
                                     (aborted-result)
