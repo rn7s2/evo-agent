@@ -1365,109 +1365,6 @@ event: response.completed~%data: {\"type\":\"response.completed\",\"response\":{
     (check "candidates are unique"
            (= (length names) (length (remove-duplicates names :test #'string=))))))
 
-;;; Plan/auto mode switching (shift+tab, /permission, status indicator)
-
-(defun test-mode-switching ()
-  (let* ((dir (uiop:ensure-directory-pathname
-               (format nil "~a/evo-mode-~a/" (tmp-dir) (gen-id))))
-         (journal (progn (ensure-directories-exist dir) (make-session-journal dir)))
-         (agent (make-agent :journal journal))
-         (tui (evo.tui::make-tui :agent agent)))
-    (with-output-to-string (fake-tty)
-      (let ((evo.tui::*tty-out* fake-tty)
-            (evo.tui::*region-height* 0)
-            (evo.tui::*region-cursor-row* 0))
-        (check "mode starts auto" (equal (evo.tui::current-mode tui) "auto"))
-        (check "auto indicator in status line"
-               (search "◆ auto" (evo.tui::status-line tui)))
-        ;; shift+tab toggles into plan mode
-        (evo.tui::handle-key-edit tui :shift-tab)
-        (check "shift-tab switches to plan"
-               (equal (evo.tui::current-mode tui) "plan"))
-        (let ((line (evo.tui::status-line tui)))
-          (check "plan indicator leads status line"
-                 (and (search "◇ plan" line)
-                      (< (search "◇ plan" line) (search "ctx" line)))))
-        (let ((state (fold-state journal)))
-          (check "mode journaled as custom state"
-                 (equal (evo.journal:custom-state state "mode") "plan"))
-          (check "plan mode gates the tool set"
-                 (equal (evo.journal:state-tools state) evo.plan:*plan-tools*))
-          (check "plan instructions injected"
-                 (find-if (lambda (m)
-                            (equal (pget (pget m :meta) :key) "plan-mode"))
-                          (evo.journal:state-messages state))))
-        ;; shift+tab toggles back; full tool set restored
-        (evo.tui::handle-key-edit tui :shift-tab)
-        (check "shift-tab back to auto"
-               (equal (evo.tui::current-mode tui) "auto"))
-        (check "auto restores full tool set"
-               (equal (evo.journal:state-tools (fold-state journal))
-                      (evo.kernel:all-tool-names)))
-        ;; /permission with no args opens the choose box, preselecting current
-        (evo.tui::builtin-command tui "permission" "")
-        (check "permission choose box opens"
-               (eq (evo.tui::tui-mode tui) :select))
-        (check "permission box has two entries"
-               (= 2 (length (evo.tui::tui-select-items tui))))
-        (check "permission box preselects current"
-               (= 0 (evo.tui::tui-select-index tui)))
-        (evo.tui::handle-key-select tui :down)
-        (evo.tui::handle-key-select tui :enter)
-        (check "permission box selection switches"
-               (equal (evo.tui::current-mode tui) "plan"))
-        ;; /permission with an explicit arg
-        (evo.tui::builtin-command tui "permission" "auto")
-        (check "permission arg switches"
-               (equal (evo.tui::current-mode tui) "auto"))
-        (check "mode is no longer a builtin command"
-               (not (evo.tui::builtin-command tui "mode" "")))
-        ;; Even stale userspace extensions that registered the old commands must
-        ;; not resurrect them in completion or dispatch.
-        (let ((called nil))
-          (setf (gethash "plan" evo::*commands*)
-                (list :fn (lambda (ctx)
-                            (declare (ignore ctx))
-                            (setf called "plan")
-                            "old /plan")
-                      :description "old plan command")
-                (gethash "auto" evo::*commands*)
-                (list :fn (lambda (ctx)
-                            (declare (ignore ctx))
-                            (setf called "auto")
-                            "old /auto")
-                      :description "old auto command"))
-          (unwind-protect
-               (progn
-                 ;; Completion candidates include /permission, but plan/auto
-                 ;; remain mode arguments only — not standalone slash commands.
-                 (let ((commands (evo.tui::all-commands)))
-                   (check "permission is a completion candidate"
-                          (assoc "permission" commands :test #'string=))
-                   (check "mode is not a completion candidate"
-                          (not (assoc "mode" commands :test #'string=)))
-                   (check "exit is a completion candidate"
-                          (assoc "exit" commands :test #'string=))
-                   (check "plan is not a completion candidate"
-                          (not (assoc "plan" commands :test #'string=)))
-                   (check "auto is not a completion candidate"
-                          (not (assoc "auto" commands :test #'string=))))
-                 (check "plan is not a builtin command"
-                        (not (evo.tui::builtin-command tui "plan" "")))
-                 (check "auto is not a builtin command"
-                        (not (evo.tui::builtin-command tui "auto" "")))
-                 (evo.tui::dispatch-command tui (format nil "/~a" "plan"))
-                 (check "slash plan does not switch mode"
-                        (equal (evo.tui::current-mode tui) "auto"))
-                 (check "slash plan extension not called" (null called))
-                 (evo.tui::set-mode tui "plan")
-                 (evo.tui::dispatch-command tui (format nil "/~a" "auto"))
-                 (check "slash auto does not switch mode"
-                        (equal (evo.tui::current-mode tui) "plan"))
-                 (check "slash auto extension not called" (null called)))
-            (remhash "plan" evo::*commands*)
-            (remhash "auto" evo::*commands*)))))))
-
 ;;; Goal budgets (default: no limit)
 
 (defun test-goal-budget ()
@@ -2221,10 +2118,11 @@ event: response.completed~%data: {\"type\":\"response.completed\",\"response\":{
   (check "dotted plist degrades instead of signaling"
          (stringp (evo.tui::format-tool-call-plain "mystery" '(:a . "b")))))
 
-;;; Plan mode, the core extension: mode policy and the two enforcement
-;;; hooks.  Everything here goes through the registered hooks rather than
-;;; calling the gates directly — with plan mode in the image, "are the hooks
-;;; actually installed?" is itself part of what needs proving.
+;;; The extension points plan mode used to be built on.  Plan mode is gone
+;;; (one mode, auto, by design) but the seams it proved out are public API
+;;; and stay: the :tool-call gate, set-active-tools, keyed inject-context
+;;; plus the :transform-context filter, and custom journal state.  These
+;;; tests drive them the way a userspace extension would.
 
 (defun tool-call-blocked-p (name args)
   "Run the real :tool-call hook chain.  Returns (values blocked-p reason)."
@@ -2238,105 +2136,143 @@ event: response.completed~%data: {\"type\":\"response.completed\",\"response\":{
   (dolist (hook (gethash :transform-context evo.kernel::*event-hooks*) messages)
     (setf messages (funcall hook messages))))
 
-(defun test-plan-mode ()
+(defmacro with-temp-hooks (&body body)
+  "Run BODY with the hook table saved and restored, so a test can register
+:tool-call/:transform-context hooks without leaking them into later tests."
+  (let ((saved (gensym)))
+    `(let ((,saved (let ((copy (make-hash-table)))
+                     (maphash (lambda (k v) (setf (gethash k copy) v))
+                              evo.kernel::*event-hooks*)
+                     copy)))
+       (unwind-protect (progn ,@body)
+         (clrhash evo.kernel::*event-hooks*)
+         (maphash (lambda (k v) (setf (gethash k evo.kernel::*event-hooks*) v))
+                  ,saved)))))
+
+(defun active-tool-names (state)
+  "Names of the tools the model is actually offered for STATE."
+  (mapcar #'evo.kernel:tool-name (evo.kernel:active-tools state)))
+
+(defun test-no-modes ()
+  "Only one mode by design: nothing journals a \"mode\", no gate is installed
+out of the box, and no frontend surface offers a switch."
   (let* ((dir (uiop:ensure-directory-pathname
-               (format nil "~a/evo-plan-~a/" (tmp-dir) (gen-id))))
+               (format nil "~a/evo-nomode-~a/" (tmp-dir) (gen-id))))
          (journal (progn (ensure-directories-exist dir) (make-session-journal dir)))
          (agent (make-agent :journal journal))
          (evo:*agent* agent))
-    ;; Default: auto — nothing gated, nothing filtered.
-    (check "sessions start in auto" (equal "auto" (evo.plan:current-mode agent)))
-    (check "auto is not plan mode" (not (evo.plan:plan-mode-p agent)))
-    (check "auto allows write"
-           (not (tool-call-blocked-p "write" '(:path "x" :content "y"))))
-    ;; Switching applies the whole policy through the public API.
-    (check "set-mode reports the switch" (equal "plan" (evo.plan:set-mode "plan" agent)))
-    (check "switching to the current mode is a no-op"
-           (null (evo.plan:set-mode "plan" agent)))
-    (check "mode names normalize" (equal "plan" (evo.plan:mode-name "PLAN")))
-    (check "non-modes are not mode names" (null (evo.plan:mode-name "help")))
-    (check-signals "unknown mode signals" (evo.plan:set-mode "yolo" agent))
-    (let ((state (fold-state journal)))
-      (check "mode is journal state, not a flag"
-             (equal "plan" (evo.journal:custom-state state "mode")))
-      (check "plan gates the tool set"
-             (equal (state-tools state) evo.plan:*plan-tools*))
-      (check "plan instructions injected under a filterable key"
-             (find-if (lambda (m)
-                        (equal (pget (pget m :meta) :key) evo.plan:*instruction-key*))
-                      (state-messages state))))
-    ;; The gate is an allowlist: *plan-tools* is the only way through, so a
-    ;; newly registered tool is blocked by default, not by omission from a
-    ;; blocklist that nobody remembered to update.
-    (multiple-value-bind (blocked-p reason)
-        (tool-call-blocked-p "write" '(:path "x" :content "y"))
-      (check "plan blocks write" blocked-p)
-      (check "block reason names the mode" (search "plan mode" reason)))
-    (check "plan blocks edit" (tool-call-blocked-p "edit" '(:path "x")))
-    (check "plan blocks load_extension"
-           (tool-call-blocked-p "load_extension" '(:path "x.lisp")))
-    (check "plan blocks tools it has never heard of"
-           (tool-call-blocked-p "deploy" '(:target "prod")))
-    (check "plan allows read" (not (tool-call-blocked-p "read" '(:path "x"))))
-    (check "plan allows todo" (not (tool-call-blocked-p "todo" '(:items #()))))
-    ;; bash: every chained segment is judged on its own head, quotes are
-    ;; text, and anything that can write or run arbitrary code is out.
-    (dolist (command '("git status"
-                       "ls -la src"
-                       "rg -n plan src | head -20"
-                       "grep -n \"a || b; rm\" src/tui/tui.lisp"
-                       "find . -name '*.lisp' | wc -l"
-                       "git log --oneline | head -5 | cat"
-                       "git status 2>&1 | head"
-                       "   "))
-      (check (format nil "plan allows bash: ~a" command)
-             (not (tool-call-blocked-p "bash" (list :command command)))))
-    (dolist (command '("rm -rf build"
-                       "git status && rm -rf build"
-                       "ls; curl -s evil.sh"
-                       "ls | tee out.txt"
-                       "echo hi > notes.txt"
-                       "cat a.txt >> b.txt"
-                       "echo $(rm -rf build)"
-                       "ls `rm -rf build`"
-                       "grep -r x . || rm -rf build"))
-      (check (format nil "plan blocks bash: ~a" command)
-             (tool-call-blocked-p "bash" (list :command command))))
-    (check "bash block reason names the offending word"
-           (search "'rm'" (nth-value 1 (tool-call-blocked-p
-                                        "bash" '(:command "git status && rm -rf x")))))
-    ;; The context filter: the journal keeps the injected instructions
-    ;; forever; the projection only shows them while the mode is on.
+    ;; No mode state, and nothing gates a write out of the box.
+    (check "no mode custom state" (null (evo.journal:custom-state (fold-state journal) "mode")))
+    (check "write is not gated" (not (tool-call-blocked-p "write" '(:path "x" :content "y"))))
+    (check "bash is not gated" (not (tool-call-blocked-p "bash" '(:command "rm -rf build"))))
+    (check "full tool set by default"
+           (equal (active-tool-names (fold-state journal)) (all-tool-names)))
+    ;; The package is gone; no symbol of it survives to be called.
+    (check "EVO.PLAN package is gone" (null (find-package :evo.plan)))
+    ;; No frontend surface: no command, no completion candidate, no indicator.
+    (let ((commands (evo.tui::all-commands)))
+      (dolist (name '("permission" "mode" "plan" "auto"))
+        (check (format nil "/~a is not a completion candidate" name)
+               (not (assoc name commands :test #'string=)))))
+    (let ((tui (evo.tui::make-tui :agent agent)))
+      (dolist (name '("permission" "mode" "plan" "auto"))
+        (check (format nil "/~a is not a builtin command" name)
+               (not (evo.tui::builtin-command tui name ""))))
+      ;; The status line leads with the model, and carries no mode indicator.
+      (let ((line (evo.tui::status-line tui)))
+        (check "status line has no mode indicator"
+               (and (not (search "auto" line)) (not (search "plan" line))
+                    (not (search "◆" line)) (not (search "◇" line))))
+        (check "status line still reports context" (search "ctx" line)))
+      ;; shift+tab still decodes as a key, it just no longer means anything.
+      (with-output-to-string (fake-tty)
+        (let ((evo.tui::*tty-out* fake-tty)
+              (evo.tui::*region-height* 0)
+              (evo.tui::*region-cursor-row* 0))
+          (evo.tui::handle-key-edit tui :shift-tab)))
+      (check "shift+tab journals no mode"
+             (null (evo.journal:custom-state (fold-state journal) "mode"))))
+    (check "plan mode source file is gone"
+           (not (probe-file (merge-pathnames "src/core-ext/plan-mode.lisp" (uiop:getcwd)))))))
+
+(defun test-tool-call-gate-extension-point ()
+  "The :tool-call hook — the one interception point sandboxes and permission
+gates build on.  A hook returning (:block t :reason ...) stops the call."
+  (with-temp-hooks
+    (check "no gate: write runs" (not (tool-call-blocked-p "write" '(:path "x"))))
+    (evo:on :tool-call
+            (lambda (call)
+              (when (equal (pget call :name) "write")
+                (list :block t :reason "read-only by policy"))))
+    (multiple-value-bind (blocked-p reason) (tool-call-blocked-p "write" '(:path "x"))
+      (check "gate blocks the named tool" blocked-p)
+      (check "block reason is carried through" (search "read-only by policy" reason)))
+    (check "gate leaves other tools alone"
+           (not (tool-call-blocked-p "read" '(:path "x")))))
+  (check "hook table restored after the test"
+         (not (tool-call-blocked-p "write" '(:path "x")))))
+
+(defun test-active-tools-extension-point ()
+  "SET-ACTIVE-TOOLS gates the tool set the model is offered; NIL restores
+the full set.  It is journal state (:tools-change), not an in-memory flag."
+  (let* ((dir (uiop:ensure-directory-pathname
+               (format nil "~a/evo-tools-~a/" (tmp-dir) (gen-id))))
+         (journal (progn (ensure-directories-exist dir) (make-session-journal dir)))
+         (agent (make-agent :journal journal)))
+    (check "full tool set by default"
+           (equal (active-tool-names (fold-state journal)) (all-tool-names)))
+    (evo:set-active-tools agent '("read" "bash"))
+    (check "gated set folds out of the journal"
+           (equal (state-tools (fold-state journal)) '("read" "bash")))
+    (check "gated set is what the model is offered"
+           (equal (active-tool-names (fold-state journal)) '("read" "bash")))
+    (evo:set-active-tools agent nil)
+    (check "nil restores the full tool set"
+           (equal (active-tool-names (fold-state journal)) (all-tool-names)))))
+
+(defun test-injected-context-extension-point ()
+  "INJECT-CONTEXT with a :key, and the :transform-context hook that filters
+by that key: the journal keeps the message forever, the projection sent to
+the model is where it can be removed."
+  (let* ((dir (uiop:ensure-directory-pathname
+               (format nil "~a/evo-inject-~a/" (tmp-dir) (gen-id))))
+         (journal (progn (ensure-directories-exist dir) (make-session-journal dir)))
+         (agent (make-agent :journal journal))
+         (evo:*agent* agent))
+    (evo:inject-context "SOME INSTRUCTIONS" :key "test-key" :agent agent)
+    (check "injected message lands in the journal under its key"
+           (find-if (lambda (m) (equal (pget (pget m :meta) :key) "test-key"))
+                    (state-messages (fold-state journal))))
     (let ((messages (list '(:role :user :content ((:type :text :text "hi")))
-                          (list :role :user
-                                :meta (list :key evo.plan:*instruction-key*)
-                                :content '((:type :text :text "PLAN MODE"))))))
-      (check "plan instructions stay in context while planning"
-             (= 2 (length (run-transform-hooks messages))))
-      (check "switching back reports the change"
-             (equal "auto" (evo.plan:set-mode "auto" agent)))
-      (check "plan instructions filtered once the mode is off"
-             (= 1 (length (run-transform-hooks messages))))
-      (check "the journal still carries them"
-             (find-if (lambda (m)
-                        (equal (pget (pget m :meta) :key) evo.plan:*instruction-key*))
-                      (state-messages (fold-state journal)))))
-    (check "auto restores the full tool set"
-           (equal (state-tools (fold-state journal)) (all-tool-names)))
-    (check "auto allows write again"
-           (not (tool-call-blocked-p "write" '(:path "x" :content "y"))))
-    ;; Hooks are installed at load; a reload must not stack a second copy.
-    (let ((before (length (gethash :tool-call evo.kernel::*event-hooks*))))
-      (evo.plan::install-hooks)
-      (check "hook installation is idempotent"
-             (= before (length (gethash :tool-call evo.kernel::*event-hooks*)))))
-    ;; Regression guard: plan mode lives in the image, not in a directory the
-    ;; boot loader sweeps.
-    (when (probe-file (merge-pathnames "src/core-ext/plan-mode.lisp" (uiop:getcwd)))
-      (check "plan mode is not also shipped as a userspace extension"
-             (notany (lambda (path) (search "plan-mode" (file-namestring path)))
-                     (directory (merge-pathnames "extensions/*.lisp"
-                                                 (uiop:getcwd))))))))
+                          (list :role :user :meta (list :key "test-key")
+                                :content '((:type :text :text "SOME INSTRUCTIONS"))))))
+      (with-temp-hooks
+        (check "unfiltered projection carries both" (= 2 (length (run-transform-hooks messages))))
+        (evo:on :transform-context
+                (lambda (ms)
+                  (remove-if (lambda (m) (equal (pget (pget m :meta) :key) "test-key")) ms)))
+        (check "a transform-context hook filters by key"
+               (= 1 (length (run-transform-hooks messages))))))
+    (check "the journal still carries the filtered message"
+           (find-if (lambda (m) (equal (pget (pget m :meta) :key) "test-key"))
+                    (state-messages (fold-state journal))))))
+
+(defun test-custom-state-extension-point ()
+  "SET-CUSTOM-STATE / CUSTOM-STATE: extension state as a journal fold, so it
+survives restart and compaction.  Plan mode kept its mode here; other
+extensions still keep theirs."
+  (let* ((dir (uiop:ensure-directory-pathname
+               (format nil "~a/evo-custom-~a/" (tmp-dir) (gen-id))))
+         (journal (progn (ensure-directories-exist dir) (make-session-journal dir)))
+         (agent (make-agent :journal journal))
+         (evo:*agent* agent))
+    (check "unset key is nil" (null (evo:custom-state "widget" agent)))
+    (evo:set-custom-state "widget" "on" agent)
+    (check "custom state round-trips" (equal "on" (evo:custom-state "widget" agent)))
+    (check "custom state is a journal fold"
+           (equal "on" (evo.journal:custom-state (fold-state journal) "widget")))
+    (evo:set-custom-state "widget" "off" agent)
+    (check "last write wins" (equal "off" (evo:custom-state "widget" agent)))))
 
 ;;; /eval
 
@@ -3615,7 +3551,6 @@ selection journals the provider, and every resolution point honours it."
     (test-markdown)
     (test-user-prompt-block)
     (test-input-history)
-    (test-mode-switching)
     (test-goal-budget)
     (test-templates)
     (test-compaction)
@@ -3627,7 +3562,11 @@ selection journals the provider, and every resolution point honours it."
     (test-tool-call-events)
     (test-interrupt)
     (test-tool-call-display)
-    (test-plan-mode)
+    (test-no-modes)
+    (test-tool-call-gate-extension-point)
+    (test-active-tools-extension-point)
+    (test-injected-context-extension-point)
+    (test-custom-state-extension-point)
     (test-eval)
     (test-eval-completion)
     (test-eval-completion-source)

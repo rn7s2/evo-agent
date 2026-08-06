@@ -42,11 +42,11 @@ in code.
    append-only file. No Lisp image carries session state; images are build
    artifacts (D2).
 2. **State is a fold, never a mutable field.** Context, model, thinking level,
-   active tools, goal, todo list, mode — all are derived by folding the
+   active tools, goal, todo list — all are derived by folding the
    root→leaf path. Nothing is edited in place, so branching, rewind, resume,
    and pause fall out of the data structure rather than being features (D1).
 3. **One extension API, no private doors.** The kernel owns the turn loop and
-   nothing else. The TUI, todo lists, and plan mode are extensions built on
+   nothing else. The TUI, todo lists, and memory are extensions built on
    the same public API an agent-written tool uses. Anything a bundled
    extension needs and cannot get through that API is an API gap to close,
    never a private hook to add (D13).
@@ -96,7 +96,6 @@ evo (one binary)
    │    tui        adaptive renderer, multi-line editor (image attachments
    │               as editable tokens), slash commands
    │    todo       checklist tool + :custom state, rendered by the tui
-   │    plan-mode  read-only mode: tool gating + quote-aware bash allowlist
    ├─ USERSPACE  (unlocked: EVO.USER)
    │    agent-written tools and code — source files plus journal :load
    │    entries; rebuilt from source on every boot
@@ -457,24 +456,14 @@ something to say.
   `$1`..`$9` and `$@` substitution. Purely textual expansion.
 - **Slash command resolution**: extension commands → input hook → skills →
   templates → send to the agent. Built-ins are `/goal /lore /global-lore
-  /permission /compact /tree /fork /resume /model /reload /export /help /quit
-  /exit`.
-- **Modes** (`src/core-ext/plan-mode.lisp`, package `EVO.PLAN`): `auto`, the
-  fully permissive default, and `plan`. The mode is journal state (`:custom
-  "mode"`), never a flag, so it survives restart and every frontend reads the
-  same value. Switching applies policy through the public API — tool gating
-  via `set-active-tools` down to `*plan-tools*`, instructions injected as a
-  keyed `:custom-message` — and two hooks enforce it: a `:tool-call` gate that
-  is an allowlist rather than a blocklist (a tool absent from `*plan-tools*`
-  is blocked, and bash is scanned quote-aware so every chained segment must
-  have an allowlisted head, with command substitution and output redirection
-  excluded), and a `:transform-context` filter that removes the injected
-  instructions from the projection once the mode is off. The TUI is
-  presentation only: a shift+tab toggle, a `/permission` chooser built from
-  `EVO.PLAN:*MODES*`, and a status-line indicator.
-
-Plan mode is the reference implementation of the extension API's depth: a
-read-only mode built entirely from tool gating, a hook, and journal state.
+  /compact /tree /fork /resume /model /reload /export /help /quit /exit`.
+- **One mode.** There is no mode switch and no mode indicator: the agent is
+  fully permissive, always, and that is the whole design (D2). What a mode
+  would have been built from stays public API, so a userspace extension can
+  still impose a policy without the kernel knowing: `set-active-tools` gates
+  the tool set as journal state (`:tools-change`), `inject-context` adds a
+  keyed `:custom-message`, a `:transform-context` hook filters that key back
+  out of the projection, and the `:tool-call` hook is the per-call gate.
 
 ## 12. Self-extension
 
@@ -489,7 +478,7 @@ This is the evolution engine. Four mechanisms make it work.
    the tool registry and rebuild the system prompt, so a newly registered tool
    is callable on the next request. The `:tool-call` hook may mutate arguments
    or return `(:block t :reason ...)` — the single interception point that
-   permission gates, plan mode, and sandboxing all build on.
+   permission gates, read-only policies, and sandboxing all build on.
 3. **Filesystem convention.** `~/.evo/extensions/` and
    `<project>/.evo/extensions/` load at boot and are writable by the agent.
    Load order is the sorted file name and nothing else, so the name carries a
@@ -529,7 +518,7 @@ same API as user extensions, holding the same privileges. Three things
 distinguish core extensions from user ones: we ship them, they load first, and
 the essential ones cannot be disabled.
 
-The discipline exists for dogfooding. If the TUI, the todo list, and plan mode
+The discipline exists for dogfooding. If the TUI, the todo list, and memory
 can be built on `register-tool`, `register-command`, event hooks, and
 `:custom` entries, then the API is deep enough for the agent's own extensions.
 Anything a core extension needs but cannot get through the public API is an
@@ -689,9 +678,9 @@ rung is more permanent, more reviewed, and harder to undo than the one below.
    useful more than once.
 3. **Core extension** — bundled, hand-written, compiled into the image.
    Justification: everyone needs it, and it must exist before the agent is
-   trusted to install its own equivalent. Plan mode is exactly this case — a
-   read-only mode has to be present *before* an agent can be trusted to add
-   one.
+   trusted to install its own equivalent. The todo list is exactly this case —
+   the agent's own plan has to be visible *before* an agent can be trusted to
+   render it.
 4. **Kernel** — only when the turn loop itself cannot function without it.
 
 The rule that keeps this honest: **nothing enters the kernel to serve one

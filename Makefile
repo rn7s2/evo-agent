@@ -56,19 +56,17 @@ integration: build
 
 # Expect-driven TUI tests against a freshly built binary: the general smoke
 # test, the same-id/multi-provider model routing test, image paste through a
-# real vision model (EVO_TEST_VISION_MODEL), plan mode end to end, then the
-# IDE bridge (no backend needed — it drives the state file the editor plugin
-# writes).
+# real vision model (EVO_TEST_VISION_MODEL), then the IDE bridge (no backend
+# needed — it drives the state file the editor plugin writes).
 tui-test: build
 	tests/tui.exp
 	tests/model-provider.exp
 	tests/image-paste.exp
-	tests/plan-mode.exp
 	tests/ide-context.exp
 
 # Seed corpus: docs + example extensions into the global evo home.
 # Everything installed under docs/ is reference-only — nothing ships active in
-# $(EVO_HOME)/extensions (plan mode is a core extension, in the binary).
+# $(EVO_HOME)/extensions (core extensions ship inside the binary).
 # Vendored extensions in extensions/ are installed directly into
 # $(EVO_HOME)/extensions/ and loaded at startup.
 # The sample init.lisp is reference-only too: evo requires a real

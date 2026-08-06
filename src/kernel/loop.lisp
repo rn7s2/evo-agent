@@ -263,7 +263,7 @@ an adapter that no longer knows the word."
                                          :model model-id)))))
 
 ;;; Tool batch execution (sequential) with :tool-call interception —
-;;; the one point permission gates / plan mode / sandboxing build on.
+;;; the one point permission gates / read-only policies / sandboxing build on.
 
 (defun intercept-tool-call (name args)
   "Run :tool-call hooks.  Returns (values args blocked-p reason)."

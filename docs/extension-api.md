@@ -85,8 +85,9 @@ worker thread, never via a cross-thread cleanup.
 
 - `:tool-call` — THE interception point. Return `nil` to allow,
   `(:block t :reason "...")` to block, `(:arguments <new>)` to rewrite.
-  Permission gates and sandboxes are all built here — so is the bundled
-  plan mode (`src/core-ext/plan-mode.lisp`), which uses nothing you cannot.
+  Permission gates, read-only policies and sandboxes are all built here; the
+  worked example is `extensions/examples/100-permission-gate.lisp`, which uses
+  nothing you cannot.
 - `:transform-context` — receives the message list before each request;
   return a new list (filter/rewrite). Output is never written back to the
   journal.
