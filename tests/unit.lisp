@@ -128,17 +128,17 @@ line2")))
 ;;; SSE parsing
 
 (defparameter *sse-sample*
-  (format nil "event: message_start~%data: {\"type\":\"message_start\",\"message\":{\"model\":\"m\",\"usage\":{\"input_tokens\":7}}}~%~%~
-event: content_block_start~%data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}~%~%~
-event: content_block_delta~%data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"hm\"}}~%~%~
-event: content_block_delta~%data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"c2ln\"}}~%~%~
-event: content_block_stop~%data: {\"type\":\"content_block_stop\",\"index\":0}~%~%~
-event: content_block_start~%data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"tc1\",\"name\":\"bash\"}}~%~%~
-event: content_block_delta~%data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"comm\"}}~%~%~
-event: content_block_delta~%data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"and\\\": \\\"ls\\\"}\"}}~%~%~
-event: content_block_stop~%data: {\"type\":\"content_block_stop\",\"index\":1}~%~%~
-event: message_delta~%data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":42}}~%~%~
-event: message_stop~%data: {\"type\":\"message_stop\"}~%~%"))
+  (format nil (cat "event: message_start~%data: {\"type\":\"message_start\",\"message\":{\"model\":\"m\",\"usage\":{\"input_tokens\":7}}}~%~%"
+                   "event: content_block_start~%data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}~%~%"
+                   "event: content_block_delta~%data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"hm\"}}~%~%"
+                   "event: content_block_delta~%data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"c2ln\"}}~%~%"
+                   "event: content_block_stop~%data: {\"type\":\"content_block_stop\",\"index\":0}~%~%"
+                   "event: content_block_start~%data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"tc1\",\"name\":\"bash\"}}~%~%"
+                   "event: content_block_delta~%data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"comm\"}}~%~%"
+                   "event: content_block_delta~%data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"and\\\": \\\"ls\\\"}\"}}~%~%"
+                   "event: content_block_stop~%data: {\"type\":\"content_block_stop\",\"index\":1}~%~%"
+                   "event: message_delta~%data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":42}}~%~%"
+                   "event: message_stop~%data: {\"type\":\"message_stop\"}~%~%")))
 
 (defun test-sse ()
   (let ((result (with-input-from-string (in *sse-sample*)
@@ -195,18 +195,18 @@ event: message_stop~%data: {\"type\":\"message_stop\"}~%~%"))
 ;;; OpenAI Responses SSE parsing
 
 (defparameter *oai-sse-sample*
-  (format nil "event: response.created~%data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-5.6-luna\"}}~%~%~
-event: response.output_item.added~%data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_1\",\"summary\":[]}}~%~%~
-event: response.reasoning_summary_text.delta~%data: {\"type\":\"response.reasoning_summary_text.delta\",\"output_index\":0,\"delta\":\"think\"}~%~%~
-event: response.output_item.done~%data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_1\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"think\"}],\"encrypted_content\":\"ENC\"}}~%~%~
-event: response.output_item.added~%data: {\"type\":\"response.output_item.added\",\"output_index\":1,\"item\":{\"type\":\"message\",\"id\":\"msg_1\",\"role\":\"assistant\",\"content\":[]}}~%~%~
-event: response.output_text.delta~%data: {\"type\":\"response.output_text.delta\",\"output_index\":1,\"delta\":\"hel\"}~%~%~
-event: response.output_text.delta~%data: {\"type\":\"response.output_text.delta\",\"output_index\":1,\"delta\":\"lo\"}~%~%~
-event: response.output_item.done~%data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"type\":\"message\",\"id\":\"msg_1\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"hello\"}]}}~%~%~
-event: response.output_item.added~%data: {\"type\":\"response.output_item.added\",\"output_index\":2,\"item\":{\"type\":\"function_call\",\"id\":\"fc_1\",\"call_id\":\"call_1\",\"name\":\"bash\",\"arguments\":\"\"}}~%~%~
-event: response.function_call_arguments.delta~%data: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":2,\"delta\":\"{\\\"comm\"}~%~%~
-event: response.function_call_arguments.delta~%data: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":2,\"delta\":\"and\\\": \\\"ls\\\"}\"}~%~%~
-event: response.completed~%data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-5.6-luna\",\"status\":\"completed\",\"usage\":{\"input_tokens\":100,\"input_tokens_details\":{\"cached_tokens\":40},\"output_tokens\":10}}}~%~%"))
+  (format nil (cat "event: response.created~%data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-5.6-luna\"}}~%~%"
+                   "event: response.output_item.added~%data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_1\",\"summary\":[]}}~%~%"
+                   "event: response.reasoning_summary_text.delta~%data: {\"type\":\"response.reasoning_summary_text.delta\",\"output_index\":0,\"delta\":\"think\"}~%~%"
+                   "event: response.output_item.done~%data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_1\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"think\"}],\"encrypted_content\":\"ENC\"}}~%~%"
+                   "event: response.output_item.added~%data: {\"type\":\"response.output_item.added\",\"output_index\":1,\"item\":{\"type\":\"message\",\"id\":\"msg_1\",\"role\":\"assistant\",\"content\":[]}}~%~%"
+                   "event: response.output_text.delta~%data: {\"type\":\"response.output_text.delta\",\"output_index\":1,\"delta\":\"hel\"}~%~%"
+                   "event: response.output_text.delta~%data: {\"type\":\"response.output_text.delta\",\"output_index\":1,\"delta\":\"lo\"}~%~%"
+                   "event: response.output_item.done~%data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"type\":\"message\",\"id\":\"msg_1\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"hello\"}]}}~%~%"
+                   "event: response.output_item.added~%data: {\"type\":\"response.output_item.added\",\"output_index\":2,\"item\":{\"type\":\"function_call\",\"id\":\"fc_1\",\"call_id\":\"call_1\",\"name\":\"bash\",\"arguments\":\"\"}}~%~%"
+                   "event: response.function_call_arguments.delta~%data: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":2,\"delta\":\"{\\\"comm\"}~%~%"
+                   "event: response.function_call_arguments.delta~%data: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":2,\"delta\":\"and\\\": \\\"ls\\\"}\"}~%~%"
+                   "event: response.completed~%data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-5.6-luna\",\"status\":\"completed\",\"usage\":{\"input_tokens\":100,\"input_tokens_details\":{\"cached_tokens\":40},\"output_tokens\":10}}}~%~%")))
 
 (defun test-openai-sse ()
   (let* ((events nil)
@@ -341,15 +341,15 @@ event: response.completed~%data: {\"type\":\"response.completed\",\"response\":{
 ;;; parsing, each against what the Kimi API docs specify.
 
 (defparameter *kimi-sse-sample*
-  (format nil "data: {\"id\":\"cmpl-1\",\"object\":\"chat.completion.chunk\",\"model\":\"kimi-k3\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"},\"finish_reason\":null}]}~%~%~
-data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"think \"},\"finish_reason\":null}]}~%~%~
-data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"hard\"},\"finish_reason\":null}]}~%~%~
-data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"},\"finish_reason\":null}]}~%~%~
-data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"bash\",\"arguments\":\"{\\\"comm\"}}]},\"finish_reason\":null}]}~%~%~
-data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"and\\\":\\\"ls\\\"}\"}}]},\"finish_reason\":null}]}~%~%~
-data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}~%~%~
-data: {\"choices\":[],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":10,\"total_tokens\":110,\"cached_tokens\":40}}~%~%~
-data: [DONE]~%~%"))
+  (format nil (cat "data: {\"id\":\"cmpl-1\",\"object\":\"chat.completion.chunk\",\"model\":\"kimi-k3\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"},\"finish_reason\":null}]}~%~%"
+                   "data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"think \"},\"finish_reason\":null}]}~%~%"
+                   "data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"hard\"},\"finish_reason\":null}]}~%~%"
+                   "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"},\"finish_reason\":null}]}~%~%"
+                   "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"bash\",\"arguments\":\"{\\\"comm\"}}]},\"finish_reason\":null}]}~%~%"
+                   "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"and\\\":\\\"ls\\\"}\"}}]},\"finish_reason\":null}]}~%~%"
+                   "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}~%~%"
+                   "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":10,\"total_tokens\":110,\"cached_tokens\":40}}~%~%"
+                   "data: [DONE]~%~%")))
 
 (defun kimi-fn (name)
   "The extension's own function NAME, resolved after the file is loaded."
@@ -619,8 +619,8 @@ data: [DONE]~%~%"))
              ;; transcript as a value, and a missing tool-call id still has to
              ;; produce a callable block.
              (let* ((result (with-input-from-string
-                                (in (format nil "data: {\"model\":null,\"choices\":[{\"index\":0,\"delta\":{\"role\":null,\"content\":\"hi\",\"reasoning_content\":null,\"tool_calls\":[{\"index\":0,\"id\":null,\"function\":{\"name\":\"bash\",\"arguments\":null}}]},\"finish_reason\":null}],\"usage\":null}~%~%~
-data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}~%~%data: [DONE]~%~%"))
+                                (in (format nil (cat "data: {\"model\":null,\"choices\":[{\"index\":0,\"delta\":{\"role\":null,\"content\":\"hi\",\"reasoning_content\":null,\"tool_calls\":[{\"index\":0,\"id\":null,\"function\":{\"name\":\"bash\",\"arguments\":null}}]},\"finish_reason\":null}],\"usage\":null}~%~%"
+                                                     "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}~%~%data: [DONE]~%~%")))
                               (parse-stream (find-api :kimi-chat-completions) in)))
                     (blocks (pget result :content)))
                (check "kimi sse nulls never become values"
@@ -2095,6 +2095,123 @@ that is how a human's next keystroke differs from a paste's last chunk."
 
 ;;; Goal budgets (default: no limit)
 
+(defun string-tree-search (form predicate)
+  "Does any string inside FORM satisfy PREDICATE?"
+  (typecase form
+    (string (funcall predicate form))
+    (cons (or (string-tree-search (car form) predicate)
+              (string-tree-search (cdr form) predicate)))
+    (vector (some (lambda (x) (string-tree-search x predicate)) (coerce form 'list)))
+    (t nil)))
+
+(defun format-continuation-p (string)
+  "Does STRING use the ~<newline> FORMAT continuation — the one construct
+whose validity depends on the file's line endings?  (An even run of tildes
+before the newline is an escaped ~, not a directive.)"
+  (loop for i from 0 below (1- (length string))
+        thereis (and (char= (char string i) #\~)
+                     (char= (char string (1+ i)) #\Newline)
+                     (oddp (loop for k downfrom i
+                                 while (and (>= k 0) (char= (char string k) #\~))
+                                 count t)))))
+
+(defun format-continuation-offenders ()
+  "(values OFFENDERS SCANNED UNREADABLE) over the Lisp sources in CWD.
+Uses the reader rather than a regexp, so comments, character literals and
+escapes are somebody else's problem.  Symbols land in a throwaway package.
+A file the reader chokes on is reported as UNREADABLE, not quietly passed:
+a lint that can go blind without saying so is worse than none."
+  (let ((files (loop for pattern in '("src/*.lisp" "src/*/*.lisp"
+                                      "extensions/*.lisp" "tests/*.lisp")
+                     append (directory (merge-pathnames pattern (uiop:getcwd)))))
+        (offenders nil) (unreadable nil) (scanned 0)
+        (scratch (or (find-package :evo.tests.scan)
+                     (make-package :evo.tests.scan :use '(:cl :evo)))))
+    (dolist (file files (values (nreverse offenders) scanned (nreverse unreadable)))
+      (handler-case
+          (with-open-file (in file :external-format :utf-8)
+            (let ((*package* scratch) (*read-eval* nil))
+              (loop for form = (read in nil :eof)
+                    until (eq form :eof)
+                    ;; Honour IN-PACKAGE as the compiler does, or a file that
+                    ;; leans on a package-local nickname (jzon:) won't read.
+                    when (and (consp form) (eq (car form) 'in-package)
+                              (find-package (second form)))
+                      do (setf *package* (find-package (second form)))
+                    when (string-tree-search form #'format-continuation-p)
+                      do (pushnew (file-namestring file) offenders :test #'equal)))
+            (incf scanned))
+        (error (e) (push (cons (file-namestring file) (princ-to-string e))
+                         unreadable))))))
+
+(defun crlf-fixture (text)
+  "Write TEXT to a scratch file with CR-LF line endings; return the path."
+  (let ((path (format nil "~a/evo-crlf-~a.txt" (tmp-dir) (gen-id))))
+    (with-open-file (out path :direction :output :if-exists :supersede
+                              :external-format :utf-8)
+      (write-string (crlf-newlines text) out))
+    path))
+
+(defun test-line-endings ()
+  ;; CAT: the replacement for the ~<newline> FORMAT continuation, which is
+  ;; the one construct whose meaning depends on a file's line endings.
+  (check "cat folds constants" (equal (cat "ab" "cd" "ef") "abcdef"))
+  (check "cat expands to a literal, so FORMAT still sees a constant"
+         (stringp (macroexpand-1 '(cat "a" "b"))))
+  (check "the continuation lint can see one"
+         (format-continuation-p (format nil "a~~~%b")))
+  (check "the continuation lint ignores an escaped tilde"
+         (not (format-continuation-p (format nil "a~~~~~%b"))))
+  (multiple-value-bind (offenders scanned unreadable)
+      (format-continuation-offenders)
+    (check "the suite actually scanned the tree" (> scanned 30))
+    (check "every source file was readable by the lint" (null unreadable))
+    (check "no source file ends a string with the ~<newline> continuation"
+           (null offenders)))
+  ;; Normalization: foreign text arrives with whatever line endings it likes.
+  (check "normalize CR-LF" (equal (normalize-newlines (format nil "a~c~%b" #\Return))
+                                  (format nil "a~%b")))
+  (check "normalize lone CR" (equal (normalize-newlines (format nil "a~cb" #\Return))
+                                    (format nil "a~%b")))
+  (check "normalize leaves LF text untouched"
+         (let ((s (format nil "a~%b"))) (eq (normalize-newlines s) s)))
+  (check "crlf-newlines roundtrips"
+         (equal (normalize-newlines (crlf-newlines (format nil "a~%b~%")))
+                (format nil "a~%b~%")))
+  ;; The read tool shows LF whatever the file uses.
+  (let ((path (crlf-fixture (format nil "alpha~%beta~%gamma~%"))))
+    (let ((shown (evo.kernel::tool-read (list :path path))))
+      (check "read tool hands the agent no CR" (null (find #\Return shown)))
+      (check "read tool counts lines, not CR-LF halves"
+             (search (format nil "     3~cgamma" #\Tab) shown)))
+    ;; ... and an edit written with LF still matches, without converting the
+    ;; file: the rest of its CR-LF endings survive.
+    (evo.kernel::tool-edit (list :path path :old-string (format nil "alpha~%beta")
+                     :new-string (format nil "ALPHA~%BETA")))
+    (let ((raw (read-file-string path)))
+      (check "edit with LF matched a CR-LF file"
+             (search "ALPHA" raw))
+      (check "edit kept the file's CR-LF endings"
+             (= 3 (count #\Return raw)))
+      (check "edit did not leave a bare LF behind"
+             (= (count #\Return raw) (count #\Newline raw))))
+    ;; A whole-file rewrite keeps the file's convention too — otherwise
+    ;; every line of a Windows file shows up as changed.
+    (evo.kernel::tool-write (list :path path
+                                  :content (format nil "one~%two~%three~%")))
+    (let ((raw (read-file-string path)))
+      (check "write kept the file's CR-LF endings" (= 3 (count #\Return raw)))
+      (check "write did not double any endings"
+             (= (count #\Return raw) (count #\Newline raw))))
+    (ignore-errors (delete-file path)))
+  (let ((fresh (format nil "~a/evo-lf-~a.txt" (tmp-dir) (gen-id))))
+    (evo.kernel::tool-write (list :path fresh :content (format nil "a~%b~%")))
+    (check "a new file is written LF" (null (find #\Return (read-file-string fresh))))
+    (ignore-errors (delete-file fresh)))
+  ;; The prompt we send is the same text whatever the checkout looks like.
+  (let ((prompt (build-system-prompt (list (find-tool "read")))))
+    (check "system prompt carries no CR" (null (find #\Return prompt)))))
+
 (defun test-goal-budget ()
   (let* ((dir (uiop:ensure-directory-pathname
                (format nil "~a/evo-goal-~a/" (tmp-dir) (gen-id))))
@@ -3561,8 +3678,8 @@ selection journals the provider, and every resolution point honours it."
 ;;; and sizing are the whole point of the read path.
 
 (defparameter *png-1x1-hex*
-  "89504e470d0a1a0a0000000d4948445200000001000000010802000000907753de00~
-   00000c49444154789c63b82322020002d401055970d3c20000000049454e44ae426082"
+  (cat "89504e470d0a1a0a0000000d4948445200000001000000010802000000907753de00"
+       "00000c49444154789c63b82322020002d401055970d3c20000000049454e44ae426082")
   "A valid 1x1 red PNG, 69 bytes.")
 
 (defun hex->octets (hex)
@@ -4282,6 +4399,7 @@ selection journals the provider, and every resolution point honours it."
     (test-markdown)
     (test-user-prompt-block)
     (test-input-history)
+    (test-line-endings)
     (test-goal-budget)
     (test-templates)
     (test-compaction)

@@ -382,10 +382,10 @@ fresh process re-snapshots, which is exactly the intended lifetime.")
           cached
           (setf (gethash key *git-status-cache*)
                 (when (git-dir cwd)
-                  (format nil "Current branch: ~a~2%~
-                               Main branch (you will usually use this for PRs): ~a~2%~
-                               Status:~%~a~2%~
-                               Recent commits:~%~a"
+                  (format nil (cat "Current branch: ~a~2%"
+                                   "Main branch (you will usually use this for PRs): ~a~2%"
+                                   "Status:~%~a~2%"
+                                   "Recent commits:~%~a")
                           (or (git-branch cwd) "(detached)")
                           (or (git-default-branch cwd) "unknown")
                           (truncate-string (or (git-output cwd "status" "--short")
@@ -599,44 +599,49 @@ well as values wrapped across indented continuation lines."
     result))
 
 (defun build-system-prompt (tools &key (cwd (uiop:getcwd)) lore model)
-  (let ((bindings (prompt-bindings :cwd cwd :model model)))
-    (with-output-to-string (out)
-      (write-string (render-template *base-prompt* bindings) out)
-      (format out "~2%## Tools~%")
-      (dolist (tool tools)
-        (format out "- ~a: ~a~%" (tool-name tool)
-                (first (uiop:split-string (or (tool-description tool) "") :separator '(#\Newline)))))
-      (format out "~%~a~%" (render-template *guidelines* bindings))
-      (let ((docs (probe-file (merge-pathnames "docs/" (evo-home)))))
-        (when docs
-          (format out "~%~a~%" (render-template *own-docs* bindings))
-          ;; Name the files that are actually there, so the list can never
-          ;; promise a doc the seed corpus did not install.
-          (dolist (file (append (directory (merge-pathnames "*.md" docs))
-                                (directory (merge-pathnames "examples/*.lisp" docs))))
-            (format out "- ~a~%" (namestring file)))))
-      (when lore
-        ;; Lore: injected every turn, immune to summarization.  Each entry
-        ;; carries its [id] so the user can ask to edit or remove it by id.
-        (format out "~%## Lore (durable user guidance — always applies)~%")
-        (dolist (item lore)
-          (if (and (listp item) (getf item :text))
-              (format out "- [~a] ~a~%" (getf item :id) (getf item :text))
-              (format out "- ~a~%" item))))
-      (dolist (path (context-files cwd))
-        (let ((content (ignore-errors (read-file-string path))))
-          (when (and content (plusp (length content)))
-            (format out "~%## Context from ~a~%~a~%" (namestring path)
-                    (truncate-string content 20000)))))
-      (let ((skills (available-skills cwd)))
-        (when skills
-          (format out "~%<available_skills>~%")
-          (dolist (skill skills)
-            (format out "- ~a: ~a (read ~a before using)~%"
-                    (pget skill :name) (pget skill :description) (pget skill :path)))
-          (format out "</available_skills>~%")))
-      (format out "~%~a~%" (render-template *environment* bindings))
-      (when (plusp (length (or (setting :language) "")))
-        (format out "~%~a~%" (render-template *language* bindings)))
-      (when (git-status-snapshot cwd)
-        (format out "~%~a~%" (render-template *git-status* bindings))))))
+  ;; NORMALIZE-NEWLINES so the prompt we send is the same text whatever the
+  ;; line endings of the sources it was compiled from and of the files it
+  ;; quotes (AGENTS.md, skills, context files) happen to be.
+  (normalize-newlines
+   (let ((bindings (prompt-bindings :cwd cwd :model model)))
+     (with-output-to-string (out)
+       (write-string (render-template *base-prompt* bindings) out)
+       (format out "~2%## Tools~%")
+       (dolist (tool tools)
+         (format out "- ~a: ~a~%" (tool-name tool)
+                 (first (uiop:split-string (or (tool-description tool) "")
+                                           :separator '(#\Newline)))))
+       (format out "~%~a~%" (render-template *guidelines* bindings))
+       (let ((docs (probe-file (merge-pathnames "docs/" (evo-home)))))
+         (when docs
+           (format out "~%~a~%" (render-template *own-docs* bindings))
+           ;; Name the files that are actually there, so the list can never
+           ;; promise a doc the seed corpus did not install.
+           (dolist (file (append (directory (merge-pathnames "*.md" docs))
+                                 (directory (merge-pathnames "examples/*.lisp" docs))))
+             (format out "- ~a~%" (namestring file)))))
+       (when lore
+         ;; Lore: injected every turn, immune to summarization.  Each entry
+         ;; carries its [id] so the user can ask to edit or remove it by id.
+         (format out "~%## Lore (durable user guidance — always applies)~%")
+         (dolist (item lore)
+           (if (and (listp item) (getf item :text))
+               (format out "- [~a] ~a~%" (getf item :id) (getf item :text))
+               (format out "- ~a~%" item))))
+       (dolist (path (context-files cwd))
+         (let ((content (ignore-errors (read-file-string path))))
+           (when (and content (plusp (length content)))
+             (format out "~%## Context from ~a~%~a~%" (namestring path)
+                     (truncate-string content 20000)))))
+       (let ((skills (available-skills cwd)))
+         (when skills
+           (format out "~%<available_skills>~%")
+           (dolist (skill skills)
+             (format out "- ~a: ~a (read ~a before using)~%"
+                     (pget skill :name) (pget skill :description) (pget skill :path)))
+           (format out "</available_skills>~%")))
+       (format out "~%~a~%" (render-template *environment* bindings))
+       (when (plusp (length (or (setting :language) "")))
+         (format out "~%~a~%" (render-template *language* bindings)))
+       (when (git-status-snapshot cwd)
+         (format out "~%~a~%" (render-template *git-status* bindings)))))))

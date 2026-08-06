@@ -187,17 +187,17 @@ repeat across processes."
   (evo.port:exit-lisp (main)))
 
 (defun no-model-message (opts)
-  (format nil "No model is configured. evo ships no built-in model table: create~%~
-~a~%(or <project>/.evo/init.lisp) and register the models you use, then pick a default:~%~%  ~
-(evo:register-provider :deepseek~%    ~
-:base-url \"https://api.deepseek.com/anthropic\" :api-key-env \"DEEPSEEK_API_KEY\")~%  ~
-(evo:register-model \"deepseek-v4-pro\"~%    ~
-:provider :deepseek :api :anthropic-messages~%    ~
-:context-window 1000000 :max-output 192000 :thinking t :effort t)~%  ~
-(evo:set-setting :model \"deepseek-v4-pro\")~%~%~
-A commented sample is at docs/examples/init.lisp (installed to~%~
-~a by `make install-home`).~
-~@[~%~%~a~]"
+  (format nil (cat "No model is configured. evo ships no built-in model table: create~%"
+                   "~a~%(or <project>/.evo/init.lisp) and register the models you use, then pick a default:~%~%  "
+                   "(evo:register-provider :deepseek~%    "
+                   ":base-url \"https://api.deepseek.com/anthropic\" :api-key-env \"DEEPSEEK_API_KEY\")~%  "
+                   "(evo:register-model \"deepseek-v4-pro\"~%    "
+                   ":provider :deepseek :api :anthropic-messages~%    "
+                   ":context-window 1000000 :max-output 192000 :thinking t :effort t)~%  "
+                   "(evo:set-setting :model \"deepseek-v4-pro\")~%~%"
+                   "A commented sample is at docs/examples/init.lisp (installed to~%"
+                   "~a by `make install-home`)."
+                   "~@[~%~%~a~]")
           (namestring (merge-pathnames "init.lisp" (evo.util:evo-home)))
           (namestring (merge-pathnames "docs/examples/init.lisp" (evo.util:evo-home)))
           (and (getf opts :no-userspace)

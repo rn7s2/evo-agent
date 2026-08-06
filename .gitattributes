@@ -1,14 +1,26 @@
-# Line endings are not a matter of taste here.
+# Line endings: LF in the working tree, on every platform.
 #
 # Git on Windows checks out with core.autocrlf=true by default — GitHub's
-# windows runners do — and a Lisp FORMAT string that ends a line with ~
-# (the directive that swallows the newline and the indentation after it)
-# then meets a CR instead: "error in FORMAT: Unknown directive (character:
-# Return)", at compile time, in every one of the ~48 places the codebase
-# uses that continuation.  The .sh and .exp suites have the same allergy
-# for the same reason.
+# windows runners do — so this is worth saying out loud.  make.ps1 is
+# included: PowerShell reads LF-only scripts without complaint.
 #
-# So: every text file in this repo is LF in the working tree, on every
-# platform.  That includes make.ps1 — PowerShell reads LF-only scripts
-# without complaint.
+# It is a convention, though, not a guarantee — it governs only checkouts
+# made after it landed, and no editor is bound by it.  So nothing that has
+# to build is allowed to *depend* on it:
+#
+#   - Lisp source carries no ~<newline> FORMAT continuation, the one
+#     construct whose meaning turns on the byte after the tilde (a CR there
+#     is "error in FORMAT: Unknown directive (character: Return)", at
+#     compile time).  Long control strings are written as a CAT of
+#     literals instead — see EVO.UTIL:CAT, and TEST-LINE-ENDINGS, which
+#     fails the suite if a continuation reappears.
+#   - Text that reaches the model or the screen is normalized on the way
+#     (EVO.UTIL:NORMALIZE-NEWLINES), so a CR-LF checkout, a CR-LF file and
+#     a Windows console all read as LF downstream.
+#
+# The .sh and .exp suites have no such shield — a `#!/bin/sh` with a CR is
+# a "bad interpreter" — and rely on this file alone.  They are Unix-only.
+#
+# To renormalize a checkout that already has CR-LF in it:
+#   git add --renormalize . && git checkout .
 * text=auto eol=lf

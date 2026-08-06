@@ -29,6 +29,7 @@
            #:evo-home #:project-evo-dir #:encode-cwd #:ensure-directory
            #:write-sexpr-line #:read-sexpr #:read-sexpr-stream #:validate-journal-value
            #:setting #:set-setting #:reset-settings #:*settings*
+           #:cat #:normalize-newlines #:crlf-newlines #:crlf-p
            #:string-join #:string-prefix-p #:truncate-string
            #:count-substring #:string-replace
            #:read-file-string #:write-file-string
@@ -113,13 +114,15 @@
 ;; subclass and specialize the wire protocol without naming a kernel package.
 (defpackage :evo
   (:use :cl)
+  (:import-from :evo.util #:cat #:normalize-newlines #:crlf-newlines)
   (:import-from :evo.provider
                 #:provider-api #:register-api #:find-api #:api-keys
                 #:endpoint-path #:auth-headers #:build-request #:parse-stream
                 #:thinking-param #:perform-request #:map-sse-events
                 #:default-provider-key #:default-base-url #:default-api-key-env
                 #:provider-error)
-  (:export #:register-tool #:register-command #:on #:load-extension
+  (:export #:cat #:normalize-newlines #:crlf-newlines
+           #:register-tool #:register-command #:on #:load-extension
            #:register-model #:register-provider #:set-setting #:setting
            #:set-active-tools #:all-tools #:*agent* #:current-goal
            #:steer #:inject-context #:custom-state #:set-custom-state

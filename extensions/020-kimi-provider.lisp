@@ -221,10 +221,10 @@ cached_tokens, dynamically loaded tools)."))
   (let ((key (or (kimi--trim (kimi--pget config :api-key)) (kimi--api-key))))
     (unless key
       (error 'evo:provider-error
-             :message (format nil "No Moonshot API key: set ~a (or KIMI_API_KEY), ~
-                                   or pass :api-key to (evo:register-provider ~s ...). ~
-                                   Keys are platform-scoped — a platform.kimi.com key ~
-                                   is a 401 on api.moonshot.ai."
+             :message (format nil (cat "No Moonshot API key: set ~a (or KIMI_API_KEY), "
+                                       "or pass :api-key to (evo:register-provider ~s ...). "
+                                       "Keys are platform-scoped — a platform.kimi.com key "
+                                       "is a 401 on api.moonshot.ai.")
                               *kimi-api-key-env* *kimi-provider-key*)))
     `(("authorization" . ,(concatenate 'string "Bearer " key)))))
 
@@ -791,9 +791,9 @@ the stock endpoint."
                  (turns (kimi--pget usage :turns)))
             (if (zerop turns)
                 "No kimi-k3 turns in this session yet."
-                (format nil "kimi-k3 this session — ~d turn~:p~%~
-                             ~2tinput ~:d (+ ~:d cached) · output ~:d~%~
-                             ~2testimated cost $~,4f (USD/1M: in ~a, out ~a, cached in ~a)"
+                (format nil (cat "kimi-k3 this session — ~d turn~:p~%"
+                                 "~2tinput ~:d (+ ~:d cached) · output ~:d~%"
+                                 "~2testimated cost $~,4f (USD/1M: in ~a, out ~a, cached in ~a)")
                         turns (kimi--pget usage :input) (kimi--pget usage :cache-read)
                         (kimi--pget usage :output) (kimi--cost usage)
                         (kimi--pget *kimi-pricing* :input)

@@ -396,9 +396,9 @@ request arrives or 120 seconds elapse."
                                       when (and eq (string= (subseq pair 0 eq) "code"))
                                         do (setf code (subseq pair (1+ eq))))))))))
                     ;; Send a response so the browser shows something.
-                    (format stream "HTTP/1.1 200 OK~%Content-Type: text/html~%Connection: close~%~%~
-                                    <html><body><h1>Authorization complete</h1>~
-                                    <p>You may close this window and return to evo.</p></body></html>~%")
+                    (format stream (cat "HTTP/1.1 200 OK~%Content-Type: text/html~%Connection: close~%~%"
+                                        "<html><body><h1>Authorization complete</h1>"
+                                        "<p>You may close this window and return to evo.</p></body></html>~%"))
                     (force-output stream))
                 (usocket:socket-close client)))
           (evo.port:timeout-error ()
@@ -606,8 +606,8 @@ Returns a list of registered model-id strings."
   (handler-case
       (claude-oauth--register-fetched-models (claude-oauth--fetch-models))
     (error (e)
-      (format *error-output* "~&[claude-oauth] Could not fetch models at load time: ~a~%~
-                              Run /claude-oauth:login then /reload to register models.~%" e))))
+      (format *error-output* (cat "~&[claude-oauth] Could not fetch models at load time: ~a~%"
+                                  "Run /claude-oauth:login then /reload to register models.~%") e))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Slash commands
@@ -651,10 +651,10 @@ Returns a list of registered model-id strings."
       ;; Open the browser immediately.
       (uiop:launch-program (list "open" auth-url) :ignore-error-status t)
       ;; Return immediately so the UI is not blocked.
-      (format nil "Opening browser for Claude OAuth login...~%~
-                   If the browser doesn't open, visit:~%  ~a~%~
-                   Waiting for authorization (timeout 120s)...~%~
-                   Check stderr for completion status." auth-url)))
+      (format nil (cat "Opening browser for Claude OAuth login...~%"
+                       "If the browser doesn't open, visit:~%  ~a~%"
+                       "Waiting for authorization (timeout 120s)...~%"
+                       "Check stderr for completion status.") auth-url)))
   :description "Start Claude OAuth login (PKCE flow with local callback)")
 
 (evo:register-command "claude-oauth:refresh"
