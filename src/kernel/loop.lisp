@@ -14,7 +14,12 @@
 (defvar *event-hooks* (make-hash-table))  ; event-keyword -> list of fns
 
 (defun add-hook (event fn)
-  (push fn (gethash event *event-hooks*))
+  "Append FN to EVENT's hook list.  Hooks run in registration order, and
+registration order is extension load order, so the `NNN-` rank in a file
+name decides who sees a payload first here too — the alternative (pushing)
+inverts the order the user wrote and makes the ranks lie."
+  (setf (gethash event *event-hooks*)
+        (append (gethash event *event-hooks*) (list fn)))
   fn)
 
 (defun run-hooks (event payload)

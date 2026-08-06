@@ -1,4 +1,4 @@
-;;;; ide-context.lisp — ambient editor context from a companion IDE plugin.
+;;;; 900-ide-context.lisp — ambient editor context from a companion IDE plugin.
 ;;;;
 ;;;; The IDE (see the evo-vscode extension) writes a small JSON file whenever
 ;;;; editor focus or the text selection changes, and exports its path to the
