@@ -65,7 +65,12 @@ function Resolve-Lisp {
     if ($Lisp -ne 'sbcl') {
         throw "evo on Windows supports SBCL only (got -Lisp '$Lisp'). Build with ECL on Unix."
     }
-    $sbcl = Get-Command 'sbcl' -CommandType Application -ErrorAction SilentlyContinue
+    # First match only: Get-Command returns *every* sbcl on PATH, and more
+    # than one is ordinary (an installer's directory plus a package
+    # manager's shim).  Taking the whole list would stringify an array into
+    # one nonsense command name; first-on-PATH-wins is what a prompt does.
+    $sbcl = Get-Command 'sbcl' -CommandType Application -ErrorAction SilentlyContinue |
+        Select-Object -First 1
     if (-not $sbcl) {
         throw "sbcl is not on PATH."
     }
