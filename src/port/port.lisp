@@ -505,6 +505,98 @@ Measured on Windows 11, SBCL 2.6.7, console codepage 936."
                                          :external-format external-format)))
 
 #+evo-windows
+(progn
+  (sb-alien:define-alien-routine ("GetNumberOfConsoleInputEvents" %input-event-count)
+      sb-alien:int
+    (handle sb-alien:system-area-pointer)
+    (count (* sb-alien:unsigned-int)))
+  (sb-alien:define-alien-routine ("ReadConsoleInputW" %read-console-input)
+      sb-alien:int
+    (handle sb-alien:system-area-pointer)
+    (buffer (* t))
+    (length sb-alien:unsigned-int)
+    (did-read (* sb-alien:unsigned-int)))
+
+  (defconstant +key-event+ 1)
+  (defconstant +input-record-size+ 20)  ; WORD type + pad + KEY_EVENT_RECORD
+  (defconstant +alt-pressed+ #x3)       ; LEFT_ALT | RIGHT_ALT
+
+  (defparameter *virtual-key-sequences*
+    '((#x26 . "A") (#x28 . "B") (#x27 . "C") (#x25 . "D")   ; up down right left
+      (#x24 . "H") (#x23 . "F")                             ; home end
+      (#x2E . "3~") (#x2D . "2~") (#x21 . "5~") (#x22 . "6~")) ; del ins pgup pgdn
+    "Keys the console reports as a virtual-key code with no character, and
+the CSI tail evo's parser already understands for each.")
+
+  (defvar *pending-surrogate* nil
+    "A high surrogate waiting for its pair, across reads."))
+
+#+evo-windows
+(defun push-console-char (code control-state vector)
+  "Encode one UTF-16 code unit from a key event as UTF-8 onto VECTOR."
+  (cond ((<= #xD800 code #xDBFF) (setf *pending-surrogate* code))
+        ((and *pending-surrogate* (<= #xDC00 code #xDFFF))
+         (let ((high (shiftf *pending-surrogate* nil)))
+           (push-utf8 (code-char (+ #x10000
+                                    (ash (- high #xD800) 10)
+                                    (- code #xDC00)))
+                      vector)))
+        (t
+         (setf *pending-surrogate* nil)
+         ;; Alt is spelled the way every terminal spells it: ESC then the key.
+         (when (plusp (logand control-state +alt-pressed+))
+           (vector-push-extend 27 vector))
+         (push-utf8 (code-char code) vector))))
+
+#+evo-windows
+(defun drain-console-input (handle vector)
+  "Push the keys waiting on the console HANDLE onto VECTOR, as UTF-8 bytes.
+
+Reading the console's input records rather than a stream, because every
+stream on the way down eats the one key that matters: in VT input mode Enter
+sends a bare CR, and SBCL's console layer translates newlines, so the CR was
+held for an LF that only ctrl+Enter ever sent -- measured, on Windows 11:
+plain Enter produced no byte at all.  Key events carry the character
+untranslated, and the keys that carry none (the arrows, home, end) are given
+the CSI spelling the parser already reads."
+  (sb-alien:with-alien ((count sb-alien:unsigned-int)
+                        (did-read sb-alien:unsigned-int)
+                        (buffer (sb-alien:array sb-alien:unsigned-char 640)))
+    (let ((sap (sb-alien:alien-sap buffer))
+          (got nil))
+      (loop
+        (when (zerop (%input-event-count handle (sb-alien:addr count)))
+          (return))                     ; not a console, or the call failed
+        (when (zerop count) (return))
+        (setf did-read 0)
+        (when (zerop (%read-console-input handle
+                                          (sb-alien:cast (sb-alien:addr buffer) (* t))
+                                          (min count (floor 640 +input-record-size+))
+                                          (sb-alien:addr did-read)))
+          (return))
+        (when (zerop did-read) (return))
+        (dotimes (i did-read)
+          (let* ((base (* i +input-record-size+))
+                 (type (sb-sys:sap-ref-16 sap base))
+                 (down (sb-sys:sap-ref-32 sap (+ base 4)))
+                 (repeat (sb-sys:sap-ref-16 sap (+ base 8)))
+                 (vk (sb-sys:sap-ref-16 sap (+ base 10)))
+                 (code (sb-sys:sap-ref-16 sap (+ base 14)))
+                 (state (sb-sys:sap-ref-32 sap (+ base 16))))
+            (when (and (= type +key-event+) (plusp down))
+              (dotimes (n (max 1 repeat))
+                (cond ((plusp code)
+                       (push-console-char code state vector)
+                       (setf got t))
+                      ((cdr (assoc vk *virtual-key-sequences*))
+                       (vector-push-extend 27 vector)
+                       (vector-push-extend 91 vector)   ; ESC [
+                       (loop for char across (cdr (assoc vk *virtual-key-sequences*))
+                             do (vector-push-extend (char-code char) vector))
+                       (setf got t))))))))
+      got)))
+
+#+evo-windows
 (defun untranslated-newlines (external-format)
   "EXTERNAL-FORMAT with newline translation turned off.
 The console's own encoding is not ours to change (it is UCS-2LE), but what
@@ -528,15 +620,17 @@ the key parser sees a NUL after every byte it understands.  Measured on
 Windows 11, SBCL 2.6.7.  READ-AVAILABLE-INPUT turns the characters back into
 the UTF-8 bytes the parser is written against."
   #+evo-windows
-  ;; Our own stream rather than SB-SYS:*STDIN* itself: same handle, same
-  ;; encoding, but no newline translation.  In VT input mode Enter sends a
-  ;; bare CR, and a stream in :crlf mode holds that CR back waiting for the
-  ;; LF that never comes -- on Windows Enter did nothing at all, while
-  ;; ctrl+Enter (which sends LF) submitted, because the LF completed the pair.
-  (sb-sys:make-fd-stream (std-descriptor :stdin)
-                         :input t :buffering :none
-                         :external-format (untranslated-newlines
-                                           (stream-external-format sb-sys:*stdin*)))
+  ;; The console input handle itself, not a stream over it: DRAIN-CONSOLE-INPUT
+  ;; reads key events, which is the only place Enter survives (see there).  A
+  ;; redirected stdin is not a console, so it keeps the stream -- with newline
+  ;; translation off, since a pipe may spell its breaks either way.
+  (let ((handle (%std-handle +std-input-handle+)))
+    (if (console-mode handle)
+        handle
+        (sb-sys:make-fd-stream (std-descriptor :stdin)
+                               :input t :buffering :none
+                               :external-format (untranslated-newlines
+                                                 (stream-external-format sb-sys:*stdin*)))))
   #-evo-windows
   (let ((where (std-descriptor :stdin)))
     #+sbcl (sb-sys:make-fd-stream where :input t :buffering :none
@@ -567,6 +661,9 @@ the UTF-8 bytes the parser is written against."
 arrived.  The platform difference lives here, not in the key parser: bytes
 straight off the descriptor on Unix, characters re-encoded to UTF-8 on
 Windows (see MAKE-STDIN-STREAM)."
+  #+evo-windows
+  (when (sb-sys:system-area-pointer-p source)
+    (return-from read-available-input (drain-console-input source vector)))
   (let ((got nil))
     (loop while (listen source)
           do #+evo-windows
