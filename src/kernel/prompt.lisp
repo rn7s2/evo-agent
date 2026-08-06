@@ -422,16 +422,124 @@ it becomes available to every section evo owns."
 ;;; disclosure: only name/description/path go into the prompt; the model
 ;;; reads the file on demand.
 
-(defun parse-frontmatter (text)
-  "Parse a leading '---' YAML-ish frontmatter block into a key->string alist."
+(defparameter *yaml-blanks* '(#\Space #\Tab #\Return))
+(defparameter *yaml-space* '(#\Space #\Tab #\Newline #\Return))
+
+(defun frontmatter-lines (text)
+  "Raw lines between the leading '---' fence and its closing '---', or NIL."
   (let ((lines (uiop:split-string text :separator '(#\Newline))))
-    (when (and lines (string= (string-trim " " (first lines)) "---"))
+    (when (and lines (string= (string-trim *yaml-blanks* (first lines)) "---"))
       (loop for line in (rest lines)
-            until (string= (string-trim " " line) "---")
-            for colon = (position #\: line)
-            when colon
-              collect (cons (string-downcase (string-trim " " (subseq line 0 colon)))
-                            (string-trim " " (subseq line (1+ colon))))))))
+            until (member (string-trim *yaml-blanks* line) '("---" "...") :test #'string=)
+            collect (string-right-trim '(#\Return) line)))))
+
+(defun yaml-indentation (line)
+  "Column of the first non-blank character, or NIL when the line is blank."
+  (position-if (lambda (c) (not (member c '(#\Space #\Tab)))) line))
+
+(defun yaml-block-style (header)
+  "For a block-scalar header (`|`, `>-`, `|2+`, ...) return :literal or :folded."
+  (when (plusp (length header))
+    (let ((style (case (char header 0) (#\| :literal) (#\> :folded) (t nil))))
+      ;; Everything after the indicator is chomping/indent flags or a comment;
+      ;; a stray word there means this was not a block header after all.
+      (when (and style
+                 (let ((rest (string-trim *yaml-blanks* (subseq header 1))))
+                   (or (zerop (length rest))
+                       (char= (char rest 0) #\#)
+                       (every (lambda (c) (find c "+-0123456789")) rest))))
+        style))))
+
+(defun take-indented-block (lines indent)
+  "Pop the lines belonging to a key at INDENT: blanks and deeper-indented text.
+Returns (values block-lines remaining-lines)."
+  (let ((block '()))
+    (loop while lines
+          for col = (yaml-indentation (first lines))
+          while (or (null col) (> col indent))
+          do (push (pop lines) block))
+    (values (nreverse block) lines)))
+
+(defun strip-block-indent (lines)
+  "Drop the common leading indentation shared by the block's non-blank lines."
+  (let ((base (loop for line in lines
+                    for col = (yaml-indentation line)
+                    when col minimize col)))
+    (mapcar (lambda (line) (subseq line (min base (length line)))) lines)))
+
+(defun join-block (lines style)
+  "Literal blocks keep their line breaks; folded blocks join with spaces and
+turn blank lines into breaks — YAML folding, minus the corner cases."
+  (if (eq style :literal)
+      (format nil "~{~a~^~%~}" lines)
+      (with-output-to-string (out)
+        (let ((started nil) (break-pending nil))
+          (dolist (line lines)
+            (if (null (yaml-indentation line))
+                (when started (setf break-pending t))
+                (progn (cond (break-pending (write-char #\Newline out)
+                                            (setf break-pending nil))
+                             (started (write-char #\Space out)))
+                       (write-string (string-trim *yaml-blanks* line) out)
+                       (setf started t))))))))
+
+(defun unquote-scalar (s)
+  "Strip matching YAML quotes and undo the escapes inside them."
+  (let ((len (length s)))
+    (cond ((and (>= len 2) (char= (char s 0) #\") (char= (char s (1- len)) #\"))
+           (let ((body (subseq s 1 (1- len))))
+             (with-output-to-string (out)
+               (loop with i = 0
+                     while (< i (length body))
+                     for c = (char body i)
+                     do (if (and (char= c #\\) (< (1+ i) (length body)))
+                            (let ((next (char body (1+ i))))
+                              (write-char (case next (#\n #\Newline) (#\t #\Tab) (t next)) out)
+                              (incf i 2))
+                            (progn (write-char c out) (incf i)))))))
+          ((and (>= len 2) (char= (char s 0) #\') (char= (char s (1- len)) #\'))
+           (string-replace "''" "'" (subseq s 1 (1- len)) :all t))
+          (t s))))
+
+(defun frontmatter-value (raw block)
+  "Value for one key: RAW is the text after the colon, BLOCK its owned lines."
+  (let ((style (yaml-block-style raw)))
+    (if style
+        (string-trim *yaml-space* (join-block (strip-block-indent block) style))
+        ;; Plain or quoted, possibly wrapped across continuation lines; nested
+        ;; mappings and lists fold into one string rather than leaking their
+        ;; inner keys to the top level.
+        (unquote-scalar
+         (string-trim *yaml-space*
+                      (join-block (if (plusp (length raw))
+                                      (cons raw (strip-block-indent block))
+                                      (strip-block-indent block))
+                                  :folded))))))
+
+(defun parse-frontmatter (text)
+  "Parse a leading '---' YAML frontmatter block into a key->string alist.
+Understands plain, quoted and block-scalar (`|` / `>` with chomping) values as
+well as values wrapped across indented continuation lines."
+  (let ((lines (frontmatter-lines text))
+        (entries '()))
+    (loop while lines
+          for line = (pop lines)
+          for indent = (yaml-indentation line)
+          for colon = (and indent
+                           (not (char= (char line indent) #\#))
+                           (position #\: line))
+          when colon
+            do (let ((key (string-downcase (string-trim *yaml-blanks* (subseq line 0 colon))))
+                     (raw (string-trim *yaml-blanks* (subseq line (1+ colon)))))
+                 (multiple-value-bind (block rest) (take-indented-block lines indent)
+                   (setf lines rest)
+                   (push (cons key (frontmatter-value raw block)) entries)))
+          else
+            do (multiple-value-bind (block rest)
+                   (if indent (take-indented-block lines indent) (values nil lines))
+                 (declare (ignore block))
+                 (setf lines rest)))
+    (nreverse entries)))
 
 (defun skills-directories (&optional (cwd (uiop:getcwd)))
   ;; Low-to-high precedence: project dirs shadow global dirs, and evo's own
