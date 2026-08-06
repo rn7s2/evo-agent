@@ -68,6 +68,13 @@
   :provider :openai :api :openai-responses
   :context-window 272000 :max-output 128000 :thinking t)
 
+;; Kimi K3 needs nothing here: the vendored extension
+;; extensions/020-kimi-provider.lisp registers the :kimi-chat-completions
+;; API, the :moonshotai endpoint and the kimi-k3 model itself, and reads
+;; MOONSHOT_API_KEY (or KIMI_API_KEY).  Extensions load after this file, so
+;; naming it below as :model still resolves — settings are looked up after
+;; the whole boot, not while this file runs.  /kimi:status shows the wiring.
+
 ;;; Providers.  The stock :anthropic and :openai endpoints are pre-seeded
 ;;; (base URL + ANTHROPIC_API_KEY / OPENAI_API_KEY env vars), so you only
 ;;; need register-provider for a proxy, a literal key, or a custom endpoint.
