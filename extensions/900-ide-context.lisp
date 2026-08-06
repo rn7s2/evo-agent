@@ -44,9 +44,6 @@ somebody was looking at yesterday.")
 (defvar *ide-context-last-injected* nil
   "Text of the last injected block; identical state is not injected twice.")
 
-(defvar *ide-context-original-status-line* nil
-  "EVO.TUI::STATUS-LINE before this extension wrapped it.")
-
 (defvar *ide-context-original-submit* nil
   "EVO.TUI::SUBMIT-TO-AGENT before this extension wrapped it.")
 
@@ -203,19 +200,15 @@ the provider prompt cache intact across a turn's tool calls."
   (ide-context-inject (evo.tui::tui-agent tui))
   (apply *ide-context-original-submit* tui text args))
 
-(defun ide-context-label ()
-  "Status segment: shown only while a selection exists."
+(defun ide-context-label (&optional tui)
+  "Status segment text: shown only while a selection exists.  No separator of
+its own — EVO.TUI:ADD-STATUS-SEGMENT's renderer owns the punctuation between
+segments, so a segment that renders nothing leaves no dangling \" · \"."
+  (declare (ignore tui))
   (let* ((state (ignore-errors (ide-context-state)))
          (lines (and state (ide-context-selection-lines state))))
     (when (and (integerp lines) (plusp lines))
-      (evo.tui::dim (format nil " · ⧉ ~a line~:p selected" lines)))))
-
-(defun ide-context-status-line-wrapper (tui)
-  (let ((base (if *ide-context-original-status-line*
-                  (funcall *ide-context-original-status-line* tui)
-                  ""))
-        (label (ignore-errors (ide-context-label))))
-    (if label (concatenate 'string base label) base)))
+      (evo.tui::dim (format nil "⧉ ~a line~:p selected" lines)))))
 
 ;;; Installation.  Kernel packages are locked; unlock around the single
 ;;; fdefinition change, exactly as any other userspace patch does.
@@ -230,10 +223,13 @@ the provider prompt cache intact across a turn's tool calls."
       (evo.port:lock-package pkg))))
 
 (defun ide-context-install-wrappers ()
-  (ide-context-patch 'evo.tui::status-line '*ide-context-original-status-line*
-                     #'ide-context-status-line-wrapper)
   (ide-context-patch 'evo.tui::submit-to-agent '*ide-context-original-submit*
-                     #'ide-context-submit-wrapper))
+                     #'ide-context-submit-wrapper)
+  ;; The status line is a registry, not a function to wrap: several parties
+  ;; want a piece of that line and only the renderer can see them all at once.
+  ;; Order 600 puts this just inboard of the core segments (100-400).
+  (evo.tui:add-status-segment :ide-selection #'ide-context-label
+                              :side :left :order 600))
 
 (defun ide-context-generation-current-p (generation)
   (= generation *ide-context-poller-generation*))

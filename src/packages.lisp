@@ -151,7 +151,10 @@
 
 (defpackage :evo.tui
   (:use :cl :evo.util :evo.journal :evo.provider :evo.kernel)
-  (:export #:start-tui))
+  (:export #:start-tui
+           ;; Status line composition — the supported way for an extension to
+           ;; claim a piece of the bottom line (see docs/extension-api.md).
+           #:add-status-segment #:remove-status-segment #:status-segments))
 
 (defpackage :evo.cli
   (:use :cl :evo.util :evo.journal :evo.provider :evo.kernel)

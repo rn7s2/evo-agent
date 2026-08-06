@@ -181,6 +181,44 @@ These three default to `nil` (seed nothing), so implementing them is
 genuinely optional. Re-registering the same key replaces in place, which
 is what keeps a reloaded extension idempotent.
 
+## Status line segments (evo.tui)
+
+The bottom status line is composed from named segments, not formatted in one
+place. Claim a piece of it:
+
+```lisp
+(evo.tui:add-status-segment :ide-selection
+  (lambda (tui) (and (selection-p) (evo.tui::dim "⧉ 3 lines selected")))
+  :side :left :order 600)
+
+(evo.tui:remove-status-segment :ide-selection)
+(evo.tui:status-segments :right)   ; introspection, visual left-to-right
+```
+
+The function is called with the TUI on **every repaint** and returns a display
+string — already styled, the renderer will not restyle it — or `nil` to show
+nothing this frame. So it must be cheap and must never block: cache in a poller
+thread if the value is expensive, and mark the TUI dirty when it changes. A
+segment that signals is skipped rather than taking the whole line down.
+
+`:order` counts **inward from that side's edge** — on the left, ascending order
+runs left-to-right; on the right, ascending order runs right-to-left. So the
+sentence is the same on both sides: a lower order sits closer to my edge. The
+core registers `:model` 100, `:thinking` 200, `:context` 300, `:goal` 400 on the
+left, which leaves room to slot in on either side of them. Re-registering an
+existing name replaces it, so reloading an extension is idempotent.
+
+When the line does not fit, whole segments are dropped from the middle outward
+(highest order first, ties dropping from the right) until it does; a single
+segment that still cannot fit is truncated. Nothing is ever silently painted
+past the right edge.
+
+Do **not** wrap `evo.tui::status-line` to add a segment. It still works, but two
+wrappers cannot see each other: if the inner one pads to the terminal width to
+right-align itself, everything an outer one appends lands past the right edge
+and is truncated away — computed every frame, discarded every frame. That is
+the bug this registry exists to make unrepresentable.
+
 ## Other API
 
 ```lisp

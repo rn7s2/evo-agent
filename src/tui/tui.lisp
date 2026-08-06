@@ -483,12 +483,153 @@ inside the TUI tick loop and on session resume, so malformed ARGUMENTS
             (fmt-ktokens (+ (pget goal :tokens-used 0) live-tokens))
             (and budget (fmt-ktokens budget)))))
 
+;;; Status segments.
+;;;
+;;; The status line is composed from named segments rather than formatted in
+;;; one place, because more than one party wants a piece of it: the core shows
+;;; the model and context, and extensions want their own indicators.  The
+;;; obvious alternative — everyone wraps STATUS-LINE and appends to the string
+;;; the previous wrapper returned — looks fine until one of those wrappers
+;;; pads to the full terminal width to right-align itself.  Everything the
+;;; outer wrappers append then lands past the right edge and is truncated away
+;;; by DRAW-REGION, silently.  A registry keeps the layout decision in one
+;;; renderer that can see every claim on the line at once.
+;;;
+;;; ORDER counts inward from the segment's own edge: on the left, ascending
+;;; order runs left-to-right; on the right, ascending order runs right-to-left.
+;;; So a segment's order is "how close to my edge do I sit", the same sentence
+;;; on both sides, and the line degrades by dropping from the middle outward.
+
+(defstruct (status-segment (:constructor %make-status-segment))
+  (name nil :read-only t)
+  (function nil :read-only t)
+  (side :left :read-only t)
+  (order 500 :read-only t))
+
+(defvar *status-segments* nil
+  "Registered status segments, unordered.  Rebound as a whole list on every
+change so the rendering thread never observes a partially updated list.")
+
+(defparameter *status-separator* " · "
+  "Between adjacent segments on the same side.")
+
+(defun add-status-segment (name function &key (side :left) (order 500))
+  "Register FUNCTION as a status-line segment under NAME.
+
+FUNCTION is called with the TUI on every repaint and returns a display string
+— already styled, since the renderer will not restyle it — or NIL to show
+nothing this frame.  It must be cheap and must not block; cache in a poller
+thread if the value is expensive.  Errors are swallowed: a segment that
+signals is skipped, it does not take the status line down with it.
+
+SIDE is :LEFT or :RIGHT.  ORDER counts inward from that side's edge, so on the
+right a lower ORDER sits closer to the right edge.  Registering an existing
+NAME replaces it, which makes extension reloads idempotent."
+  (check-type name (or symbol string))
+  (unless (member side '(:left :right))
+    (error "status segment ~s: SIDE must be :LEFT or :RIGHT, got ~s" name side))
+  (setf *status-segments*
+        (append (remove name *status-segments*
+                        :key #'status-segment-name :test #'equal)
+                (list (%make-status-segment :name name :function function
+                                            :side side :order order))))
+  name)
+
+(defun remove-status-segment (name)
+  "Unregister the status segment called NAME."
+  (setf *status-segments*
+        (remove name *status-segments* :key #'status-segment-name :test #'equal))
+  name)
+
+(defun status-segments (&optional side)
+  "Registered segments, optionally only those on SIDE, in visual left-to-right
+order.  Ties on ORDER keep registration order, so the core segments stay put
+when an extension picks the same number."
+  ;; LOOP COLLECT, not REMOVE-IF-NOT: REMOVE and friends are permitted to share
+  ;; structure with their input, and STABLE-SORT and NREVERSE below are
+  ;; destructive — a shared tail would let a repaint scramble the registry.
+  (let* ((all (loop for segment in *status-segments*
+                    when (or (null side) (eq (status-segment-side segment) side))
+                      collect segment))
+         (sorted (stable-sort all #'< :key #'status-segment-order)))
+    ;; Ascending order runs outward from the edge, so the right side's visual
+    ;; sequence is the reverse of its order.
+    (if (eq side :right) (nreverse sorted) sorted)))
+
+(defun status-cells (tui side)
+  "Evaluate SIDE's segments against TUI.  Returns a list of (ORDER . TEXT) in
+visual left-to-right order, skipping segments that render nothing or signal."
+  (loop for segment in (status-segments side)
+        for text = (ignore-errors (funcall (status-segment-function segment) tui))
+        when (and (stringp text) (plusp (length text)))
+          collect (cons (status-segment-order segment) text)))
+
+(defun join-status-cells (cells)
+  (if cells
+      (reduce (lambda (a b) (concatenate 'string a (dim *status-separator*) b))
+              (mapcar #'cdr cells))
+      ""))
+
+(defun drop-innermost-cell (left right)
+  "Remove the cell nearest the middle of the line.  With ORDER counting inward
+from each edge, that is simply the highest ORDER on either side; a tie drops
+from the right, because the left carries the core identity of the session.
+Returns (values left right)."
+  (let ((left-max (and left (reduce #'max (mapcar #'car left))))
+        (right-max (and right (reduce #'max (mapcar #'car right)))))
+    (cond
+      ((and right-max (or (null left-max) (>= right-max left-max)))
+       ;; Rightmost visual position is the *last* of the right cells only for
+       ;; the innermost order; find it by order, not by position.
+       (values left (remove right-max right :key #'car :count 1)))
+      (left-max
+       (values (remove left-max left :key #'car :count 1 :from-end t) right))
+      (t (values left right)))))
+
+(defun compose-status (left right width)
+  "Lay LEFT out from the left edge and RIGHT flush against the right edge,
+dropping segments from the middle outward until the line fits WIDTH."
+  (loop
+    (let* ((lt (join-status-cells left))
+           (rt (join-status-cells right))
+           (ll (visible-length lt))
+           (rl (visible-length rt))
+           (gap (if (and (plusp ll) (plusp rl)) 1 0)))
+      (cond
+        ((<= (+ ll rl gap) width)
+         (return (cond ((zerop rl) lt)
+                       ((zerop ll) (concatenate 'string
+                                                (make-string (- width rl)
+                                                             :initial-element #\Space)
+                                                rt))
+                       (t (concatenate 'string lt
+                                       (make-string (- width ll rl)
+                                                    :initial-element #\Space)
+                                       rt)))))
+        ;; One cell left and it still does not fit: truncate rather than
+        ;; render an empty status line.
+        ((<= (+ (length left) (length right)) 1)
+         (return (truncate-visible (if (plusp ll) lt rt) width)))
+        (t (multiple-value-setq (left right) (drop-innermost-cell left right)))))))
+
 (defun status-line (tui)
-  (let ((goal (tui-goal tui)))
-    (dim (format nil "~a · ~a · ~a~@[ · ~a~]"
-                 (tui-model-label tui) (tui-thinking-label tui)
-                 (context-label tui)
-                 (and goal (goal-label goal (tui-goal-run-tokens tui)))))))
+  (compose-status (status-cells tui :left) (status-cells tui :right)
+                  (max 10 (1- *cols*))))
+
+;;; The core's own claims on the line.  Registered like anybody else's, so the
+;;; layout has no privileged path through it.
+
+(add-status-segment :model (lambda (tui) (dim (tui-model-label tui)))
+                    :side :left :order 100)
+(add-status-segment :thinking (lambda (tui) (dim (tui-thinking-label tui)))
+                    :side :left :order 200)
+(add-status-segment :context (lambda (tui) (dim (context-label tui)))
+                    :side :left :order 300)
+(add-status-segment :goal
+                    (lambda (tui)
+                      (let ((goal (tui-goal tui)))
+                        (and goal (dim (goal-label goal (tui-goal-run-tokens tui))))))
+                    :side :left :order 400)
 
 (defparameter *working-frames* "|/-\\"
   "Rotating slash while the agent is executing.")

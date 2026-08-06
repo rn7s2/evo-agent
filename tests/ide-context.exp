@@ -18,6 +18,20 @@ file mkdir "$env(EVO_HOME)/extensions"
 # The extension under test, installed the way `make install-home` installs it.
 file copy "$repo/extensions/900-ide-context.lisp" "$env(EVO_HOME)/extensions/900-ide-context.lisp"
 
+# A second claimant on the status line, loaded FIRST (rank 500 < 900).  This is
+# the shape of the bug this test missed for its whole life: the real right-hand
+# extension used to patch EVO.TUI::STATUS-LINE and pad its result out to the
+# full terminal width to right-align itself, so the selection segment appended
+# by the later wrapper landed past the right edge and was truncated away.  With
+# one extension installed the collision was unobservable, and the suite was
+# green while the feature was dead on every machine that had both.
+set f [open "$env(EVO_HOME)/extensions/500-right-segment.lisp" w]
+puts $f {(in-package :evo.user)}
+puts $f {(evo.tui:add-status-segment :test-right}
+puts $f {  (lambda (tui) (declare (ignore tui)) (evo.tui::dim "load 42"))}
+puts $f {  :side :right :order 100)}
+close $f
+
 # A model must exist for the TUI to start; it is never reached (the endpoint
 # is dead on purpose — this test asserts journal state, not model replies).
 set f [open "$env(EVO_HOME)/init.lisp" w]
@@ -92,10 +106,18 @@ proc fail {name} {
 
 spawn "$repo/build/evo"
 
-# 1. the selection segment appears, and the core status line survives wrapping
+# 1. the selection segment appears, and the core status line survives wrapping.
+#    Patterns stay ASCII-anchored: the ⧉ glyph is multibyte and what expect
+#    sees on a pty depends on the channel encoding.
+#    The ordering inside the regex is itself the assertion: core segments, then
+#    the selection segment, then the right-aligned claimant last on the same
+#    line — i.e. the right-hand extension aligned itself without swallowing
+#    anything to its left.
 expect {
-    -re {ctx \d+k.*3 lines selected} { check "status segment with selection" }
-    timeout { fail "status segment with selection"; exit 1 }
+    -re {ctx \d+k[^\n]*3 lines selected[^\n]*load 42} {
+        check "left and right status segments coexist"
+    }
+    timeout { fail "left and right status segments coexist"; exit 1 }
 }
 
 # 2. clearing the selection in the IDE drops the segment without any keypress:
