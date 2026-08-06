@@ -504,6 +504,19 @@ Measured on Windows 11, SBCL 2.6.7, console codepage 936."
                                          :element-type 'character
                                          :external-format external-format)))
 
+#+evo-windows
+(defun untranslated-newlines (external-format)
+  "EXTERNAL-FORMAT with newline translation turned off.
+The console's own encoding is not ours to change (it is UCS-2LE), but what
+the stream does with CR is: the TUI wants the bytes the key sent, not a
+line discipline's opinion of them."
+  (let ((spec (if (listp external-format) (copy-list external-format)
+                  (list external-format))))
+    (loop while (getf (cdr spec) :newline :absent)
+          until (eq (getf (cdr spec) :newline :absent) :absent)
+          do (remf (cdr spec) :newline))
+    (append spec '(:newline :lf))))
+
 (defun make-stdin-stream ()
   "Where the TUI reads keys from.
 
@@ -514,7 +527,16 @@ typing abc arrives as 97 0 98 0 99 0, and an arrow key as 27 0 91 0 65 0, so
 the key parser sees a NUL after every byte it understands.  Measured on
 Windows 11, SBCL 2.6.7.  READ-AVAILABLE-INPUT turns the characters back into
 the UTF-8 bytes the parser is written against."
-  #+evo-windows sb-sys:*stdin*
+  #+evo-windows
+  ;; Our own stream rather than SB-SYS:*STDIN* itself: same handle, same
+  ;; encoding, but no newline translation.  In VT input mode Enter sends a
+  ;; bare CR, and a stream in :crlf mode holds that CR back waiting for the
+  ;; LF that never comes -- on Windows Enter did nothing at all, while
+  ;; ctrl+Enter (which sends LF) submitted, because the LF completed the pair.
+  (sb-sys:make-fd-stream (std-descriptor :stdin)
+                         :input t :buffering :none
+                         :external-format (untranslated-newlines
+                                           (stream-external-format sb-sys:*stdin*)))
   #-evo-windows
   (let ((where (std-descriptor :stdin)))
     #+sbcl (sb-sys:make-fd-stream where :input t :buffering :none
