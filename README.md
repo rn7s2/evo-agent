@@ -428,6 +428,10 @@ Requirements and caveats:
 - Untested on real hardware so far: CI builds `evo.exe` and checks it starts,
   and no test asserts anything about running it. Treat the TUI on Windows as
   new, and report what breaks.
+- `EVO_INPUT_TRACE=<file>` makes the TUI write, every tick, the bytes that
+  arrived, the key events parsed from them, and the events left after paste
+  coalescing. It is how the Enter bug above was found from another continent:
+  the trace showed no byte at all for the key. Off unless set.
 - `tests/windows-probe.lisp` is for exactly that: a self-contained SBCL script
   (no evo, no quicklisp) that answers what a Unix box cannot be asked — which
   descriptor the standard streams use, what `GetStdHandle` returns, which of
