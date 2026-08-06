@@ -451,15 +451,7 @@ lists only global (every project) lore — mirroring /memory vs /global-memory."
 
 (defun read-pending-bytes (tui)
   "Slurp everything currently readable from stdin into the parser buffer."
-  (let ((stream (tui-stdin tui))
-        (got nil))
-    (loop while (listen stream)
-          do (let ((b (read-byte stream nil)))
-               (if b
-                   (progn (vector-push-extend b (in-buffer (tui-input tui)))
-                          (setf got t))
-                   (loop-finish))))
-    got))
+  (evo.port:read-available-input (tui-stdin tui) (in-buffer (tui-input tui))))
 
 (defun tick (tui)
   (incf (tui-tick tui))

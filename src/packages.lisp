@@ -17,6 +17,7 @@
            #:shell-invocation #:shell-name
            #:lock-package #:unlock-package #:add-package-local-nickname
            #:make-stdout-stream #:make-stdin-stream
+           #:read-available-input
            #:std-descriptor #:std-external-format
            #:install-signal-handler #:+sigwinch+
            #:terminal-raw-mode #:restore-terminal-mode #:terminal-sane
