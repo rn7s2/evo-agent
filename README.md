@@ -213,8 +213,8 @@ This is the evolution engine. Four mechanisms make it work:
   fixing or removing a file, never by surgery on opaque state.
 
 Seed corpus: [docs/](docs/) (extension API, journal format, self-extension
-guide) and example extensions — git-checkpoint and permission-gate
-([extensions/examples/](extensions/examples/)).
+guide, Windows field manual) and example extensions — git-checkpoint and
+permission-gate ([extensions/examples/](extensions/examples/)).
 
 ### Core extensions
 
@@ -428,6 +428,10 @@ Requirements and caveats:
 - Untested on real hardware so far: CI builds `evo.exe` and checks it starts,
   and no test asserts anything about running it. Treat the TUI on Windows as
   new, and report what breaks.
+- [docs/windows.md](docs/windows.md) is the field manual: what is settled
+  about handles, encodings and console input (with the measurements), how to
+  use the two instruments below, and what is still unverified on real
+  hardware. Read it before theorising about a Windows symptom.
 - `EVO_INPUT_TRACE=<file>` makes the TUI write, every tick, the bytes that
   arrived, the key events parsed from them, and the events left after paste
   coalescing. It is how the Enter bug above was found from another continent:
