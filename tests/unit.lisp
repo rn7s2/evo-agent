@@ -800,6 +800,16 @@ line2")))
            (load (merge-pathnames "extensions/020-claude-oauth-provider.lisp"
                                   (uiop:getcwd))
                  :verbose nil :print nil)
+           (let ((sha256 (symbol-function (find-symbol "SHA256-HEX" :evo.user))))
+             (check "claude oauth SHA256 hashes an empty string without a shell"
+                    (string= (funcall sha256 "")
+                             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"))
+             (check "claude oauth SHA256 hashes a multi-block input"
+                    (string= (funcall sha256 (make-string 100 :initial-element #\a))
+                             "2816597888e4a0d3a36b82b83316ab32680eb8f00f8cd3b904d681246d285a0e"))
+             (check "claude oauth SHA256 hashes UTF-8 input"
+                    (string= (funcall sha256 "你好")
+                             "670d9743542cae3ea7ebe36af56bd53648b0a1126162e78d81a32934a711302e")))
            (setf calls nil)
            (funcall (symbol-function
                      (find-symbol "CLAUDE-OAUTH--EXCHANGE-CODE" :evo.user))
