@@ -678,6 +678,47 @@ data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]
                         (check "kimi call: usage recorded"
                                (= 110 (usage-total-tokens (pget message :usage))))))
                  (setf (symbol-function 'dex:post) saved-post)))
+             ;; Config beats the environment.  init.lisp is evaluated before
+             ;; extensions load and register-provider merges with the later
+             ;; call winning, so the extension has to fill in only what config
+             ;; left out — otherwise a key or endpoint written in init.lisp
+             ;; would be silently undone by the extension that follows it.
+             (flet ((forget-provider ()
+                      (setf evo.provider::*providers*
+                            (remove :moonshotai evo.provider::*providers*
+                                    :key #'car)))
+                    (reload-extension ()
+                      (load (merge-pathnames "extensions/020-kimi-provider.lisp"
+                                             (uiop:getcwd))
+                            :verbose nil :print nil)))
+               (evo.port:setenv "MOONSHOT_API_KEY" "")
+               (evo.port:setenv "KIMI_API_KEY" "sk-env-alias")
+               (forget-provider)
+               (register-provider* :moonshotai
+                                   :base-url "https://api.moonshot.cn"
+                                   :api-key "sk-from-init")
+               (reload-extension)
+               (let ((config (provider-config :moonshotai)))
+                 (check "kimi: a base url from init.lisp survives the extension"
+                        (equal (pget config :base-url) "https://api.moonshot.cn"))
+                 (check "kimi: a key from init.lisp beats the env alias"
+                        (equal (pget config :api-key) "sk-from-init")))
+               ;; With nothing configured, the alias is what fills the gap.
+               (forget-provider)
+               (reload-extension)
+               (let ((config (provider-config :moonshotai)))
+                 (check "kimi: KIMI_API_KEY alias used when config is silent"
+                        (equal (pget config :api-key) "sk-env-alias"))
+                 (check "kimi: stock endpoint when config is silent"
+                        (equal (pget config :base-url) "https://api.moonshot.ai")))
+               ;; And MOONSHOT_API_KEY, the canonical variable, wins over the
+               ;; alias without anything being written into the registry.
+               (forget-provider)
+               (evo.port:setenv "MOONSHOT_API_KEY" key)
+               (reload-extension)
+               (check "kimi: MOONSHOT_API_KEY beats the alias"
+                      (equal (pget (provider-config :moonshotai) :api-key) key))
+               (evo.port:setenv "KIMI_API_KEY" ""))
              ;; Unknown finish reasons are loud rather than guessed.
              (check-signals "kimi sse unknown finish reason signals"
                             (with-input-from-string

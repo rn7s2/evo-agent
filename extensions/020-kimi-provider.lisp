@@ -70,6 +70,14 @@
 ;;;;       https://api.moonshot.cn for the China platform.  A trailing "/v1"
 ;;;;       is stripped: the SDK-style base URL and the host both work.
 ;;;;
+;;;; Or write it in config instead, which wins over both — see
+;;;; docs/examples/init.lisp:
+;;;;
+;;;;   (evo:register-provider :moonshotai :api-key "sk-...")
+;;;;
+;;;; init.lisp is evaluated before extensions load, so this extension fills in
+;;;; only the fields config left out (KIMI--REGISTER-ENDPOINT).
+;;;;
 ;;;; Keys are platform-scoped: a platform.kimi.com (.cn) key on api.moonshot.ai
 ;;;; is a 401, and vice versa.
 ;;;;
@@ -157,6 +165,13 @@ K3's context cache is automatic, with no explicit write step.")
 
 (defun kimi--json->sexpr (value)
   (evo.provider::json->sexpr value))
+
+(defun kimi--provider-entry ()
+  "The raw registry plist for the provider, or NIL — what init.lisp already
+said about this endpoint.  PROVIDER-CONFIG cannot answer this: it errors when
+no base URL is set yet, and it resolves the key rather than reporting whether
+one was written down."
+  (cdr (assoc *kimi-provider-key* evo.provider::*providers*)))
 
 (defun kimi--handoff (messages model)
   (evo.provider::handoff-pass messages (kimi--pget model :id)
@@ -663,14 +678,32 @@ as a cache write."
 
 (evo:register-api *kimi-api-name* (make-instance 'kimi-chat-completions-api))
 
-(evo:register-provider *kimi-provider-key*
-                       :base-url (kimi--base-url)
-                       :api-key-env *kimi-api-key-env*)
+(defun kimi--register-endpoint ()
+  "Register the endpoint, filling in only what config left out.
+init.lisp is evaluated before extensions load and REGISTER-PROVIDER merges
+field-wise with the later call winning — so registering unconditionally would
+silently undo a base URL or key the user wrote in their own config.  Anything
+already in the registry stays; anything missing gets the default.
 
-;; KIMI_API_KEY is a convenience alias; provider config reads exactly one env
-;; var, so resolve the alias here rather than teaching the registry two names.
-(when (and (null (kimi--env *kimi-api-key-env*)) (kimi--env "KIMI_API_KEY"))
-  (evo:register-provider *kimi-provider-key* :api-key (kimi--env "KIMI_API_KEY")))
+Precedence, strongest first: init.lisp (or post-init.lisp) · the environment ·
+the stock endpoint."
+  (let ((entry (kimi--provider-entry)))
+    (apply #'evo:register-provider *kimi-provider-key*
+           (append
+            (unless (kimi--pget entry :base-url)
+              (list :base-url (kimi--base-url)))
+            (unless (kimi--pget entry :api-key-env)
+              (list :api-key-env *kimi-api-key-env*))
+            ;; KIMI_API_KEY is a convenience alias; provider config reads
+            ;; exactly one env var, so the alias is resolved here rather than
+            ;; teaching the registry two names — and only when nothing more
+            ;; explicit is set.
+            (when (and (null (kimi--pget entry :api-key))
+                       (null (kimi--env *kimi-api-key-env*))
+                       (kimi--env "KIMI_API_KEY"))
+              (list :api-key (kimi--env "KIMI_API_KEY")))))))
+
+(kimi--register-endpoint)
 
 (evo:register-model *kimi-model-id*
                     :provider *kimi-provider-key*

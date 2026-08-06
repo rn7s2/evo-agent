@@ -68,12 +68,13 @@
   :provider :openai :api :openai-responses
   :context-window 272000 :max-output 128000 :thinking t)
 
-;; Kimi K3 needs nothing here: the vendored extension
+;; Kimi K3 needs no register-model here: the vendored extension
 ;; extensions/020-kimi-provider.lisp registers the :kimi-chat-completions
 ;; API, the :moonshotai endpoint and the kimi-k3 model itself, and reads
-;; MOONSHOT_API_KEY (or KIMI_API_KEY).  Extensions load after this file, so
-;; naming it below as :model still resolves — settings are looked up after
-;; the whole boot, not while this file runs.  /kimi:status shows the wiring.
+;; MOONSHOT_API_KEY (or KIMI_API_KEY) for the key.  Extensions load after
+;; this file, so naming it below as :model still resolves — settings are
+;; read after the whole boot, not while this file runs.  See "Providers"
+;; below for keeping the key in config instead of the environment.
 
 ;;; Providers.  The stock :anthropic and :openai endpoints are pre-seeded
 ;;; (base URL + ANTHROPIC_API_KEY / OPENAI_API_KEY env vars), so you only
@@ -85,6 +86,38 @@
 (evo:register-provider :deepseek
   :base-url "https://api.deepseek.com/anthropic"
   :api-key-env "DEEPSEEK_API_KEY")
+
+;; Keys in config rather than the environment: :api-key takes the literal
+;; string.  This is the whole setup for Kimi — the extension registers the
+;; :moonshotai endpoint itself and fills in only what this file left out, so
+;; a key (or base URL) written here wins over MOONSHOT_API_KEY, over the
+;; KIMI_API_KEY alias, and over the stock endpoint.
+;;
+;; Naming a provider that already exists is fine and is the point: this is
+;; register-OR-MERGE, so the call below sets one field and leaves every other
+;; one — the base URL included — exactly as it was.  (Whether :moonshotai
+;; already exists when this file runs depends on the boot: on a fresh start
+;; the extension has not loaded yet and this call creates the entry; on
+;; /reload the endpoint is already seeded and this merges into it.  Same
+;; result either way.)  Uncomment and edit:
+;;
+;; (evo:register-provider :moonshotai :api-key "sk-...")
+;;
+;; A literal key means the file holds a credential: keep it in ~/.evo (not a
+;; project directory that gets committed), and chmod 600 it.  :api-key-env
+;; names a different variable instead, if what you want is only to rename it:
+;;
+;; (evo:register-provider :moonshotai :api-key-env "WORK_MOONSHOT_KEY")
+;;
+;; The same call moves Kimi to the China platform.  Accounts and keys are
+;; platform-scoped — a platform.kimi.com key is a 401 on api.moonshot.ai and
+;; vice versa — so change both together:
+;;
+;; (evo:register-provider :moonshotai
+;;   :base-url "https://api.moonshot.cn" :api-key "sk-...")
+;;
+;; /kimi:status prints the resulting wiring (endpoint, whether a key was
+;; found, thinking ladder) without printing the key itself.
 
 ;;; Settings.  :model is required (there is no default); the rest have
 ;;; kernel defaults.
