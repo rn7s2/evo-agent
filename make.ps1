@@ -38,7 +38,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('build', 'install', 'install-home', 'test', 'integration', 'tui-test', 'clean', 'help')]
+    [ValidateSet('build', 'install', 'install-home', 'test', 'console-test', 'integration', 'tui-test', 'clean', 'help')]
     [string]$Target = 'build',
 
     [string]$Lisp = 'sbcl',
@@ -161,12 +161,24 @@ function Invoke-Install {
     }
 }
 
-# The unit suite is Lisp-only and runs here, but nothing about evo on
-# Windows is covered by a test yet: the .exp suites need a pty and expect,
-# and CI builds Windows without testing it (by decision, for now).
+# The unit suite is Lisp-portable and passes on Windows; the Windows-only
+# console paths have their own live tests (console-test) that need a real
+# console and so run here, not in CI.  The .exp suites still need a pty.
 function Invoke-Test {
     Write-Step 'running unit tests'
     Invoke-LispScript -Script (Join-Path $RepoRoot 'tests\run-unit.lisp')
+}
+
+# Live console tests: drive the real console (CONIN$/CONOUT$) to prove the
+# Windows-only input and output paths.  They need a real console attached, so
+# they run here but not in CI (which has no interactive console).  See
+# docs/windows.md.
+function Invoke-ConsoleTest {
+    foreach ($script in @('tests\windows-input-live.lisp',
+                          'tests\windows-console-live.lisp')) {
+        Write-Step "running $script"
+        Invoke-LispScript -Script (Join-Path $RepoRoot $script)
+    }
 }
 
 function Invoke-Clean {
@@ -185,6 +197,7 @@ switch ($Target) {
     'install' { Invoke-Install }
     'install-home' { Invoke-InstallHome }
     'test' { Invoke-Test }
+    'console-test' { Invoke-ConsoleTest }
     'clean' { Invoke-Clean }
     'help' { Show-Help }
 }

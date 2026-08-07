@@ -179,30 +179,78 @@ Three lines per tick, and they separate the three suspects in one run:
 Off unless the variable is set. It is how Enter was diagnosed from another
 continent, and it should be the first thing reached for, before any theory.
 
+### `tests/windows-input-live.lisp` — inject real keys, assert real bytes
+
+Opens `CONIN$` (the console input buffer, reachable even when stdin is a
+redirected pipe), writes genuine `INPUT_RECORD`s with `WriteConsoleInputW`,
+and asserts the exact UTF-8 bytes `EVO.PORT:DRAIN-CONSOLE-INPUT` produces. It
+drives the real code path the TUI uses, so it is proof, not a model.
+
+```powershell
+sbcl --non-interactive --load tests\windows-input-live.lisp   # or: .\make.ps1 console-test
+```
+
+One caveat learned the hard way: `WriteConsoleInput` normalizes an injected
+`wRepeatCount` back to 1, so a held-key repeat cannot be injected this way
+(the `(max 1 repeat)` loop is correct by inspection).
+
+### `tests/windows-console-live.lisp` — size, raw mode, and the glyphs
+
+Opens `CONOUT$`/`CONIN$` and checks `console-size`, the `SetConsoleMode`
+raw-mode round trip, and — the interesting one — writes the exact octets evo's
+stdout stream would emit and reads the glyphs back with
+`ReadConsoleOutputCharacterW`, so box drawing and CJK are verified as *stored
+code points*, not eyeballed. (`make-fd-stream` over a non-std console handle
+hangs, so the test writes bytes with `WriteFile` — the same call the fd-stream
+ultimately makes.)
+
 ### The suites
 
-`.\make.ps1 test` runs the unit suite. `.\make.ps1 build` builds. The
-integration (`.sh`) and TUI (`.exp`) suites are Unix-only and will not run
-there; the unit suite is the whole safety net on Windows.
+`.\make.ps1 test` runs the unit suite (the whole safety net on Windows — the
+`.sh`/`.exp` suites are Unix-only). `.\make.ps1 console-test` runs the two live
+console tests above, which need a real console and so cannot run in CI.
+`.\make.ps1 build` builds.
 
-## Still unverified on real hardware
+## Verified on real hardware
 
-Everything below is written but has never been observed working on Windows.
-Check them off, and when one fails, take a trace before theorising.
+Each line below was observed working on Windows itself, by the instrument
+named. When one regresses, run that instrument and take a trace before
+theorising.
 
-- **Arrows, Home, End, Delete, PgUp, PgDn.** The virtual-key table in
-  `DRAIN-CONSOLE-INPUT` was written blind; these keys carry no character and
-  their CSI spellings are synthesised.
-- **Paste.** Windows Terminal may inject a paste as ordinary key events
-  without the bracketed-paste wrapper, in which case the burst heuristic
-  (`*paste-burst-min-chars*`) is what catches it. Expect
-  `[pasted N lines]` for anything over three lines.
-- **Resize.** No SIGWINCH; it is polled once per tick.
-- **ctrl+c and ctrl+v**, and the modifyOtherKeys/kitty spellings the parser
-  asks for at startup.
-- **The supervisor path end to end**: crash, restart, quarantine, give-up.
-- **CJK and box drawing in the TUI proper.** The probe printed them correctly
-  at codepage 936, but the TUI paints through its own stream.
+- **Arrows, Home, End, Delete, Insert, PgUp, PgDn** — `windows-input-live.lisp`,
+  25/25: every synthesised CSI spelling in the virtual-key table matches, plus
+  letters, Enter-as-CR, tab, backspace, esc, ctrl+c, alt+key (ESC-prefixed),
+  CJK, accented Latin, and an emoji surrogate pair joined across records.
+- **CJK and box drawing** — `windows-console-live.lisp`: U+2500/U+276F/U+25CB
+  and é round-trip exactly through the console at codepage 65001, and the
+  double-width CJK ideographs U+4E2D/U+6587 are stored, not mojibake'd.
+- **Resize** — the engine (`terminal-size` / `GetConsoleScreenBufferInfo`)
+  returns the real window dimensions in `windows-console-live.lisp`; the
+  per-tick poll compares them and sets `*resized*`.
+- **Raw mode** — `SetConsoleMode` enables VT input + processing and clears
+  line/echo, and restore puts the modes back exactly (same instrument).
+- **The supervisor path end to end** — crash → restart → quarantine
+  (`--no-userspace`) → the exit-code protocol (1 restarts, 64 stops),
+  observed with a real `evo.exe` child that logs each boot then exits 1.
+  When testing this, capture the supervisor's stderr with `Start-Job` + `cmd`
+  redirection: running it directly under another agent's shell tool truncates
+  the child tree and makes it look like it only booted once.
+- **The bash tool** runs through PowerShell (a temp script; see below).
+  Latency note: pwsh startup here is ~1.5–7 s per call — that is Defender/AMSI
+  scanning plus pwsh's own start cost, not evo (a fresh `-EncodedCommand` is
+  just as slow, and `cmd` is ~0.07 s); the abort test widens its Windows
+  timing margin accordingly.
+
+## Still worth a look on real hardware
+
+- **Paste bursts.** The byte→key→event path is proven, but injecting a real
+  Windows Terminal paste (with or without the bracketed-paste wrapper) and
+  confirming `[pasted N lines]` was not automated. The burst heuristic
+  (`*paste-burst-min-chars*`) is what catches an unwrapped paste.
+- **Held-key auto-repeat** in a live TUI (see the `WriteConsoleInput` caveat
+  above — the count cannot be injected).
+- **The modifyOtherKeys / kitty spellings** the parser asks for at startup, as
+  Windows Terminal actually emits them.
 
 ## When evo runs on Windows itself
 
