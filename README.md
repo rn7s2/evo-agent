@@ -442,10 +442,6 @@ Requirements and caveats:
   `ReadConsoleOutputCharacterW`, asserting the exact bytes evo produces. They
   need a real console, so they run here and not in CI (which stays build-only
   on Windows).
-- `EVO_INPUT_TRACE=<file>` makes the TUI write, every tick, the bytes that
-  arrived, the key events parsed from them, and the events left after paste
-  coalescing. Off unless set — the first thing to reach for on an input
-  symptom.
 
 ## Layout
 

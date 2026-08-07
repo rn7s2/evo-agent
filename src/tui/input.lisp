@@ -15,26 +15,6 @@
   "The poll loop's clock (milliseconds, monotonic within a session)."
   (round (* 1000 (/ (get-internal-real-time) internal-time-units-per-second))))
 
-(defvar *input-trace* :unchecked
-  "Path from EVO_INPUT_TRACE, or NIL.  Resolved once, on first use.")
-
-(defun input-trace (label datum)
-  "Append one line to EVO_INPUT_TRACE when that names a file.
-
-The TUI owns the terminal, so on a machine one cannot attach to, the only
-way to learn what a key actually produced is to write it down: the bytes as
-they arrived, the events the parser made of them, and the events that
-survived paste coalescing.  Off unless the variable is set."
-  (when (eq *input-trace* :unchecked)
-    (let ((path (uiop:getenv "EVO_INPUT_TRACE")))
-      (setf *input-trace* (and path (plusp (length path)) path))))
-  (when *input-trace*
-    (ignore-errors
-     (with-open-file (out *input-trace* :direction :output :if-exists :append
-                                        :if-does-not-exist :create
-                                        :external-format :utf-8)
-       (format out "~6d ~a ~s~%" (now-ms) label datum)))))
-
 (defstruct (input-state (:conc-name in-))
   (buffer (make-array 0 :element-type '(unsigned-byte 8)
                         :adjustable t :fill-pointer t)))

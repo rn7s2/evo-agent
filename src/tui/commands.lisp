@@ -451,12 +451,7 @@ lists only global (every project) lore — mirroring /memory vs /global-memory."
 
 (defun read-pending-bytes (tui)
   "Slurp everything currently readable from stdin into the parser buffer."
-  (let* ((buffer (in-buffer (tui-input tui)))
-         (start (fill-pointer buffer))
-         (got (evo.port:read-available-input (tui-stdin tui) buffer)))
-    (when (> (fill-pointer buffer) start)
-      (input-trace "bytes " (coerce (subseq buffer start) 'list)))
-    got))
+  (evo.port:read-available-input (tui-stdin tui) (in-buffer (tui-input tui))))
 
 (defun tick (tui)
   (incf (tui-tick tui))
@@ -480,8 +475,6 @@ lists only global (every project) lore — mirroring /memory vs /global-memory."
     (let* ((keys (parse-keys (tui-input tui)
                              :flush-escape (>= (tui-quiet-ticks tui) 2)))
            (events (tick-key-events tui keys)))
-      (when keys (input-trace "keys  " keys))
-      (when events (input-trace "events" events))
       (dolist (event events)
         (case (tui-mode tui)
           (:select (handle-key-select tui event))
