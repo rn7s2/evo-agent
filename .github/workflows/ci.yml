@@ -101,14 +101,16 @@ jobs:
         run: make test LISP=${{ matrix.lisp }}
 
   # Windows is SBCL-only (src/port/port.lisp: the ECL branches are Unix
-  # facilities with no Windows twin) and build-only for now — by decision,
-  # not by omission.  The unit suite is Lisp-portable but unproven here, and
-  # the .exp suites need a pty; wiring either in as a red gate before anyone
-  # has run evo on Windows would only teach people to ignore the badge.
-  # What this job does guard is the thing that silently rots: that every
-  # #+/#- branch in the port layer still READS and COMPILES on Windows, and
-  # that the artifact is a runnable evo.exe.
-  build-windows:
+  # facilities with no Windows twin).  It builds, runs the portable unit suite
+  # and smoke-tests the artifact — the same guard the Unix job gives, now that
+  # the unit suite passes on Windows (876/0) instead of being taken on faith.
+  # What stays out, by decision not omission: the live console-test, which
+  # drives a real interactive console (CONIN$/CONOUT$ key injection and
+  # screen-buffer readback) a redirected CI runner does not have; and the .exp
+  # suites, which need a pty.  So this job guards that every #+/#- branch in the
+  # port layer still READS and COMPILES on Windows, that the unit suite is
+  # green, and that the artifact is a runnable evo.exe.
+  build-and-test-windows:
     runs-on: windows-latest
     timeout-minutes: 25
     steps:
@@ -212,6 +214,12 @@ jobs:
       - name: .\make.ps1 build
         shell: pwsh
         run: .\make.ps1 build
+
+      # The Lisp-portable unit suite, the same one the Unix job runs.  The
+      # Windows-only live console-test is not here: it needs a real console.
+      - name: .\make.ps1 test
+        shell: pwsh
+        run: .\make.ps1 test
 
       - name: .\make.ps1 install
         shell: pwsh
