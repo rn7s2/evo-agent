@@ -26,11 +26,60 @@
      (error () (incf *pass*))))
 
 (defun tmp-dir ()
-  "Scratch directory for test fixtures. TMPDIR is always set on macOS but
-   not guaranteed on Linux (e.g. GitHub Actions runners), where an unguarded
-   (uiop:getenv \"TMPDIR\") would splice the literal string \"NIL\" into a
-   path instead of failing loudly."
-  (or (uiop:getenv "TMPDIR") "/tmp"))
+  "Scratch directory for test fixtures, as a string with no trailing
+separator.  UIOP:TEMPORARY-DIRECTORY is the portable answer: it honours
+TMPDIR/TMP where set and falls back to /tmp, and on Windows it is the real
+per-user temp directory.  (The old hardcoded \"/tmp\" fallback only worked on
+Windows when C:\\tmp happened to exist — a fresh box has no /tmp there, and
+every fixture write would fail.)"
+  (string-right-trim "/\\" (namestring (uiop:temporary-directory))))
+
+(defun stub-emit-program (line)
+  "A runnable stub program that prints LINE to stdout and exits 0, ignoring
+its arguments.  Stands in for an external tool whose contract is \"argv in,
+one line out\" — a clipboard helper, PowerShell.  Portable: a .cmd on
+Windows (SBCL's RUN-PROGRAM launches .cmd directly), a chmod+x /bin/sh
+script elsewhere.  Returns its path."
+  (if (evo.port:windows-p)
+      (let ((path (format nil "~a/evo-stub-~a.cmd" (tmp-dir) (gen-id 8))))
+        (with-open-file (out path :direction :output :if-exists :supersede
+                                  :external-format :latin-1)
+          ;; .cmd wants CR-LF; @echo off keeps the command itself off stdout.
+          (format out "@echo off~c~%echo ~a~c~%" #\Return line #\Return))
+        path)
+      (let ((path (format nil "~a/evo-stub-~a" (tmp-dir) (gen-id 8))))
+        (with-open-file (out path :direction :output :if-exists :supersede)
+          (format out "#!/bin/sh~%echo '~a'~%" line))
+        (uiop:run-program (list "/bin/chmod" "+x" path) :ignore-error-status t)
+        path)))
+
+(defun stub-copy-program ()
+  "A runnable stub program that copies its first argument to its second — a
+fake image downscaler / converter, exercising the RUN-CHILD path with a real
+external program.  Portable: a .cmd using COPY on Windows, /bin/cp elsewhere.
+Returns the program spec RUN-CHILD wants (an absolute path, or \"cp\").
+
+The Windows body normalizes the arguments to backslashes first: SBCL hands
+COPY the forward-slash namestrings it produces, and cmd's COPY builtin reports
+\"cannot find the file\" on those."
+  (if (evo.port:windows-p)
+      (let ((path (format nil "~a/evo-copy-~a.cmd" (tmp-dir) (gen-id 8))))
+        (with-open-file (out path :direction :output :if-exists :supersede
+                                  :external-format :latin-1)
+          ;; Explicit CR-LF, no ~<newline> FORMAT continuation (banned tree-wide).
+          (dolist (line '("@echo off"
+                          "setlocal"
+                          "set \"src=%~1\""
+                          "set \"dst=%~2\""
+                          "set \"src=%src:/=\\%\""
+                          "set \"dst=%dst:/=\\%\""
+                          "copy /y \"%src%\" \"%dst%\" >nul"
+                          "exit /b %ERRORLEVEL%"))
+            (write-string line out)
+            (write-char #\Return out)
+            (write-char #\Newline out)))
+        path)
+      "cp"))
 
 ;;; sexpr IO
 
@@ -2932,23 +2981,44 @@ a lint that can go blind without saying so is worse than none."
               (let ((evo.kernel::*executing-agent* agent))
                 (handler-case
                     (evo.kernel::tool-bash
-                     (list :command (format nil "touch ~s; sleep 5" (namestring marker))
+                     (list :command
+                           ;; Same shape either way: create the marker, then
+                           ;; sleep long enough to be interrupted.  The shell
+                           ;; is the platform's (PowerShell on Windows), so the
+                           ;; command must be spelled for it.
+                           #+evo-windows
+                           (format nil "New-Item -ItemType File -Force -Path '~a' > $null; Start-Sleep 5"
+                                   (namestring marker))
+                           #-evo-windows
+                           (format nil "touch ~s; sleep 5" (namestring marker))
                            :timeout 10))
                   (error (e)
                     (setf aborted (search "aborted" (format nil "~a" e)))))))
             :name "test-bash-abort")))
-    (loop repeat 100 until (probe-file marker) do (sleep 0.01))
+    ;; Wait long enough for the command to start: /bin/sh is instant, but the
+    ;; Windows shell is PowerShell, whose cold start (script AMSI-scanned, .NET
+    ;; JITed) can be several seconds — none of which is the abort latency this
+    ;; test measures.
+    (loop repeat (if (evo.port:windows-p) 3000 100)
+          until (probe-file marker) do (sleep 0.01))
     (check "bash command starts before interrupt" (probe-file marker))
     (check "bash process remains owned by its execution thread"
            (bt:with-lock-held ((evo.kernel::agent-lock agent))
              (null (evo.kernel::agent-abort-cleanups agent))))
-    (request-abort agent)
-    (bt:join-thread worker)
-    (ignore-errors (delete-file marker))
-    (let ((elapsed (/ (- (get-internal-real-time) start)
-                      internal-time-units-per-second)))
-      (check "bash observes abort without waiting for command completion"
-             (and aborted (< elapsed 3/2))))))
+    ;; Time the abort itself — from the request, not from launch — so the
+    ;; measurement isolates "did it interrupt the 5s sleep" from shell startup.
+    (let ((abort-start (get-internal-real-time)))
+      (request-abort agent)
+      (bt:join-thread worker)
+      (ignore-errors (delete-file marker))
+      (let ((elapsed (/ (- (get-internal-real-time) abort-start)
+                        internal-time-units-per-second)))
+        (declare (ignorable start))
+        ;; Comfortably under the 5s the command would have slept: the kill
+        ;; landed instead of the sleep being waited out.  taskkill /T is a
+        ;; touch slower than a SIGKILL, hence the wider Windows margin.
+        (check "bash observes abort without waiting for command completion"
+               (and aborted (< elapsed (if (evo.port:windows-p) 4 3/2))))))))
 
 ;;; Tool-call display: one line, key arguments only, and total — malformed
 ;;; arguments must degrade, never signal (this renders in the tick loop).
@@ -3786,7 +3856,10 @@ selection journals the provider, and every resolution point honours it."
     (let* ((small (image-fixture))
            (evo.media:*max-image-bytes* 100)
            (evo.media:*downscalers*
-             (list (list :keep-format "cp"
+             ;; A portable stand-in for sips/imagemagick: a real external
+             ;; program (cp, or a COPY .cmd on Windows) that produces the
+             ;; small output, exercising the RUN-CHILD path for real.
+             (list (list :keep-format (stub-copy-program)
                          (lambda (in out dim)
                            (declare (ignore in dim))
                            (list (namestring small) out))))))
@@ -3834,7 +3907,10 @@ selection journals the provider, and every resolution point honours it."
     ;; text/uri-list naming the file.  Without that fallback the gesture
     ;; that works from Finder finds nothing from Nautilus/Dolphin.  `printf`
     ;; stands in for the clipboard tool: same contract (argv in, bytes on
-    ;; stdout), no X server required.
+    ;; stdout), no X server required.  Guarded off Windows, which has no
+    ;; printf and reaches its clipboard through WINDOWS-CLIPBOARD-IMAGE (below)
+    ;; rather than this stdout-tool path.
+    #-evo-windows
     (let* ((dir (uiop:ensure-directory-pathname
                  (format nil "~a/evo-uri-~a/" (tmp-dir) (gen-id 6))))
            (text-file (format nil "~a/evo-notes-~a.txt" (tmp-dir) (gen-id 6))))
@@ -3865,6 +3941,44 @@ selection journals the provider, and every resolution point honours it."
                       "printf" (clipboard-offering (format nil "file://~a" text-file)) dir)))
         (check "clipboard: the pointed-at file is never consumed" (probe-file fixture)))
       (ignore-errors (uiop:delete-directory-tree dir :validate t :if-does-not-exist :ignore)))
+    ;; Native Windows: evo asks PowerShell for the clipboard and gets a native
+    ;; path back — `image:<temp.png>` for pixels PowerShell saved (a
+    ;; screenshot), `path:<file>` for a file copied in Explorer.  The stub
+    ;; speaks that same one-line contract, so WINDOWS-CLIPBOARD-IMAGE's own
+    ;; move/keep/miss logic is what is under test.
+    #+evo-windows
+    (let* ((scratch (uiop:ensure-directory-pathname
+                     (format nil "~a/evo-winclip-~a/" (tmp-dir) (gen-id 6))))
+           (shot (format nil "~a/evo-winshot-~a.png" (tmp-dir) (gen-id 6))))
+      (ensure-directories-exist scratch)
+      ;; Pixels PowerShell saved to a temp file: ours to move into the scratch
+      ;; dir the caller sweeps, and to remove from temp afterwards.
+      (write-file-octets shot (read-file-octets fixture))
+      (let ((evo.media::*wsl-powershell-programs*
+              (list (stub-emit-program (format nil "image:~a" shot)))))
+        (let ((got (evo.media::windows-clipboard-image scratch)))
+          (check "windows clipboard: saved pixels land in the scratch dir"
+                 (and got (evo.media::image-file-p got) (uiop:subpathp got scratch)))
+          (check "windows clipboard: the temp file is moved out, not left behind"
+                 (not (probe-file shot)))))
+      ;; A file copied in Explorer: only pointed at, so used in place and never
+      ;; deleted.
+      (write-file-octets shot (read-file-octets fixture))
+      (let ((evo.media::*wsl-powershell-programs*
+              (list (stub-emit-program (format nil "path:~a" shot)))))
+        (let ((got (evo.media::windows-clipboard-image scratch)))
+          (check "windows clipboard: an Explorer file copy is used in place"
+                 (equal got (probe-file shot)))
+          (check "windows clipboard: the user's own file survives" (probe-file shot))))
+      ;; A path to nothing is nothing — no attachment, no error.
+      (let ((evo.media::*wsl-powershell-programs*
+              (list (stub-emit-program
+                     (format nil "path:~a/evo-gone-~a.png" (tmp-dir) (gen-id 6))))))
+        (check "windows clipboard: a path that is not there is nothing"
+               (null (evo.media::windows-clipboard-image scratch))))
+      (ignore-errors (delete-file shot))
+      (ignore-errors (uiop:delete-directory-tree scratch :validate t
+                                                         :if-does-not-exist :ignore)))
     ;; A tool that is not installed is not an error: that is how the macOS
     ;; readers behave on Linux and the Linux readers on macOS.  (If xclip
     ;; happens to be installed here there is nothing to prove.)
@@ -3921,8 +4035,12 @@ selection journals the provider, and every resolution point honours it."
       (flet ((seed-clipboard-file ()
                (write-file-octets win-file (read-file-octets fixture)))
              (fake-powershell (line)
-               (write-file-string stub (format nil "#!/bin/sh~%echo '~a'~%" line))
-               (uiop:run-program (list "/bin/chmod" "+x" stub) :ignore-error-status t)
+               ;; A real stub with the real contract (argv in, one line out),
+               ;; runnable on this platform: a .cmd on Windows, a chmod+x
+               ;; /bin/sh script elsewhere.  The WSL logic under test is pure
+               ;; Lisp (path mapping via a bound *WSL-MOUNT-ROOT*), so it is
+               ;; worth exercising even when the host is Windows itself.
+               (setf stub (stub-emit-program line))
                stub))
         (let ((evo.media::*wsl-session* t)
               (evo.media::*wsl-mount-root* root)
@@ -3996,10 +4114,34 @@ selection journals the provider, and every resolution point honours it."
     (check "paste: a quoted path with spaces attaches"
            (equal (evo.media:pasted-image-paths (format nil "'~a'" (namestring spaced)))
                   (list spaced)))
+    ;; POSIX backslash-escaping of a space is a Unix convention; on Windows
+    ;; the backslash is a path separator, so the native gesture is a
+    ;; backslash-spelled path (an Explorer drag), which the Windows tokenizer
+    ;; keeps intact where the POSIX splitter would eat it.
+    #-evo-windows
     (check "paste: a backslash-escaped path attaches"
            (equal (evo.media:pasted-image-paths
                    (string-replace " " "\\ " (namestring spaced) :all t))
                   (list spaced)))
+    #+evo-windows
+    (check "paste: a native backslash Windows path attaches"
+           (equal (evo.media:pasted-image-paths
+                   (substitute #\\ #\/ (namestring fixture)))
+                  (list fixture)))
+    ;; Two space-free paths, one per line: the multi-token pass keeps the
+    ;; backslashes and resolves each.  (A path with a space would have to be
+    ;; quoted; that is the single-path case above.)
+    #+evo-windows
+    (let ((other (image-fixture)))
+      (check "paste: several native backslash paths attach in order"
+             (equal (evo.media:pasted-image-paths
+                     (format nil "~a~%~a"
+                             (substitute #\\ #\/ (namestring fixture))
+                             (substitute #\\ #\/ (namestring other))))
+                    (list fixture other))))
+    #+evo-windows
+    (check "paste: a native Windows path to nothing stays text"
+           (null (evo.media:pasted-image-paths "C:\\evo-nope\\gone.png")))
     (check "paste: a file:// url attaches"
            (equal (evo.media:pasted-image-paths (format nil "file://~a" (namestring fixture)))
                   (list fixture)))
@@ -4018,7 +4160,11 @@ selection journals the provider, and every resolution point honours it."
     ;; WSL: Explorer and Windows Terminal hand out Windows spelling for a
     ;; filesystem evo sees mounted elsewhere, and POSIX quoting rules would
     ;; eat the backslashes (`C:\Users\a\x.png` -> `C:Usersax.png`) long
-    ;; before anything got to look for the file.
+    ;; before anything got to look for the file.  Guarded off native Windows,
+    ;; where WINDOWS-P shadows the WSL mount mapping in TOKEN->PATH (a Windows
+    ;; path there names a real local file, not a mounted one) — the native
+    ;; backslash cases are covered above instead.
+    #-evo-windows
     (let* ((root (format nil "~a/evo-wslpaste-~a" (tmp-dir) (gen-id 6)))
            (win-dir (format nil "~a/c/Temp" root))
            (win-file (format nil "~a/shot.png" win-dir)))
