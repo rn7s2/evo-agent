@@ -71,7 +71,7 @@ Invoked plainly, `evo` is its own supervisor: the parent process re-spawns the
 same binary as a supervised child (inherited stdio, so the TUI just works),
 monitors a heartbeat file, restarts with `--resume` after crashes and hangs,
 and quarantines repeated boot failures with `--no-userspace`. Exit codes:
-`0` done · `1` error · `2` goal blocked · `3` budget-limited · `64` usage error.
+`0` done · `1` error · `2` goal blocked/paused · `3` budget-limited · `64` usage error.
 
 `--no-supervisor` (or `EVO_NO_SUPERVISOR=1`) runs the session in-process.
 
@@ -164,15 +164,21 @@ point.
   audit (prove it from current evidence, requirement by requirement), and a
   blocked audit (declare `:blocked` only after the same blocker recurs across
   three consecutive goal turns). Doing nothing is never completion.
-- **Budgets** run every turn over tokens and wall time. Exhaustion moves the
-  goal to `:budget-limited` and the next steering is a wrap-up template. A
+- **The agent owns the goal, not just its status.** `update_goal` lets the
+  model refine the live objective, attach or replace the `done_when` verifier,
+  pause the goal when it needs the user (which stops the idle loop), and resume
+  it — as well as complete/block it. The user doesn't drive the goal directly;
+  they state intent and the agent folds it in.
+- **Budgets** run every turn over tokens. Exhaustion moves the goal to
+  `:budget-limited` and the next steering is a wrap-up template. A
   session-level budget exists too.
 - **Verified completion**: when an objective is mechanically checkable, the
   agent writes a named zero-argument predicate into a userspace file, journals
-  it via `:load`, and references it by name on the `:goal` entry. On
-  `update_goal :complete`, the kernel runs the predicate — failure returns an
-  error and the goal stays active. The model's completion claim becomes a
-  checked assertion it wrote against itself.
+  it via `:load`, and references it by name on the `:goal` entry (at creation
+  or attached later with `update_goal done_when`). On `update_goal :complete`,
+  the kernel runs the predicate — failure returns an error and the goal stays
+  active. The model's completion claim becomes a checked assertion it wrote
+  against itself.
 - **Supervisor**: the `evo` binary invoked plainly *is* the supervisor parent.
   It re-spawns itself as the session child, monitors process exit and a
   heartbeat file, restarts with `--resume`, and on repeated boot failures
