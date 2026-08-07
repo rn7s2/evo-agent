@@ -170,9 +170,9 @@ function Invoke-Test {
 }
 
 # Live console tests: drive the real console (CONIN$/CONOUT$) to prove the
-# Windows-only input and output paths.  They need a real console attached, so
-# they run here but not in CI (which has no interactive console).  See
-# docs/windows.md.
+# Windows-only input and output paths — they inject real key events and read
+# the glyphs back out of the screen buffer.  They need a real console
+# attached, so they run here but not in CI (which has no interactive console).
 function Invoke-ConsoleTest {
     foreach ($script in @('tests\windows-input-live.lisp',
                           'tests\windows-console-live.lisp')) {

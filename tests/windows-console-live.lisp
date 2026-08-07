@@ -122,7 +122,8 @@
             (string= back glyphs))))
     ;; A CJK ideograph is double-width (two cells); the console keeps the code
     ;; point in the lead cell.  Proves the wide glyph the TUI paints is decoded,
-    ;; not mojibake'd — the failure mode docs/windows.md warns about.  Read a
+    ;; not mojibake'd (the failure mode where a console stream forced to :utf-8
+    ;; hands the wide console API bytes it reads as UTF-16).  Read a
     ;; span of cells and assert both ideographs are present (their exact column
     ;; depends on the console's double-width cell accounting).
     (let ((cjk (map 'string #'code-char '(#x4E2D #x6587)))) ; 中 文
