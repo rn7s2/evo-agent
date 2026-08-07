@@ -425,25 +425,21 @@ Requirements and caveats:
   controlling terminal so a `sudo` prompt fails fast instead of hanging. A
   Windows console process that wants to prompt opens its own window instead,
   so there is nothing to detach from.
-- Untested on real hardware so far: CI builds `evo.exe` and checks it starts,
-  and no test asserts anything about running it. Treat the TUI on Windows as
-  new, and report what breaks.
-- [docs/windows.md](docs/windows.md) is the field manual: what is settled
-  about handles, encodings and console input (with the measurements), how to
-  use the two instruments below, and what is still unverified on real
-  hardware. Read it before theorising about a Windows symptom.
+- Verified on real hardware, not just built: the console input path (every
+  key in the virtual-key table — arrows, home/end/delete/insert/pgup/pgdn —
+  plus Enter-as-CR, alt, CJK and surrogate pairs), the output path (box
+  drawing and double-width CJK glyphs), terminal size, raw-mode set/restore,
+  and the supervisor's crash → restart → quarantine loop.
+- `.\make.ps1 console-test` runs the proofs: `tests/windows-input-live.lisp`
+  and `tests/windows-console-live.lisp` open `CONIN$`/`CONOUT$`, inject real
+  `INPUT_RECORD`s with `WriteConsoleInputW`, and read glyphs back with
+  `ReadConsoleOutputCharacterW`, asserting the exact bytes evo produces. They
+  need a real console, so they run here and not in CI (which stays build-only
+  on Windows).
 - `EVO_INPUT_TRACE=<file>` makes the TUI write, every tick, the bytes that
   arrived, the key events parsed from them, and the events left after paste
-  coalescing. It is how the Enter bug above was found from another continent:
-  the trace showed no byte at all for the key. Off unless set.
-- `tests/windows-probe.lisp` is for exactly that: a self-contained SBCL script
-  (no evo, no quicklisp) that answers what a Unix box cannot be asked — which
-  descriptor the standard streams use, what `GetStdHandle` returns, which of
-  those a fresh fd-stream can actually write to, whether a spawned child
-  inherits the console. Run it both ways, since the answers may differ: in a
-  console with `sbcl --script`, and as `%USERPROFILE%\.evo\extensions\000-probe.lisp`
-  so it runs inside the supervised child. Both append to
-  `%USERPROFILE%\evo-windows-probe.txt`.
+  coalescing. Off unless set — the first thing to reach for on an input
+  symptom.
 
 ## Layout
 

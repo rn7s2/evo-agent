@@ -2,8 +2,8 @@
 ;;;; REAL Windows console, by injecting genuine INPUT_RECORDs with
 ;;;; WriteConsoleInputW and asserting the exact UTF-8 bytes evo produces.
 ;;;;
-;;;; This is the missing proof for the virtual-key table that docs/windows.md
-;;;; calls "written blind": arrows, home/end/delete/pgup/pgdn, alt, CR-Enter,
+;;;; This is the proof for the virtual-key table that was written blind during
+;;;; the remote bring-up: arrows, home/end/delete/pgup/pgdn, alt, CR-Enter,
 ;;;; surrogate pairs, repeat counts and ignored key-up events.  Run under the
 ;;;; built image's own environment:
 ;;;;
