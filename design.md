@@ -335,14 +335,18 @@ A goal is journal state; the current goal is a fold over `:goal` entries.
 
 ```lisp
 (:goal-id "g-01" :objective "..." :status :active
- :token-budget 500000 :tokens-used 123456 :time-used-seconds 840
+ :token-budget 500000 :tokens-used 123456
  :done-when nil)          ; name of an agent-authored userspace predicate (D15)
 ```
 
 Statuses are `:active`, `:paused`, `:blocked`, `:budget-limited`, `:complete`.
-The model may transition only to `:complete` or `:blocked`, through
-`update_goal`, under the audit rules below. Pause, resume, and budget
-transitions belong to the user and the system.
+Through `update_goal` the model may transition to `:complete` or `:blocked`
+(under the audit rules below), `:paused` (stop the idle loop when it needs the
+user) and back to `:active` (resume), and may **refine** the live goal —
+rewrite its `:objective` or attach/replace its `:done-when` verifier. The user
+does not drive the goal directly; they express intent and the agent folds it
+in (this is by design — the same tool surface serves the human's requests and
+the agent's own judgement). Budget transitions belong to the system.
 
 ### 8.2 Driver
 
@@ -358,12 +362,18 @@ transitions belong to the user and the system.
   audit** (declare `:blocked` only after the same blocker recurs across three
   consecutive goal turns).
 - Doing nothing is not completion. An idle active goal is always re-steered.
-  Termination is explicit: the model calls `update_goal`, a budget trips, or
-  the user pauses.
-- **Budget accounting** runs every turn over tokens and wall time. Exhaustion
-  moves the goal to `:budget-limited`, and the next steering is a wrap-up
-  template — summarize progress, remaining work, next step, start nothing new.
-  This doubles as the runaway-cost brake; a session-level budget exists too.
+  Termination is explicit: the model calls `update_goal` (complete/blocked), a
+  budget trips, or the goal is paused.
+- **Pause/resume**: `update_goal :paused` stops the idle-continuation loop —
+  the settled hook only re-steers an `:active` goal, so a paused goal settles
+  and waits. It does not auto-resume on session restart either (resumption
+  keys on `:active`). The model pauses when it genuinely needs the user before
+  proceeding, then resumes with `update_goal :active`. Headless, a paused goal
+  exits like a blocked one (code 2, human needed, no auto-restart).
+- **Budget accounting** runs every turn over tokens. Exhaustion moves the goal
+  to `:budget-limited`, and the next steering is a wrap-up template —
+  summarize progress, remaining work, next step, start nothing new. This
+  doubles as the runaway-cost brake; a session-level budget exists too.
 - A turn error moves the goal to `:blocked`, which is also the supervisor
   hook: on restart, a goal blocked by `turn-error` rather than by model
   decision is eligible for automatic resumption (§14).
@@ -371,8 +381,10 @@ transitions belong to the user and the system.
 ### 8.3 Model-facing tools
 
 `get_goal`; `create_goal`, which is for explicit user requests only and
-refuses while an unfinished goal exists; and `update_goal`, which sets status
-only, with the audit language carried in the tool description itself.
+refuses while an unfinished goal exists; and `update_goal`, which changes
+status (`complete`/`blocked`/`paused`/`active`) **and** refines the live goal
+(`objective` text, `done_when` verifier) — at least one field required, the
+audit language carried in the tool description itself.
 
 ### 8.4 Verified completion
 
@@ -381,8 +393,11 @@ state objectives in prose; when an objective is mechanically checkable the
 agent formalizes it — writing a *named* zero-argument predicate into a
 userspace file, journaled via `:load` so it survives restart (closures do not
 round-trip through sexprs) — and references it by name on the `:goal` entry.
-The goal-creation flow steers the agent to derive the predicate up front, at
-goal start, not at completion time.
+The continuation prompt steers the agent to derive the predicate up front, at
+goal start, not at completion time, and nags only while none is attached. A
+predicate can be attached at creation (`create_goal done_when`) or added to a
+live goal later (`update_goal done_when`) — the latter matters because a goal
+the user set with `/goal` has no predicate until the agent writes one.
 
 `update_goal :complete` is then not taken at its word: the kernel runs the
 predicate. Failure returns an error carrying the predicate's output and the

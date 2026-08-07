@@ -30,7 +30,7 @@ Usage:
 
 evo supervises itself: crashes and hangs restart the session with --resume;
 a goal that was active picks itself back up.  Exit codes: 0 done, 1 error,
-2 goal blocked, 3 budget-limited, 64 usage error.
+2 goal blocked or paused, 3 budget-limited, 64 usage error.
 
 Config: ~/.evo/init.lisp, then <cwd>/.evo/init.lisp, then extensions, then
 ~/.evo/post-init.lisp, then <cwd>/.evo/post-init.lisp (Lisp, evaluated in order;
@@ -307,11 +307,14 @@ prompt without the image the user asked for is worse than not running."
           (format *error-output* "goal ~a: ~a~%"
                   (pget goal :goal-id) (string-downcase (pget goal :status))))
         ;; Exit codes are supervisor protocol: 0 done, 1 error
-        ;; (restart-eligible), 2 blocked by model, 3 budget-limited —
-        ;; 2 and 3 need a human, the supervisor must NOT restart them.
+        ;; (restart-eligible), 2 blocked/paused by model, 3 budget-limited —
+        ;; 2 and 3 need a human, the supervisor must NOT restart them.  A goal
+        ;; the model paused wants the user before it proceeds: same as blocked,
+        ;; don't auto-restart — the human resumes it later with --resume.
         (cond ((and goal (eq (pget goal :status) :complete)) 0)
               ((and goal (eq (pget goal :status) :blocked))
                (if (equal (pget goal :blocked-reason) "turn-error") 1 2))
+              ((and goal (eq (pget goal :status) :paused)) 2)
               ((and goal (eq (pget goal :status) :budget-limited)) 3)
               ((eq outcome :stop) 0)
               (t 1))))))

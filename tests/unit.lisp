@@ -2300,7 +2300,80 @@ a lint that can go blind without saying so is worse than none."
              (search "no limit" (goal-continuation-message goal 1234)))
       (check "continuation with budget shows remaining"
              (search "(800 remaining)"
-                     (goal-continuation-message (pput goal :token-budget 2034) 1234))))))
+                     (goal-continuation-message (pput goal :token-budget 2034) 1234))))
+    ;; The continuation nudges toward a done-when verifier only while none is
+    ;; attached — once set, it must stop nagging.
+    (let ((goal (current-goal agent)))
+      (check "continuation nudges when no done-when"
+             (search "No done-when verifier" (goal-continuation-message goal 10)))
+      (check "continuation stops nudging once done-when set"
+             (not (search "No done-when verifier"
+                          (goal-continuation-message (pput goal :done-when "p") 10)))))))
+
+(defvar *test-goal-done* nil
+  "Flip switch read by the userspace done-when predicate in test-goal-tools.")
+
+(defun test-goal-tools ()
+  "update_goal: refine objective/done-when, pause/resume, and the guards +
+completion gating around all of it."
+  (let* ((dir (uiop:ensure-directory-pathname
+               (format nil "~a/evo-goaltools-~a/" (tmp-dir) (gen-id))))
+         (journal (progn (ensure-directories-exist dir) (make-session-journal dir)))
+         (agent (make-agent :journal journal))
+         (evo:*agent* agent))
+    ;; A userspace verifier whose result this test controls.
+    (eval `(defun ,(intern "TEST-GOAL-DONE-P" :evo.user) ()
+             evo.tests::*test-goal-done*))
+    (create-goal-entry agent "ship the feature")
+    (let ((id (pget (current-goal agent) :goal-id)))
+      ;; Refine objective text — same goal, new objective.
+      (evo.kernel::tool-update-goal '(:objective "ship the feature and document it"))
+      (check "objective refined"
+             (equal (pget (current-goal agent) :objective)
+                    "ship the feature and document it"))
+      (check "refine keeps the same goal-id"
+             (equal id (pget (current-goal agent) :goal-id))))
+    ;; Empty update is refused.
+    (check-signals "update_goal with no fields errors"
+                   (evo.kernel::tool-update-goal '()))
+    ;; Attach a done-when verifier after creation (goal set via /goal has none).
+    (evo.kernel::tool-update-goal '(:done-when "test-goal-done-p"))
+    (check "done-when attached to live goal"
+           (equal (pget (current-goal agent) :done-when) "test-goal-done-p"))
+    ;; Pause: reachable, records its reason, guards double-pause.
+    (evo.kernel::tool-update-goal '(:status "paused" :reason "need the user"))
+    (check "goal paused" (eq (pget (current-goal agent) :status) :paused))
+    (check "pause reason recorded"
+           (equal (pget (current-goal agent) :pause-reason) "need the user"))
+    (check-signals "cannot pause an already-paused goal"
+                   (evo.kernel::tool-update-goal '(:status "paused")))
+    ;; The idle-continuation hook must NOT re-steer a paused goal.
+    (check "settled hook re-steers nothing while paused"
+           (null (evo.kernel::goal-settled-hook agent :stop)))
+    (check "no steering queued while paused"
+           (not (evo.kernel:steering-pending-p agent)))
+    ;; Resume, then guard double-resume.
+    (evo.kernel::tool-update-goal '(:status "active"))
+    (check "goal resumed to active" (eq (pget (current-goal agent) :status) :active))
+    (check-signals "cannot resume an already-active goal"
+                   (evo.kernel::tool-update-goal '(:status "active")))
+    ;; A resumed active goal IS re-steered by the hook.
+    (check "settled hook re-steers an active goal"
+           (evo.kernel::goal-settled-hook agent :stop))
+    (evo.kernel::drain-steering agent)   ; clear the queued continuation
+    ;; Completion is gated by the verifier.
+    (setf *test-goal-done* nil)
+    (check-signals "complete rejected while done-when fails"
+                   (evo.kernel::tool-update-goal '(:status "complete")))
+    (check "goal stays active after a rejected completion"
+           (eq (pget (current-goal agent) :status) :active))
+    (setf *test-goal-done* t)
+    (evo.kernel::tool-update-goal '(:status "complete"))
+    (check "goal complete once done-when passes"
+           (eq (pget (current-goal agent) :status) :complete))
+    ;; A finished goal can no longer be refined.
+    (check-signals "cannot refine a completed goal"
+                   (evo.kernel::tool-update-goal '(:objective "too late")))))
 
 ;;; Templates + skills
 
@@ -4639,6 +4712,7 @@ five identical restarts, each reporting a different error than the real one."
     (test-input-history)
     (test-line-endings)
     (test-goal-budget)
+    (test-goal-tools)
     (test-templates)
     (test-compaction)
     (test-lore)

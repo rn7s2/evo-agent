@@ -96,7 +96,7 @@ Returns (values exit-code hung-p)."
             (setf first nil)
             (case code
               (0 (return 0))
-              (2 (format *error-output* "~&evo: goal blocked by the model — human needed~%")
+              (2 (format *error-output* "~&evo: goal blocked or paused by the model — human needed~%")
                  (return 2))
               (3 (format *error-output* "~&evo: goal budget-limited — human needed~%")
                  (return 3))

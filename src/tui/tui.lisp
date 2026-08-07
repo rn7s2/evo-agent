@@ -308,7 +308,7 @@ a file onto the terminal arrives here as its escaped path."
     ("write" . ("path"))
     ("edit" . ("path" "old_string"))
     ("create_goal" . ("objective"))
-    ("update_goal" . ("status"))
+    ("update_goal" . ("status" "objective"))
     ("todo" . ("items"))
     ("load_extension" . ("path")))
   "Alist mapping tool name -> list of key argument names to show.")
@@ -451,7 +451,7 @@ inside the TUI tick loop and on session resume, so malformed ARGUMENTS
      (setf (tui-md tui) (make-md))
      (refresh-goal tui)
      (let ((goal (tui-goal tui)))
-       (when (and goal (member (pget goal :status) '(:complete :blocked :budget-limited)))
+       (when (and goal (member (pget goal :status) '(:complete :blocked :budget-limited :paused)))
          (scroll tui (yellow (format nil "◆ goal ~a: ~a"
                                      (pget goal :goal-id)
                                      (string-downcase (pget goal :status)))))))
