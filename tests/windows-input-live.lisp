@@ -28,6 +28,9 @@
   (written (* sb-alien:unsigned-int)))
 (sb-alien:define-alien-routine ("FlushConsoleInputBuffer" %flush-console-input) sb-alien:int
   (h sb-alien:system-area-pointer))
+(sb-alien:define-alien-routine ("PeekConsoleInputW" %peek-console-input) sb-alien:int
+  (h sb-alien:system-area-pointer) (buf (* t)) (n sb-alien:unsigned-int)
+  (got (* sb-alien:unsigned-int)))
 
 (defun open-conin ()
   "A read/write handle on the console input buffer, independent of stdin."
@@ -56,6 +59,26 @@ Writes each as a 20-byte INPUT_RECORD (KEY_EVENT) into HANDLE's buffer."
                  (setf (sb-sys:sap-ref-32 sap (+ base 16)) (getf rec :state 0)))
         (%write-console-input handle (sb-alien:cast (sb-alien:addr buf) (* t))
                               n (sb-alien:addr written))))))
+
+(defun peek-first-key-repeat (handle)
+  "The wRepeatCount the console actually stored for the first pending key-DOWN
+event, read without consuming it (PeekConsoleInput).  NIL when no key-down is
+pending.  Lets a test assert what DRAIN does with the count the console kept,
+instead of assuming whether an injected repeat survives (a real console keeps
+it; some redirected harnesses normalize it to 1)."
+  (sb-alien:with-alien ((buf (sb-alien:array sb-alien:unsigned-char 320))
+                        (got sb-alien:unsigned-int))
+    (let ((sap (sb-alien:alien-sap buf)))
+      (dotimes (i 320) (setf (sb-sys:sap-ref-8 sap i) 0))
+      (setf got 0)
+      (when (and (/= 0 (%peek-console-input handle (sb-alien:cast (sb-alien:addr buf) (* t))
+                                            16 (sb-alien:addr got)))
+                 (plusp got))
+        (loop for i below got
+              for base = (* i 20)
+              when (and (= (sb-sys:sap-ref-16 sap base) 1)          ; KEY_EVENT
+                        (plusp (sb-sys:sap-ref-32 sap (+ base 4)))) ; bKeyDown
+                do (return (sb-sys:sap-ref-16 sap (+ base 8))))))))  ; wRepeatCount
 
 (defvar *conin* (open-conin))
 (defvar *pass* 0)
@@ -115,11 +138,28 @@ Writes each as a 20-byte INPUT_RECORD (KEY_EVENT) into HANDLE's buffer."
        '((:uchar #xD83D) (:uchar #xDE00))                '(240 159 152 128))
 ;; Key-up events are ignored; only key-down produces bytes.
 (check "key-up ignored"  '((:down 0 :uchar 97))          '())
-;; Repeat count: DRAIN replays the key (max 1 repeat) times.  A held key on
-;; real hardware raises wRepeatCount; WriteConsoleInput normalizes an injected
-;; count back to 1, so the most this path can assert is the one-shot case.
-(check "repeat (console normalizes injected count to 1)"
-       '((:uchar 97 :repeat 3))                          '(97))
+;; Repeat count: DRAIN replays the key wRepeatCount times (its (max 1 repeat)
+;; loop).  A held key on real hardware raises wRepeatCount; we inject 3 but do
+;; not assume it survives — a real console keeps 3, a redirected harness may
+;; normalize it to 1.  Read back what the console actually stored and assert
+;; DRAIN produced exactly that many copies, so the check exercises the repeat
+;; loop wherever the count is preserved and still holds where it is not.
+(let ()
+  (%flush-console-input *conin*)
+  (setf *pending-surrogate* nil)
+  (inject-keys *conin* '((:uchar 97 :repeat 3)))
+  (let* ((stored (or (peek-first-key-repeat *conin*) 1))
+         (expected (make-list stored :initial-element 97))
+         (v (make-array 0 :element-type '(unsigned-byte 8) :adjustable t :fill-pointer t)))
+    (drain-console-input *conin* v)
+    (let ((got (coerce v 'list)))
+      (if (equal got expected)
+          (progn (incf *pass*)
+                 (format t "  ok   repeat (console kept count ~a) -> ~a~%" stored got))
+          (progn (incf *fail*)
+                 (format t "  FAIL repeat (console kept count ~a)~%       expected ~a~%       got      ~a~%"
+                         stored expected got)))
+      (finish-output))))
 ;; A short burst in one drain, in order.
 (check "burst h i + enter"
        '((:uchar 104) (:uchar 105) (:uchar 13 :vk #x0D)) '(104 105 13))
