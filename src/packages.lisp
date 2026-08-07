@@ -49,7 +49,7 @@
            #:sniff-media-type #:file-media-type #:image-file-p #:media-type-extension
            #:make-image-block #:image-block-p #:image-summary #:format-bytes
            #:attach-image-file #:clipboard-image
-           #:pasted-image-paths #:split-shell-tokens))
+           #:pasted-image-paths #:split-shell-tokens #:split-windows-tokens))
 
 (defpackage :evo.journal
   (:use :cl :evo.util)

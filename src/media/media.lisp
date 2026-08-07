@@ -618,6 +618,35 @@ Returns (values BLOCK NIL) or (values NIL REASON)."
       (finish))
     (nreverse tokens)))
 
+(defun split-windows-tokens (line)
+  "Split LINE into whitespace-separated tokens the way Windows does, honouring
+double quotes but NOT treating backslash as an escape: on Windows (and for a
+Windows path handed to a WSL session) the backslash is the path separator, so
+the POSIX splitter would eat it and turn `C:\\Users\\a\\x.png` into
+`C:Usersax.png`.  Single quotes are ordinary characters here, as they are to
+cmd and PowerShell."
+  (let ((tokens nil) (current (make-string-output-stream)) (any nil)
+        (in-quote nil) (i 0) (n (length line)))
+    (flet ((finish ()
+             (let ((token (get-output-stream-string current)))
+               (when (or any (plusp (length token)))
+                 (push token tokens))
+               (setf any nil))))
+      (loop while (< i n)
+            for char = (char line i)
+            do (cond
+                 ((char= char #\")
+                  (setf in-quote (not in-quote) any t)
+                  (incf i))
+                 ((and (not in-quote) (member char '(#\Space #\Tab)))
+                  (finish)
+                  (incf i))
+                 (t (write-char char current)
+                    (setf any t)
+                    (incf i))))
+      (finish))
+    (nreverse tokens)))
+
 (defun percent-decode (string)
   (with-output-to-string (out)
     (loop with i = 0
@@ -673,25 +702,31 @@ all."
 (defun pasted-image-paths (text)
   "The image files TEXT names, if TEXT is nothing but paths to images.
 NIL for ordinary text — including text that merely mentions an image path."
-  ;; A Windows path must skip the shell splitter: POSIX quoting rules read
-  ;; `C:\Users\a\shot.png` as an escape sequence and hand back
-  ;; `C:Usersashot.png`.  It is one token, backslashes and all.
-  (let ((windows (strip-quotes (string-trim '(#\Space #\Tab #\Newline #\Return) text))))
-    (when (windows-path-p windows)
-      (let ((file (let ((path (token->path windows)))
-                    (and path (ignore-errors (probe-file path))))))
-        (return-from pasted-image-paths
-          (and file (image-file-p file) (list file))))))
-  (let ((tokens (loop for line in (uiop:split-string (string-trim
-                                                      '(#\Space #\Tab #\Newline #\Return)
-                                                      text)
-                                                     :separator '(#\Newline))
-                      append (split-shell-tokens (string-trim '(#\Return) line)))))
-    (when (and tokens (<= (length tokens) 16))
-      (let ((paths (loop for token in tokens
-                         for path = (token->path token)
-                         for file = (and path (ignore-errors (probe-file path)))
-                         unless (and file (image-file-p file))
-                           do (return nil)
-                         collect file)))
-        paths))))
+  (let* ((trimmed (string-trim '(#\Space #\Tab #\Newline #\Return) text))
+         ;; On Windows (and for a Windows path in a WSL session) the tokenizer
+         ;; must keep backslashes: they are path separators, not escapes.
+         (windows-mode (or (evo.port:windows-p) (wsl-p))))
+    ;; A single quoted-or-bare Windows path may hold spaces and backslashes
+    ;; and must skip the splitter entirely — POSIX quoting reads
+    ;; `C:\Users\a\shot.png` as escapes and hands back `C:Usersashot.png`, and
+    ;; the splitter would break an unquoted path at its spaces.  Only claim it
+    ;; when it actually resolves to an image; otherwise fall through, so
+    ;; several paths (or a path plus prose) still get the multi-token pass.
+    (let ((windows (strip-quotes trimmed)))
+      (when (windows-path-p windows)
+        (let* ((path (token->path windows))
+               (file (and path (ignore-errors (probe-file path)))))
+          (when (and file (image-file-p file))
+            (return-from pasted-image-paths (list file))))))
+    (let ((tokens (loop for line in (uiop:split-string trimmed :separator '(#\Newline))
+                        append (funcall (if windows-mode
+                                            #'split-windows-tokens
+                                            #'split-shell-tokens)
+                                        (string-trim '(#\Return) line)))))
+      (when (and tokens (<= (length tokens) 16))
+        (loop for token in tokens
+              for path = (token->path token)
+              for file = (and path (ignore-errors (probe-file path)))
+              unless (and file (image-file-p file))
+                do (return nil)
+              collect file)))))
