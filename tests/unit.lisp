@@ -2184,9 +2184,20 @@ Uses the reader rather than a regexp, so comments, character literals and
 escapes are somebody else's problem.  Symbols land in a throwaway package.
 A file the reader chokes on is reported as UNREADABLE, not quietly passed:
 a lint that can go blind without saying so is worse than none."
-  (let ((files (loop for pattern in '("src/*.lisp" "src/*/*.lisp"
-                                      "extensions/*.lisp" "tests/*.lisp")
-                     append (directory (merge-pathnames pattern (uiop:getcwd)))))
+  (let ((files (remove-if
+                ;; The Windows console instruments (tests/windows-*.lisp) are
+                ;; standalone SBCL-only diagnostics that call sb-alien/sb-sys
+                ;; directly — they cannot even be READ on ECL (no such
+                ;; packages), and being run by `sbcl --script` / `make.ps1
+                ;; console-test` they are not portable suite source.  The
+                ;; portability lint is for the tree that must read everywhere.
+                (lambda (f)
+                  (let ((name (file-namestring f)))
+                    (and (>= (length name) 8)
+                         (string= "windows-" (subseq name 0 8)))))
+                (loop for pattern in '("src/*.lisp" "src/*/*.lisp"
+                                       "extensions/*.lisp" "tests/*.lisp")
+                      append (directory (merge-pathnames pattern (uiop:getcwd))))))
         (offenders nil) (unreadable nil) (scanned 0)
         (scratch (or (find-package :evo.tests.scan)
                      (make-package :evo.tests.scan :use '(:cl :evo)))))
