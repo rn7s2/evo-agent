@@ -10,6 +10,7 @@
   /help                this list
   /goal [objective]    show, create, or refine the goal
   /todo                toggle the todo panel
+  /theme [dark|light]  switch the light/dark theme (math colours follow it)
   /model [id]          pick the model from a list, or set it directly
   /thinking [level]    low·medium·high·xhigh·max (changing it mid-session
                        drops the provider prompt cache)
@@ -369,6 +370,24 @@ lists only global (every project) lore — mirroring /memory vs /global-memory."
                                     label args)))))
     t))
 
+(defun theme-command (tui args)
+  "Set or toggle the TUI light/dark theme.  The theme is the shared :theme
+setting (also settable in init.lisp); extensions read it — the LaTeX-math
+renderer, for one, picks its glyph colour from it.  Applies to new output;
+already-painted scrollback keeps its colours."
+  (let* ((cur (setting :theme :dark))
+         (new (cond ((string-equal args "light") :light)
+                    ((string-equal args "dark") :dark)
+                    ((or (zerop (length args)) (string-equal args "toggle"))
+                     (if (eq cur :light) :dark :light))
+                    (t nil))))
+    (cond
+      (new (set-setting :theme new)
+           (setf (tui-dirty tui) t)
+           (scroll tui (dim (format nil "theme → ~(~a~) (applies to new output)" new))))
+      (t (scroll tui (dim "usage: /theme [dark | light | toggle]"))))
+    t))
+
 (defun builtin-command (tui name args)
   (let ((agent (tui-agent tui)))
     (macrolet ((cmd (&rest names) `(member name ',names :test #'string-equal)))
@@ -380,6 +399,7 @@ lists only global (every project) lore — mirroring /memory vs /global-memory."
          (setf (tui-todo-visible tui) (not (tui-todo-visible tui))
                (tui-dirty tui) t)
          t)
+        ((cmd "theme") (theme-command tui args))
         ((cmd "model")
          (if (zerop (length args))
              (model-select-command tui)

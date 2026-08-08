@@ -51,18 +51,64 @@ call per tick, and only on the platforms that need it."
 
 ;; Frequently used sequences.
 (defun cursor-up (n) (if (plusp n) (esc n "A") ""))
+(defun cursor-down (n) (if (plusp n) (esc n "B") ""))
 (defun cursor-right (n) (if (plusp n) (esc n "C") ""))
+(defun save-cursor () (format nil "~c7" #\Escape))     ; DECSC
+(defun restore-cursor () (format nil "~c8" #\Escape))  ; DECRC
 (defun clear-below () (esc "0J"))
 (defun hide-cursor () (esc "?25l"))
 (defun show-cursor () (esc "?25h"))
 (defun sgr (&rest codes) (format nil "~c[~{~a~^;~}m" #\Escape codes))
-(defun dim (s) (concatenate 'string (sgr 2) s (sgr 0)))
+
+;;; Theme.  The TUI carries a light/dark theme — the shared :theme setting the
+;;; /theme command toggles, also settable in init.lisp — and every semantic
+;;; colour below resolves through it, so switching theme recolours separators,
+;;; tool calls, errors, the goal line, list bullets, inline code and every
+;;; other styled element at the next repaint (already-painted scrollback keeps
+;;; its colours, like any terminal history).  DARK is exactly the historical
+;;; palette (plain ANSI), so nothing changes until you pick LIGHT; LIGHT uses
+;;; 24-bit colours legible on a light background where the terminal reports
+;;; truecolor, and falls back to the same ANSI where it does not.  Attributes
+;;; (bold, italic, underline, reverse) are theme-independent and stay raw.
+
+(defvar *truecolor*
+  (let ((c (uiop:getenv "COLORTERM")))
+    (and c (or (search "truecolor" c) (search "24bit" c)) t))
+  "T when the terminal advertises 24-bit colour (COLORTERM).")
+
+(defun current-theme ()
+  "The active TUI theme: :LIGHT, or :DARK (the default)."
+  (if (eq (setting :theme :dark) :light) :light :dark))
+
+(defparameter *legacy-role-sgr*
+  '((:muted . "2") (:accent . "36") (:error . "31")
+    (:success . "32") (:warning . "33") (:code . "33"))
+  "Plain-ANSI SGR per semantic role — the historical (dark) palette, and the
+fallback wherever the terminal has no truecolor.")
+
+(defparameter *light-role-sgr*
+  '((:muted . "38;2;110;110;110") (:accent . "38;2;12;122;132")
+    (:error . "38;2;192;57;43") (:success . "38;2;30;126;52")
+    (:warning . "38;2;155;120;10") (:code . "38;2;150;95;20"))
+  "24-bit SGR per role tuned to read on a light background.")
+
+(defun role-sgr (role)
+  "The SGR parameter string for semantic ROLE under the active theme."
+  (or (and (eq (current-theme) :light) *truecolor*
+           (cdr (assoc role *light-role-sgr*)))
+      (cdr (assoc role *legacy-role-sgr*))))
+
+(defun sgr-role (role) (format nil "~c[~am" #\Escape (role-sgr role)))
+(defun paint-role (role s)
+  (concatenate 'string (sgr-role role) s (sgr 0)))
+
 (defun bold (s) (concatenate 'string (sgr 1) s (sgr 0)))
-(defun cyan (s) (concatenate 'string (sgr 36) s (sgr 0)))
-(defun red (s) (concatenate 'string (sgr 31) s (sgr 0)))
-(defun green (s) (concatenate 'string (sgr 32) s (sgr 0)))
-(defun yellow (s) (concatenate 'string (sgr 33) s (sgr 0)))
 (defun reverse-video (s) (concatenate 'string (sgr 7) s (sgr 0)))
+(defun dim (s) (paint-role :muted s))
+(defun cyan (s) (paint-role :accent s))
+(defun red (s) (paint-role :error s))
+(defun green (s) (paint-role :success s))
+(defun yellow (s) (paint-role :warning s))
 
 ;;; Key reporting: ask for more than ASCII, and take back what you ask for.
 ;;;

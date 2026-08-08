@@ -131,6 +131,42 @@
 ;; (evo:set-setting :goal-token-budget 500000)
 ;; (evo:set-setting :compact-reserve 16000)
 ;; (evo:set-setting :compact-keep-recent 20000)
+;; (evo:set-setting :language "English")      ; response-language hint
+
+;;; Theme.  :dark (the default) or :light — the /theme command toggles it
+;;; live.  It must MATCH your terminal's background: evo paints colours legible
+;;; for that background (and the LaTeX-math renderer, which reads :theme, sets
+;;; its glyph colour from it), so :light on a dark terminal is unreadable.
+;; (evo:set-setting :theme :light)
+;; A conditional default — light only in the VS Code integrated terminal:
+;; (when (string-equal (or (uiop:getenv "TERM_PROGRAM") "") "vscode")
+;;   (evo:set-setting :theme :light))
+
+;;; Math rendering (extensions/300-latex-math.lisp).  LaTeX in agent output —
+;;; $…$, $$…$$, \(…\), \[…\] — renders as a real typeset image inline, with
+;;; inline formulas baseline-aligned with the prose around them.  Needs a
+;;; LaTeX toolchain (latex + dvipng) and a kitty-graphics terminal (VS Code's
+;;; integrated terminal with terminal.integrated.enableImages + GPU
+;;; acceleration on, or kitty).  Absent the toolchain it stays off and shows
+;;; source.  Prerequisites and calibration: docs/math.md.  The three
+;;; geometry settings are per-setup, in CSS pixels — run
+;;; tests/math-calibrate.py in your terminal to measure them:
+;;
+;; (evo:set-setting :math-cell-px 18)            ; terminal row height, CSS px
+;; (evo:set-setting :math-cell-w-px 9)           ; terminal col width, CSS px
+;; (evo:set-setting :math-dpi 110)               ; 110 ≈ prose size; 220 = 2x
+;;
+;;; The rest has working defaults:
+;;
+;; (evo:set-setting :math t)                     ; master on/off (default t)
+;; (evo:set-setting :math-baseline-frac 0.8)     ; baseline position in a row
+;; (evo:set-setting :math-snap-px 2)             ; nudge <= Npx to save a row
+;; (evo:set-setting :math-x-advance :terminal)   ; :terminal (exact) | :manual
+;; (evo:set-setting :math-pixel-align t)         ; sub-cell baseline offset
+;; (evo:set-setting :math-inline-mode :aligned)  ; :aligned | :break | :raw
+;; (evo:set-setting :math-foreground nil)        ; xcolor name; nil = :theme
+;; (evo:set-setting :math-border "1pt")          ; whitespace around a formula
+;; (evo:set-setting :math-max-bytes 786432)      ; largest PNG to emit
 
 ;;; Anything an extension can do, config can do too: register-tool,
 ;;; register-command, event hooks (evo:on), evo:load-extension.

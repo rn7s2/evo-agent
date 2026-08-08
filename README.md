@@ -289,6 +289,28 @@ self-contained and replayable with no side files to lose. Oversized images are
 downscaled first (`sips`, ImageMagick) rather than rejected, and a model
 registered without vision gets a named placeholder instead of a 400.
 
+### Math rendering
+
+LaTeX math in agent output — `$…$`, `$$…$$`, `\(…\)`, `\[…\]` — renders as a
+real typeset image inline in scrollback, the way KaTeX/MathJax draw it, not an
+ASCII approximation: inline formulas sit ON the prose baseline (pixel-exact,
+via the formula's own reported baseline metrics) and flow with the text, which
+wraps by formula rather than through one; display equations get their own
+block. The split is deliberate: the TUI core only *finds* the math and *places*
+whatever a renderer returns (falling back to the raw LaTeX source), and the
+bundled `extensions/300-latex-math.lisp` is the renderer — it rasterizes each
+formula with the LaTeX toolchain (`latex` + `dvipng`) and emits it via the
+kitty graphics protocol (VS Code's integrated terminal renders it on all three
+platforms with `terminal.integrated.enableImages` and GPU acceleration on; so
+does kitty itself). So the heavy, optional, platform-bound half is an
+extension; with it absent, math is just shown as source. It stays off unless
+the toolchain is present, caches every formula by content hash, registers a
+system-prompt note asking the agent to write real LaTeX while rendering is
+active, and never paints an image into the managed bottom region (the live
+preview shows source; the image lands only when the line reaches scrollback).
+Prerequisites, calibration, and settings: [docs/math.md](docs/math.md); the
+renderer seam: [docs/extension-api.md](docs/extension-api.md#math-rendering-evotui).
+
 ### Skills, templates, slash commands
 
 - **Skills**: the Agent Skills standard (SKILL.md + frontmatter) with

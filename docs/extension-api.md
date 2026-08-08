@@ -219,6 +219,68 @@ right-align itself, everything an outer one appends lands past the right edge
 and is truncated away — computed every frame, discarded every frame. That is
 the bug this registry exists to make unrepresentable.
 
+## Math rendering (evo.tui)
+
+Agent output that contains LaTeX math — `$…$`, `$$…$$`, `\(…\)`, `\[…\]` — is
+found and *placed* by the TUI core, but *drawn* by whatever renderer an
+extension installs. Install one:
+
+```lisp
+;; FN is (LATEX DISPLAY-P) -> (values ESCAPE TOTAL-ROWS ASCENT-ROWS COLS
+;; ADVANCE), or NIL to fall back to source.  DISPLAY-P is T for $$…$$ / \[…\]
+;; block math, NIL for inline.  ESCAPE is spliced verbatim into scrollback —
+;; it is where a terminal-graphics escape goes.  TOTAL-ROWS is the terminal
+;; rows the image spans and ASCENT-ROWS how many sit above the formula's
+;; baseline: the core reserves the rows and sits the formula's baseline on
+;; the text baseline.  COLS is its width in cells, used to wrap the line by
+;; formula and (without ADVANCE) to step the cursor past it; ADVANCE :self
+;; declares that ESCAPE itself leaves the cursor stepped past the image
+;; (exact, where COLS is an estimate).  Only ESCAPE is required — a renderer
+;; returning a bare string gets one row on the baseline.
+(evo.tui:register-math-renderer
+  (lambda (latex display-p) (my-rasterize latex display-p)))
+```
+
+The bundled `extensions/300-latex-math.lisp` is exactly such a renderer: it
+rasterizes each formula with the LaTeX toolchain (`latex` + `dvipng`, baseline
+metrics from `--depth`/`--height`) and emits it over the kitty graphics
+protocol, so formulas render the way KaTeX/MathJax would — inline math
+baseline-aligned with the prose around it, pixel-exact via a sub-cell offset.
+It is off unless the toolchain is present, is configured by settings (`:math`,
+`:math-dpi`, `:math-cell-px`, …), and exposes `/math status | on | off |
+clear-cache`. Prerequisites (VS Code settings, TeX installation) and
+calibration live in [docs/math.md](math.md).
+
+Three rules the seam guarantees, so a renderer stays simple and safe:
+
+- **Off by default.** With no renderer installed (`evo.tui:*math-enabled*` nil)
+  the markdown renderer is byte-for-byte what it was — math is left as source.
+- **Source is the fallback.** A renderer that returns `nil`, signals, or is
+  absent yields the literal `$…$` text; a bad formula never takes down the
+  render thread.
+- **Never in the managed region.** The live streaming preview renders math as
+  its own source (the bottom region strips control bytes and counts columns);
+  an image is only emitted when a finished line reaches scrollback. So a
+  renderer only ever has to produce the escape — the TUI decides *when*.
+
+## Prompt notes (evo)
+
+An extension that changes what the agent should *do* — not just how output is
+shown — can ride guidance in every system prompt:
+
+```lisp
+(evo:register-prompt-note "latex-math"
+  "## Mathematical notation
+Write mathematics as LaTeX: `$...$` inline, `$$...$$` for display equations.")
+(evo:register-prompt-note "latex-math" nil)   ; withdraw
+```
+
+Notes are named: re-registering a name replaces its text (an extension
+reloaded at session start stays idempotent), `nil` withdraws it (a feature
+toggled off stops steering the agent). The bundled math renderer does exactly
+this — registered while rendering is usable, withdrawn on `/math off` — so
+the agent writes real LaTeX precisely when the terminal will render it.
+
 ## Other API
 
 ```lisp

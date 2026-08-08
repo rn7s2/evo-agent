@@ -13,7 +13,11 @@
 (in-package :evo.tui)
 
 (defstruct (md (:conc-name md-))
-  (in-code nil))
+  (in-code nil)
+  ;; While inside a bare $$ / \[ … \] display-math block, this holds the
+  ;; accumulated LaTeX (a string); NIL otherwise.  Mirrors IN-CODE: one
+  ;; slot of cross-line state, so nesting needs no stack.
+  (in-math nil))
 
 (defun md-fence-p (line)
   "A ``` fence line (up to 3 spaces of indent, per CommonMark — deeper
@@ -89,7 +93,7 @@ non-space, not doubled, and for _ not running into a word."
                            (close (md-code-close text run ticks)))
                       (cond
                         (close
-                         (write-string (sgr 33) out)
+                         (write-string (sgr-role :code) out)  ; theme-aware
                          (write-string (subseq text run close) out)
                          (write-string (sgr 39) out)
                          (setf i (+ close ticks)))
@@ -142,6 +146,32 @@ non-space, not doubled, and for _ not running into a word."
       (when (or bold-close emph-close)
         (write-string (sgr 0) out)))))
 
+(defun md-inline-math (text)
+  "MD-INLINE, but with math spans ($…$, \\(…\\), and single-line $$…$$ /
+\\[…\\]) carved out first and handed to RENDER-MATH-SPAN; the prose between
+them still gets full inline styling.  When math is off, or the line holds no
+math, this is exactly MD-INLINE — so the old rendering is untouched."
+  (if (not *math-enabled*)
+      (md-inline text)
+      (let ((segs (md-split-math text)))
+        (if (or (null segs)
+                (and (null (rest segs)) (eq (first (first segs)) :text)))
+            (md-inline text)
+            ;; Render each segment to an item, then let MATH-ASSEMBLE-LINE lay
+            ;; the line out per :MATH-INLINE-MODE.  Prose keeps full inline
+            ;; styling; a math span becomes an (:image bytes height) item, or
+            ;; falls back to styled source text when no image was produced.
+            (math-assemble-line
+             (mapcar (lambda (seg)
+                       (if (eq (first seg) :text)
+                           (list :text (md-inline (second seg)))
+                           (multiple-value-bind (bytes image-p total ascent cols advance)
+                               (render-math-span (second seg) (third seg))
+                             (if image-p
+                                 (list :image bytes total ascent cols advance)
+                                 (list :text bytes)))))
+                     segs))))))
+
 ;;; Block pass.
 
 (defun md-hrule-p (trimmed)
@@ -174,8 +204,8 @@ non-space, not doubled, and for _ not running into a word."
                   (or (= hashes (length rest))
                       (char= (char rest hashes) #\Space)))
              (concatenate 'string (dim (subseq rest 0 hashes))
-                          (bold (md-inline (subseq rest hashes))))
-             (md-inline line))))
+                          (bold (md-inline-math (subseq rest hashes))))
+             (md-inline-math line))))
       ((md-hrule-p rest)
        (dim (make-string (max 10 (1- *cols*)) :initial-element #\─)))
       ;; > blockquote — dim, one ▌ per nesting level
@@ -192,33 +222,63 @@ non-space, not doubled, and for _ not running into a word."
       ((and (>= (length rest) 2)
             (member (char rest 0) '(#\- #\* #\+))
             (char= (char rest 1) #\Space))
-       (concatenate 'string pad (cyan "•") (md-inline (subseq rest 1))))
+       (concatenate 'string pad (cyan "•") (md-inline-math (subseq rest 1))))
       ;; 1. ordered list
       ((md-ordered-end rest)
        (let ((end (md-ordered-end rest)))
          (concatenate 'string pad (cyan (subseq rest 0 end))
-                      (md-inline (subseq rest end)))))
-      (t (concatenate 'string pad (md-inline rest))))))
+                      (md-inline-math (subseq rest end)))))
+      (t (concatenate 'string pad (md-inline-math rest))))))
 
 ;;; Entry points.
 
 (defun md-render-line (line md)
-  "Render one complete markdown LINE for scrollback, advancing the fence
-state in MD."
+  "Render one complete markdown LINE for scrollback, advancing the fence and
+display-math state in MD.  Returns NIL to SUPPRESS a line: the interior
+lines of a multi-line $$…$$ block produce nothing, and the whole formula is
+emitted as one unit on its closing line.  Callers must skip a NIL result."
   (cond
+    ;; Code fences win over everything (a $$ inside a code block is literal).
     ((md-fence-p line)
      (setf (md-in-code md) (not (md-in-code md)))
      (dim line))
     ((md-in-code md) line)
+    ;; Inside a bare $$ / \[ display block: accumulate until the closer,
+    ;; then render the whole formula at once.
+    ((md-in-math md)
+     (cond
+       ((math-close-display-line-p line)
+        (let ((latex (md-in-math md)))
+          (setf (md-in-math md) nil)
+          (multiple-value-bind (bytes image-p total)
+              (render-math-span (string-right-trim '(#\Newline) latex) t)
+            (if image-p (math-display-block bytes total) bytes))))
+       (t (setf (md-in-math md)
+                (concatenate 'string (md-in-math md) line (string #\Newline)))
+          nil)))
+    ;; A bare $$ / \[ opens a display block (only when math is on; otherwise
+    ;; it is ordinary text and must render verbatim as before).
+    ((and *math-enabled* (math-open-display-line-p line))
+     (setf (md-in-math md) "")
+     nil)
     (t (md-block-line line))))
 
 (defun md-render-preview (line md)
-  "Render a still-streaming LINE without advancing the fence state."
-  (md-render-line line (copy-md md)))
+  "Render a still-streaming LINE for the managed region without advancing the
+real fence/math state.  Math renders as its own source here — never an image
+(the region strips control bytes and counts columns).  Always a string."
+  (let ((*math-live-preview* t)
+        ;; A copy whose IN-MATH is cleared: the preview line shows its own
+        ;; source rather than being swallowed by an open display block.
+        (probe (copy-md md)))
+    (setf (md-in-math probe) nil)
+    (or (md-render-line line probe) "")))
 
 (defun md-render-text (text)
-  "Render complete multi-line markdown TEXT with a fresh fence state."
+  "Render complete multi-line markdown TEXT with a fresh fence state,
+dropping suppressed (NIL) lines so a multi-line formula joins cleanly."
   (let ((md (make-md)))
     (string-join (string #\Newline)
-                 (mapcar (lambda (line) (md-render-line line md))
-                         (uiop:split-string text :separator '(#\Newline))))))
+                 (remove nil
+                         (mapcar (lambda (line) (md-render-line line md))
+                                 (uiop:split-string text :separator '(#\Newline)))))))
