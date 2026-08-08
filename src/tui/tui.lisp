@@ -70,7 +70,8 @@
 
 (defun flush-partial (tui)
   (when (plusp (length (tui-partial tui)))
-    (scroll tui (md-render-line (tui-partial tui) (tui-md tui)))
+    (let ((rendered (md-render-line (tui-partial tui) (tui-md tui))))
+      (when rendered (scroll tui rendered)))     ; NIL = suppressed (math block)
     (setf (tui-partial tui) "")))
 
 (defun refresh-goal (tui &key (reset-goal-run-tokens t))
@@ -369,8 +370,9 @@ inside the TUI tick loop and on session resume, so malformed ARGUMENTS
            (concatenate 'string (tui-partial tui) (pget event :text)))
      (loop for pos = (position #\Newline (tui-partial tui))
            while pos
-           do (scroll tui (md-render-line (subseq (tui-partial tui) 0 pos)
-                                          (tui-md tui)))
+           do (let ((rendered (md-render-line (subseq (tui-partial tui) 0 pos)
+                                              (tui-md tui))))
+                (when rendered (scroll tui rendered)))  ; NIL = suppressed
               (setf (tui-partial tui) (subseq (tui-partial tui) (1+ pos))))
      (setf (tui-dirty tui) t))
     (:thinking-delta
@@ -830,6 +832,7 @@ wrapped between two rules, and the model status line under the editbox."
   '(("help" . "commands and keys")
     ("goal" . "show, create, or refine the goal")
     ("todo" . "toggle the todo panel")
+    ("theme" . "switch the light/dark theme (math colours follow it)")
     ("model" . "pick the model from a list, or set it directly")
     ("thinking" . "low·medium·high·xhigh·max")
     ("compact" . "compact the context now")

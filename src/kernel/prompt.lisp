@@ -606,6 +606,29 @@ well as values wrapped across indented continuation lines."
       (sub "$@" args-string))
     result))
 
+;;; Prompt notes — extension-contributed system-prompt additions.  An
+;;; extension that changes what the AGENT should DO (not just how output is
+;;; shown) registers a note; the note rides in every system prompt until
+;;; removed.  Named, so re-registration replaces rather than accumulates —
+;;; an extension reloaded at session start stays idempotent — and so a
+;;; feature toggled off can withdraw its guidance by name.
+
+(defvar *prompt-notes* nil
+  "Alist of (NAME . TEXT), appended to the system prompt after the
+guidelines, in registration order.")
+
+(defun register-prompt-note (name text)
+  "Add or replace the system-prompt note NAME (a string) with TEXT, a
+self-contained markdown snippet.  NIL TEXT removes the note.  Returns TEXT."
+  (let ((entry (assoc name *prompt-notes* :test #'equal)))
+    (cond ((null text)
+           (setf *prompt-notes* (remove name *prompt-notes*
+                                        :key #'car :test #'equal)))
+          (entry (setf (cdr entry) text))
+          (t (setf *prompt-notes*
+                   (append *prompt-notes* (list (cons name text)))))))
+  text)
+
 (defun build-system-prompt (tools &key (cwd (uiop:getcwd)) lore model)
   ;; NORMALIZE-NEWLINES so the prompt we send is the same text whatever the
   ;; line endings of the sources it was compiled from and of the files it
@@ -620,6 +643,9 @@ well as values wrapped across indented continuation lines."
                  (first (uiop:split-string (or (tool-description tool) "")
                                            :separator '(#\Newline)))))
        (format out "~%~a~%" (render-template *guidelines* bindings))
+       ;; Extension-contributed guidance (REGISTER-PROMPT-NOTE).
+       (dolist (note *prompt-notes*)
+         (format out "~%~a~%" (cdr note)))
        (let ((docs (probe-file (merge-pathnames "docs/" (evo-home)))))
          (when docs
            (format out "~%~a~%" (render-template *own-docs* bindings))

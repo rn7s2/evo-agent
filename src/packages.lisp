@@ -94,7 +94,8 @@
            #:request-abort #:with-abort-cleanup
            #:queue-steering #:queue-followup #:emit-event #:steering-pending-p
            ;; prompt, skills, templates
-           #:build-system-prompt #:available-skills #:find-skill
+           #:build-system-prompt #:register-prompt-note
+           #:available-skills #:find-skill
            #:find-template #:expand-template
            ;; extension api internals
            #:run-hooks #:add-hook #:load-extension* #:boot-extensions
@@ -126,6 +127,7 @@
                 #:provider-error)
   (:export #:cat #:normalize-newlines #:crlf-newlines #:with-proxy
            #:register-tool #:register-command #:on #:load-extension
+           #:register-prompt-note
            #:register-model #:register-provider #:set-setting #:setting
            #:set-active-tools #:all-tools #:*agent* #:current-goal
            #:steer #:inject-context #:custom-state #:set-custom-state
@@ -163,7 +165,11 @@
   (:export #:start-tui
            ;; Status line composition — the supported way for an extension to
            ;; claim a piece of the bottom line (see docs/extension-api.md).
-           #:add-status-segment #:remove-status-segment #:status-segments))
+           #:add-status-segment #:remove-status-segment #:status-segments
+           ;; Math rendering seam — an extension installs a rasterizer here
+           ;; (see extensions/300-latex-math.lisp and docs/extension-api.md).
+           #:register-math-renderer #:*math-renderer* #:*math-enabled*
+           #:*math-live-preview* #:md-split-math #:render-math-span))
 
 (defpackage :evo.cli
   (:use :cl :evo.util :evo.journal :evo.provider :evo.kernel)

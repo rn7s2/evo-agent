@@ -1649,12 +1649,13 @@ that is how a human's next keystroke differs from a paste's last chunk."
       (let ((lines (evo.tui::compose-region tui)))
         (check "popup rendered alongside input"
                (and (find-if (lambda (l) (search "❯" l)) lines)
-                    (find-if (lambda (l) (search "● /thinking" l)) lines)
+                    ;; /t candidates sort alphabetically: theme < thinking < todo < tree
+                    (find-if (lambda (l) (search "● /theme" l)) lines)
                     (find-if (lambda (l) (search "  /todo" l)) lines))))
       (evo.tui::edit-down tui)            ; selection moves in the popup...
       (evo.tui::complete-at-point tui)     ; ...and tab accepts it
       (check "tab accepts highlighted"
-             (equal (evo.tui::eb-text (evo.tui::tui-editor tui)) "/todo "))
+             (equal (evo.tui::eb-text (evo.tui::tui-editor tui)) "/thinking "))
       ;; enter on a partial command word completes instead of submitting
       (evo.tui::eb-clear (evo.tui::tui-editor tui))
       (evo.tui::eb-insert-text (evo.tui::tui-editor tui) "/mod")
@@ -1954,6 +1955,217 @@ that is how a human's next keystroke differs from a paste's last chunk."
     (let ((r (evo.tui::md-render-text (format nil "# t~%```~%**raw**~%```"))))
       (check "text render styles heading" (search esc-bold r))
       (check "text render keeps code raw" (search "**raw**" r)))))
+
+;;; LaTeX math seam (core; the rasterizer lives in an extension).  This
+;;; covers the grammar and placement the TUI does with whatever a renderer
+;;; returns — a stub renderer stands in for the LaTeX->image extension.
+
+(defun test-math ()
+  ;; grammar: MD-SPLIT-MATH carves out $…$, $$…$$, \(…\), \[…\]
+  (check "inline $..$ splits"
+         (equal (evo.tui::md-split-math "a $x^2$ b")
+                '((:text "a ") (:math "x^2" nil) (:text " b"))))
+  (check "display $$..$$ splits"
+         (equal (evo.tui::md-split-math "p $$E=mc^2$$ q")
+                '((:text "p ") (:math "E=mc^2" t) (:text " q"))))
+  (check "\\(..\\) inline / \\[..\\] display"
+         (and (equal (evo.tui::md-split-math "\\(a+b\\)") '((:math "a+b" nil)))
+              (equal (evo.tui::md-split-math "\\[a+b\\]") '((:math "a+b" t)))))
+  (check "dollar inside a code span stays prose"
+         (equal (mapcar #'first (evo.tui::md-split-math "cost `$5` and $y$"))
+                '(:text :math)))
+  (check "escaped \\$ stays prose"
+         (equal (evo.tui::md-split-math "price \\$5 only")
+                '((:text "price \\$5 only"))))
+  (check "currency $5 and $10 stays prose"
+         (equal (evo.tui::md-split-math "it is $5 and $10 today")
+                '((:text "it is $5 and $10 today"))))
+  ;; defaults: aligned/bottom, so inline prose stays one selectable line
+  (check "default inline mode is aligned, bottom"
+         (and (eq :aligned (evo.tui::math-inline-mode))
+              (eq :bottom (evo.tui::math-inline-valign))))
+  ;; placement: a stub renderer stands in for the extension
+  (let ((evo.tui:*math-enabled* t)
+        (evo.tui:*math-renderer*
+          (lambda (latex disp) (format nil "<IMG:~a:~a>" (if disp "D" "I") latex))))
+    (evo.util:set-setting :math-inline-mode :break)   ; test :break explicitly
+    ;; a placed image ends its physical line (break before trailing text), so
+    ;; images never stair-step "lower and lower" down a wrapped line
+    (check "placed image breaks the line before trailing text"
+           (equal (evo.tui::md-render-line "see $x^2$ end" (evo.tui::make-md))
+                  (format nil "see <IMG:I:x^2>~% end")))
+    (check "two inline formulas each end their own line"
+           (equal (evo.tui::md-render-line "a $x$ b $y$ c" (evo.tui::make-md))
+                  (format nil "a <IMG:I:x>~% b <IMG:I:y>~% c")))
+    ;; multi-line $$ block: interior lines suppressed (NIL), one image at close
+    (let ((md (evo.tui::make-md)))
+      (check "bare $$ opens a suppressed block"
+             (null (evo.tui::md-render-line "$$" md)))
+      (check "block interior suppressed"
+             (and (null (evo.tui::md-render-line "a+b" md))
+                  (null (evo.tui::md-render-line "=c" md))))
+      (check "closing $$ emits the whole formula as one image"
+             (equal (evo.tui::md-render-line "$$" md)
+                    (format nil "<IMG:D:a+b~%=c>"))))
+    ;; a multi-row display block reserves its rows and lands on the foot
+    (let ((md2 (evo.tui::make-md)) (nl (string #\Newline))
+          (evo.tui:*math-renderer*
+            (lambda (l d) (declare (ignore l d)) (values "<D>" 3 1 5))))
+      (evo.tui::md-render-line "$$" md2)
+      (evo.tui::md-render-line "z" md2)
+      (check "multi-row display block reserves its rows"
+             (equal (evo.tui::md-render-line "$$" md2)
+                    (concatenate 'string nl nl (evo.tui::cursor-up 2)
+                                 "<D>" (evo.tui::cursor-down 2)))))
+    ;; the live preview must show source, never an image (region-safe)
+    (check "preview renders math as source"
+           (equal (evo.tui::md-render-preview "see $x^2$ end" (evo.tui::make-md))
+                  "see $x^2$ end")))
+  ;; a renderer that declines (NIL) falls back to the LaTeX source
+  (let ((evo.tui:*math-enabled* t)
+        (evo.tui:*math-renderer* (lambda (l d) (declare (ignore l d)) nil)))
+    (check "declined render falls back to source"
+           (equal (evo.tui::md-render-line "x $a+b$ y" (evo.tui::make-md))
+                  "x $a+b$ y")))
+  ;; :aligned mode — prose stays one selectable line; each image is drawn ABOVE
+  ;; the baseline between a cursor save/restore, so placement never depends on
+  ;; how the terminal moves the cursor for an image.  These stubs report only a
+  ;; height, so the baseline comes from :MATH-INLINE-VALIGN and there is no COLS
+  ;; step.
+  (let ((evo.tui:*math-enabled* t)
+        (evo.tui:*math-renderer*
+          (lambda (latex disp) (declare (ignore disp))
+            (values (format nil "<IMG:~a>" latex) 3)))
+        (saved (evo.util:setting :math-inline-mode :break)))
+    (unwind-protect
+         (let ((nl (string #\Newline))
+               (u1 (evo.tui::cursor-up 1)) (u2 (evo.tui::cursor-up 2))
+               (d1 (evo.tui::cursor-down 1))
+               (sv (evo.tui::save-cursor)) (rs (evo.tui::restore-cursor)))
+           (evo.util:set-setting :math-inline-mode :aligned)
+           (evo.util:set-setting :math-inline-valign :center)
+           ;; h=3, center -> baseline row 1 (1 above, 1 below): reserve 2 rows,
+           ;; rise to the baseline, draw the image one row up (save/restore),
+           ;; prose stays on the baseline, drop to the foot.
+           (check "aligned centers the image on the text baseline"
+                  (equal (evo.tui::md-render-line "x $a$ y" (evo.tui::make-md))
+                         (concatenate 'string nl nl u1 "x " sv u1 "<IMG:a>" rs " y" d1)))
+           (evo.util:set-setting :math-inline-valign :top)
+           ;; top -> baseline is the image's first row (0 above, 2 below).
+           (check "aligned :top hangs the image from the baseline row"
+                  (equal (evo.tui::md-render-line "$a$" (evo.tui::make-md))
+                         (concatenate 'string nl nl u2 sv "<IMG:a>" rs
+                                      (evo.tui::cursor-down 2)))))
+      (evo.util:set-setting :math-inline-mode saved)
+      (evo.util:set-setting :math-inline-valign :center)))
+  ;; MIXED heights with baselines + widths reported (the real renderer's path):
+  ;; a 2-row and a 3-row formula line up on ONE baseline, and the cursor is
+  ;; stepped past each by its own COLS.
+  (let ((evo.tui:*math-enabled* t)
+        (evo.tui:*math-renderer*
+          (lambda (latex disp) (declare (ignore disp))
+            ;; (escape total ascent cols)
+            (if (string= latex "a")
+                (values "<a>" 2 1 2)
+                (values "<b>" 3 2 4))))
+        (saved (evo.util:setting :math-inline-mode :aligned)))
+    (unwind-protect
+         (let ((nl (string #\Newline))
+               (u1 (evo.tui::cursor-up 1)) (u2 (evo.tui::cursor-up 2))
+               (r2 (evo.tui::cursor-right 2)) (r4 (evo.tui::cursor-right 4))
+               (sv (evo.tui::save-cursor)) (rs (evo.tui::restore-cursor)))
+           (evo.util:set-setting :math-inline-mode :aligned)
+           ;; above = max ascent = 2, below = 0 -> h=3, baseline is the foot row.
+           (check "aligned lines mixed-height formulas on one baseline"
+                  (equal (evo.tui::md-render-line "x $a$ $b$ y" (evo.tui::make-md))
+                         (concatenate 'string nl nl
+                                      "x " sv u1 "<a>" rs r2
+                                      " " sv u2 "<b>" rs r4 " y"))))
+      (evo.util:set-setting :math-inline-mode saved)
+      (evo.util:set-setting :math-inline-valign :center)))
+  ;; :SELF advance — the escape itself steps the cursor past the image (the
+  ;; terminal's own exact column count), landing on the image's bottom row:
+  ;; no save/restore, no COLS step, only vertical correction.
+  (let ((evo.tui:*math-enabled* t)
+        (evo.tui:*math-renderer*
+          (lambda (latex disp) (declare (ignore disp))
+            (values (format nil "<~a>" latex) 3 1 4 :self)))
+        (saved (evo.util:setting :math-inline-mode :aligned)))
+    (unwind-protect
+         (let ((nl (string #\Newline))
+               (u1 (evo.tui::cursor-up 1)) (d1 (evo.tui::cursor-down 1)))
+           (evo.util:set-setting :math-inline-mode :aligned)
+           ;; total 3, ascent 1 -> descent 1; block: 1 above, baseline, 1 below.
+           (check ":self advance corrects vertically only"
+                  (equal (evo.tui::md-render-line "x $a$ y" (evo.tui::make-md))
+                         (concatenate 'string nl nl u1 "x " u1 "<a>" u1 " y" d1))))
+      (evo.util:set-setting :math-inline-mode saved)))
+  ;; width-aware wrap: an image that would overflow the terminal width starts
+  ;; a new sub-line (with its own baseline block) instead of letting the
+  ;; terminal hard-wrap mid-image and wreck the reserved-row geometry.
+  (let ((evo.tui:*math-enabled* t)
+        (evo.tui::*cols* 20)
+        (evo.tui:*math-renderer*
+          (lambda (latex disp) (declare (ignore disp))
+            (values (format nil "<~a>" latex) 1 0 10)))
+        (saved (evo.util:setting :math-inline-mode :aligned)))
+    (unwind-protect
+         (let ((nl (string #\Newline))
+               (sv (evo.tui::save-cursor)) (rs (evo.tui::restore-cursor))
+               (r10 (evo.tui::cursor-right 10)))
+           (evo.util:set-setting :math-inline-mode :aligned)
+           ;; image budget = 10 + 1 + ceil(10/8) = 13; 11 prose cols + 13 > 20.
+           (check "overflowing formula wraps to its own sub-line"
+                  (equal (evo.tui::md-render-line "0123456789 $a$" (evo.tui::make-md))
+                         (concatenate 'string "0123456789 " nl sv "<a>" rs r10)))
+           ;; prose itself splits at a cell boundary when it overflows.
+           (check "prose splits at the width boundary"
+                  (equal (evo.tui::md-render-line
+                          "abcdefghijklmnopqrs $a$ tail" (evo.tui::make-md))
+                         (concatenate 'string "abcdefghijklmnopqrs " nl
+                                      sv "<a>" rs r10 " tail"))))
+      (evo.util:set-setting :math-inline-mode saved)))
+  ;; disabled: byte-for-byte the old behaviour
+  (let ((evo.tui:*math-enabled* nil))
+    (check "math off leaves $x$ untouched"
+           (equal (evo.tui::md-render-line "a $x$ b" (evo.tui::make-md))
+                  "a $x$ b"))))
+
+;;; Light/dark theme: semantic colours resolve through the :theme setting.
+
+(defun test-theme ()
+  (let ((saved (evo.util:setting :theme :dark)))
+    (unwind-protect
+         (progn
+           ;; DARK (default) is byte-for-byte the historical ANSI palette.
+           (evo.util:set-setting :theme :dark)
+           (check "dark theme is the default" (eq :dark (evo.tui::current-theme)))
+           (check "dark dim = ANSI faint"
+                  (equal (evo.tui::dim "x")
+                         (format nil "~c[2mx~c[0m" #\Escape #\Escape)))
+           (check "dark cyan = ANSI 36"
+                  (equal (evo.tui::cyan "x")
+                         (format nil "~c[36mx~c[0m" #\Escape #\Escape)))
+           (check "dark code role = ANSI 33"
+                  (equal (evo.tui::sgr-role :code) (format nil "~c[33m" #\Escape)))
+           ;; LIGHT recolours to 24-bit where the terminal has truecolor.
+           (let ((evo.tui::*truecolor* t))
+             (evo.util:set-setting :theme :light)
+             (check "light theme selected" (eq :light (evo.tui::current-theme)))
+             (check "light accent is 24-bit and legible on white"
+                    (search "38;2;12;122;132" (evo.tui::cyan "x")))
+             (check "light muted is no longer plain faint"
+                    (not (search (format nil "~c[2m" #\Escape) (evo.tui::dim "x"))))
+             (check "light code role differs from dark"
+                    (not (equal (evo.tui::sgr-role :code)
+                                (format nil "~c[33m" #\Escape)))))
+           ;; Without truecolor, light falls back to the ANSI palette.
+           (let ((evo.tui::*truecolor* nil))
+             (evo.util:set-setting :theme :light)
+             (check "no-truecolor light falls back to ANSI"
+                    (equal (evo.tui::cyan "x")
+                           (format nil "~c[36mx~c[0m" #\Escape #\Escape)))))
+      (evo.util:set-setting :theme saved))))
 
 ;;; User prompts sit between two rules in scrollback
 
@@ -2287,6 +2499,29 @@ a lint that can go blind without saying so is worse than none."
   ;; The prompt we send is the same text whatever the checkout looks like.
   (let ((prompt (build-system-prompt (list (find-tool "read")))))
     (check "system prompt carries no CR" (null (find #\Return prompt)))))
+
+;;; Prompt notes: extension-contributed system-prompt additions, named so
+;;; re-registration replaces (idempotent reloads) and NIL withdraws.
+
+(defun test-prompt-notes ()
+  (let ((saved evo.kernel::*prompt-notes*))
+    (unwind-protect
+         (progn
+           (setf evo.kernel::*prompt-notes* nil)
+           (evo:register-prompt-note "t-math" "Write formulas as LaTeX.")
+           (check "registered note rides in the prompt"
+                  (search "Write formulas as LaTeX."
+                          (build-system-prompt nil)))
+           (evo:register-prompt-note "t-math" "Prefer $...$ inline.")
+           (let ((prompt (build-system-prompt nil)))
+             (check "re-registration replaces, not accumulates"
+                    (and (search "Prefer $...$ inline." prompt)
+                         (not (search "Write formulas as LaTeX." prompt)))))
+           (evo:register-prompt-note "t-math" nil)
+           (check "nil text withdraws the note"
+                  (not (search "Prefer $...$ inline."
+                               (build-system-prompt nil)))))
+      (setf evo.kernel::*prompt-notes* saved))))
 
 (defun test-goal-budget ()
   (let* ((dir (uiop:ensure-directory-pathname
@@ -4708,9 +4943,12 @@ five identical restarts, each reporting a different error than the real one."
     (test-display-width)
     (test-wrap-visible)
     (test-markdown)
+    (test-math)
+    (test-theme)
     (test-user-prompt-block)
     (test-input-history)
     (test-line-endings)
+    (test-prompt-notes)
     (test-goal-budget)
     (test-goal-tools)
     (test-templates)

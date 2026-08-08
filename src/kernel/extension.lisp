@@ -188,6 +188,14 @@ resolved by the CLI's --command flag and by future frontends.")
 A :tool-call hook may return (:block t :reason ...) or (:arguments ...)."
   (evo.kernel:add-hook event fn))
 
+(defun register-prompt-note (name text)
+  "Append TEXT (a self-contained markdown snippet) to every system prompt,
+under the name NAME.  Re-registering NAME replaces its text — idempotent
+across extension reloads — and NIL TEXT removes it.  For extensions that
+change what the agent should DO: e.g. the LaTeX-math renderer asks the
+agent to write formulas as LaTeX because they now render as images."
+  (evo.kernel:register-prompt-note name text))
+
 (defun load-extension (path &key (reason "requested"))
   (evo.kernel:load-extension* path :reason reason))
 
