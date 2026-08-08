@@ -1548,7 +1548,64 @@ that is how a human's next keystroke differs from a paste's last chunk."
       (setf (evo.tui::tui-todos tui) (vector '(:status "pending" :text "x")))
       (let ((lines (evo.tui::compose-region tui)))
         (check "separators for activity/todo/editbox"
-               (= 4 (count-if (lambda (l) (search "─" l)) lines)))))
+               (= 4 (count-if (lambda (l) (search "─" l)) lines))))
+      ;; A long list hides its completed prefix: the done items at the top
+      ;; collapse into a "+N more" and the panel shows from the first
+      ;; unfinished item down; a tail still too long hides behind the bottom
+      ;; "+N more" as before.
+      (flet ((panel (todos)
+               (setf (evo.tui::tui-todos tui) todos)
+               (evo.tui::compose-region tui)))
+        (let ((lines (panel (coerce
+                             (loop for i from 0 below 12
+                                   collect (list :text (format nil "item-~d" i)
+                                                 :status (if (< i 3) :done :pending)))
+                             'vector))))
+          (check "done prefix hides behind a top +N more"
+                 (some (lambda (l) (search "+3 more" l)) lines))
+          (check "the first unfinished item leads the visible list"
+                 (and (some (lambda (l) (search "item-3" l)) lines)
+                      (notany (lambda (l) (search "item-0" l)) lines)))
+          (check "the overflowing tail still hides behind a bottom +N more"
+                 (some (lambda (l) (search "+2 more" l)) lines))
+          (check "both markers keep the panel at limit+1 rows"
+                 (= 9 (count-if (lambda (l) (or (search "item-" l)
+                                                (search "+" l)))
+                                lines))))
+        (let ((lines (panel (coerce
+                             (loop for i from 0 below 10
+                                   collect (list :text (format nil "item-~d" i)
+                                                 :status (if (< i 3) :done :pending)))
+                             'vector))))
+          (check "a top marker alone when the rest fits"
+                 (and (some (lambda (l) (search "+3 more" l)) lines)
+                      (some (lambda (l) (search "item-9" l)) lines)
+                      (= 1 (count-if (lambda (l) (search "+" l)) lines)))))
+        (let ((lines (panel (coerce
+                             (loop for i from 0 below 10
+                                   collect (list :text (format nil "item-~d" i)
+                                                 :status :pending))
+                             'vector))))
+          (check "without a done prefix the list shows from the top"
+                 (and (some (lambda (l) (search "item-0" l)) lines)
+                      (some (lambda (l) (search "+2 more" l)) lines))))
+        (let ((lines (panel (coerce
+                             (loop for i from 0 below 12
+                                   collect (list :text (format nil "item-~d" i)
+                                                 :status :done))
+                             'vector))))
+          (check "an all-done list falls back to showing from the top"
+                 (and (some (lambda (l) (search "item-0" l)) lines)
+                      (some (lambda (l) (search "+4 more" l)) lines))))
+        (let ((lines (panel (coerce
+                             (loop for i from 0 below 6
+                                   collect (list :text (format nil "item-~d" i)
+                                                 :status (if (< i 2) :done :pending)))
+                             'vector))))
+          (check "a short list never hides anything"
+                 (and (some (lambda (l) (search "item-0" l)) lines)
+                      (some (lambda (l) (search "item-5" l)) lines)
+                      (notany (lambda (l) (search "+" l)) lines))))))
     ;; The region is painted with relative cursor movement, so it must never
     ;; be taller than the screen: one frame taller than the terminal scrolls
     ;; its own top away and every later frame then clears the wrong rows and

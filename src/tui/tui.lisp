@@ -690,15 +690,31 @@ wrapped between two rules, and the model status line under the editbox."
     (when (and (tui-todo-visible tui) (tui-todos tui)
                (plusp (length (tui-todos tui))))
       (push sep lines)
-      (loop for item across (tui-todos tui)
-            for i from 0
-            when (< i 8)
+      (let* ((todos (tui-todos tui))
+             (n (length todos))
+             (limit 8)
+             ;; A long list hides its completed prefix behind a top "+N more"
+             ;; and shows from the first unfinished item down; a tail that is
+             ;; still too long hides behind a bottom "+N more" as before.
+             (start (if (> n limit)
+                        (or (position-if-not (lambda (item)
+                                               (eq (pget item :status) :done))
+                                             todos)
+                            0)
+                        0))
+             (shown (min (- n start) limit)))
+        (when (and (plusp start) (< (+ start shown) n))
+          (decf shown))            ; both markers: keep the panel at limit+1 rows
+        (when (plusp start)
+          (push (dim (format nil "   +~d more" start)) lines))
+        (loop for i from (1- (+ start shown)) downto start
               do (push (dim (format nil " ~a ~a"
-                                    (evo.todo::status-glyph (pget item :status))
-                                    (pget item :text)))
+                                    (evo.todo::status-glyph
+                                     (pget (aref todos i) :status))
+                                    (pget (aref todos i) :text)))
                        lines))
-      (when (> (length (tui-todos tui)) 8)
-        (push (dim (format nil "   +~d more" (- (length (tui-todos tui)) 8))) lines)))
+        (when (< (+ start shown) n)
+          (push (dim (format nil "   +~d more" (- n start shown))) lines))))
     (setf lines (nreverse lines))
     (case (tui-mode tui)
       (:select
