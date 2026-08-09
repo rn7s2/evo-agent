@@ -87,10 +87,13 @@ call per tick, and only on the platforms that need it."
 fallback wherever the terminal has no truecolor.")
 
 (defparameter *light-role-sgr*
-  '((:muted . "38;2;110;110;110") (:accent . "38;2;12;122;132")
-    (:error . "38;2;192;57;43") (:success . "38;2;30;126;52")
-    (:warning . "38;2;155;120;10") (:code . "38;2;150;95;20"))
-  "24-bit SGR per role tuned to read on a light background.")
+  '((:muted . "38;2;88;88;88") (:accent . "38;2;0;100;112")
+    (:error . "38;2;178;24;24") (:success . "38;2;18;104;42")
+    (:warning . "38;2;122;82;0") (:code . "38;2;132;74;8"))
+  "24-bit SGR per role tuned to read on a light background.  Darker and more
+saturated than a plain mid-grey: every role clears ~7:1 contrast on white
+(WCAG AAA), so light mode reads as crisply as dark instead of washed out.
+The earlier palette sat at ~5:1 — legible but visibly soft and grey.")
 
 (defun role-sgr (role)
   "The SGR parameter string for semantic ROLE under the active theme."

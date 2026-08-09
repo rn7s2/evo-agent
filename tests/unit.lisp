@@ -2221,7 +2221,7 @@ that is how a human's next keystroke differs from a paste's last chunk."
              (evo.util:set-setting :theme :light)
              (check "light theme selected" (eq :light (evo.tui::current-theme)))
              (check "light accent is 24-bit and legible on white"
-                    (search "38;2;12;122;132" (evo.tui::cyan "x")))
+                    (search "38;2;0;100;112" (evo.tui::cyan "x")))
              (check "light muted is no longer plain faint"
                     (not (search (format nil "~c[2m" #\Escape) (evo.tui::dim "x"))))
              (check "light code role differs from dark"
