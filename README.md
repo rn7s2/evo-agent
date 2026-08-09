@@ -311,6 +311,19 @@ preview shows source; the image lands only when the line reaches scrollback).
 Prerequisites, calibration, and settings: [docs/math.md](docs/math.md); the
 renderer seam: [docs/extension-api.md](docs/extension-api.md#math-rendering-evotui).
 
+### Bionic reading
+
+Agent prose can be shown "bionic reading" style — the leading letters of each
+word bolded, so the eye fixates on the stem and skims the rest. It rides the
+same kind of seam as math: the TUI core hands each run of plain prose (never
+`code`, link URLs, or already-bold text) to a pluggable `*prose-styler*`, and
+the bundled `extensions/350-bionic-reader.lisp` is one such styler. It only
+touches runs of ASCII Latin letters, so English is bolded while accented Latin,
+CJK, Cyrillic and other scripts pass through untouched. On by default with the
+extension loaded; `/bionic status | on | off | fixation <0..1>` tunes it, and
+the seam is documented in
+[docs/extension-api.md](docs/extension-api.md#prose-styling-evotui).
+
 ### Skills, templates, slash commands
 
 - **Skills**: the Agent Skills standard (SKILL.md + frontmatter) with
@@ -521,10 +534,13 @@ src/cli/                 EVO.CLI
 
 docs/                    seed corpus (also installed to ~/.evo/docs)
 extensions/              vendored user extensions — copied ACTIVE into
-  020-claude-oauth-provider.lisp     ~/.evo/extensions by `make install-home`
-  020-kimi-provider.lisp             (Claude OAuth; Moonshot AI Kimi K3 over
-  400-efficiency.lisp                 chat completions; prompt section; the
-  900-ide-context.lisp                editor/IDE bridge)
+                         ~/.evo/extensions by `make install-home`:
+  020-claude-oauth-provider.lisp     Claude Pro/Max OAuth provider
+  020-kimi-provider.lisp             Moonshot AI Kimi K3 over chat completions
+  300-latex-math.lisp                LaTeX math rendered as inline images
+  350-bionic-reader.lisp             bionic reading for agent prose (ASCII)
+  400-efficiency.lisp                working/reasoning prompt section
+  900-ide-context.lisp               editor/IDE bridge
 extensions/examples/     reference-only example extensions (installed to
                          ~/.evo/docs/examples) — user extensions, distinct from
                          the bundled core extensions in src/core-ext/

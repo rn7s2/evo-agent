@@ -19,6 +19,41 @@
   ;; slot of cross-line state, so nesting needs no stack.
   (in-math nil))
 
+;;; Prose-styler seam.  The inline renderer emits some text verbatim — the
+;;; words BETWEEN markdown markers, outside `code` spans and link URLs.  An
+;;; extension can restyle exactly those runs (bionic reading bolds each word's
+;;; leading letters, say) by installing a *PROSE-STYLER*.  It is a peer of the
+;;; math seam: off by default, so with nothing installed the renderer is
+;;; byte-for-byte what it was, and a signalling styler falls back to source.
+
+(defvar *prose-styler* nil
+  "Function (TEXT) -> styled-text applied to each run of plain prose the
+inline renderer would otherwise emit verbatim — the words between markers,
+never inside a `code` span or a link URL, and never inside already-bold text
+(a heading, or **strong**), which a bold-toggling styler must not disturb.
+TEXT carries no ANSI; the result may add some.  NIL is identity — with no
+styler installed the markdown renderer behaves exactly as before, so this
+seam has zero impact until an extension opts in.  The bundled reader is
+extensions/350-bionic-reader.lisp.")
+
+(defvar *prose-styling-suppressed* nil
+  "Bound T while the renderer emits text that is ALREADY fully bold (a
+heading): a prose styler that toggles bold — bionic reading does — must not
+fire there, or it would only un-bold the letters it did not fixate.")
+
+(defun register-prose-styler (fn)
+  "Install FN as *PROSE-STYLER* (NIL removes it) and return it.  The supported
+way for an extension to restyle plain prose words, e.g. bionic reading."
+  (setf *prose-styler* fn))
+
+(defun style-prose (text)
+  "Route a plain-prose run through *PROSE-STYLER*, falling back to TEXT on a
+NIL result or a signalling styler.  Byte-for-byte identity when no styler is
+installed or styling is suppressed (already-bold context)."
+  (if (and *prose-styler* (not *prose-styling-suppressed*))
+      (or (ignore-errors (funcall *prose-styler* text)) text)
+      text))
+
 (defun md-fence-p (line)
   "A ``` fence line (up to 3 spaces of indent, per CommonMark — deeper
 indented backticks inside a code block must not toggle the fence)."
@@ -66,85 +101,107 @@ non-space, not doubled, and for _ not running into a word."
 
 (defun md-inline (text)
   "Inline markdown -> ANSI: **strong**, *emph* (also _), `code`, and
-[text](url) links.  Unmatched markers stay literal."
+[text](url) links.  Unmatched markers stay literal.  Plain prose runs — what
+this would otherwise emit verbatim, outside code spans, link URLs and bold —
+are collected and passed to STYLE-PROSE (identity by default), the seam a
+reader like bionic reading installs."
   (let ((len (length text))
         (bold-close nil)     ; index of the pending ** closer
-        (emph-close nil))    ; index of the pending * / _ closer
+        (emph-close nil)     ; index of the pending * / _ closer
+        (buf (make-string-output-stream)))  ; pending plain-prose run
     (with-output-to-string (out)
-      (loop with i = 0
-            while (< i len)
-            do (let ((c (char text i)))
-                 (cond
-                   ;; pending closers first: ** before * at the same index
-                   ((and bold-close (= i bold-close))
-                    (write-string (sgr 22) out)
-                    (setf bold-close nil)
-                    (incf i 2))
-                   ((and emph-close (= i emph-close))
-                    (write-string (sgr 23) out)
-                    (setf emph-close nil)
-                    (incf i))
-                   ;; `code` span: content is protected from other styling
-                   ((char= c #\`)
-                    (let* ((run (or (position-if-not (lambda (ch) (char= ch #\`))
-                                                     text :start i)
-                                    len))
-                           (ticks (- run i))
-                           (close (md-code-close text run ticks)))
-                      (cond
-                        (close
-                         (write-string (sgr-role :code) out)  ; theme-aware
-                         (write-string (subseq text run close) out)
-                         (write-string (sgr 39) out)
-                         (setf i (+ close ticks)))
-                        (t (write-string (subseq text i run) out)
-                           (setf i run)))))
-                   ;; **strong** / __strong__
-                   ((and (member c '(#\* #\_))
-                         (null bold-close)
-                         (< (+ i 2) len)
-                         (char= (char text (1+ i)) c)
-                         (not (char= (char text (+ i 2)) #\Space))
-                         (char/= (char text (+ i 2)) c))
-                    (let ((j (md-strong-close text (+ i 3)
-                                              (make-string 2 :initial-element c))))
-                      (cond (j (write-string (sgr 1) out)
-                               (setf bold-close j)
-                               (incf i 2))
-                            (t (write-char c out) (incf i)))))
-                   ;; *emph* / _emph_
-                   ((and (member c '(#\* #\_))
-                         (null emph-close)
-                         (< (1+ i) len)
-                         (not (char= (char text (1+ i)) #\Space))
-                         (char/= (char text (1+ i)) c)
-                         (or (char/= c #\_)   ; _ opens only at a word edge
-                             (zerop i)
-                             (not (alphanumericp (char text (1- i))))))
-                    (let ((j (md-emph-close text (+ i 2) c)))
-                      (cond (j (write-string (sgr 3) out)
-                               (setf emph-close j)
-                               (incf i))
-                            (t (write-char c out) (incf i)))))
-                   ;; [text](url)
-                   ((char= c #\[)
-                    (let* ((mid (search "](" text :start2 (1+ i)))
-                           (end (and mid (position #\) text :start (+ mid 2)))))
-                      (cond
-                        (end
-                         (let ((label (subseq text (1+ i) mid))
-                               (url (subseq text (+ mid 2) end)))
-                           (write-string (sgr 4) out)
-                           (write-string label out)
-                           (write-string (sgr 24) out)
-                           (unless (equal label url)
-                             (write-string (dim (format nil " (~a)" url)) out))
-                           (setf i (1+ end))))
-                        (t (write-char c out) (incf i)))))
-                   (t (write-char c out) (incf i)))))
-      ;; a closer swallowed by a code span leaves a style open: reset
-      (when (or bold-close emph-close)
-        (write-string (sgr 0) out)))))
+      ;; Drain the buffered prose before emitting anything that is not prose
+      ;; (an SGR toggle, a code span, link markup): the styler only ever sees a
+      ;; contiguous run in one style state, and BOLD-CLOSE tells it whether we
+      ;; are inside **strong** (already bold — leave it alone).  When no styler
+      ;; is installed STYLE-PROSE is identity, so the bytes are unchanged.
+      (flet ((drain ()
+               (let ((run (get-output-stream-string buf)))
+                 (when (plusp (length run))
+                   (write-string (if bold-close run (style-prose run)) out)))))
+        (loop with i = 0
+              while (< i len)
+              do (let ((c (char text i)))
+                   (cond
+                     ;; pending closers first: ** before * at the same index
+                     ((and bold-close (= i bold-close))
+                      (drain)
+                      (write-string (sgr 22) out)
+                      (setf bold-close nil)
+                      (incf i 2))
+                     ((and emph-close (= i emph-close))
+                      (drain)
+                      (write-string (sgr 23) out)
+                      (setf emph-close nil)
+                      (incf i))
+                     ;; `code` span: content is protected from other styling
+                     ((char= c #\`)
+                      (let* ((run (or (position-if-not (lambda (ch) (char= ch #\`))
+                                                       text :start i)
+                                      len))
+                             (ticks (- run i))
+                             (close (md-code-close text run ticks)))
+                        (cond
+                          (close
+                           (drain)
+                           (write-string (sgr-role :code) out)  ; theme-aware
+                           (write-string (subseq text run close) out)
+                           (write-string (sgr 39) out)
+                           (setf i (+ close ticks)))
+                          (t (write-string (subseq text i run) buf)
+                             (setf i run)))))
+                     ;; **strong** / __strong__
+                     ((and (member c '(#\* #\_))
+                           (null bold-close)
+                           (< (+ i 2) len)
+                           (char= (char text (1+ i)) c)
+                           (not (char= (char text (+ i 2)) #\Space))
+                           (char/= (char text (+ i 2)) c))
+                      (let ((j (md-strong-close text (+ i 3)
+                                                (make-string 2 :initial-element c))))
+                        (cond (j (drain)
+                                 (write-string (sgr 1) out)
+                                 (setf bold-close j)
+                                 (incf i 2))
+                              (t (write-char c buf) (incf i)))))
+                     ;; *emph* / _emph_
+                     ((and (member c '(#\* #\_))
+                           (null emph-close)
+                           (< (1+ i) len)
+                           (not (char= (char text (1+ i)) #\Space))
+                           (char/= (char text (1+ i)) c)
+                           (or (char/= c #\_)   ; _ opens only at a word edge
+                               (zerop i)
+                               (not (alphanumericp (char text (1- i))))))
+                      (let ((j (md-emph-close text (+ i 2) c)))
+                        (cond (j (drain)
+                                 (write-string (sgr 3) out)
+                                 (setf emph-close j)
+                                 (incf i))
+                              (t (write-char c buf) (incf i)))))
+                     ;; [text](url)
+                     ((char= c #\[)
+                      (let* ((mid (search "](" text :start2 (1+ i)))
+                             (end (and mid (position #\) text :start (+ mid 2)))))
+                        (cond
+                          (end
+                           (drain)
+                           (let ((label (subseq text (1+ i) mid))
+                                 (url (subseq text (+ mid 2) end)))
+                             (write-string (sgr 4) out)
+                             (write-string (if bold-close label (style-prose label))
+                                           out)
+                             (write-string (sgr 24) out)
+                             (unless (equal label url)
+                               (write-string (dim (format nil " (~a)" url)) out))
+                             (setf i (1+ end))))
+                          (t (write-char c buf) (incf i)))))
+                     (t (write-char c buf) (incf i)))))
+        ;; drain the trailing prose, then reset a style left open by a closer
+        ;; swallowed inside a code span.
+        (drain)
+        (when (or bold-close emph-close)
+          (write-string (sgr 0) out))))))
 
 (defun md-inline-math (text)
   "MD-INLINE, but with math spans ($…$, \\(…\\), and single-line $$…$$ /
@@ -204,7 +261,8 @@ math, this is exactly MD-INLINE — so the old rendering is untouched."
                   (or (= hashes (length rest))
                       (char= (char rest hashes) #\Space)))
              (concatenate 'string (dim (subseq rest 0 hashes))
-                          (bold (md-inline-math (subseq rest hashes))))
+                          (bold (let ((*prose-styling-suppressed* t))
+                                  (md-inline-math (subseq rest hashes)))))
              (md-inline-math line))))
       ((md-hrule-p rest)
        (dim (make-string (max 10 (1- *cols*)) :initial-element #\─)))

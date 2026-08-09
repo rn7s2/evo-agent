@@ -263,6 +263,39 @@ Three rules the seam guarantees, so a renderer stays simple and safe:
   an image is only emitted when a finished line reaches scrollback. So a
   renderer only ever has to produce the escape — the TUI decides *when*.
 
+## Prose styling (evo.tui)
+
+The inline markdown renderer emits some text verbatim — the words *between*
+markers, outside `code` spans, link URLs, and already-bold text (a heading or
+`**strong**`). An extension can restyle exactly those runs by installing a
+`*prose-styler*`:
+
+```lisp
+;; FN is (TEXT) -> styled-text.  TEXT carries no ANSI; the result may add some.
+;; Install one; NIL removes it and restores the byte-for-byte old rendering.
+(evo.tui:register-prose-styler
+  (lambda (text) (my-restyle text)))
+```
+
+It is a peer of the math seam, with the same three guarantees:
+
+- **Off by default.** With no styler installed (`*prose-styler*` nil) the
+  markdown renderer is byte-for-byte what it was — zero impact until an
+  extension opts in.
+- **Source is the fallback.** A styler that returns `nil` or signals yields
+  the original run; it can never take down the render thread.
+- **Only ever plain prose.** Code spans, link URLs and bold text never reach
+  the styler, so it needs no markdown awareness. It sees one contiguous run in
+  one style state at a time, and it should add only *zero-width* SGR (bold,
+  colour) — the region's cursor math ignores SGR but not printing width. Toggle
+  bold off with `22` (not `0`) so a run nested in italic/underline keeps those.
+
+The bundled `extensions/350-bionic-reader.lisp` is exactly such a styler: it
+bolds the leading letters of each English word ("bionic reading"), touching
+only runs of ASCII Latin letters so non-English scripts pass through untouched.
+It is on by default, configured by settings (`:bionic`, `:bionic-fixation`),
+and exposes `/bionic status | on | off | fixation <0..1>`.
+
 ## Prompt notes (evo)
 
 An extension that changes what the agent should *do* — not just how output is

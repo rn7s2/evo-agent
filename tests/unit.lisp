@@ -2199,6 +2199,107 @@ that is how a human's next keystroke differs from a paste's last chunk."
            (equal (evo.tui::md-render-line "a $x$ b" (evo.tui::make-md))
                   "a $x$ b"))))
 
+;;; Prose-styler seam (core; the bionic reader lives in an extension).  The
+;;; inline renderer routes plain prose runs through *PROSE-STYLER*; code spans,
+;;; link URLs, **strong** and headings must NOT reach it, and with no styler
+;;; installed the renderer is byte-for-byte what it was.
+
+(defun test-prose-styler ()
+  ;; Off by default: identity, byte-for-byte.
+  (check "no styler: plain prose identity"
+         (equal "hello there" (evo.tui::md-inline "hello there")))
+  (check "no styler: unmatched marker still literal"
+         (equal "2 * 3 * 4" (evo.tui::md-inline "2 * 3 * 4")))
+  ;; A stub styler brackets every prose run it is given.
+  (let ((evo.tui:*prose-styler* (lambda (s) (concatenate 'string "«" s "»"))))
+    (check "prose run reaches the styler"
+           (search "«hi »" (evo.tui::md-inline "hi **b**")))
+    (check "strong text does NOT reach the styler"
+           (not (search "«b»" (evo.tui::md-inline "hi **b**"))))
+    (check "code span content does NOT reach the styler"
+           (not (find #\« (evo.tui::md-inline "`x`"))))
+    (check "link URL does NOT reach the styler"
+           (not (search "«u»" (evo.tui::md-inline "[t](u)"))))
+    (check "emphasised prose still reaches the styler"
+           (search "«c»" (evo.tui::md-inline "*c*")))
+    (check "list item text reaches the styler"
+           (search "«" (evo.tui::md-render-line "- item" (evo.tui::make-md))))
+    ;; A heading is already fully bold: the styler is suppressed there.
+    (check "heading suppresses the styler"
+           (not (find #\« (evo.tui::md-render-line "## Title" (evo.tui::make-md)))))
+    ;; A signalling styler falls back to the source run, never crashes.
+    (let ((evo.tui:*prose-styler* (lambda (s) (declare (ignore s)) (error "boom"))))
+      (check "signalling styler falls back to source"
+             (equal "hello" (evo.tui::md-inline "hello"))))))
+
+;;; Bionic reader extension (extensions/350-bionic-reader.lisp): no toolchain,
+;;; so the real extension loads and runs here.  Covers the ASCII-only rule
+;;; (English words bolded; anything non-ASCII left untouched) and the command.
+
+(defun test-bionic ()
+  (let ((bon (format nil "~c[1m" #\Escape))
+        (boff (format nil "~c[22m" #\Escape))
+        (saved-styler evo.tui:*prose-styler*)
+        (saved-on (evo.util:setting :bionic t))
+        (saved-fix (evo.util:setting :bionic-fixation 0.5)))
+    (unwind-protect
+         (progn
+           (load (merge-pathnames "extensions/350-bionic-reader.lisp"
+                                  (uiop:getcwd))
+                 :verbose nil :print nil)
+           (evo.util:set-setting :bionic-fixation 0.5)
+           (let ((bionic (uiop:find-symbol* :bionic-transform :evo.user))
+                 (cmd (uiop:find-symbol* :bionic-command :evo.user)))
+             ;; ASCII words: the leading ceil(n·0.5) letters bold, ≥1, ≤n.
+             (check "bionic bolds an ascii word's prefix"
+                    (equal (funcall bionic "hello")
+                           (concatenate 'string bon "hel" boff "lo")))
+             (check "bionic bolds a whole one-letter word"
+                    (equal (funcall bionic "a")
+                           (concatenate 'string bon "a" boff)))
+             (check "bionic keeps punctuation and spacing"
+                    (equal (funcall bionic "hi, ok")
+                           (concatenate 'string bon "h" boff "i, " bon "o" boff "k")))
+             ;; Non-English: untouched, byte-for-byte.
+             (let ((accented (format nil "caf~c" (code-char 233))))     ; café
+               (check "bionic leaves an accented word untouched"
+                      (equal (funcall bionic accented) accented)))
+             (let ((cjk (coerce (list (code-char #x65E5) (code-char #x672C)
+                                      (code-char #x8A9E))
+                                'string)))                              ; 日本語
+               (check "bionic leaves a CJK word untouched"
+                      (equal (funcall bionic cjk) cjk)))
+             (let ((glued (coerce (list (code-char #x65E5) #\w #\o #\r #\d)
+                                  'string)))                           ; 日word
+               (check "bionic leaves ascii glued to non-ascii untouched"
+                      (equal (funcall bionic glued) glued)))
+             (check "bionic still bolds an english word beside foreign text"
+                    (search (concatenate 'string bon "wo" boff "rd")
+                            (funcall bionic
+                                     (coerce (list (code-char #x65E5) #\Space
+                                                   #\w #\o #\r #\d)
+                                             'string))))               ; 日 word
+             ;; The command drives the seam and the settings.
+             (check "/bionic off removes the styler"
+                    (progn (funcall cmd '(:args "off"))
+                           (null evo.tui:*prose-styler*)))
+             (check "/bionic on installs the styler"
+                    (progn (funcall cmd '(:args "on"))
+                           (and evo.tui:*prose-styler* t)))
+             (check "/bionic status reports state"
+                    (search "bionic on" (funcall cmd '(:args "status"))))
+             (check "/bionic fixation sets the fraction"
+                    (progn (funcall cmd '(:args "fixation 0.75"))
+                           (< (abs (- 0.75 (evo.util:setting :bionic-fixation 0)))
+                              1d-4)))
+             ;; End to end through the renderer: prose gets bolded once on.
+             (check "seam applies bionic to rendered prose"
+                    (search bon (evo.tui::md-render-line "plain words"
+                                                         (evo.tui::make-md))))))
+      (evo.tui:register-prose-styler saved-styler)
+      (evo.util:set-setting :bionic saved-on)
+      (evo.util:set-setting :bionic-fixation saved-fix))))
+
 ;;; Light/dark theme: semantic colours resolve through the :theme setting.
 
 (defun test-theme ()
@@ -5014,6 +5115,8 @@ five identical restarts, each reporting a different error than the real one."
     (test-wrap-visible)
     (test-markdown)
     (test-math)
+    (test-prose-styler)
+    (test-bionic)
     (test-theme)
     (test-user-prompt-block)
     (test-input-history)
