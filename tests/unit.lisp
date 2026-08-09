@@ -1555,7 +1555,14 @@ that is how a human's next keystroke differs from a paste's last chunk."
       ;; "+N more" as before.
       (flet ((panel (todos)
                (setf (evo.tui::tui-todos tui) todos)
-               (evo.tui::compose-region tui)))
+               (evo.tui::compose-region tui))
+             ;; The item numbers, in the order the panel displays them, so we
+             ;; can assert the list reads top-down and never reversed.
+             (item-order (lines)
+               (loop for l in lines
+                     for pos = (search "item-" l)
+                     when pos
+                     collect (parse-integer l :start (+ pos 5) :junk-allowed t))))
         (let ((lines (panel (coerce
                              (loop for i from 0 below 12
                                    collect (list :text (format nil "item-~d" i)
@@ -1571,7 +1578,9 @@ that is how a human's next keystroke differs from a paste's last chunk."
           (check "both markers keep the panel at limit+1 rows"
                  (= 9 (count-if (lambda (l) (or (search "item-" l)
                                                 (search "+" l)))
-                                lines))))
+                                lines)))
+          (check "the visible items read top-down, not reversed"
+                 (equal (item-order lines) '(3 4 5 6 7 8 9))))
         (let ((lines (panel (coerce
                              (loop for i from 0 below 10
                                    collect (list :text (format nil "item-~d" i)
@@ -1605,7 +1614,9 @@ that is how a human's next keystroke differs from a paste's last chunk."
           (check "a short list never hides anything"
                  (and (some (lambda (l) (search "item-0" l)) lines)
                       (some (lambda (l) (search "item-5" l)) lines)
-                      (notany (lambda (l) (search "+" l)) lines))))))
+                      (notany (lambda (l) (search "+" l)) lines)))
+          (check "a short list stays in order, not reversed"
+                 (equal (item-order lines) '(0 1 2 3 4 5))))))
     ;; The region is painted with relative cursor movement, so it must never
     ;; be taller than the screen: one frame taller than the terminal scrolls
     ;; its own top away and every later frame then clears the wrong rows and
