@@ -169,7 +169,11 @@
            ;; Math rendering seam — an extension installs a rasterizer here
            ;; (see extensions/300-latex-math.lisp and docs/extension-api.md).
            #:register-math-renderer #:*math-renderer* #:*math-enabled*
-           #:*math-live-preview* #:md-split-math #:render-math-span))
+           #:*math-live-preview* #:md-split-math #:render-math-span
+           ;; Prose-styler seam — an extension restyles plain prose words here
+           ;; (see extensions/350-bionic-reader.lisp and docs/extension-api.md).
+           #:register-prose-styler #:*prose-styler* #:*prose-styling-suppressed*
+           #:style-prose))
 
 (defpackage :evo.cli
   (:use :cl :evo.util :evo.journal :evo.provider :evo.kernel)
