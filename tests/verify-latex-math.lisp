@@ -117,6 +117,17 @@
           (let ((bytes (and (stringp esc) (kitty-png esc))))
             (cl-user::ok "display formula rasterizes to PNG"
                 (and bytes (png-p bytes)))))
+        ;; CJK / Unicode: the classic 8-bit latex engine cannot set 素, so this
+        ;; formula used to fall all the way back to raw source (the bug).  The
+        ;; XeLaTeX + xeCJK fallback must turn it into a real image instead.
+        ;; Skipped only where that toolchain is absent (e.g. CI without xelatex).
+        (if (not (evo.user::latex-fallback-ready-p))
+            (format t "~&skip CJK fallback (no xelatex + pdf rasterizer)~%")
+            (let* ((esc (evo.user::latex-math-render
+                         "\\prod_{p\\ \\text{素}}\\frac{1}{1-p^{-s}}" t))
+                   (bytes (and (stringp esc) (kitty-png esc))))
+              (cl-user::ok "CJK formula rasterizes to a PNG (xelatex fallback)"
+                  (and bytes (png-p bytes)))))
         ;; cache: a second call returns the memoized escape (identical string)
         (cl-user::ok "escape memoized"
             (eq (evo.user::latex-math-render "E=mc^2" nil)
