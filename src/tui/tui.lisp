@@ -707,7 +707,9 @@ wrapped between two rules, and the model status line under the editbox."
           (decf shown))            ; both markers: keep the panel at limit+1 rows
         (when (plusp start)
           (push (dim (format nil "   +~d more" start)) lines))
-        (loop for i from (1- (+ start shown)) downto start
+        ;; Lines are accumulated with PUSH and NREVERSEd once at the end, so
+        ;; push order equals display order: emit items top-down (ascending).
+        (loop for i from start below (+ start shown)
               do (push (dim (format nil " ~a ~a"
                                     (evo.todo::status-glyph
                                      (pget (aref todos i) :status))
