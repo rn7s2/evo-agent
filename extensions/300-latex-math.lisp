@@ -200,6 +200,25 @@ macroexpansion, so no ~<newline> FORMAT continuation appears (TEST-LINE-ENDINGS)
               (format nil "$\\displaystyle ~a$" latex)
               (format nil "$~a$" latex))))
 
+(defun xelatex-document (latex display-p)
+  "A tight preview document for the XeLaTeX fallback.  xeCJK gives CJK glyphs the
+classic latex engine cannot set; the preview package's auctex option reports the
+snippet's baseline metrics to the log.  Font size 10pt matches the classic
+standalone path so a CJK formula comes out the same size as an ASCII one."
+  (format nil (cat "\\documentclass[10pt]{article}~%"
+                   "\\usepackage{amsmath,amssymb,amsfonts}~%"
+                   "\\usepackage{xeCJK}~%"
+                   "\\usepackage{xcolor}~%"
+                   "\\usepackage[active,tightpage,auctex]{preview}~%"
+                   "\\PreviewBorder=~a~%"
+                   "\\begin{document}~%"
+                   "\\begin{preview}\\color{~a}~a\\end{preview}~%"
+                   "\\end{document}~%")
+          (math-border) (math-fg)
+          (if display-p
+              (format nil "$\\displaystyle ~a$" latex)
+              (format nil "$~a$" latex))))
+
 (defun parse-depth-height (s)
   "(values HEIGHT DEPTH) in px from dvipng's `depth=D height=H` report, or NILs."
   (flet ((num (key)
@@ -252,20 +271,160 @@ when FACTOR is 1 or magick is missing.  Returns T iff it actually shrank."
 (defun %read-metrics (path)
   (ignore-errors (with-open-file (i path) (list (read i) (read i) (read i)))))
 
+;;; The classic path (latex -> DVI -> dvipng) is fast and pixel-calibrated but
+;;; runs an 8-bit engine that cannot set CJK — or any Unicode it was not told
+;;; about — so a formula like `\prod_{p\ \text{素}}...` compiles to NO DVI and
+;;; used to fall all the way back to raw source (the bug this fixes).  When the
+;;; classic engine sets no DVI we retry with XeLaTeX + xeCJK, which handles
+;;; Unicode/CJK, rasterizing its PDF to a transparent PNG.  ASCII math never
+;;; leaves the fast path, so nothing about the common case changes.
+
+(defun %read-log-ascii (path)
+  "PATH read as a byte->char (latin-1) string — tolerant of any bytes, unlike a
+strict UTF-8 read, which a TeX log's font names can trip.  We only scan it for
+the ASCII `Preview:` report, so the mapping is exact where it matters."
+  (let ((o (ignore-errors (evo.util:read-file-octets path))))
+    (when o (map 'string #'code-char o))))
+
+(defun %dimen->sp (s)
+  "A TeX dimension string like \"1pt\" or \"0.5pt\" to scaled points (65536/pt).
+Only pt is understood; anything else is treated as 1pt."
+  (let* ((str (string s))
+         (p (search "pt" str))
+         (n (and p (ignore-errors
+                     (let ((*read-default-float-format* 'double-float))
+                       (values (read-from-string (subseq str 0 p))))))))
+    (if (numberp n) (round (* n 65536)) 65536)))
+
+(defun parse-preview-snippet (log)
+  "From a preview(auctex) LOG string, (values HEIGHT DEPTH WIDTH) in scaled
+points for snippet 1 — height above and depth below the baseline — or NIL.  The
+package prints `Preview: Snippet 1 ended.(H+DxW).`"
+  (let ((p (search "Snippet 1 ended.(" log)))
+    (when p
+      (let ((i (+ p (length "Snippet 1 ended.("))))
+        (multiple-value-bind (h j) (parse-integer log :start i :junk-allowed t)
+          (when (and h (< j (length log)) (char= (char log j) #\+))
+            (multiple-value-bind (d k) (parse-integer log :start (1+ j) :junk-allowed t)
+              (when (and d (< k (length log)) (char= (char log k) #\x))
+                (let ((w (parse-integer log :start (1+ k) :junk-allowed t)))
+                  (when w (values h d w))))))))))) ; W unused, but validates the shape
+
+(defun pdf-raster-exe ()
+  "Best available PDF->PNG rasterizer that can keep a transparent background:
+pdftocairo (native alpha), then magick (needs ghostscript), then pdftoppm."
+  (or (and (find-exe "pdftocairo") :cairo)
+      (and (magick-exe) :magick)
+      (and (find-exe "pdftoppm") :toppm)))
+
+(defun %pdf->png (pdf png dpi)
+  "Rasterize page 1 of PDF to a transparent PNG at DPI.  T on success."
+  (let ((root (uiop:native-namestring (make-pathname :type nil :defaults png))))
+    (case (pdf-raster-exe)
+      (:cairo
+       (zerop (%run (list (find-exe "pdftocairo") "-png" "-r" (princ-to-string dpi)
+                          "-transp" "-singlefile"
+                          (uiop:native-namestring pdf) root))))
+      (:magick
+       (zerop (%run (list (magick-exe) "-density" (princ-to-string dpi)
+                          "-background" "none"
+                          (format nil "~a[0]" (uiop:native-namestring pdf))
+                          (uiop:native-namestring png)))))
+      (:toppm
+       (zerop (%run (list (find-exe "pdftoppm") "-png" "-r" (princ-to-string dpi)
+                          "-singlefile" (uiop:native-namestring pdf) root))))
+      (t nil))))
+
+(defun latex-fallback-ready-p ()
+  "T iff the XeLaTeX+PDF-rasterizer fallback can run."
+  (and (find-exe "xelatex") (pdf-raster-exe) t))
+
+(defun %render-classic (latex display-p dir h png)
+  "Classic, calibrated path: latex -> DVI -> dvipng transparent PNG at :math-dpi.
+Returns (values PNG ABOVE BELOW WIDTH) in display pixels, or NIL when the 8-bit
+engine sets no DVI (a genuine error, or Unicode it cannot handle)."
+  (let ((tex (merge-pathnames (format nil "~a.tex" h) dir))
+        (dvi (merge-pathnames (format nil "~a.dvi" h) dir)))
+    (with-open-file (out tex :direction :output :if-exists :supersede
+                             :if-does-not-exist :create :external-format :utf-8)
+      (write-string (latex-document latex display-p) out))
+    (unwind-protect
+         (progn
+           (%run (list (find-exe "latex") "-interaction=nonstopmode" "-halt-on-error"
+                       (format nil "-output-directory=~a" (uiop:native-namestring dir))
+                       (uiop:native-namestring tex))
+                 :directory dir)
+           (unless (probe-file dvi) (return-from %render-classic nil))
+           (multiple-value-bind (rh rd) (%dvi->png dvi png (math-dpi))
+             (unless rh (return-from %render-classic nil))
+             ;; Derive the baseline split from the ACTUAL final pixels so the
+             ;; layout always matches what is on screen.
+             (multiple-value-bind (aw ah) (png-dimensions png)
+               (let* ((tot (max 1 (+ rh rd)))
+                      (ah (or ah tot))
+                      (aw (or aw tot))
+                      (above (max 0 (round (* rh ah) tot)))
+                      (below (max 0 (- ah above))))
+                 (and (probe-file png) (values png above below aw))))))
+      (dolist (ext '("tex" "dvi" "aux" "log"))
+        (ignore-errors
+         (delete-file (merge-pathnames (format nil "~a.~a" h ext) dir)))))))
+
+(defun %render-xelatex (latex display-p dir h png)
+  "XeLaTeX+xeCJK fallback for formulas the classic engine cannot set (CJK and
+other Unicode): LaTeX -> PDF (preview/auctex reports the baseline to the log) ->
+transparent PNG.  Returns (values PNG ABOVE BELOW WIDTH) in display pixels, or
+NIL.  Only used when the classic path produced no DVI."
+  (unless (latex-fallback-ready-p) (return-from %render-xelatex nil))
+  (let ((tex (merge-pathnames (format nil "~a-x.tex" h) dir))
+        (pdf (merge-pathnames (format nil "~a-x.pdf" h) dir))
+        (logf (merge-pathnames (format nil "~a-x.log" h) dir))
+        (dpi (math-dpi)))
+    (with-open-file (out tex :direction :output :if-exists :supersede
+                             :if-does-not-exist :create :external-format :utf-8)
+      (write-string (xelatex-document latex display-p) out))
+    (unwind-protect
+         (progn
+           ;; auctex reports the snippet via \errmessage, so xelatex exits
+           ;; non-zero even on success: gate on the PDF + parsed metrics, never
+           ;; the exit code, and NEVER halt-on-error (it would stop at the
+           ;; report).  nonstopmode keeps it from ever waiting for input.
+           (%run (list (find-exe "xelatex") "-interaction=nonstopmode"
+                       "-no-shell-escape"
+                       (format nil "-output-directory=~a" (uiop:native-namestring dir))
+                       (uiop:native-namestring tex))
+                 :directory dir)
+           (unless (probe-file pdf) (return-from %render-xelatex nil))
+           (let ((logtext (and (probe-file logf) (%read-log-ascii logf))))
+             (unless logtext (return-from %render-xelatex nil))
+             (multiple-value-bind (hsp dsp) (parse-preview-snippet logtext)
+               (unless hsp (return-from %render-xelatex nil))
+               (unless (%pdf->png pdf png dpi) (return-from %render-xelatex nil))
+               (multiple-value-bind (aw ah) (png-dimensions png)
+                 (unless (and aw ah) (return-from %render-xelatex nil))
+                 ;; The PNG page includes the preview border on every side; the
+                 ;; baseline sits (H + border) sp below the top.  Split the
+                 ;; ACTUAL png height by that fraction so total = png height.
+                 (let* ((bsp (%dimen->sp (math-border)))
+                        (num (+ hsp bsp))
+                        (den (max 1 (+ hsp dsp (* 2 bsp))))
+                        (above (max 0 (min ah (round (* ah num) den))))
+                        (below (max 0 (- ah above))))
+                   (and (probe-file png) (values png above below aw)))))))
+      (dolist (ext '("tex" "pdf" "aux" "log"))
+        (ignore-errors
+         (delete-file (merge-pathnames (format nil "~a-x.~a" h ext) dir)))))))
+
 (defun render-latex-png (latex display-p)
-  "Rasterize LATEX to a native-size, supersample-antialiased transparent PNG in
-the cache.  Returns (values PNG-PATH ABOVE-PX BELOW-PX WIDTH-PX) — pixels above /
-below the baseline and the image width, at display size — or NIL on failure.  A
-cache hit skips the toolchain entirely."
-  (unless (latex-toolchain-ready-p) (return-from render-latex-png nil))
+  "Rasterize LATEX to a native-size transparent PNG in the cache.  Returns
+(values PNG-PATH ABOVE-PX BELOW-PX WIDTH-PX) — pixels above / below the baseline
+and the width, at display size — or NIL.  Tries the fast, calibrated classic
+latex+dvipng path first; when that sets no DVI (e.g. CJK the 8-bit engine cannot
+handle) it falls back to XeLaTeX+xeCJK.  A cache hit skips the toolchain."
+  (unless (or (latex-toolchain-ready-p) (latex-fallback-ready-p))
+    (return-from render-latex-png nil))
   (let* ((d0 (math-dpi))
-         ;; Render straight at the target DPI.  Supersampling needs an external
-         ;; downscaler (magick), which silently no-ops in GUI-launched terminals
-         ;; that lack its delegate env — leaving 3x-oversized PNGs that overlap
-         ;; and blow past xterm's image limit (display math showed as gray
-         ;; placeholder boxes).  dvipng antialiases fine at this DPI.
-         (ss 1)
-         (key (format nil "~a|~a|~a|~a|~a|~a|k3" latex display-p d0 ss
+         (key (format nil "~a|~a|~a|~a|~a|k4" latex display-p d0
                       (math-fg) (math-border)))
          (h (math-hash key))
          (dir (math-cache-dir))
@@ -275,36 +434,14 @@ cache hit skips the toolchain entirely."
       (when m (return-from render-latex-png
                 (values png (first m) (second m) (third m)))))
     (ensure-directories-exist dir)
-    (let ((tex (merge-pathnames (format nil "~a.tex" h) dir))
-          (dvi (merge-pathnames (format nil "~a.dvi" h) dir)))
-      (with-open-file (out tex :direction :output :if-exists :supersede
-                               :if-does-not-exist :create :external-format :utf-8)
-        (write-string (latex-document latex display-p) out))
-      (unwind-protect
-           (progn
-             (%run (list (find-exe "latex") "-interaction=nonstopmode" "-halt-on-error"
-                         (format nil "-output-directory=~a" (uiop:native-namestring dir))
-                         (uiop:native-namestring tex))
-                   :directory dir)
-             (unless (probe-file dvi) (return-from render-latex-png nil))
-             (multiple-value-bind (rh rd) (%dvi->png dvi png (* d0 ss))
-               (unless rh (return-from render-latex-png nil))
-               (%downsample png ss)
-               ;; Derive the baseline split from the ACTUAL final pixels, not
-               ;; from an assumed 1/ss shrink — so the layout always matches
-               ;; what is on screen even if the downsample did not run (metrics
-               ;; would otherwise say 1 row while a 3x image is displayed).
-               (multiple-value-bind (aw ah) (png-dimensions png)
-                 (let* ((tot (max 1 (+ rh rd)))
-                        (ah (or ah (round tot ss)))
-                        (aw (or aw (round tot ss)))
-                        (above (max 0 (round (* rh ah) tot)))
-                        (below (max 0 (- ah above))))
-                   (%write-metrics met above below aw)
-                   (and (probe-file png) (values png above below aw))))))
-        (dolist (ext '("tex" "dvi" "aux" "log"))
-          (ignore-errors
-           (delete-file (merge-pathnames (format nil "~a.~a" h ext) dir))))))))
+    (multiple-value-bind (rpng above below width)
+        (%render-classic latex display-p dir h png)
+      (unless rpng
+        (multiple-value-setq (rpng above below width)
+          (%render-xelatex latex display-p dir h png)))
+      (when rpng
+        (%write-metrics met above below width)
+        (values rpng above below width)))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Placement geometry + kitty encoder
@@ -447,11 +584,13 @@ Installed as EVO.TUI:*MATH-RENDERER*."
 
 (defun math-status-text ()
   (format nil (cat "math ~a · theme ~a · protocol kitty · "
-                   "latex ~a dvipng ~a · dpi ~d · cell ~dx~d css px · rendered ~d")
+                   "latex ~a dvipng ~a · xelatex ~a (CJK) · "
+                   "dpi ~d · cell ~dx~d css px · rendered ~d")
           (if (and (math-on-p) evo.tui:*math-enabled*) "on" "off")
           (string-downcase (math-theme))
           (if (find-exe "latex") "✓" "✗")
           (if (find-exe "dvipng") "✓" "✗")
+          (if (latex-fallback-ready-p) "✓" "✗")
           (math-dpi) (math-cell-w-px) (math-cell-px) *math-render-count*))
 
 (defun math-clear-cache ()

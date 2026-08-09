@@ -45,6 +45,20 @@ Binaries are searched on `PATH` plus the usual TeX locations (`~/bin`,
 `/usr/local/texlive/bin`) — a GUI-launched evo without a login shell's `PATH`
 still finds them.  `/math status` shows what was found.
 
+**CJK / Unicode fallback (optional).**  The classic `latex` engine is 8-bit and
+cannot set CJK or other non-Latin Unicode, so a formula like
+`\prod_{p\ \text{素}} ...` fails it and would otherwise fall back to raw source.
+When that happens and `xelatex` (with the `xeCJK` package and a CJK font — e.g.
+Fandol, shipped with TeX Live/MiKTeX) plus a PDF rasterizer (`pdftocairo`, or
+ImageMagick+Ghostscript, or `pdftoppm`) are present, evo retries the formula
+through XeLaTeX and renders it as an image just like any other.  ASCII math never
+leaves the fast `latex`+`dvipng` path.  `/math status` shows `xelatex ✓ (CJK)`
+when the fallback is available.
+
+- macOS: MacTeX/MiKTeX include `xelatex` + `xeCJK`; `brew install poppler` gives
+  `pdftocairo`.
+- Debian/Ubuntu: `apt install texlive-xetex texlive-lang-cjk poppler-utils`.
+
 ## Calibration
 
 The terminal lays images out in **CSS pixels** (xterm.js maps 1 image px to
@@ -102,6 +116,9 @@ settings, so stale entries are simply unused (`/math clear-cache` tidies).
 
 - **Formulas show as `$…$` source** — no renderer: check `/math status` for
   the toolchain (latex ✓ dvipng ✓) and that math is `on`.
+- **Only CJK/Unicode formulas show as source** — the classic engine cannot set
+  those; install the fallback (`/math status` should read `xelatex ✓ (CJK)`) —
+  see the CJK / Unicode fallback under Prerequisites — then `/math clear-cache`.
 - **Escape garbage in output** — the terminal has no kitty graphics support
   (or VS Code's `enableImages`/`gpuAcceleration` are off).
 - **Overlap, or gray dithered boxes** — cell calibration is wrong for your
