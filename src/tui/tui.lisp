@@ -726,11 +726,22 @@ wrapped between two rules, and the model status line under the editbox."
              ;; A long list hides its completed prefix behind a top "+N more"
              ;; and shows from the first unfinished item down; a tail that is
              ;; still too long hides behind a bottom "+N more" as before.
+             ;; But never underfill: if hiding the whole done prefix would
+             ;; leave only a row or two visible (almost everything is done),
+             ;; back the start up (CAP) so the panel fills to its budget,
+             ;; revealing the most recent done items as context above the last
+             ;; one.  Clamping DOWN only ever reveals more done items, so the
+             ;; first unfinished item stays visible.  And when EVERYTHING is
+             ;; done (no unfinished item to anchor on) we anchor at the bottom
+             ;; — a "+N more" over the final items — because the finish line is
+             ;; the interesting part of a completed list, not its stale head.
              (start (if (> n limit)
-                        (or (position-if-not (lambda (item)
-                                               (eq (pget item :status) :done))
-                                             todos)
-                            0)
+                        (let ((first-open (position-if-not
+                                           (lambda (item)
+                                             (eq (pget item :status) :done))
+                                           todos))
+                              (cap (max 0 (- n (1- limit)))))
+                          (if first-open (min first-open cap) cap))
                         0))
              (shown (min (- n start) limit)))
         (when (and (plusp start) (< (+ start shown) n))

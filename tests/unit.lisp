@@ -1590,6 +1590,23 @@ that is how a human's next keystroke differs from a paste's last chunk."
                  (and (some (lambda (l) (search "+3 more" l)) lines)
                       (some (lambda (l) (search "item-9" l)) lines)
                       (= 1 (count-if (lambda (l) (search "+" l)) lines)))))
+        ;; Almost everything done, one item left: hiding the whole done
+        ;; prefix would leave a single row under a "+9 more" — the panel must
+        ;; instead fill up, revealing recent done items above the last one.
+        (let ((lines (panel (coerce
+                             (loop for i from 0 below 10
+                                   collect (list :text (format nil "item-~d" i)
+                                                 :status (if (< i 9) :done
+                                                             :in-progress)))
+                             'vector))))
+          (check "an almost-done list fills the panel, not one lonely row"
+                 (and (some (lambda (l) (search "+3 more" l)) lines)
+                      (some (lambda (l) (search "item-3" l)) lines) ; a done item
+                      (some (lambda (l) (search "item-9" l)) lines) ; the last one
+                      (notany (lambda (l) (search "item-2" l)) lines)
+                      (= 1 (count-if (lambda (l) (search "+" l)) lines))))
+          (check "the filled panel reads top-down and holds the last one"
+                 (equal (item-order lines) '(3 4 5 6 7 8 9))))
         (let ((lines (panel (coerce
                              (loop for i from 0 below 10
                                    collect (list :text (format nil "item-~d" i)
@@ -1603,9 +1620,16 @@ that is how a human's next keystroke differs from a paste's last chunk."
                                    collect (list :text (format nil "item-~d" i)
                                                  :status :done))
                              'vector))))
-          (check "an all-done list falls back to showing from the top"
-                 (and (some (lambda (l) (search "item-0" l)) lines)
-                      (some (lambda (l) (search "+4 more" l)) lines))))
+          ;; Nothing unfinished to anchor on: show the finish line, not the
+          ;; stale head — the last items under a top "+N more" (mirror of the
+          ;; almost-done fill above).
+          (check "an all-done list anchors at the bottom, showing the finish line"
+                 (and (some (lambda (l) (search "item-11" l)) lines) ; the last one
+                      (some (lambda (l) (search "+5 more" l)) lines)
+                      (notany (lambda (l) (search "item-0" l)) lines)
+                      (= 1 (count-if (lambda (l) (search "+" l)) lines))))
+          (check "the all-done panel reads top-down"
+                 (equal (item-order lines) '(5 6 7 8 9 10 11))))
         (let ((lines (panel (coerce
                              (loop for i from 0 below 6
                                    collect (list :text (format nil "item-~d" i)
