@@ -367,3 +367,38 @@ $$ or \\[ standing alone."
   "T if LINE, trimmed, is a bare display-math closer — $$ or \\]."
   (let ((s (%math-trim line)))
     (or (string= s "$$") (string= s "\\]"))))
+
+(defun math-starts-with-opener-p (line)
+  "T if LINE, trimmed, OPENS a multi-line display block: it starts with $$ or
+\\[ carrying content, and has NO matching closer later on the same line.  A
+self-contained single-line formula ($$…$$ / \\[…\\]) is NOT an opener — it is
+rendered inline by MD-SPLIT-MATH — so this must reject it, or the single-line
+form would swallow the prose that follows until the next stray closer."
+  (let ((s (%math-trim line)))
+    (cond
+      ((and (eql 0 (search "$$" s)) (not (string= s "$$")))
+       (null (%math-close s 2 "$$")))
+      ((and (eql 0 (search "\\[" s)) (not (string= s "\\[")))
+       (null (%math-close s 2 "\\]")))
+      (t nil))))
+
+(defun math-ends-with-closer-p (line)
+  "T if LINE, trimmed, ends with $$ or \\] but is NOT exactly that — i.e. the
+closer is on the same line as the last content."
+  (let ((s (%math-trim line)))
+    (or (and (>= (length s) 3)
+             (string= s "$$" :start1 (- (length s) 2))
+             (not (string= s "$$")))
+        (and (>= (length s) 3)
+             (string= s "\\]" :start1 (- (length s) 2))
+             (not (string= s "\\]"))))))
+
+(defun %math-strip-trailing (s suffix)
+  "Remove SUFFIX from the end of S; NIL if S does not end with it."
+  (let ((pos (- (length s) (length suffix))))
+    (and (>= pos 0) (string= s suffix :start1 pos) (subseq s 0 pos))))
+
+(defun %math-strip-closer (s)
+  "Strip the trailing $$ or \\] from S; NIL if S ends with neither."
+  (or (%math-strip-trailing s "$$")
+      (%math-strip-trailing s "\\]")))

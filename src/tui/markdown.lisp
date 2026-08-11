@@ -294,43 +294,72 @@ math, this is exactly MD-INLINE — so the old rendering is untouched."
   "Render one complete markdown LINE for scrollback, advancing the fence and
 display-math state in MD.  Returns NIL to SUPPRESS a line: the interior
 lines of a multi-line $$…$$ block produce nothing, and the whole formula is
-emitted as one unit on its closing line.  Callers must skip a NIL result."
-  (cond
-    ;; Code fences win over everything (a $$ inside a code block is literal).
-    ((md-fence-p line)
-     (setf (md-in-code md) (not (md-in-code md)))
-     (dim line))
-    ((md-in-code md) line)
-    ;; Inside a bare $$ / \[ display block: accumulate until the closer,
-    ;; then render the whole formula at once.
-    ((md-in-math md)
-     (cond
-       ((math-close-display-line-p line)
-        (let ((latex (md-in-math md)))
-          (setf (md-in-math md) nil)
-          (multiple-value-bind (bytes image-p total)
-              (render-math-span (string-right-trim '(#\Newline) latex) t)
-            (if image-p (math-display-block bytes total) bytes))))
-       (t (setf (md-in-math md)
-                (concatenate 'string (md-in-math md) line (string #\Newline)))
-          nil)))
-    ;; A bare $$ / \[ opens a display block (only when math is on; otherwise
-    ;; it is ordinary text and must render verbatim as before).
-    ((and *math-enabled* (math-open-display-line-p line))
-     (setf (md-in-math md) "")
-     nil)
-    (t (md-block-line line))))
+emitted as one unit on its closing line.  Callers must skip a NIL result.
+
+The multi-line display-math machinery (opening a block, accumulating its
+interior, emitting the image at the close) is gated on (NOT *MATH-LIVE-PREVIEW*)
+so it runs ONLY on the scrollback path.  In the live-region preview every line
+instead falls through to MD-BLOCK-LINE and renders as its own source — an
+unclosed block must show its raw LaTeX, line by line, not vanish (the image is
+emitted once, later, when the block closes in scrollback)."
+  (let ((assemble (not *math-live-preview*)))     ; scrollback path only
+    (cond
+      ;; Code fences win over everything (a $$ inside a code block is literal).
+      ((md-fence-p line)
+       (setf (md-in-code md) (not (md-in-code md)))
+       (dim line))
+      ((md-in-code md) line)
+      ;; Inside a bare $$ / \[ display block: accumulate until the closer,
+      ;; then render the whole formula at once.
+      ((and assemble (md-in-math md))
+       (cond
+         ((math-close-display-line-p line)
+          (let ((latex (md-in-math md)))
+            (setf (md-in-math md) nil)
+            (multiple-value-bind (bytes image-p total)
+                (render-math-span (string-right-trim '(#\Newline) latex) t)
+              (if image-p (math-display-block bytes total) bytes))))
+         ;; Line ends with the closer but has content before it — accumulate
+         ;; the content and render.
+         ((math-ends-with-closer-p line)
+          (let ((content (%math-strip-closer (%math-trim line)))
+                (latex (md-in-math md)))
+            (setf (md-in-math md) nil)
+            (when content
+              (setf latex (concatenate 'string latex content (string #\Newline))))
+            (multiple-value-bind (bytes image-p total)
+                (render-math-span (string-right-trim '(#\Newline) latex) t)
+              (if image-p (math-display-block bytes total) bytes))))
+         (t (setf (md-in-math md)
+                  (concatenate 'string (md-in-math md) line (string #\Newline)))
+            nil)))
+      ;; A bare $$ / \[ opens a display block (only when math is on; otherwise
+      ;; it is ordinary text and must render verbatim as before).
+      ((and assemble *math-enabled* (math-open-display-line-p line))
+       (setf (md-in-math md) "")
+       nil)
+      ;; $$… (or \[…) on a line with content but no closer on the same line:
+      ;; open a display block and accumulate the content after the opener.
+      ((and assemble *math-enabled* (math-starts-with-opener-p line))
+       ;; Both $$ and \[ are two characters; keep the content after them, with a
+       ;; trailing newline so accumulation is uniform with the interior lines.
+       (setf (md-in-math md)
+             (concatenate 'string (subseq (%math-trim line) 2) (string #\Newline)))
+       nil)
+      (t (md-block-line line)))))
 
 (defun md-render-preview (line md)
   "Render a still-streaming LINE for the managed region without advancing the
 real fence/math state.  Math renders as its own source here — never an image
-(the region strips control bytes and counts columns).  Always a string."
-  (let ((*math-live-preview* t)
-        ;; A copy whose IN-MATH is cleared: the preview line shows its own
-        ;; source rather than being swallowed by an open display block.
-        (probe (copy-md md)))
-    (setf (md-in-math probe) nil)
-    (or (md-render-line line probe) "")))
+(the region strips control bytes and counts columns).  Always a string.
+
+Binding *MATH-LIVE-PREVIEW* both forces inline math to its source (see
+RENDER-MATH-SPAN) and disables the multi-line display-block assembly in
+MD-RENDER-LINE, so an unclosed $$…$$ block previews as raw LaTeX line by line —
+including its opener — rather than being swallowed.  The COPY-MD still shields
+the real fence state (IN-CODE) from a partial ``` line that has not landed yet."
+  (let ((*math-live-preview* t))
+    (or (md-render-line line (copy-md md)) "")))
 
 (defun md-render-text (text)
   "Render complete multi-line markdown TEXT with a fresh fence state,

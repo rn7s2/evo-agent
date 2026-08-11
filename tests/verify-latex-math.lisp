@@ -66,10 +66,75 @@
     (cl-user::ok "close $$ emits block image"
         (equal (evo.tui::md-render-line "$$" md) "<IMG:D:a+b
 =c>")))
+  ;; multi-line $$ block where the opener SHARES its line with the first content
+  ;; and the closer shares its line with the last content — the shape a model
+  ;; emits a pmatrix in ($$A = \begin{pmatrix} … \end{pmatrix}$$).  Opener +
+  ;; interior suppressed, the whole formula (opener content included) images at
+  ;; the close.
+  (let ((md (evo.tui::make-md)))
+    (cl-user::ok "opener-with-content suppressed"
+        (null (evo.tui::md-render-line "$$A = \\begin{pmatrix}" md)))
+    (cl-user::ok "matrix row suppressed"
+        (null (evo.tui::md-render-line "a & b \\\\" md)))
+    (cl-user::ok "closer-with-content emits block image incl. opener content"
+        (equal (evo.tui::md-render-line "\\end{pmatrix}$$" md)
+               "<IMG:D:A = \\begin{pmatrix}
+a & b \\\\
+\\end{pmatrix}>")))
+  ;; same shape with \[ … \]
+  (let ((md (evo.tui::make-md)))
+    (cl-user::ok "\\[-with-content opener suppressed"
+        (null (evo.tui::md-render-line "\\[x =" md)))
+    (cl-user::ok "\\]-with-content closer emits image"
+        (equal (evo.tui::md-render-line "y\\]" md) "<IMG:D:x =
+y>")))
+  ;; CRITICAL: a SELF-CONTAINED single-line $$…$$ is NOT an opener — it must
+  ;; image on its own line and leave IN-MATH nil, so the prose that follows is
+  ;; NOT swallowed into a math block (the regression that rasterized a whole
+  ;; paragraph between two display equations).
+  (let ((md (evo.tui::make-md)))
+    (cl-user::ok "single-line $$…$$ images inline, does not open a block"
+        (equal (evo.tui::md-render-line "$$f(q) = 0$$" md) "<IMG:D:f(q) = 0>"))
+    (cl-user::ok "single-line $$…$$ leaves in-math nil"
+        (null (evo.tui::md-in-math md)))
+    (cl-user::ok "prose after single-line $$…$$ renders as prose (not swallowed)"
+        ;; layout-agnostic (inline mode is :break here): the point is the prose
+        ;; survives with INLINE math, and is NOT rasterized as a DISPLAY block.
+        (let ((r (evo.tui::md-render-line "Each $q$ has a dimension." md)))
+          (and (search "<IMG:I:q>" r)
+               (search "has a dimension." r)
+               (not (search "<IMG:D:" r)))))
+    (cl-user::ok "second single-line $$…$$ images on its own"
+        (equal (evo.tui::md-render-line "$$[q] = D^a$$" md) "<IMG:D:[q] = D^a>")))
+  ;; likewise a self-contained single-line \[…\] is not an opener
+  (let ((md (evo.tui::make-md)))
+    (cl-user::ok "single-line \\[…\\] images inline, does not open a block"
+        (equal (evo.tui::md-render-line "\\[x = y\\]" md) "<IMG:D:x = y>"))
+    (cl-user::ok "single-line \\[…\\] leaves in-math nil"
+        (null (evo.tui::md-in-math md))))
   ;; preview renders math as SOURCE, never the stub image
   (cl-user::ok "preview shows source not image"
       (equal (evo.tui::md-render-preview "see $x^2$ end" (evo.tui::make-md))
-             "see $x^2$ end")))
+             "see $x^2$ end"))
+  ;; PREVIEW of an unclosed multi-line block: EVERY line — the opener included —
+  ;; must show its raw source, never vanish and never image.  The real md
+  ;; advances line-by-line (scrollback) while we preview the same line.
+  (let ((real (evo.tui::make-md)))
+    (cl-user::ok "preview opener-with-content shows source"
+        (equal (evo.tui::md-render-preview "$$A = \\begin{pmatrix}" real)
+               "$$A = \\begin{pmatrix}"))
+    (evo.tui::md-render-line "$$A = \\begin{pmatrix}" real)
+    (cl-user::ok "preview interior shows source"
+        (equal (evo.tui::md-render-preview "a & b \\\\" real) "a & b \\\\"))
+    (evo.tui::md-render-line "a & b \\\\" real)
+    (cl-user::ok "preview closer-with-content shows source"
+        (equal (evo.tui::md-render-preview "\\end{pmatrix}$$" real)
+               "\\end{pmatrix}$$")))
+  ;; preview must not toggle the real fence/math state (COPY-MD shield)
+  (let ((real (evo.tui::make-md)))
+    (evo.tui::md-render-preview "$$A = \\begin{pmatrix}" real)
+    (cl-user::ok "preview leaves real in-math untouched"
+        (null (evo.tui::md-in-math real)))))
 
 ;; --- disabled: byte-for-byte passthrough -----------------------------------
 (let ((evo.tui:*math-enabled* nil))
