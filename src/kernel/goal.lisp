@@ -196,11 +196,16 @@ status change or stand alone."
       (flet ((commit (&rest changes)
                (apply #'update-goal-entry agent goal (append changes refine))))
         (cond
-          ;; Refine only, no status change.
-          ((null status)
+          ;; Refine only, no status change.  If status is given but equals
+          ;; current, treat as a refine (agent may send status="active"
+          ;; along with done_when to attach a verifier on a live goal);
+          ;; if status matches and there is nothing to refine, error.
+          ((or (null status)
+               (and (eq cur (intern (string-upcase status) :keyword))
+                    refine))
            (commit)
-           (format nil "Goal refined.~@[ New objective: ~a.~]~@[ done-when: ~a.~]"
-                   objective done-when))
+           (format nil "Goal refined~@[ (status unchanged: ~(~a~))~].~@[ New objective: ~a.~]~@[ done-when: ~a.~]"
+                   (when status cur) objective done-when))
           ((equal status "complete")
            (unless (member cur '(:active :budget-limited))
              (error "Goal is ~(~a~); resume it before completing." cur))

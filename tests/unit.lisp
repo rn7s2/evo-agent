@@ -2746,6 +2746,14 @@ completion gating around all of it."
     (evo.kernel::tool-update-goal '(:done-when "test-goal-done-p"))
     (check "done-when attached to live goal"
            (equal (pget (current-goal agent) :done-when) "test-goal-done-p"))
+    ;; Agent may send status="active" along with done_when on an active goal
+    ;; (e.g. "attach verifier + reaffirm active"); must not error as resume.
+    (let ((before (length (evo.journal::journal-entries (agent-journal agent)))))
+      (evo.kernel::tool-update-goal '(:status "active" :done-when "test-goal-done-p"))
+      (check "status=active+done_when on active goal refines instead of erroring"
+             (equal (pget (current-goal agent) :status) :active))
+      (check "status=active+done_when still appends a journal entry"
+             (> (length (evo.journal::journal-entries (agent-journal agent))) before)))
     ;; Pause: reachable, records its reason, guards double-pause.
     (evo.kernel::tool-update-goal '(:status "paused" :reason "need the user"))
     (check "goal paused" (eq (pget (current-goal agent) :status) :paused))
