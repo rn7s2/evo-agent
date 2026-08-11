@@ -634,6 +634,36 @@ dropping segments from the middle outward until the line fits WIDTH."
                         (and goal (dim (goal-label goal (tui-goal-run-tokens tui))))))
                     :side :left :order 400)
 
+(defun short-duration (seconds)
+  "Compact elapsed clock for the status line: 45s, 3m, 1h2m."
+  (cond ((< seconds 60) (format nil "~ds" seconds))
+        ((< seconds 3600) (format nil "~dm" (floor seconds 60)))
+        (t (multiple-value-bind (h rest) (floor seconds 3600)
+             (format nil "~dh~dm" h (floor rest 60))))))
+
+(defun jobs-status-segment ()
+  "The ▷ background-jobs cell, or NIL when no job is running.  Sits on the
+inner right of the status line (order 200, inward of the model-load cell)."
+  (let ((summary (running-jobs-summary)))
+    (when summary
+      (let* ((n (getf summary :count))
+             (elapsed (max 0 (- (get-universal-time) (getf summary :since))))
+             (clock (short-duration elapsed)))
+        (dim (if (> n 1)
+                 (format nil "▷ ~d jobs · ~a" n clock)
+                 (let* ((cmd (or (getf summary :command) ""))
+                        (line (or (first (uiop:split-string
+                                          cmd :separator '(#\Newline)))
+                                  ""))
+                        (short (if (> (length line) 24)
+                                   (concatenate 'string (subseq line 0 23) "…")
+                                   line)))
+                   (format nil "▷ ~a · ~a" short clock))))))))
+
+(add-status-segment :jobs (lambda (tui) (declare (ignore tui))
+                            (jobs-status-segment))
+                    :side :right :order 200)
+
 (defparameter *working-frames* "|/-\\"
   "Rotating slash while the agent is executing.")
 (defparameter *thinking-frames* "✢✳✶✻✽✻✶✳"

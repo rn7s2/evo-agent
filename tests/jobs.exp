@@ -1,0 +1,82 @@
+#!/usr/bin/expect -f
+# jobs.exp — background jobs surface on the status line, through a real pty.
+#
+# No backend: nothing here calls a model.  A background job normally starts
+# when a bash command passes its timeout, but that needs the model to run a
+# tool; here we inject job entries straight into the registry with /eval (a
+# REPL into the live image) and assert the ▷ status segment renders them.
+#
+# The assertion matches "2 jobs" — a pure-ASCII string the jobs status segment
+# produces and that appears nowhere in the text we type, so a hit can only be
+# the repainted status line (not the editor's echo of the /eval command).  The
+# ◆/▷/· glyphs around it are multibyte and what expect sees on a pty depends on
+# the channel encoding, so we anchor on the ASCII, never the diamond.
+set timeout 15
+
+set repo [file dirname [file dirname [file normalize $argv0]]]
+set scratch [exec mktemp -d /tmp/evo-jobs.XXXXXX]
+set env(EVO_HOME) "$scratch/home"
+file mkdir $env(EVO_HOME)
+foreach v {EVO_SUPERVISED_CHILD EVO_HEARTBEAT_FILE} {
+    if {[info exists env($v)]} { unset env($v) }
+}
+# A model must be registered for the TUI to start; it is never called.
+set f [open "$env(EVO_HOME)/init.lisp" w]
+puts $f {(evo:register-model "jobs-test" :provider :none :api :anthropic-messages :context-window 100000 :max-output 4000)}
+puts $f {(evo:set-setting :model "jobs-test")}
+puts $f {(evo:register-provider :none :base-url "http://127.0.0.1:1/unused" :api-key "unused")}
+close $f
+
+set workdir "$scratch/work"
+file mkdir $workdir
+cd $workdir
+
+set pass 0
+set failures {}
+proc check {name} {
+    global pass
+    incr pass
+    puts "\nPASS: $name"
+}
+proc fail {name} {
+    global failures
+    lappend failures $name
+    puts "\nFAIL: $name"
+}
+
+# A wide, one-line status region so the right-hand jobs segment is never
+# dropped for width or wrapped mid-token.
+set stty_init "rows 24 cols 100"
+spawn "$repo/build/evo"
+
+expect {
+    -re {ctx \d+k/\d+k} { check "startup status line" }
+    timeout { fail "startup status line"; exit 1 }
+}
+
+# Inject two pure-data jobs (no process needed: the status segment reads only
+# their count/command/start-time) and return :ok so the /eval RESULT carries no
+# matchable token.
+send "/eval (progn (dotimes (i 2) (push (cons i (evo.kernel::make-job :id i :command \"bg\" :start-time (get-universal-time))) evo.kernel::*jobs*)) :ok)\r"
+expect {
+    -re {2 jobs} { check "background jobs surface on the status line" }
+    timeout { fail "background jobs surface on the status line" }
+}
+
+# Clearing the registry drops the segment; ctx is still on the line, the job
+# count is not.
+send "/eval (progn (setf evo.kernel::*jobs* nil) :cleared)\r"
+expect {
+    -re {:cleared} { check "registry cleared" }
+    timeout { fail "registry cleared" }
+}
+
+send "/quit\r"
+expect {
+    eof {}
+    timeout {}
+}
+
+puts "\n$pass passed, [llength $failures] failed"
+if {[llength $failures] > 0} { exit 1 }
+exit 0

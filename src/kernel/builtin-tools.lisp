@@ -76,8 +76,8 @@ endings therefore stay mixed."
                (write-file-string path (string-replace old new content :all all))
                (format nil "Edited ~a (~d replacement~:p)" path (if all n 1))))))))
 
-(defparameter *bash-default-timeout* 120)
-(defparameter *bash-max-timeout* 600)
+;; *bash-default-timeout* / *bash-max-timeout* live in jobs.lisp (loaded first):
+;; the timeout is now a yield ceiling shared by bash and `wait`.
 
 (defparameter *bash-max-inline-bytes* (* 1024 1024)
   "Bash output at or above this size (1 MiB) is left on disk instead of
@@ -112,12 +112,35 @@ console spells its line breaks with."
                     (or (ignore-errors (read-file-string out-file)) ""))
                    max-chars))
 
+(defun bash-wait-loop (process out-file timeout agent)
+  "Poll PROCESS until it exits (returns :DONE) or TIMEOUT seconds pass (returns
+:TIMEOUT).  On user abort, kill the process and signal — the same, whether or
+not there is an executing AGENT.  The worker that launched PROCESS stays its
+sole owner: the TUI thread only sets the abort flag, and a cross-thread
+kill/wait on the handle can race this poll and crash the runtime."
+  (loop with deadline = (+ (get-internal-real-time)
+                           (* timeout internal-time-units-per-second))
+        while (evo.port:process-alive-p process)
+        do (when (and agent (agent-abort-flag agent))
+             (evo.port:process-kill-tree process)
+             (evo.port:process-wait process)
+             (error "Command aborted by user. Partial output:~%~a"
+                    (partial-output out-file)))
+           (when (> (get-internal-real-time) deadline)
+             (return-from bash-wait-loop :timeout))
+           (sleep 0.05))
+  (when (and agent (agent-abort-flag agent))
+    (evo.port:process-wait process)
+    (error "Command aborted by user. Partial output:~%~a"
+           (partial-output out-file)))
+  :done)
+
 (defun tool-bash (args)
   (let* ((command (pget args :command))
          (timeout (min *bash-max-timeout*
                        (or (pget args :timeout) *bash-default-timeout*)))
          (out-file (uiop:with-temporary-file (:pathname p :keep t) p))
-         (keep nil)          ; leave OUT-FILE on disk when output is large
+         (keep nil)          ; leave OUT-FILE on disk (large output, or detached)
          (agent *executing-agent*)
          (script nil))       ; scratch shell script, on platforms that need one
     (unless (and (stringp command) (plusp (length command)))
@@ -140,39 +163,17 @@ console spells its line breaks with."
                            :environment (list* (format nil "EVO_PID=~d"
                                                        (evo.port:getpid))
                                                (evo.port:environ))))))
-           (when agent
-             ;; The worker that launched PROCESS remains its sole owner.  The
-             ;; TUI thread only sets the abort flag; cross-thread kill/wait on
-             ;; an SBCL process handle can race the polling worker and crash
-             ;; the runtime.
-             (loop with deadline = (+ (get-internal-real-time)
-                                      (* timeout internal-time-units-per-second))
-                   while (evo.port:process-alive-p process)
-                   when (agent-abort-flag agent)
-                     do (evo.port:process-kill-tree process)
-                        (evo.port:process-wait process)
-                        (error "Command aborted by user. Partial output:~%~a"
-                               (partial-output out-file))
-                   when (> (get-internal-real-time) deadline)
-                     do (evo.port:process-kill-tree process)
-                        (evo.port:process-wait process)
-                        (error "Command timed out after ~ds. Partial output:~%~a"
-                               timeout (partial-output out-file))
-                   do (sleep 0.05))
-             (when (agent-abort-flag agent)
-               (evo.port:process-wait process)
-               (error "Command aborted by user. Partial output:~%~a"
-                      (partial-output out-file))))
-           (unless agent
-             (loop with deadline = (+ (get-internal-real-time)
-                                      (* timeout internal-time-units-per-second))
-                   while (evo.port:process-alive-p process)
-                   when (> (get-internal-real-time) deadline)
-                     do (evo.port:process-kill-tree process)
-                        (evo.port:process-wait process)
-                        (error "Command timed out after ~ds. Partial output:~%~a"
-                               timeout (partial-output out-file))
-                   do (sleep 0.05)))
+           ;; At the yield ceiling the command is NOT killed: it keeps running
+           ;; as a background job and bash hands back a handle, so the model
+           ;; never has to guess a duration and sleep for it (see jobs.lisp).
+           (when (eq (bash-wait-loop process out-file timeout agent) :timeout)
+             (let ((id (detach-as-job :command command :process process
+                                      :out-file out-file :script script)))
+               (setf keep t script nil)  ; the job owns these files now
+               (return-from tool-bash
+                 (values (still-running-note id command
+                                             (job-new-output (find-job id)))
+                         (list :job-id id :running t)))))
            (let ((code (nth-value 1 (evo.port:process-wait process)))
                  (bytes (or (file-byte-length out-file) 0)))
              (if (>= bytes *bash-max-inline-bytes*)
@@ -237,12 +238,12 @@ console spells its line breaks with."
    :name "bash"
    ;; The shell is named, not assumed: on Windows this is PowerShell, and a
    ;; model told it is talking to /bin/sh writes commands that cannot run.
-   :description (format nil "Run a shell command via ~a in the working directory. Returns combined stdout/stderr and exit code. Output at or above 1 MiB is not returned inline: it is written to a temp file and the tool returns that path plus a short head preview — read it back selectively (this read tool with offset/limit, or grep/sed/head/tail) rather than dumping it whole."
+   :description (format nil "Run a shell command via ~a in the working directory. Returns combined stdout/stderr and exit code. Output at or above 1 MiB is not returned inline: it is written to a temp file and the tool returns that path plus a short head preview — read it back selectively (this read tool with offset/limit, or grep/sed/head/tail) rather than dumping it whole. A command still running at its timeout is NOT killed: it moves to the background and returns a job_id — call `wait` with that id to collect its output or kill it. Do not sleep-and-poll for a long command; just let it run and use `wait`."
                         (evo.port:shell-name))
    :schema '(:object
              (:command :type :string :description "Shell command to run")
              (:timeout :type :integer :optional t
-              :description "Timeout in seconds (default 120, max 600)"))
+              :description "Seconds to wait before the command moves to the background as a job (default 120, max 600)"))
    :execute #'tool-bash))
 
 (register-builtin-tools)

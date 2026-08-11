@@ -161,8 +161,33 @@ runtime keeps the file readable on the platforms where it did not."
 
 ;;; Process lifecycle (exit, argv, self-path, environment).
 
+(defvar *exit-hooks* nil
+  "Thunks run once, best-effort, when evo exits through EXIT-LISP.  Used to tear
+down resources that must not outlive the process — notably background jobs,
+which are killed here so none survives its evo.  Every real exit routes through
+EXIT-LISP, so hooking it (rather than SB-EXT:*EXIT-HOOKS*) also keeps the
+build's own save-lisp-and-die from ever tripping the run-once guard.")
+
+(defvar *exit-hooks-run* nil)
+
+(defun add-exit-hook (thunk)
+  "Register THUNK (called with no args) to run when the process exits.  Pass a
+SYMBOL rather than a closure so re-loading the registering file stays idempotent
+under EQL."
+  (pushnew thunk *exit-hooks*)
+  thunk)
+
+(defun run-exit-hooks ()
+  "Run the exit hooks exactly once, swallowing errors so one bad hook cannot
+block the rest of shutdown."
+  (unless *exit-hooks-run*
+    (setf *exit-hooks-run* t)
+    (dolist (hook *exit-hooks*)
+      (ignore-errors (funcall hook)))))
+
 (defun exit-lisp (code)
   "Terminate the process with exit CODE."
+  (run-exit-hooks)
   #+sbcl (sb-ext:exit :code code)
   #+ecl (ext:quit code))
 
@@ -409,21 +434,27 @@ taskkill /T in one call and never needs to walk it."
                out))
         (ignore-errors (delete-file out-file))))))
 
+(defun reap-pid-tree (pid)
+  "Best-effort SIGKILL of PID and its current descendants, by pid alone — no
+process handle is touched, so this is safe to call from a thread that does not
+own the handle (an exit hook, say).  On Unix it walks children with pgrep -P
+and unix-kill(2); on Windows taskkill /T takes the whole tree in one call."
+  (when pid
+    #+evo-windows (taskkill pid :tree t)
+    #-evo-windows
+    (progn
+      (dolist (child (child-pids pid))
+        (reap-pid-tree child))
+      (ignore-errors
+       #+sbcl (sb-unix:unix-kill pid sb-unix:sigkill)
+       #+ecl (si:system (format nil "kill -9 ~d >/dev/null 2>&1" pid))))))
+
 (defun process-kill-tree (process)
   "Best-effort SIGKILL of PROCESS and its current descendants."
-  (labels ((kill-pid-tree (pid)
-             #+evo-windows (taskkill pid :tree t)
-             #-evo-windows
-             (progn
-               (dolist (child (child-pids pid))
-                 (kill-pid-tree child))
-               (ignore-errors
-                #+sbcl (sb-unix:unix-kill pid sb-unix:sigkill)
-                #+ecl (si:system (format nil "kill -9 ~d >/dev/null 2>&1" pid))))))
-    (let ((pid (ignore-errors (process-pid process))))
-      (if pid
-          (kill-pid-tree pid)
-          (process-kill process)))))
+  (let ((pid (ignore-errors (process-pid process))))
+    (if pid
+        (reap-pid-tree pid)
+        (process-kill process))))
 
 (defun process-wait (process)
   "Block until PROCESS exits.  Returns (values STATUS CODE): STATUS is

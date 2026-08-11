@@ -9,10 +9,11 @@
 ;; sb-* / ext: / si: symbols.  See src/port/port.lisp.
 (defpackage :evo.port
   (:use :cl)
-  (:export #:exit-lisp #:argv #:runtime-pathname #:environ #:setenv #:getpid
+  (:export #:exit-lisp #:add-exit-hook #:run-exit-hooks
+           #:argv #:runtime-pathname #:environ #:setenv #:getpid
            #:call-with-timeout #:timeout-error
            #:launch-child #:process-alive-p #:process-kill #:process-kill-tree
-           #:process-wait #:process-pid
+           #:reap-pid-tree #:process-wait #:process-pid
            #:program-in-path #:windows-p #:path-separator
            #:shell-invocation #:shell-name
            #:lock-package #:unlock-package #:add-package-local-nickname
@@ -109,7 +110,9 @@
            #:add-lore #:add-session-lore #:all-lore #:all-lore-entries
            #:edit-lore #:remove-lore #:find-lore-scope
            #:compact-now #:compaction-needed-p #:estimate-context-tokens
-           #:overflow-error-p #:select-cut))
+           #:overflow-error-p #:select-cut
+           ;; background jobs
+           #:running-jobs-summary))
 
 ;; Public API for extensions, config (init.lisp), and userspace code.
 ;;
