@@ -80,7 +80,39 @@
 (defun math-setting (key default) (evo:setting key default))
 
 (defun math-on-p () (and (math-setting :math t) t))
-(defun math-dpi () (max 10 (math-setting :math-dpi 110)))
+
+;;; ---------------------------------------------------------------------------
+;;; Device-resolution surface (the evo-vscode webview terminal)
+;;; ---------------------------------------------------------------------------
+;;; VS Code's built-in terminal draws images into a CSS-resolution canvas, so on
+;;; a Retina/HiDPI display every formula is upscaled and soft — no DPI or
+;;; supersampling on our side can beat it.  The evo-vscode extension sidesteps
+;;; that with its OWN xterm terminal whose image addon draws 1 image-pixel per
+;;; PHYSICAL device-pixel, and it advertises that surface through the
+;;; environment: EVO_WEBVIEW_DPR = the device-pixel-ratio, and EVO_TERM_CELL_
+;;; W_PX / _H_PX = the terminal's DEVICE cell size in px (what the addon tiles
+;;; by).  In that surface we size PNGs in device px and render at dpr× the DPI:
+;;; identical on-screen size, dpr× the pixels — crisp, and supersampling finally
+;;; earns its keep.  All three variables are unset in any other terminal, where
+;;; the getters below fall back to the CSS-space calibration and nothing changes.
+
+(defun %env-number (name)
+  "Positive real parsed from environment variable NAME, or NIL."
+  (let ((s (uiop:getenv name)))
+    (and s (ignore-errors
+             (let* ((*read-default-float-format* 'double-float)
+                    (v (read-from-string s nil nil)))
+               (and (realp v) (plusp v) v))))))
+
+(defun math-device-dpr ()
+  "Device-pixel-ratio of the evo-vscode device-resolution webview, or NIL when
+evo is not running inside it."
+  (let ((d (%env-number "EVO_WEBVIEW_DPR"))) (and d (>= d 1) d)))
+
+(defun math-dpi ()
+  (let ((base (max 10 (math-setting :math-dpi 110)))
+        (dpr (math-device-dpr)))
+    (if dpr (max 10 (round (* base dpr))) base)))
 (defun math-border () (math-setting :math-border "1pt"))
 (defun math-max-bytes () (math-setting :math-max-bytes (* 768 1024)))
 
@@ -93,9 +125,15 @@
 ;; row height and :math-cell-w-px the column width (defaulting to half the
 ;; height, the usual monospace shape); :math-baseline-frac is where the text
 ;; baseline sits within a row (≈0.8 = near the bottom, above the descenders).
-(defun math-cell-px () (max 1 (math-setting :math-cell-px 18)))
+;; In the device-resolution webview the terminal's real DEVICE cell size (px)
+;; arrives in the environment and MUST win: the addon tiles by exactly that, so
+;; using anything else desyncs the row/col reservation from what is drawn.
+(defun math-cell-px ()
+  (or (and (math-device-dpr) (%env-number "EVO_TERM_CELL_H_PX"))
+      (max 1 (math-setting :math-cell-px 18))))
 (defun math-cell-w-px ()
-  (max 1 (math-setting :math-cell-w-px (round (math-cell-px) 2))))
+  (or (and (math-device-dpr) (%env-number "EVO_TERM_CELL_W_PX"))
+      (max 1 (math-setting :math-cell-w-px (round (math-cell-px) 2)))))
 (defun math-baseline-frac () (max 0.0 (min 1.0 (math-setting :math-baseline-frac 0.8))))
 (defun math-pixel-align () (math-setting :math-pixel-align t))
 (defun math-snap-px () (max 0 (math-setting :math-snap-px 2)))
