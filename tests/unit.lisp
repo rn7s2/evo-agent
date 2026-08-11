@@ -3518,6 +3518,96 @@ completion gating around all of it."
         (check "bash observes abort without waiting for command completion"
                (and aborted (< elapsed (if (evo.port:windows-p) 4 3/2))))))))
 
+;;; Background jobs: a command past its timeout ceiling detaches instead of
+;;; being killed, `wait` collects/kills it, and no job outlives its evo.
+
+(defun test-jobs ()
+  (flet ((sleepcmd (n)
+           #+evo-windows (format nil "Start-Sleep ~d" n)
+           #-evo-windows (format nil "sleep ~d" n)))
+    ;; Reset the registry so counts and IDs are deterministic in isolation.
+    (setf evo.kernel::*jobs* nil evo.kernel::*job-counter* 0)
+    ;; Ceiling of 0s forces the still-running command to detach at once.
+    (multiple-value-bind (note details)
+        (evo.kernel::tool-bash (list :command (sleepcmd 2) :timeout 0))
+      (check "bash detaches at the ceiling instead of killing"
+             (getf details :running))
+      (check "detach note names the job" (search "job" note))
+      (let ((id (getf details :job-id)))
+        (check "job id is a positive integer" (and (integerp id) (plusp id)))
+        (check "job is registered" (evo.kernel::find-job id))
+        (check "running-jobs-summary reports the live job"
+               (let ((s (running-jobs-summary))) (and s (>= (getf s :count) 1))))
+        (check "job status segment renders the ▷ marker"
+               (let ((seg (evo.tui::jobs-status-segment)))
+                 (and (stringp seg) (search "▷" seg))))
+        ;; Wait returns the instant it finishes, with the exit code.
+        (multiple-value-bind (wnote wdetails)
+            (evo.kernel::tool-wait (list :job-id id :timeout 10))
+          (check "wait reports the finished job's exit code"
+                 (eql 0 (getf wdetails :exit-code)))
+          (check "wait note says finished" (search "finished" wnote))
+          (check "a finished job is retired from the registry"
+                 (null (evo.kernel::find-job id)))
+          (check "no jobs left running" (null (running-jobs-summary))))))
+    ;; wait with :kill terminates a long job.
+    (setf evo.kernel::*jobs* nil evo.kernel::*job-counter* 0)
+    (multiple-value-bind (note details)
+        (evo.kernel::tool-bash (list :command (sleepcmd 30) :timeout 0))
+      (declare (ignore note))
+      (let* ((id (getf details :job-id))
+             (job (evo.kernel::find-job id)))
+        (check "detached job records a raw pid for the reaper"
+               (integerp (evo.kernel::job-pid job)))
+        (multiple-value-bind (wnote wdetails)
+            (evo.kernel::tool-wait (list :job-id id :kill t))
+          (declare (ignore wnote))
+          (check "wait kill is reported" (getf wdetails :killed))
+          (check "a killed job is retired" (null (evo.kernel::find-job id))))))
+    ;; wait on an unknown id is an error, not a crash.
+    (check-signals "wait on an unknown job signals"
+                   (evo.kernel::tool-wait (list :job-id 999999)))
+    ;; job-new-output returns only the freshly appended slice, by offset.
+    (let* ((dir (uiop:ensure-directory-pathname
+                 (format nil "~a/evo-joboutput-~a/" (tmp-dir) (gen-id))))
+           (f (progn (ensure-directories-exist dir)
+                     (merge-pathnames "out" dir)))
+           (job (evo.kernel::make-job :id 1 :command "x" :out-file f
+                                      :chars-read 0
+                                      :start-time (get-universal-time))))
+      (with-open-file (o f :direction :output :if-exists :supersede
+                           :if-does-not-exist :create)
+        (format o "hello~%"))
+      (check "job-new-output reads the first slice"
+             (search "hello" (evo.kernel::job-new-output job)))
+      (check "job-new-output is empty when nothing was appended"
+             (string= "" (evo.kernel::job-new-output job)))
+      (with-open-file (o f :direction :output :if-exists :append
+                           :if-does-not-exist :create)
+        (format o "world~%"))
+      (check "job-new-output returns only the appended part"
+             (let ((out (evo.kernel::job-new-output job)))
+               (and (search "world" out) (not (search "hello" out))))))
+    ;; The exit reaper kills live jobs by pid and empties the registry.
+    (setf evo.kernel::*jobs* nil evo.kernel::*job-counter* 0)
+    (multiple-value-bind (note details)
+        (evo.kernel::tool-bash (list :command (sleepcmd 30) :timeout 0))
+      (declare (ignore note))
+      (let* ((id (getf details :job-id))
+             (proc (evo.kernel::job-process (evo.kernel::find-job id))))
+        (evo.kernel::reap-all-jobs)
+        (loop repeat 300 until (not (evo.port:process-alive-p proc))
+              do (sleep 0.01))
+        (check "reap-all-jobs kills the running process"
+               (not (evo.port:process-alive-p proc)))
+        (check "reap-all-jobs empties the registry" (null evo.kernel::*jobs*))))
+    ;; Status segment is wired onto the inner right at order 200.
+    (let ((seg (find :jobs (evo.tui::status-segments :right)
+                     :key #'evo.tui::status-segment-name)))
+      (check "jobs segment sits on the right" seg)
+      (check "jobs segment order is 200 (inner, past model-load at 100)"
+             (and seg (= 200 (evo.tui::status-segment-order seg)))))))
+
 ;;; Tool-call display: one line, key arguments only, and total — malformed
 ;;; arguments must degrade, never signal (this renders in the tick loop).
 
@@ -5141,6 +5231,7 @@ five identical restarts, each reporting a different error than the real one."
     (test-prompt-template)
     (test-tool-call-events)
     (test-interrupt)
+    (test-jobs)
     (test-tool-call-display)
     (test-no-modes)
     (test-tool-call-gate-extension-point)

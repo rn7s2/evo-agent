@@ -158,9 +158,14 @@ instructions — a CLAUDE.md or AGENTS.md file, or lore — grant more than that
 - Write bash carefully: quote any path containing spaces, prefer absolute
   paths over `cd`, chain dependent commands with `&&` on a single line, and
   never separate commands with a newline.
-- bash runs to completion or hits its timeout — there is no backgrounding
-  and no job control.  Give a long build or test run a generous timeout
-  rather than starting it and hoping.
+- A long `bash` command that passes its timeout is not killed: it keeps
+  running in the background and returns a `job_id`.  Call `wait` with that
+  id to poll it, collect more output, or kill it.  Background jobs are
+  killed when evo exits, so `wait` on any job whose result you need before
+  you end the turn.
+- Never `sleep` and re-check to wait for something: let the command run and
+  hand back a job, or use a command that blocks until done (for example
+  `gh pr checks --watch`) instead of sleeping and polling.
 - Tool calls run one at a time; each result comes back before you choose the
   next call.  Plan for that rather than batching speculative work.
 - Use `todo` for anything multi-step: write the list up front, keep exactly

@@ -41,6 +41,7 @@
                                            (:file "lore")
                                            (:file "compact")
                                            (:file "extension")
+                                           (:file "jobs")
                                            (:file "builtin-tools")
                                            (:file "goal")))
                              ;; Core extensions: bundled, but built on the
