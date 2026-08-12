@@ -62,15 +62,23 @@ when the fallback is available.
 
 ## Calibration
 
-The terminal lays images out in **CSS pixels** (xterm.js maps 1 image px to
+> **In the [evo-vscode](https://github.com/rn7s2/evo-vscode) webview terminal
+> this is automatic.**  That terminal reports its device-pixel-ratio and exact
+> **device** cell size through the environment (`EVO_WEBVIEW_DPR`,
+> `EVO_TERM_CELL_W_PX` / `EVO_TERM_CELL_H_PX`); the renderer then sizes formulas
+> in device pixels and rasterizes at `:math-dpi × dpr`, so they are crisp at the
+> right size with nothing to calibrate.  Set the geometry below **only** for
+> other terminals.
+
+Most terminals lay images out in **CSS pixels** (xterm.js maps 1 image px to
 1 CSS px; a cell is ~9×18 CSS px at default zoom).  Layout — how many rows a
 formula reserves, where its baseline lands — is computed from three settings:
 
 ```lisp
 (evo:set-setting :math-cell-px   18)  ; CSS px per terminal row
 (evo:set-setting :math-cell-w-px 9)   ; CSS px per terminal column
-(evo:set-setting :math-dpi       220) ; formula size: 110 ≈ prose x-height,
-                                      ; 220 = 2x prose (easier to read)
+(evo:set-setting :math-dpi       110) ; formula size: 110 ≈ prose x-height,
+                                      ; 220 = 2× prose (easier to read)
 ```
 
 Run `python3 tests/math-calibrate.py` **at a shell prompt in the terminal you
@@ -84,9 +92,9 @@ TUI uses, reading back the terminal's accept/reject responses.
 | setting | default | meaning |
 |---|---|---|
 | `:math` | `t` | master switch |
-| `:math-dpi` | `110` | rasterization size (CSS px) |
-| `:math-cell-px` | `18` | terminal row height, CSS px |
-| `:math-cell-w-px` | cell-px/2 | terminal column width, CSS px (wrap budget) |
+| `:math-dpi` | `110` | rasterization size (CSS px); the webview renders at `× dpr` |
+| `:math-cell-px` | `18` | terminal row height, CSS px; the webview overrides with its device cell |
+| `:math-cell-w-px` | cell-px/2 | terminal column width, CSS px (wrap budget); webview-overridden |
 | `:math-baseline-frac` | `0.8` | where the text baseline sits within a row |
 | `:math-snap-px` | `2` | nudge ≤ this many px off true baseline when it saves a whole terminal row |
 | `:math-x-advance` | `:terminal` | inline stepping: `:terminal` lets the terminal advance the cursor past the image by its own exact column count; `:manual` pins with `C=1` and steps by the estimate |
@@ -103,9 +111,12 @@ settings, so stale entries are simply unused (`/math clear-cache` tidies).
 
 ## Limitations
 
-- The terminal's image canvas is CSS-resolution: on a retina display a
-  formula can never be sharper than a 1× image upscaled — that is the
-  terminal's ceiling, not a dpi problem.
+- **Sharpness depends on the terminal.**  Native kitty terminals (kitty,
+  Ghostty, WezTerm) and the [evo-vscode](https://github.com/rn7s2/evo-vscode)
+  webview draw images at **device resolution** — formulas are crisp on retina.
+  Most other terminals — including VS Code's *built-in* terminal — draw into a
+  CSS-resolution canvas, so on a retina display a formula can never be sharper
+  than a 1× image upscaled; that is the terminal's ceiling, not a dpi problem.
 - Line spacing around tall formulas is real: a display-size fraction at
   `:math-dpi 220` is ~5 terminal rows and baseline-aligned layout must
   reserve them, exactly as a browser grows line-height around tall inline
@@ -127,7 +138,10 @@ settings, so stale entries are simply unused (`/math clear-cache` tidies).
   on and is only CSS-resolution.
 - **Overlap, or gray dithered boxes** — cell calibration is wrong for your
   font/zoom (images spill over text, then the terminal's tile accounting
-  degrades them to placeholders): re-run `tests/math-calibrate.py` and update
-  the three geometry settings.
+  degrades them to placeholders).  Other terminals only: re-run
+  `tests/math-calibrate.py` and update the three geometry settings (the
+  evo-vscode webview measures its cell size automatically, so this cannot
+  happen there).
 - **Formulas too large / too small** — tune `:math-dpi` (110 matches prose
-  x-height at an 18 px cell; scale proportionally with `:math-cell-px`).
+  x-height at an 18 px cell; scale proportionally with `:math-cell-px`).  In the
+  evo-vscode webview only `:math-dpi` matters — the cell size is auto-detected.

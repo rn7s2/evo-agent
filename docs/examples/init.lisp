@@ -138,19 +138,21 @@
 ;;; for that background (and the LaTeX-math renderer, which reads :theme, sets
 ;;; its glyph colour from it), so :light on a dark terminal is unreadable.
 ;; (evo:set-setting :theme :light)
-;; A conditional default — light only in the VS Code integrated terminal:
-;; (when (string-equal (or (uiop:getenv "TERM_PROGRAM") "") "vscode")
+;; A conditional default — e.g. light only when run via the evo-vscode webview
+;; (its terminal palette already follows VS Code; :theme only drives evo's own
+;; colours and the math glyph colour, so match it to your VS Code theme):
+;; (when (uiop:getenv "EVO_WEBVIEW")
 ;;   (evo:set-setting :theme :light))
 
 ;;; Math rendering (extensions/300-latex-math.lisp).  LaTeX in agent output —
 ;;; $…$, $$…$$, \(…\), \[…\] — renders as a real typeset image inline, with
 ;;; inline formulas baseline-aligned with the prose around them.  Needs a
-;;; LaTeX toolchain (latex + dvipng) and a kitty-graphics terminal (VS Code's
-;;; integrated terminal with terminal.integrated.enableImages + GPU
-;;; acceleration on, or kitty).  Absent the toolchain it stays off and shows
-;;; source.  Prerequisites and calibration: docs/math.md.  The three
-;;; geometry settings are per-setup, in CSS pixels — run
-;;; tests/math-calibrate.py in your terminal to measure them:
+;;; LaTeX toolchain (latex + dvipng) and a kitty-graphics terminal.  In VS Code,
+;;; run evo through the evo-vscode extension (crisp, device resolution);
+;;; kitty/Ghostty/WezTerm work out of the box.  Absent the toolchain it stays
+;;; off and shows source.  Prerequisites and calibration: docs/math.md.  The
+;;; three geometry settings below are AUTO-DETECTED in the evo-vscode webview;
+;;; set them (CSS px, via tests/math-calibrate.py) only for other terminals:
 ;;
 ;; (evo:set-setting :math-cell-px 18)            ; terminal row height, CSS px
 ;; (evo:set-setting :math-cell-w-px 9)           ; terminal col width, CSS px
