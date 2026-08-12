@@ -33,12 +33,6 @@
 ;;;; addon's tile accounting deletes them — formulas degrade into gray
 ;;;; placeholder boxes.
 ;;;;
-;;;; SUPERSAMPLING: dvipng at the target DPI can thin/drop hairlines.  We render
-;;;; at :math-dpi × (an integer ≥ :math-supersample) and downsample by that
-;;;; whole factor with ImageMagick (a clean integer-ratio Lanczos shrink), which
-;;;; antialiases far better at the same on-screen size.  If magick is absent we
-;;;; render straight at :math-dpi.
-;;;;
 ;;;; BASELINE: dvipng --depth --height reports the pixels above (height) and
 ;;;; below (depth) the formula's baseline.  We carry that through so the core
 ;;;; can sit each formula ON the text baseline (a kitty sub-cell Y offset makes
@@ -50,7 +44,6 @@
 ;;;; Settings (override in init.lisp, e.g. (evo:set-setting :math-dpi 120)):
 ;;;;   :math              t     master on/off
 ;;;;   :math-dpi          110   on-screen size (CSS px); tune so $x$ ≈ prose
-;;;;   :math-supersample  3     render this many× larger, then downsample (AA)
 ;;;;   :math-cell-px      18    terminal row height in CSS px (CSI 16 t)
 ;;;;   :math-cell-w-px    9     terminal column width in CSS px (CSI 16 t)
 ;;;;   :math-baseline-frac 0.8  where the text baseline sits within a row (0..1)
@@ -115,10 +108,6 @@ evo is not running inside it."
     (if dpr (max 10 (round (* base dpr))) base)))
 (defun math-border () (math-setting :math-border "1pt"))
 (defun math-max-bytes () (math-setting :math-max-bytes (* 768 1024)))
-
-;; Supersample factor as a whole number ≥ 1: the reference :math-supersample
-;; rounded UP to the next integer, so the downsample is a clean 1/N shrink.
-(defun math-supersample () (max 1 (ceiling (math-setting :math-supersample 3))))
 
 ;; Terminal geometry for placement, in CSS pixels — the space the terminal
 ;; itself lays images out in (see PIXEL SPACE above).  :math-cell-px is the
@@ -213,7 +202,7 @@ key (folds each char's low and high byte)."
     (format nil "~(~16,'0x~)" h)))
 
 ;;; ---------------------------------------------------------------------------
-;;; Rasterization: LaTeX -> DVI -> (supersampled) PNG, with baseline metrics
+;;; Rasterization: LaTeX -> DVI -> PNG, with baseline metrics
 ;;; ---------------------------------------------------------------------------
 
 (defun %run (argv &key directory)
@@ -282,24 +271,6 @@ standalone path so a CJK formula comes out the same size as an ASCII one."
       (flet ((be32 (i) (+ (ash (aref o i) 24) (ash (aref o (+ i 1)) 16)
                           (ash (aref o (+ i 2)) 8) (aref o (+ i 3)))))
         (values (be32 16) (be32 20))))))
-
-(defun %downsample (png factor)
-  "Shrink PNG by 1/FACTOR with a Lanczos filter (supersample AA).  Writes to a
-temp file and swaps it in only on success, so a failed/absent magick leaves the
-full-resolution PNG intact rather than silently doing nothing in place.  No-op
-when FACTOR is 1 or magick is missing.  Returns T iff it actually shrank."
-  (when (and (> factor 1) (magick-exe))
-    (let ((tmp (merge-pathnames (format nil "~a-ds.png" (pathname-name png)) png)))
-      (multiple-value-bind (code)
-          (%run (list (magick-exe) (uiop:native-namestring png)
-                      "-filter" "Lanczos"
-                      "-resize" (format nil "~,4f%" (/ 100.0 factor))
-                      (uiop:native-namestring tmp)))
-        (when (and (zerop code) (probe-file tmp))
-          (ignore-errors (rename-file tmp png))
-          (return-from %downsample t))
-        (ignore-errors (delete-file tmp)))))
-  nil)
 
 (defun %write-metrics (path above below width) ; display-resolution pixels
   (with-open-file (o path :direction :output :if-exists :supersede
@@ -580,9 +551,9 @@ Installed as EVO.TUI:*MATH-RENDERER*."
              (stringp latex)
              (plusp (length (string-trim '(#\Space #\Tab #\Newline) latex)))
              (<= (length latex) 2000))
-    (let ((memo-key (format nil "~a|~a|~a|~a|~a|~a|~a|~a|~a|~a|~a"
+    (let ((memo-key (format nil "~a|~a|~a|~a|~a|~a|~a|~a|~a|~a"
                             (math-fg) latex display-p
-                            (math-dpi) (math-supersample) (math-cell-px)
+                            (math-dpi) (math-cell-px)
                             (math-cell-w-px) (math-baseline-frac)
                             (math-snap-px) (math-x-advance)
                             (and (math-pixel-align) t))))

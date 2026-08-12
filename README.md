@@ -300,9 +300,10 @@ block. The split is deliberate: the TUI core only *finds* the math and *places*
 whatever a renderer returns (falling back to the raw LaTeX source), and the
 bundled `extensions/300-latex-math.lisp` is the renderer — it rasterizes each
 formula with the LaTeX toolchain (`latex` + `dvipng`) and emits it via the
-kitty graphics protocol (VS Code's integrated terminal renders it on all three
-platforms with `terminal.integrated.enableImages` and GPU acceleration on; so
-does kitty itself). So the heavy, optional, platform-bound half is an
+kitty graphics protocol (in VS Code, run evo through the
+[evo-vscode](https://github.com/rn7s2/evo-vscode) extension for crisp
+device-resolution images; kitty/Ghostty/WezTerm render it out of the box). So
+the heavy, optional, platform-bound half is an
 extension; with it absent, math is just shown as source. It stays off unless
 the toolchain is present, caches every formula by content hash, registers a
 system-prompt note asking the agent to write real LaTeX while rendering is

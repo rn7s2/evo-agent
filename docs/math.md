@@ -18,15 +18,16 @@ toolchain to rasterize formulas.
 
 **Terminal.**  Images are emitted with the kitty graphics protocol.
 
-- *VS Code integrated terminal* (all three platforms) — enable in settings:
-
-  ```json
-  "terminal.integrated.enableImages": true,
-  "terminal.integrated.gpuAcceleration": "on"
-  ```
-
-  Both are required: the image addon only activates on the GPU renderer.
-- *kitty* itself works out of the box.
+- *VS Code* — use the [evo-vscode](https://github.com/rn7s2/evo-vscode)
+  extension's **Evo: Open in CLI** command.  It runs evo in its own webview
+  terminal that renders images at **device resolution**, so formulas are crisp
+  on Retina/HiDPI.  (VS Code's *built-in* terminal also supports kitty graphics
+  via `terminal.integrated.enableImages` + `gpuAcceleration`, but it draws into
+  a CSS-resolution canvas, so on a HiDPI display every formula is upscaled and
+  blurry — no DPI or supersampling can beat that ceiling.  Prefer the
+  extension.)
+- *kitty*, *Ghostty*, *WezTerm* — device-resolution kitty graphics out of the
+  box; formulas are crisp.
 - Terminals with no kitty-graphics support show escape garbage — use
   `/math off` (or leave the toolchain uninstalled; the feature then never
   activates).
@@ -119,8 +120,11 @@ settings, so stale entries are simply unused (`/math clear-cache` tidies).
 - **Only CJK/Unicode formulas show as source** — the classic engine cannot set
   those; install the fallback (`/math status` should read `xelatex ✓ (CJK)`) —
   see the CJK / Unicode fallback under Prerequisites — then `/math clear-cache`.
-- **Escape garbage in output** — the terminal has no kitty graphics support
-  (or VS Code's `enableImages`/`gpuAcceleration` are off).
+- **Escape garbage in output** — the terminal has no kitty graphics support.
+  In VS Code, run evo through the [evo-vscode](https://github.com/rn7s2/evo-vscode)
+  extension (its webview terminal renders images at device resolution); the
+  built-in terminal needs `terminal.integrated.enableImages` + `gpuAcceleration`
+  on and is only CSS-resolution.
 - **Overlap, or gray dithered boxes** — cell calibration is wrong for your
   font/zoom (images spill over text, then the terminal's tile accounting
   degrades them to placeholders): re-run `tests/math-calibrate.py` and update
