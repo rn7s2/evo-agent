@@ -2,8 +2,12 @@
 """math-calibrate.py — measure the terminal's cell geometry and prove math
 placement, from inside the terminal you actually use.
 
-Run it AT A SHELL PROMPT in the VS Code integrated terminal (not through a
-subprocess — it needs the real tty):
+For VS Code, use the evo-vscode extension instead: its webview terminal reports
+its device-pixel-ratio and device cell size automatically, so no calibration is
+needed.  This script is for OTHER terminals that lay images out in CSS pixels.
+
+Run it AT A SHELL PROMPT in that terminal (not through a subprocess — it needs
+the real tty):
 
     python3 tests/math-calibrate.py
 

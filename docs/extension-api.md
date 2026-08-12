@@ -248,8 +248,9 @@ protocol, so formulas render the way KaTeX/MathJax would — inline math
 baseline-aligned with the prose around it, pixel-exact via a sub-cell offset.
 It is off unless the toolchain is present, is configured by settings (`:math`,
 `:math-dpi`, `:math-cell-px`, …), and exposes `/math status | on | off |
-clear-cache`. Prerequisites (VS Code settings, TeX installation) and
-calibration live in [docs/math.md](math.md).
+clear-cache`. Prerequisites (a kitty-graphics terminal — in VS Code, the
+[evo-vscode](https://github.com/rn7s2/evo-vscode) webview — and a TeX
+installation) and calibration live in [docs/math.md](math.md).
 
 Three rules the seam guarantees, so a renderer stays simple and safe:
 
