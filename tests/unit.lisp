@@ -2699,7 +2699,8 @@ a lint that can go blind without saying so is worse than none."
 ;;; re-registration replaces (idempotent reloads) and NIL withdraws.
 
 (defun test-prompt-notes ()
-  (let ((saved evo.kernel::*prompt-notes*))
+  (let ((saved evo.kernel::*prompt-notes*)
+        (saved-languages evo.kernel::*prompt-languages*))
     (unwind-protect
          (progn
            (setf evo.kernel::*prompt-notes* nil)
@@ -2715,8 +2716,29 @@ a lint that can go blind without saying so is worse than none."
            (evo:register-prompt-note "t-math" nil)
            (check "nil text withdraws the note"
                   (not (search "Prefer $...$ inline."
-                               (build-system-prompt nil)))))
-      (setf evo.kernel::*prompt-notes* saved))))
+                               (build-system-prompt nil))))
+           ;; A note may be a function of the active language pack, so an
+           ;; extension's guidance follows /lang instead of sitting in
+           ;; English in the middle of a translated prompt.
+           (evo:register-prompt-note
+            "t-lang" (lambda (pack)
+                       (when (equal (pget pack :code) "en")
+                         (format nil "NOTE-FOR-~a" (pget pack :name)))))
+           (check "a function note is called with the active language pack"
+                  (search "NOTE-FOR-English" (build-system-prompt nil)))
+           (evo.kernel:register-prompt-language "xx-note" :name "Notish"
+                                               :sections (list :base "B"))
+           (check "and returning nil drops it for that prompt"
+                  (not (search "NOTE-FOR"
+                               (build-system-prompt nil :language "xx-note"))))
+           (evo:register-prompt-note "t-boom" (lambda (pack)
+                                                (declare (ignore pack))
+                                                (error "note is broken")))
+           (check "a signalling note is skipped, not fatal to the prompt"
+                  (handler-bind ((warning #'muffle-warning))
+                    (search "NOTE-FOR-English" (build-system-prompt nil)))))
+      (setf evo.kernel::*prompt-notes* saved
+            evo.kernel::*prompt-languages* saved-languages))))
 
 #| Prompt language packs: the prompt's own words are a registry, English is
 just the pack that ships as a core extension, and what the user picked

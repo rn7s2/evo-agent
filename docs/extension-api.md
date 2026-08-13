@@ -315,6 +315,21 @@ toggled off stops steering the agent). The bundled math renderer does exactly
 this — registered while rendering is usable, withdrawn on `/math off` — so
 the agent writes real LaTeX precisely when the terminal will render it.
 
+A note may be a **function of the active language pack** instead of a string,
+called while the prompt is built, so long guidance follows `/lang` rather than
+sitting in English inside a translated prompt:
+
+```lisp
+(evo:register-prompt-note "efficiency"
+  (lambda (pack)                       ; pack plist; :code is "en", "zh-cn", ...
+    (or (cdr (assoc (evo.util:pget pack :code) *sections* :test #'equal))
+        *english-section*)))           ; untranslated language -> English
+```
+
+Returning `nil` drops the note from that one prompt; a note that signals is
+skipped with a warning rather than taking the turn down.
+`extensions/400-efficiency.lisp` is the worked example (English + 简体中文).
+
 ## Prompt languages (evo)
 
 The words of the system prompt belong to a **language pack**, not to the

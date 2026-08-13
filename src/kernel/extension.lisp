@@ -193,7 +193,11 @@ A :tool-call hook may return (:block t :reason ...) or (:arguments ...)."
 under the name NAME.  Re-registering NAME replaces its text — idempotent
 across extension reloads — and NIL TEXT removes it.  For extensions that
 change what the agent should DO: e.g. the LaTeX-math renderer asks the
-agent to write formulas as LaTeX because they now render as images."
+agent to write formulas as LaTeX because they now render as images.
+
+TEXT may instead be a function of the active language pack (a plist; its
+:code is the language) returning the snippet, so a note can follow /lang
+the way the prompt's own sections do — see extensions/400-efficiency.lisp."
   (evo.kernel:register-prompt-note name text))
 
 (defun register-prompt-language (code &rest args)
