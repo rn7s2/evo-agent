@@ -335,7 +335,13 @@ the seam is documented in
 - **Slash command resolution**: extension commands → builtins → skills →
   prompt templates → send to the agent. Built-ins: `/goal /lore /global-lore
   /memory /global-memory /compact /image /eval /tree /fork /resume
-  /model /reload /export /help /quit /exit`.
+  /model /lang /reload /export /help /quit /exit`.
+- **`/lang [code]`**: the language of the system prompt and of replies. The
+  prompt's words are a registered language pack — English ships as a core
+  extension, `extensions/100-lang-zh-cn.lisp` adds 简体中文, and
+  `evo:register-prompt-language` adds any other (untranslated sections fall
+  back to English). Set the default with `(evo:set-setting :language "zh-CN")`
+  in init.lisp. Evo's own interface stays English.
 - **`/eval <sexpr>`**: a REPL into the live image. The content is read and
   evaluated in `EVO.USER` — the same package extensions and agent-written code
   live in — so registered tools, extension state and `evo:*agent*` are all

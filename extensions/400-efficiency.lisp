@@ -9,12 +9,13 @@
 ;;;; another paragraph of "yes... but... wait...".  Contradictory or
 ;;;; impossible instructions, say exactly what collides and ask for help.
 ;;;;
-;;;; Mechanics: the prompt is reassembled from EVO.KERNEL::*GUIDELINES* every
-;;;; turn, so appending to it is the whole install and it takes effect on the
-;;;; next turn.  That is an assignment to a special variable, not a
-;;;; redefinition, so the kernel package lock permits it with no unlock.
-;;;; Reloading this file replaces its own block rather than stacking a second
-;;;; copy, and leaves any other extension's additions alone.
+;;;; Mechanics: a named prompt note, emitted right after the guidelines in
+;;;; every system prompt.  The name is the identity, so reloading this file
+;;;; replaces the note instead of stacking a second copy, and no other
+;;;; extension's text is touched.  The guidelines themselves now belong to
+;;;; the active language pack — this section is English, and stays English
+;;;; whatever pack is in force, which is the honest thing for text nobody
+;;;; has translated.
 
 (in-package :evo.user)
 
@@ -68,20 +69,6 @@ user's head.  Asking after twenty minutes of circling is not.  None of this
 licenses asking instead of working: when a reasonable reading exists and
 the work is reversible, take it, say which reading you took, and keep
 moving."
-  "Appended to the kernel guidelines by EFFICIENCY-INSTALL.")
+  "Registered as the \"efficiency\" prompt note.")
 
-(defvar *efficiency-installed-block* nil
-  "Exact text this extension last spliced into the guidelines, so a reload
-removes its own previous copy instead of stacking another one.")
-
-(defun efficiency-install ()
-  "Put *EFFICIENCY-SECTION* at the end of the kernel guidelines.  Idempotent:
-safe to call on every load, and it only ever removes text it wrote itself."
-  (let ((text evo.kernel::*guidelines*))
-    (when *efficiency-installed-block*
-      (setf text (evo.util:string-replace *efficiency-installed-block* "" text)))
-    (let ((block (format nil "~2%~a" *efficiency-section*)))
-      (setf evo.kernel::*guidelines* (concatenate 'string text block)
-            *efficiency-installed-block* block))))
-
-(efficiency-install)
+(evo:register-prompt-note "efficiency" *efficiency-section*)

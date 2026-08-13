@@ -315,6 +315,48 @@ toggled off stops steering the agent). The bundled math renderer does exactly
 this — registered while rendering is usable, withdrawn on `/math off` — so
 the agent writes real LaTeX precisely when the terminal will render it.
 
+## Prompt languages (evo)
+
+The words of the system prompt belong to a **language pack**, not to the
+kernel: English ships as a core extension, and an extension can register any
+other language. A pack decides what the model *reads* and what it *answers
+in* — evo's own interface (commands, help, status line, tool descriptions)
+is not translated and is not part of this.
+
+```lisp
+(evo:register-prompt-language "zh-CN"
+  :name "Chinese (Simplified)"   ; English name
+  :native "简体中文"              ; endonym — what the /lang picker shows
+  :response-language "简体中文"   ; what the model is told to answer in
+  :sections (list :base "..." :guidelines "..." :tools-heading "## 工具"))
+```
+
+- Section keys are `evo.kernel:*prompt-sections*`: `:base :guidelines
+  :own-docs :environment :git-status :respond-in :tools-heading :lore-heading
+  :context-heading`. **Anything you leave out falls back to English**, so a
+  pack can translate as much or as little as it likes and never goes stale
+  into a hole when a new section is added.
+- `{{TOKEN}}` placeholders must survive translation — they are where runtime
+  facts (working directory, model, git status, `{{CONTEXT_PATH}}`) reach the
+  model. An unknown section key is refused at registration.
+- Re-registering a code replaces the pack, so reloading an extension is
+  idempotent. Codes compare case-insensitively (`zh-CN` = `zh-cn`).
+- The bundled `extensions/100-lang-zh-cn.lisp` is a complete worked pack.
+
+Choosing one:
+
+```lisp
+(evo:set-setting :language "zh-CN")     ; init.lisp: the session default
+(evo:set-language "zh-CN")              ; same thing, anywhere at runtime
+(evo:set-language "zh-CN" evo:*agent*)  ; journalled: survives restart/compaction
+```
+
+`/lang` opens a picker of the registered packs; `/lang <code>` sets one
+directly. A value that names no pack (`"Korean"`) is taken as a
+response-language hint — the prompt stays English and the model is asked to
+reply in that language. Precedence is the model's: a journalled `/lang` pick
+beats the `:language` setting beats the default pack.
+
 ## Other API
 
 ```lisp

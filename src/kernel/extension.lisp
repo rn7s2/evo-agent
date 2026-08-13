@@ -196,6 +196,27 @@ change what the agent should DO: e.g. the LaTeX-math renderer asks the
 agent to write formulas as LaTeX because they now render as images."
   (evo.kernel:register-prompt-note name text))
 
+(defun register-prompt-language (code &rest args)
+  "Register a prompt language pack — the system prompt's own words, and the
+language the model answers in:
+ (evo:register-prompt-language \"zh-CN\" :name \"Chinese (Simplified)\"
+   :native \"简体中文\" :response-language \"简体中文\"
+   :sections (list :base \"...\" :guidelines \"...\"))
+Sections left out fall back to English, so a pack may translate as much or
+as little as it likes.  See extensions/100-lang-zh-cn.lisp for a full one.
+Re-registration replaces the pack, so reloading is idempotent."
+  (apply #'evo.kernel:register-prompt-language code args))
+
+(defun set-language (code &optional agent)
+  "Choose the prompt language: a registered pack code (\"en\", \"zh-CN\")
+switches the system prompt into that language and asks for replies in it;
+any other string (\"Korean\") is taken as a response-language hint on the
+default pack.  Called from init.lisp it is the session default; called with
+an AGENT at runtime the choice is journaled and survives a restart.  It
+governs what the MODEL reads and writes — evo's own interface stays as it
+is."
+  (evo.kernel:set-prompt-language code agent))
+
 (defun load-extension (path &key (reason "requested"))
   (evo.kernel:load-extension* path :reason reason))
 

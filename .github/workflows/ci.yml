@@ -104,7 +104,7 @@ jobs:
       # never calls it, so unlike the backend-driven .exp suites (tui,
       # model-provider, image-paste) they run headless here.  `expect` hands
       # evo a real pseudo-terminal; these guard paste handling, the IDE bridge,
-      # and background jobs — none of which the unit suite exercises through a
+      # background jobs, and the prompt-language switch — none of which the unit suite exercises through a
       # live terminal.  The binary is already built by the step above, so the
       # scripts run directly rather than via `make tui-test-offline` (whose
       # build prerequisite would rebuild).  SBCL only, matching the .exp suites'
@@ -116,6 +116,7 @@ jobs:
           tests/paste.exp
           tests/ide-context.exp
           tests/jobs.exp
+          tests/lang.exp
 
   # Windows is SBCL-only (src/port/port.lisp: the ECL branches are Unix
   # facilities with no Windows twin).  It builds, runs the portable unit suite

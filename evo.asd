@@ -48,7 +48,8 @@
                              ;; same public API as userspace ones.
                              (:module "core-ext"
                               :serial t
-                              :components ((:file "todo")
+                              :components ((:file "lang-en")
+                                           (:file "todo")
                                            (:file "memory")
                                            (:file "eval")))
                              (:module "tui"

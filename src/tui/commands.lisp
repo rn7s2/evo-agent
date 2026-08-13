@@ -14,6 +14,8 @@
   /model [id]          pick the model from a list, or set it directly
   /thinking [level]    low·medium·high·xhigh·max (changing it mid-session
                        drops the provider prompt cache)
+  /lang [code]         pick the language of the system prompt and replies
+                       (\"en\", \"zh-CN\"; no code: a list)
   /compact [hint]      compact the context now
   /image [path ...]    attach an image to the message being typed
                        (no path: the system clipboard, same as ctrl+v)
@@ -296,6 +298,41 @@ providers are distinct entries, and the journaled choice must say which."
                 0))
     t))
 
+(defun set-language (tui code)
+  "Journal the language choice so it outlives a restart and a compaction,
+the way a model pick does.  A code naming no registered pack is kept as a
+response-language hint — the prompt stays in the default language and the
+model is asked to answer in what the user named."
+  (let ((pack (evo.kernel:find-prompt-language code)))
+    (evo.kernel:set-prompt-language code (tui-agent tui))
+    (refresh-goal tui)
+    (scroll tui (dim (if pack
+                         (format nil "language → ~a (~a) — next turn"
+                                 (pget pack :native) (pget pack :code))
+                         (format nil "language → ~a — no prompt pack for it, so replies only (next turn)"
+                                 code))))))
+
+(defun language-select-command (tui)
+  "Choose box: the registered prompt language packs, current one preselected.
+The label is the endonym — someone looking for their own language scans for
+the word they write it with, not its English name."
+  (let* ((state (fold-state (agent-journal (tui-agent tui))))
+         (request (evo.kernel:language-request state))
+         (current (evo.kernel:resolve-language request))
+         (packs (evo.kernel:all-prompt-languages)))
+    (enter-select
+     tui "language:"
+     (loop for p in packs
+           collect (list (pget p :native)
+                         (pget p :code)
+                         (format nil "~a~:[~; · current~]" (pget p :name)
+                                 (equal (pget p :code) (pget current :code)))))
+     (lambda (code) (set-language tui code))
+     :index (or (position (pget current :code) packs
+                          :key (lambda (p) (pget p :code)) :test #'equal)
+                0))
+    t))
+
 (defun export-image (block path index)
   "Write an image block beside the export as a sidecar file and return its
 file name.  A markdown transcript that dropped the screenshots would not be
@@ -413,6 +450,11 @@ already-painted scrollback keeps its colours."
                   (refresh-goal tui)
                   (scroll tui (dim (format nil "thinking → ~(~a~)" level))))
                  (t (scroll tui (dim "levels: low medium high xhigh max")))))
+         t)
+        ((cmd "lang" "language")
+         (if (zerop (length args))
+             (language-select-command tui)
+             (set-language tui args))
          t)
         ((cmd "image" "img") (image-command tui args))
         ((cmd "compact")
