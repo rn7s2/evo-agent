@@ -1,0 +1,135 @@
+#!/usr/bin/expect -f
+# lang.exp — the prompt-language switch, through a real pty.
+#
+# No backend: nothing here calls a model.  The pack decides the words of the
+# SYSTEM PROMPT, so the assertions read the built prompt back out of the live
+# image with /eval rather than looking at the screen chrome — evo's own
+# interface is not translated and must not change.
+#
+# The zh-CN pack ships in extensions/, which this test installs into a scratch
+# EVO_HOME the way `make install-home` does.
+set timeout 15
+
+set repo [file dirname [file dirname [file normalize $argv0]]]
+set scratch [exec mktemp -d /tmp/evo-lang.XXXXXX]
+set env(EVO_HOME) "$scratch/home"
+file mkdir "$env(EVO_HOME)/extensions"
+file copy "$repo/extensions/100-lang-zh-cn.lisp" "$env(EVO_HOME)/extensions/"
+foreach v {EVO_SUPERVISED_CHILD EVO_HEARTBEAT_FILE} {
+    if {[info exists env($v)]} { unset env($v) }
+}
+# A model must be registered for the TUI to start; it is never called.
+set f [open "$env(EVO_HOME)/init.lisp" w]
+puts $f {(evo:register-model "lang-test" :provider :none :api :anthropic-messages :context-window 100000 :max-output 4000)}
+puts $f {(evo:set-setting :model "lang-test")}
+puts $f {(evo:register-provider :none :base-url "http://127.0.0.1:1/unused" :api-key "unused")}
+close $f
+
+set workdir "$scratch/work"
+file mkdir $workdir
+cd $workdir
+
+set pass 0
+set failures {}
+proc check {name} {
+    global pass
+    incr pass
+    puts "\nPASS: $name"
+}
+proc fail {name} {
+    global failures
+    lappend failures $name
+    puts "\nFAIL: $name"
+}
+
+# Probe the live image for which language the assembled prompt is in.  The
+# answer is an ASCII token that appears nowhere in what we type, so a hit can
+# only be the /eval result — never the editor's echo of the command.
+proc prompt-language-probe {} {
+    # Ask the live image which pack the assembled prompt actually starts with.
+    # The command stays pure ASCII (what expect sees for multibyte text on a
+    # pty depends on the channel encoding), and the answer is a pair the typed
+    # line does not contain — a bare keyword would match the editor's own echo
+    # of the command that produced it.
+    return "/eval (let* ((st (evo.journal:fold-state (evo.kernel:agent-journal evo:*agent*))) (req (evo.kernel:language-request st)) (pack (evo.kernel:resolve-language req)) (p (evo.kernel:build-system-prompt nil :language req))) (list (evo.util:pget pack :code) (evo.util:string-prefix-p (evo.kernel:prompt-section :base pack) p)))"
+}
+
+set stty_init "rows 24 cols 100"
+spawn "$repo/build/evo"
+
+expect {
+    -re {ctx \d+k/\d+k} { check "startup status line" }
+    timeout { fail "startup status line"; exit 1 }
+}
+
+# The zh-CN extension loaded from EVO_HOME/extensions registers a pack.
+send "/eval (if (= 2 (length (evo.kernel:all-prompt-languages))) :two-packs :other)\r"
+expect {
+    -re {:two-packs} { check "en plus the zh-CN extension pack are registered" }
+    timeout { fail "en plus the zh-CN extension pack are registered" }
+}
+
+send "[prompt-language-probe]\r"
+expect {
+    -re {\("en" t\)} { check "the prompt starts out in the default language" }
+    timeout { fail "the prompt starts out in the default language" }
+}
+
+# /lang with a code switches without the picker.
+send "/lang zh-CN\r"
+expect {
+    -re {language ->|language →} { check "/lang <code> confirms the switch" }
+    timeout { fail "/lang <code> confirms the switch" }
+}
+
+send "[prompt-language-probe]\r"
+expect {
+    -re {\("zh-cn" t\)} { check "the system prompt is now assembled in Chinese" }
+    timeout { fail "the system prompt is now assembled in Chinese" }
+}
+
+# The switch is journalled, so it is state, not a screen effect.
+send "/eval (evo.kernel:language-request (evo.journal:fold-state (evo.kernel:agent-journal evo:*agent*)))\r"
+expect {
+    -re {"zh-CN"} { check "the choice is journalled, not just displayed" }
+    timeout { fail "the choice is journalled, not just displayed" }
+}
+
+# evo's own interface stays English whatever the prompt language is.
+send "/help\r"
+expect {
+    -re {/lang \[code\]} { check "the interface is untranslated (/help still English)" }
+    timeout { fail "the interface is untranslated (/help still English)" }
+}
+
+# Bare /lang opens the choose box; escape leaves the language alone.
+send "/lang\r"
+expect {
+    -re {language:} { check "bare /lang opens the choose box" }
+    timeout { fail "bare /lang opens the choose box" }
+}
+expect {
+    -re {English} { check "the picker lists the registered packs" }
+    timeout { fail "the picker lists the registered packs" }
+}
+send "\033"
+expect {
+    -re {cancelled} { check "escape cancels the picker" }
+    timeout { fail "escape cancels the picker" }
+}
+
+send "[prompt-language-probe]\r"
+expect {
+    -re {\("zh-cn" t\)} { check "a cancelled pick leaves the language alone" }
+    timeout { fail "a cancelled pick leaves the language alone" }
+}
+
+send "/quit\r"
+expect {
+    eof {}
+    timeout {}
+}
+
+puts "\n$pass passed, [llength $failures] failed"
+if {[llength $failures] > 0} { exit 1 }
+exit 0

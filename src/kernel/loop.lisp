@@ -260,7 +260,8 @@ an adapter that no longer knows the word."
             :cache-key (pget (evo.journal:journal-header (agent-journal agent)) :id)
             :system (build-system-prompt tools
                                          :lore (all-lore-entries :state state)
-                                         :model model-id)))))
+                                         :model model-id
+                                         :language (language-request state))))))
 
 ;;; Tool batch execution (sequential) with :tool-call interception —
 ;;; the one point permission gates / read-only policies / sandboxing build on.

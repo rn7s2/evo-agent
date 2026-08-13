@@ -894,6 +894,7 @@ wrapped between two rules, and the model status line under the editbox."
     ("theme" . "switch the light/dark theme (math colours follow it)")
     ("model" . "pick the model from a list, or set it directly")
     ("thinking" . "low·medium·high·xhigh·max")
+    ("lang" . "language of the system prompt and replies")
     ("compact" . "compact the context now")
     ("image" . "attach an image (path, or the clipboard)")
     ("lore" . "show lore, or add project-scope guidance")

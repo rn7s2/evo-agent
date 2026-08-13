@@ -96,6 +96,11 @@
            #:queue-steering #:queue-followup #:emit-event #:steering-pending-p
            ;; prompt, skills, templates
            #:build-system-prompt #:register-prompt-note
+           ;; prompt language packs
+           #:register-prompt-language #:find-prompt-language
+           #:all-prompt-languages #:prompt-section #:*prompt-sections*
+           #:*default-language* #:language-code #:language-request
+           #:resolve-language #:set-prompt-language
            #:available-skills #:find-skill
            #:find-template #:expand-template
            ;; extension api internals
@@ -130,7 +135,7 @@
                 #:provider-error)
   (:export #:cat #:normalize-newlines #:crlf-newlines #:with-proxy
            #:register-tool #:register-command #:on #:load-extension
-           #:register-prompt-note
+           #:register-prompt-note #:register-prompt-language #:set-language
            #:register-model #:register-provider #:set-setting #:setting
            #:set-active-tools #:all-tools #:*agent* #:current-goal
            #:steer #:inject-context #:custom-state #:set-custom-state
@@ -149,6 +154,9 @@
 (defpackage :evo.todo
   (:use :cl :evo.util :evo.journal :evo.kernel)
   (:export #:current-todos #:format-todos))
+
+(defpackage :evo.lang.en
+  (:use :cl))
 
 (defpackage :evo.memory
   (:use :cl :evo.util)

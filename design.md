@@ -443,6 +443,18 @@ extend itself, how to reach for `load_extension` rather than declaring a
 capability missing, how to weigh reversibility when nothing prompts for
 permission, how to handle git, and how to treat injected system material.
 
+**Language packs.** The kernel owns the assembly order; the *words* belong to
+a registered language pack, and English is one — `src/core-ext/lang-en.lisp`,
+a core extension like todo or memory. `evo:register-prompt-language` adds
+another (`extensions/100-lang-zh-cn.lisp` is a full one); a pack may translate
+any subset of `*prompt-sections*` and inherits English for the rest, so adding
+a section never leaves a translated prompt with a hole. Which pack is in force
+follows the model's precedence — a journalled `/lang` pick, then the
+`:language` setting, then the default — and a `:language` value that names no
+pack degrades to what it always meant: a response-language hint on the English
+prompt. The scope is exactly what the model reads and writes; evo's own
+interface is not translated.
+
 **Templating.** Every section evo owns is a template; `{{NAME}}` tokens are
 the injection points where runtime facts reach the model, filled from
 `prompt-bindings`: working directory, git repo and branch, platform, OS

@@ -2718,6 +2718,75 @@ a lint that can go blind without saying so is worse than none."
                                (build-system-prompt nil)))))
       (setf evo.kernel::*prompt-notes* saved))))
 
+#| Prompt language packs: the prompt's own words are a registry, English is
+just the pack that ships as a core extension, and what the user picked
+(journaled) beats the :language setting beats the default. |#
+
+(defun test-prompt-languages ()
+  (let ((saved evo.kernel::*prompt-languages*)
+        (saved-setting (setting :language)))
+    (unwind-protect
+         (progn
+           (check "the English pack is registered by the core extension"
+                  (equal "English" (pget (evo.kernel:find-prompt-language "en") :name)))
+           (evo.kernel:register-prompt-language
+            "xx-TEST" :name "Testish" :native "Tëstish"
+            :response-language "Testish"
+            :sections (list :base "BASE-IN-TESTISH" :tools-heading "## Tuulz"))
+           (check "codes are case-insensitive"
+                  (eq (evo.kernel:find-prompt-language "XX-test")
+                      (evo.kernel:find-prompt-language "xx-test")))
+           (let ((prompt (build-system-prompt nil :language "xx-TEST")))
+             (check "the pack supplies the sections it translated"
+                    (and (string-prefix-p "BASE-IN-TESTISH" prompt)
+                         (search "## Tuulz" prompt)))
+             (check "an untranslated section falls back to the default language"
+                    (search "## Doing tasks" prompt))
+             (check "the pack names the language to answer in"
+                    (search "Always respond in Testish" prompt)))
+           (let ((before (length evo.kernel::*prompt-languages*)))
+             (evo.kernel:register-prompt-language
+              "xx-TEST" :name "Testish" :sections (list :base "SECOND-BASE"))
+             (check "re-registration replaces the pack, not stacks it"
+                    (and (= before (length evo.kernel::*prompt-languages*))
+                         (string-prefix-p "SECOND-BASE"
+                                          (build-system-prompt nil :language "xx-test")))))
+           (check "an unknown section key is refused at registration"
+                  (nth-value 1 (ignore-errors
+                                (evo.kernel:register-prompt-language
+                                 "xx-bad" :sections (list :nonesuch "x")))))
+           (check "an unregistered code is a response-language hint, not a pack"
+                  (let ((prompt (build-system-prompt nil :language "Korean")))
+                    (and (search "Always respond in Korean" prompt)
+                         (search "## Doing tasks" prompt))))
+           (check "no request means no language directive at all"
+                  (not (search "## Language" (build-system-prompt nil :language nil))))
+           ;; Precedence: journalled pick > :language setting > default.
+           (let* ((dir (uiop:ensure-directory-pathname
+                        (format nil "~a/evo-lang-~a/" (tmp-dir) (gen-id))))
+                  (journal (progn (ensure-directories-exist dir) (make-session-journal dir)))
+                  (agent (make-agent :journal journal)))
+             (setf (setting :language) "xx-test")
+             (check "the :language setting is the session default"
+                    (equal "xx-test" (evo.kernel:language-request
+                                      (fold-state journal))))
+             (evo.kernel:set-prompt-language "en" agent)
+             (check "a journalled pick outranks the setting"
+                    (equal "en" (evo.kernel:language-request (fold-state journal))))
+             ;; Nothing reaches disk before the first assistant message.
+             (append-entry journal (list :type :message
+                                         :message (list :role :assistant
+                                                        :content (list (list :type :text
+                                                                             :text "ok")))))
+             (check "and it survives a reopen of the journal"
+                    (equal "en" (evo.kernel:language-request
+                                 (fold-state (open-journal (journal-path journal))))))
+             (evo.kernel:set-prompt-language "xx-test")
+             (check "without an agent the choice is just the setting"
+                    (equal "xx-test" (setting :language)))))
+      (setf evo.kernel::*prompt-languages* saved
+            (setting :language) saved-setting))))
+
 (defun test-goal-budget ()
   (let* ((dir (uiop:ensure-directory-pathname
                (format nil "~a/evo-goal-~a/" (tmp-dir) (gen-id))))
@@ -5244,6 +5313,7 @@ five identical restarts, each reporting a different error than the real one."
     (test-input-history)
     (test-line-endings)
     (test-prompt-notes)
+    (test-prompt-languages)
     (test-goal-budget)
     (test-goal-tools)
     (test-templates)

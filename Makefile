@@ -59,10 +59,10 @@ integration: build
 
 # Expect-driven TUI tests against a freshly built binary: the general smoke
 # test, the same-id/multi-provider model routing test, image paste through a
-# real vision model (EVO_TEST_VISION_MODEL), then three that need no backend at
+# real vision model (EVO_TEST_VISION_MODEL), then four that need no backend at
 # all — pasting in every shape a terminal sends it, the IDE bridge (which
-# drives the state file the editor plugin writes), and background jobs on the
-# status line.
+# drives the state file the editor plugin writes), background jobs on the
+# status line, and switching the system prompt's language.
 tui-test: build
 	tests/tui.exp
 	tests/model-provider.exp
@@ -70,6 +70,7 @@ tui-test: build
 	tests/paste.exp
 	tests/ide-context.exp
 	tests/jobs.exp
+	tests/lang.exp
 
 # The subset of the pty tests that need no backend at all: each registers a
 # model so the TUI starts but never sends anything to it.  Unlike the rest of
@@ -79,6 +80,7 @@ tui-test-offline: build
 	tests/paste.exp
 	tests/ide-context.exp
 	tests/jobs.exp
+	tests/lang.exp
 
 # Seed corpus: docs + example extensions into the global evo home.
 # Everything installed under docs/ is reference-only — nothing ships active in
