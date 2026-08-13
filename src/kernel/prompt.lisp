@@ -430,7 +430,10 @@ well as values wrapped across indented continuation lines."
 ;;; shown) registers a note; the note rides in every system prompt until
 ;;; removed.  Named, so re-registration replaces rather than accumulates —
 ;;; an extension reloaded at session start stays idempotent — and so a
-;;; feature toggled off can withdraw its guidance by name.
+;;; feature toggled off can withdraw its guidance by name.  A note may be a
+;;; function instead of a string: it is called with the active language pack
+;;; while the prompt is being built, which is how an extension's own guidance
+;;; follows /lang instead of staying in whatever language it was written in.
 
 (defvar *prompt-notes* nil
   "Alist of (NAME . TEXT), appended to the system prompt after the
@@ -438,7 +441,9 @@ guidelines, in registration order.")
 
 (defun register-prompt-note (name text)
   "Add or replace the system-prompt note NAME (a string) with TEXT, a
-self-contained markdown snippet.  NIL TEXT removes the note.  Returns TEXT."
+self-contained markdown snippet — or a function of the active language pack
+returning one (NIL from it drops the note for that prompt).  NIL TEXT removes
+the note.  Returns TEXT."
   (let ((entry (assoc name *prompt-notes* :test #'equal)))
     (cond ((null text)
            (setf *prompt-notes* (remove name *prompt-notes*
@@ -447,6 +452,18 @@ self-contained markdown snippet.  NIL TEXT removes the note.  Returns TEXT."
           (t (setf *prompt-notes*
                    (append *prompt-notes* (list (cons name text)))))))
   text)
+
+(defun prompt-note-text (note pack)
+  "Text NOTE contributes to a prompt in PACK's language.  A note that
+signals is dropped with a warning rather than taking the turn down with it:
+the agent losing one extension's guidance beats the agent losing its prompt."
+  (let ((value (cdr note)))
+    (if (functionp value)
+        (handler-case (funcall value pack)
+          (error (e)
+            (warn "prompt note ~a failed: ~a" (car note) e)
+            nil))
+        value)))
 
 (defun build-system-prompt (tools &key (cwd (uiop:getcwd)) lore model
                                        (language (language-request)))
@@ -468,9 +485,11 @@ self-contained markdown snippet.  NIL TEXT removes the note.  Returns TEXT."
                      (first (uiop:split-string (or (tool-description tool) "")
                                                :separator '(#\Newline)))))
            (format out "~%~a~%" (section :guidelines))
-           ;; Extension-contributed guidance (REGISTER-PROMPT-NOTE).
+           ;; Extension-contributed guidance (REGISTER-PROMPT-NOTE), each
+           ;; note given the chance to speak the active language.
            (dolist (note *prompt-notes*)
-             (format out "~%~a~%" (cdr note)))
+             (let ((text (prompt-note-text note pack)))
+               (when text (format out "~%~a~%" text))))
            (let ((docs (probe-file (merge-pathnames "docs/" (evo-home)))))
              (when docs
                (format out "~%~a~%" (section :own-docs))
