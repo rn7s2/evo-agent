@@ -220,7 +220,7 @@ fresh process re-snapshots, which is exactly the intended lifetime.")
                                            2000)
                           (or (git-output cwd "log" "--oneline" "-5") "(none)"))))))))
 
-(defun prompt-bindings (&key (cwd (uiop:getcwd)) model response-language)
+(defun prompt-bindings (&key (cwd (uiop:getcwd)) model response-language (vision t))
   "The facts injected into the prompt templates.  Add a placeholder here and
 it becomes available to every section evo owns."
   (list (cons "WORKING_DIRECTORY"
@@ -235,6 +235,10 @@ it becomes available to every section evo owns."
         (cons "OS_VERSION" (string (software-version)))
         (cons "TODAY_DATE" (today-string))
         (cons "MODEL" (or model "unknown"))
+        ;; Whether this session's model accepts image input.  The agent has
+        ;; no other way to know, and a model that assumes it is blind never
+        ;; reads the screenshot it was pointed at.
+        (cons "VISION" (if vision "yes" "no"))
         (cons "GIT_STATUS" (or (git-status-snapshot cwd) ""))
         (cons "RESPONSE_LANGUAGE" (or response-language ""))
         (cons "EVO_DOCS" (namestring (merge-pathnames "docs/" (evo-home))))))
@@ -466,13 +470,14 @@ the agent losing one extension's guidance beats the agent losing its prompt."
         value)))
 
 (defun build-system-prompt (tools &key (cwd (uiop:getcwd)) lore model
+                                       (vision t)
                                        (language (language-request)))
   ;; NORMALIZE-NEWLINES so the prompt we send is the same text whatever the
   ;; line endings of the sources it was compiled from and of the files it
   ;; quotes (AGENTS.md, skills, context files) happen to be.
   (normalize-newlines
    (multiple-value-bind (pack response-language) (resolve-language language)
-     (let ((bindings (prompt-bindings :cwd cwd :model model
+     (let ((bindings (prompt-bindings :cwd cwd :model model :vision vision
                                       :response-language response-language)))
        (flet ((section (key &optional extra)
                 (render-template (prompt-section key pack)

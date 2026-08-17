@@ -550,6 +550,36 @@ line2")))
                               (and (equal (evo.provider::jget block "type") "image_url")
                                    (equal (evo.provider::jget block "image_url" "url")
                                           "data:image/png;base64,AAAA"))))))
+                 ;; A tool that hands back a picture (READ on a screenshot):
+                 ;; chat completions has no image inside a tool message, so the
+                 ;; image has to follow it as a user message or the model
+                 ;; answers blind about an image it was told it had.
+                 (let* ((img-history
+                          (list '(:role :user :content ((:type :text :text "look")))
+                                (list :role :assistant :model "kimi-k3"
+                                      :stop-reason :tool-use
+                                      :content (list '(:type :tool-call :id "call_i"
+                                                       :name "read"
+                                                       :arguments (:path "shot.png"))))
+                                (list :role :tool-result :tool-call-id "call_i"
+                                      :tool-name "read" :is-error nil
+                                      :content (list '(:type :text :text "Image shot.png")
+                                                     '(:type :image :media-type "image/png"
+                                                       :data "QUJD" :name "shot.png")))))
+                        (img-req (com.inuoe.jzon:parse
+                                  (funcall build :model model :system "sys"
+                                                 :messages img-history :tools tools
+                                                 :thinking-level :low :cache-key "k2")))
+                        (img-messages (evo.provider::jget img-req "messages")))
+                   (check "kimi req: a tool result image follows as a user message"
+                          (and (equal (map 'list
+                                           (lambda (m) (evo.provider::jget m "role"))
+                                           img-messages)
+                                      '("system" "user" "assistant" "tool" "user"))
+                               (search "QUJD" (com.inuoe.jzon:stringify
+                                               (aref img-messages 4)))))
+                   (check "kimi req: the tool message itself stays text"
+                          (stringp (evo.provider::jget (aref img-messages 3) "content"))))
                  ;; :xhigh clamps to high, :max passes through.
                  (check "kimi req clamps :xhigh to high"
                         (equal (evo.provider::jget
@@ -5098,6 +5128,170 @@ selection journals the provider, and every resolution point honours it."
              (and (search "Image #1" rendered)
                   (search (file-namestring fixture) rendered))))))
 
+(defun test-image-read-tool ()
+  "The read tool on an image: the picture comes back, not line noise."
+  (let* ((fixture (image-fixture))
+         (data (octets->base64 (read-file-octets fixture))))
+    (register-model* "reads-images" :provider :anthropic :api :anthropic-messages
+                     :context-window 200000 :max-output 8192)
+    (register-model* "reads-nothing" :provider :anthropic :api :anthropic-messages
+                     :context-window 200000 :max-output 8192 :vision nil)
+    ;; A tool may answer with blocks instead of a string.
+    (check "tool content: a string is one text block"
+           (equal (evo.kernel::tool-content-blocks "hi")
+                  '((:type :text :text "hi"))))
+    (check "tool content: a lone block is wrapped"
+           (equal (evo.kernel::tool-content-blocks '(:type :text :text "hi"))
+                  '((:type :text :text "hi"))))
+    (check "tool content: a list of blocks passes through"
+           (= 2 (length (evo.kernel::tool-content-blocks
+                         (list '(:type :text :text "hi")
+                               (evo.media:make-image-block :data "QUJD"))))))
+    ;; A userspace tool is agent-written: a block no adapter could send is
+    ;; stringified here, not at request-build time where it would fail the
+    ;; whole turn and name the adapter instead of the tool.
+    (check "tool content: an unknown block becomes text"
+           (let ((blocks (evo.kernel::tool-content-blocks '(:type :bogus :x 1))))
+             (and (= 1 (length blocks))
+                  (eq (pget (first blocks) :type) :text)
+                  (search "BOGUS" (pget (first blocks) :text)))))
+    (check "tool content: a nil inside a list is dropped"
+           (= 1 (length (evo.kernel::tool-content-blocks
+                         (list nil '(:type :text :text "hi"))))))
+    ;; Truncation is a text budget; an image is not half-sendable.
+    (let* ((evo.kernel::*max-tool-result-chars* 10)
+           (blocks (evo.kernel::truncate-result-blocks
+                    (list (list :type :text :text (make-string 500 :initial-element #\a))
+                          (evo.media:make-image-block :data data :media-type "image/png"
+                                                      :name "shot.png" :bytes 69)))))
+      (check "tool result: text is truncated to the budget"
+             (< (length (pget (first blocks) :text)) 200))
+      (check "tool result: the image survives whole"
+             (equal (pget (second blocks) :data) data)))
+    (check "tool result: the host display names the image"
+           (search "shot.png"
+                   (evo.kernel::result-display-text
+                    (list (evo.media:make-image-block :data data :media-type "image/png"
+                                                      :name "shot.png" :bytes 69)))))
+    (check "tool result: an image is priced into the context estimate"
+           (> (evo.kernel::result-context-chars
+               (list (evo.media:make-image-block :data data :bytes 69)))
+              4000))
+    ;; The tool call, end to end through the journal.
+    (let* ((dir (uiop:ensure-directory-pathname
+                 (format nil "~a/evo-imgread-~a/" (tmp-dir) (gen-id))))
+           (journal (progn (ensure-directories-exist dir) (make-session-journal dir)))
+           (events nil)
+           (agent (make-agent :journal journal :model-override "reads-images"
+                              :events-cb (lambda (ev) (push ev events)))))
+      (evo.kernel::run-tool-call agent (list :name "read" :id "call_img"
+                                             :arguments (list :path (namestring fixture))))
+      (let* ((result (find :tool-result (reverse (state-messages (fold-state journal)))
+                           :key #'message-role))
+             (content (message-content result))
+             (image (find :image content :key (lambda (b) (pget b :type)))))
+        (check "read: an image file comes back as an image block"
+               (and image (equal (pget image :data) data)
+                    (equal (pget image :media-type) "image/png")))
+        (check "read: the image is captioned, not silent"
+               (search (file-namestring fixture)
+                       (or (pget (first content) :text) "")))
+        (check "read: reading an image is not an error"
+               (not (pget result :is-error)))
+        (check "read: the event prices the image into the context estimate"
+               (> (pget (find :tool-result events :key (lambda (e) (pget e :type)))
+                        :content-chars)
+                  4000))
+        ;; Anthropic sends it inside the tool_result; a blind model gets text.
+        (let* ((history (list (list :role :assistant :model "reads-images"
+                                    :content (list (list :type :tool-call :id "call_img"
+                                                         :name "read"
+                                                         :arguments (list :path "x.png"))))
+                              result))
+               (json (com.inuoe.jzon:stringify
+                      (com.inuoe.jzon:parse
+                       (build-request (find-api :anthropic-messages)
+                                      :model (find-model "reads-images") :system "sys"
+                                      :messages history :tools nil :thinking-level nil))))
+               (blind (com.inuoe.jzon:stringify
+                       (com.inuoe.jzon:parse
+                        (build-request (find-api :anthropic-messages)
+                                       :model (find-model "reads-nothing") :system "sys"
+                                       :messages history :tools nil :thinking-level nil)))))
+          (check "anthropic: the tool result carries the image"
+                 (and (search "tool_result" json) (search data json)))
+          (check "anthropic: a blind model gets a placeholder, not base64"
+                 (and (not (search data blind)) (search "image not shown" blind))))
+        ;; The Responses API has no image inside a function_call_output, so
+        ;; the image follows as a user message instead of being dropped.
+        (let* ((oai '(:id "reads-images-gpt" :provider :openai :api :openai-responses
+                      :context-window 272000 :max-output 128000))
+               (history (list (list :role :assistant :model "reads-images-gpt"
+                                    :content (list (list :type :tool-call :id "call_img"
+                                                         :name "read"
+                                                         :arguments (list :path "x.png"))))
+                              result))
+               (req (com.inuoe.jzon:parse
+                     (build-request (find-api :openai-responses)
+                                    :model oai :system "sys" :messages history
+                                    :tools nil :thinking-level nil)))
+               (items (evo.provider::jget req "input"))
+               (output (evo.provider::jget (aref items 1) "output")))
+          (check "openai: the image rides inside function_call_output"
+                 (and (vectorp output) (not (stringp output))
+                      (equal (evo.provider::jget (aref output 0) "type") "input_text")
+                      (equal (evo.provider::jget (aref output 1) "type") "input_image")
+                      (search data (evo.provider::jget (aref output 1) "image_url"))))
+          (check "openai: no separate user message is injected"
+                 (and (= (length items) 2)
+                      (notany (lambda (item)
+                                (equal (evo.provider::jget item "role") "user"))
+                              (coerce items 'list))))
+          ;; A text-only result keeps the plain-string output shape.
+          (let* ((plain (list :role :tool-result :tool-call-id "call_img"
+                              :tool-name "bash" :is-error nil
+                              :content (list (list :type :text :text "ok"))))
+                 (req2 (com.inuoe.jzon:parse
+                        (build-request (find-api :openai-responses)
+                                       :model oai :system "sys"
+                                       :messages (list (first history) plain)
+                                       :tools nil :thinking-level nil))))
+            (check "openai: a text-only result is still a plain string"
+                   (equal (evo.provider::jget (aref (evo.provider::jget req2 "input") 1)
+                                              "output")
+                          "ok")))))
+      ;; A model that cannot see gets the truth instead of a megabyte of base64.
+      (let* ((dir (uiop:ensure-directory-pathname
+                   (format nil "~a/evo-imgblind-~a/" (tmp-dir) (gen-id))))
+             (journal (progn (ensure-directories-exist dir) (make-session-journal dir)))
+             (agent (make-agent :journal journal :model-override "reads-nothing")))
+        (evo.kernel::run-tool-call agent (list :name "read" :id "call_blind"
+                                               :arguments (list :path (namestring fixture))))
+        (let ((result (find :tool-result (reverse (state-messages (fold-state journal)))
+                            :key #'message-role)))
+          (check "read: a blind model is refused, and sent no image"
+                 (and (pget result :is-error)
+                      (null (find :image (message-content result)
+                                  :key (lambda (b) (pget b :type))))
+                      (search "vision" (pget (first (message-content result)) :text)))))))
+    ;; Text files are untouched by any of this.
+    (let ((path (format nil "~a/evo-imgread-~a.txt" (tmp-dir) (gen-id 6))))
+      (write-file-string path (format nil "alpha~%beta~%"))
+      (check "read: a text file still reads as numbered lines"
+             (let ((out (evo.kernel::tool-read (list :path path))))
+               (and (stringp out) (search "alpha" out) (search "2" out)))))
+    ;; And the agent is told which of the two worlds it is in.
+    (check "prompt: a vision model is told it can see images"
+           (search "Can see images: yes"
+                   (build-system-prompt (list (find-tool "read")) :vision t)))
+    (check "prompt: a blind model is told it cannot"
+           (search "Can see images: no"
+                   (build-system-prompt (list (find-tool "read")) :vision nil)))
+    (check "prompt: the tool list says read takes images"
+           (search "image" (build-system-prompt (list (find-tool "read")))))
+    (reset-user-registries)
+    (register-fixture-models)))
+
 (defun test-image-export ()
   (let* ((dir (format nil "~a/evo-imgexp-~a" (tmp-dir) (gen-id 6)))
          (md (format nil "~a/transcript.md" dir))
@@ -5367,5 +5561,6 @@ five identical restarts, each reporting a different error than the real one."
     (test-image-wire)
     (test-image-tui-paste)
     (test-image-export)
+    (test-image-read-tool)
     (format t "~%~d passed, ~d failed~%" *pass* *fail*)
     (if (zerop *fail*) 0 1)))

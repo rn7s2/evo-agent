@@ -17,6 +17,7 @@
 #   multi-turn task in print mode; kill -9 mid-task; resume cleanly
 #   goals: a goal run that terminates via audited update_goal :complete
 #   image input: --image attached to a headless prompt, read by a vision model
+#   image input: the agent opening an image itself with the read tool
 set -u
 
 : "${EVO_TEST_BASE_URL:=}"
@@ -146,7 +147,7 @@ mkdir -p "$work4"
 )
 t4=$?
 [ $t4 -eq 0 ] && grep -q "survived" "$work4/crash-proof.txt" 2>/dev/null \
-    && grep -q "restarting with --resume" "$scratch/t4.err"
+    && grep -q "restarting --resume" "$scratch/t4.err"
 report $? "supervisor: induced crash -> restart -> resume -> goal complete"
 
 # --- Test 5: compaction fires mid-task and the task still finishes -------
@@ -183,8 +184,22 @@ if [ -n "$EVO_TEST_VISION_MODEL" ] && command -v xxd >/dev/null 2>&1; then
     )
     grep -qi "colour-is-red" "$scratch/t-img.out"
     report $? "headless --image: a vision model reads the attached image"
+
+    # --- Test 6b: the AGENT opens the image itself -----------------------
+    # Nobody attached anything here: the agent has to reach for `read` on a
+    # png and look at what comes back.  Same red pixels, so an answer that
+    # is not about them cannot pass.
+    (
+        cd "$work_img"
+        "$evo" --model "$EVO_TEST_VISION_MODEL" \
+            -p "Use the read tool on red.png in this directory and look at it. What single colour fills the image? Reply with exactly one line: colour-is-<word>." \
+            >"$scratch/t-img2.out" 2>"$scratch/t-img2.err"
+    )
+    grep -qi "colour-is-red" "$scratch/t-img2.out"
+    report $? "read tool: the agent opens an image file and sees it"
 else
     report_skip "headless --image: a vision model reads the attached image"
+    report_skip "read tool: the agent opens an image file and sees it"
 fi
 
 else
@@ -194,6 +209,7 @@ else
     report_skip "supervisor: induced crash -> restart -> resume -> goal complete"
     report_skip "compaction fires mid-task, task completes"
     report_skip "headless --image: a vision model reads the attached image"
+    report_skip "read tool: the agent opens an image file and sees it"
 fi
 
 # --- Test 7: two separately launched agents mint distinct ids ------------
