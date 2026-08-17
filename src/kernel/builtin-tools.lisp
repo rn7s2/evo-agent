@@ -4,12 +4,51 @@
 
 (defparameter *read-max-chars* 40000)
 
+(defun executing-model-sees-images-p ()
+  "Whether the model this tool call is running under accepts image input.
+Unknown counts as capable — the same optimism the TUI applies when it warns
+about an attachment: a false alarm is worse than none."
+  (let ((agent *executing-agent*))
+    (handler-case
+        (if (null agent)
+            t
+            (let* ((state (fold-state (agent-journal agent)))
+                   (id (effective-model-id state agent)))
+              (model-vision-p (find-model id (effective-model-provider state id)))))
+      (error () t))))
+
+(defun read-image-file (path)
+  "The read tool's answer for an image: the picture itself, captioned.
+
+Text is useless here — an image file read as characters is line noise — so
+the result carries the image block the providers already know how to send,
+and the model looks at it.  A model with no vision has the call refused: it
+cannot be shown a picture, and saying so as a successful result would read
+like one."
+  (unless (executing-model-sees-images-p)
+    ;; Refuse before reading the bytes: a blind model cannot be shown the
+    ;; picture, and a result that merely says so still reads like success.
+    (error "~a is an image, and the current model has no vision (image input): it cannot be shown one. Switch to a vision model with /model."
+           path))
+  (multiple-value-bind (block reason) (evo.media:attach-image-file path :source "read")
+    (cond
+      ((null block) (error "Cannot read ~a as an image: ~a" path reason))
+      (t
+       ;; The caption grounds the picture that follows it — the model is
+       ;; handed pixels and needs to know which file they are.  Size and
+       ;; type are the host's business and stay in the display line.
+       (values (list (list :type :text :text (format nil "Image: ~a" path))
+                     block)
+               (list :image t :bytes (pget block :bytes)))))))
+
 (defun tool-read (args)
   (let* ((path (pget args :path))
          (offset (pget args :offset))
          (limit (pget args :limit)))
     (unless (and path (probe-file path))
       (error "File not found: ~a" path))
+    (when (evo.media:image-file-p path)
+      (return-from tool-read (read-image-file path)))
     (let* ((content (normalize-newlines (read-file-string path)))
            (lines (uiop:split-string content :separator '(#\Newline)))
            (start (max 0 (1- (or offset 1))))
@@ -212,7 +251,10 @@ kill/wait on the handle can race this poll and crash the runtime."
 (defun register-builtin-tools ()
   (register-tool*
    :name "read"
-   :description "Read a file from the filesystem. Returns numbered lines. Use offset/limit for large files."
+   ;; The first line is what the system prompt's tool list quotes, so the
+   ;; image half has to be said there: a model that does not know it can
+   ;; look at a screenshot will never try.
+   :description "Read a file from the filesystem — text as numbered lines, and an image (png, jpeg, gif, webp) as the picture itself, which you can look at. Use offset/limit for large text files."
    :schema '(:object
              (:path :type :string :description "Absolute or cwd-relative file path")
              (:offset :type :integer :optional t :description "1-based line to start from")

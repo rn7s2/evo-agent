@@ -104,7 +104,9 @@ point.
   a text-only model mid-session costs a screenshot, not every turn after it.
 - **Images are first-class input**: an `:image` block carries base64 bytes and
   a sniffed media type, encoded as an Anthropic `image` source or an OpenAI
-  `input_image` data URL. See *Images in* below for how one gets there.
+  `input_image` data URL. See *Images in* below for how one gets there. The
+  agent reads images too — `read` on a png/jpeg/gif/webp returns the picture,
+  so it can open a screenshot itself instead of asking you to describe one.
 - **Retry** in three layers: in-request HTTP retry with `retry-after` and
   backoff, error normalization on typed codes (not regex), and turn-level retry
   on finished error messages.

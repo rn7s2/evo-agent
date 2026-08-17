@@ -424,6 +424,10 @@ that came from a different model, so nothing cross-model is replayed here."
         (setf (gethash "tool_calls" obj) (coerce (nreverse calls) 'vector)))
       obj)))
 
+(defun kimi--tool-result-images (m)
+  (remove-if-not (lambda (b) (eq (kimi--pget b :type) :image))
+                 (kimi--pget m :content)))
+
 (defun kimi--tool-result->json (m)
   "A tool result.  Chat completions has no is_error flag — the error rides in
 the text, which is where the kernel already puts it (\"Tool error: ...\") —
@@ -434,8 +438,26 @@ and the API rejects empty content."
     (let ((name (kimi--pget m :tool-name)))
       (when name (setf (gethash "name" obj) name)))
     (setf (gethash "content" obj)
-          (if (zerop (length text)) "(no tool output)" text))
+          (cond ((plusp (length text)) text)
+                ((kimi--tool-result-images m) "(image output; the image follows)")
+                (t "(no tool output)")))
     obj))
+
+(defun kimi--tool-result-image-message (m)
+  "A `tool` message is text: chat completions has no image inside a tool
+result.  A tool that hands back a picture (READ on a screenshot) therefore
+gets it delivered in the user message that follows the result — dropping it
+would leave the model answering blind about an image it was told it had."
+  (let ((images (kimi--tool-result-images m)))
+    (when images
+      (kimi--jobj "role" "user"
+                  "content"
+                  (coerce (cons (kimi--jobj "type" "text"
+                                            "text" (format nil "Image~p returned by the ~a call above:"
+                                                           (length images)
+                                                           (or (kimi--pget m :tool-name) "tool")))
+                                (mapcar #'kimi--user-block->json images))
+                          'vector)))))
 
 (defun kimi--user->json (m)
   (let ((blocks (kimi--pget m :content)))
@@ -458,7 +480,10 @@ cached prefix does not move."
               (:user (kimi--user->json m))
               (:assistant (kimi--assistant->json m))
               (:tool-result (kimi--tool-result->json m)))
-            out))
+            out)
+      (when (eq (evo.provider:message-role m) :tool-result)
+        (let ((images (kimi--tool-result-image-message m)))
+          (when images (push images out)))))
     (when deferred-tools
       ;; A dynamic-tools message carries `tools` and no `content` — sending
       ;; both is a 400 ("cannot be used with content").

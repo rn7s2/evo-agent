@@ -372,7 +372,14 @@ the transcript; base64 inline would not be readable."
                (:tool-call (format out "`⏺ ~a` `~s`~2%" (pget b :name) (pget b :arguments))))))
           (:tool-result
            (format out "```~%~a~%```~2%"
-                   (or (pget (first (message-content m)) :text) ""))))))
+                   (result-display-text (message-content m)))
+           ;; A tool may hand back a picture (read on a screenshot); the
+           ;; transcript keeps it beside the text, same as a user's.
+           (dolist (b (message-content m))
+             (when (evo.media:image-block-p b)
+               (let ((file (ignore-errors
+                            (export-image b path (incf image-index)))))
+                 (format out "~@[![~a](~a)~2%~]" (and file (pget b :name)) file))))))))
     (scroll tui (format nil "exported to ~a" path))
     t))
 

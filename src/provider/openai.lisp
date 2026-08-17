@@ -70,15 +70,31 @@ request clamped to its ladder first — the stock Responses API tops out at
               :message (format nil "Unknown user content block type ~s"
                                (pget block :type))))))
 
-(defun tool-result->output-string (m)
-  "The Responses API has no is_error flag and rejects empty output;
-the error signal rides in the text itself."
-  (let ((text (string-join
-               (string #\Newline)
+(defun tool-result-text (m)
+  (string-join (string #\Newline)
                (loop for b in (message-content m)
                      when (eq (pget b :type) :text)
-                       collect (pget b :text)))))
-    (if (zerop (length text)) "(no tool output)" text)))
+                       collect (pget b :text))))
+
+(defun tool-result->output-json (m)
+  "The value of `function_call_output.output`, which the Responses API takes
+in two shapes: a plain string, or an array of content items.
+
+A tool that hands back a picture uses the second — the image belongs to the
+result it came from.  Injecting it as a separate user message instead would
+put words in the user's mouth, break the call/result adjacency the API
+validates, and move the cached prefix.  The API has no is_error flag either
+way, so the error signal keeps riding in the text, and empty output is
+rejected."
+  (let ((text (tool-result-text m))
+        (images (remove-if-not (lambda (b) (eq (pget b :type) :image))
+                               (message-content m))))
+    (if images
+        (coerce (append (when (plusp (length text))
+                          (list (jobj "type" "input_text" "text" text)))
+                        (mapcar #'user-block->input-json images))
+                'vector)
+        (if (zerop (length text)) "(no tool output)" text))))
 
 (defun assistant-message->items (m target-model-id)
   (let ((same-model (equal (pget m :model) target-model-id)))
@@ -133,7 +149,7 @@ the error signal rides in the text itself."
         (:tool-result
          (push (jobj "type" "function_call_output"
                      "call_id" (pget m :tool-call-id)
-                     "output" (tool-result->output-string m))
+                     "output" (tool-result->output-json m))
                items))))
     (coerce (nreverse items) 'vector)))
 

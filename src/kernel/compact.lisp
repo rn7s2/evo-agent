@@ -16,7 +16,7 @@
 (defparameter *compact-keep-recent-tokens* 20000)
 
 (defun estimate-message-tokens (message)
-  "chars/4; images flat ~4800."
+  "chars/4; an image flat at *IMAGE-BLOCK-TOKENS*."
   (let ((chars 0) (images 0))
     (dolist (block (message-content message))
       (case (pget block :type)
@@ -24,7 +24,7 @@
         (:thinking (incf chars (length (or (pget block :thinking) ""))))
         (:tool-call (incf chars (length (format nil "~s" (pget block :arguments)))))
         (:image (incf images))))
-    (+ (ceiling chars 4) (* images 4800))))
+    (+ (ceiling chars 4) (* images *image-block-tokens*))))
 
 (defun estimate-context-tokens (messages)
   "Anchor on the last message with provider-reported usage; only
@@ -114,10 +114,12 @@ messages verbatim — they must survive the summary.")
              (:tool-call (format out "[tool-call ~a] ~s~%"
                                  (pget block :name) (pget block :arguments))))))
         (:tool-result
+         ;; A result may carry blocks the summarizer cannot read (an image);
+         ;; RESULT-DISPLAY-TEXT names those instead of dropping them, so the
+         ;; summary records that a picture was looked at.
          (format out "[tool-result~:[~; ERROR~]] ~a~%"
                  (pget m :is-error)
-                 (truncate-string
-                  (or (pget (first (message-content m)) :text) "") 1500)))))))
+                 (truncate-string (result-display-text (message-content m)) 1500)))))))
 
 (defun summarize (model thinking messages previous-summary hint &key abort-flag abort-cleanup)
   "One summarization call.  Returns the summary text and the provider usage."

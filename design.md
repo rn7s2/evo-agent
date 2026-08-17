@@ -238,6 +238,22 @@ errors signal, and preflight catches them.
   poison a transcript that contains one. `evo.media` owns the read path —
   clipboard readers per platform, size cap, downscaling — and nothing above it
   knows where the bytes came from.
+- **The agent looks at images too, not just the user**: an `:image` block is a
+  legal tool result, so `read` on a png/jpeg/gif/webp returns the picture
+  instead of line noise, and the agent can open a screenshot on its own
+  initiative. The image stays *inside the result of the call that produced
+  it* on every wire that has a slot for it — Anthropic `tool_result` content,
+  Responses `function_call_output.output` as content items
+  (`input_text` + `input_image`, the string form kept for text-only results).
+  Injecting it as a separate user message instead would put words in the
+  user's mouth, break call/result adjacency, and move the cached prefix; the
+  Kimi chat-completions extension does exactly that, and only because a
+  `tool` message there has nowhere else to carry one. A model registered
+  `:vision nil` has the call refused outright — a result that merely explains
+  still reads like success, and a megabyte of base64 it can never see costs
+  the turn — and the system prompt states per session which case the agent is
+  in (`Can see images: yes|no`), because a model that assumes it is blind
+  never tries.
 - **Provider artifacts are a typed variant, not stringly-typed**: an Anthropic
   thinking signature is a base64 scalar accumulated from chunked
   `signature_delta`; an OpenAI reasoning item is the whole item with
@@ -298,7 +314,11 @@ messages remain — then polls follow-ups.
   continues. The goal driver (§8) plugs in here.
 - Tool interface: name, description, sexpr schema (emitted as JSON Schema),
   `execute` function, and a result split into `:content` (model-visible) and
-  `:details` (host-visible). Execution is sequential (D9).
+  `:details` (host-visible). `:content` is a string in the common case, or
+  content blocks when the tool hands back something the model must *see*
+  rather than read — `read` on an image is the one such tool today, and the
+  text budget (50k chars) applies to the text blocks only. Execution is
+  sequential (D9).
 
 ## 7. Context management
 

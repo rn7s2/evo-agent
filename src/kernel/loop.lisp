@@ -240,6 +240,7 @@ an adapter that no longer knows the word."
   (let* ((state (fold-state (agent-journal agent)))
          (tools (active-tools state))
          (model-id (effective-model-id state agent))
+         (model (find-model model-id (effective-model-provider state model-id)))
          (thinking (effective-thinking state (agent-thinking-override agent))))
     ;; Projection pipeline: journal entries -> agent messages ->
     ;; (transform-context) -> provider messages.  Extensions hook the
@@ -254,13 +255,14 @@ an adapter that no longer knows the word."
       (list :state state
             :tools tools
             :messages messages
-            :model (find-model model-id (effective-model-provider state model-id))
+            :model model
             :thinking thinking
             ;; Session id = OpenAI prompt_cache_key (cache affinity).
             :cache-key (pget (evo.journal:journal-header (agent-journal agent)) :id)
             :system (build-system-prompt tools
                                          :lore (all-lore-entries :state state)
                                          :model model-id
+                                         :vision (model-vision-p model)
                                          :language (language-request state))))))
 
 ;;; Tool batch execution (sequential) with :tool-call interception —
@@ -277,6 +279,37 @@ an adapter that no longer knows the word."
                (setf args (pget r :arguments))))))))
 
 (defparameter *max-tool-result-chars* 50000)
+
+(defun truncate-result-blocks (blocks)
+  "Trim the TEXT in BLOCKS to a shared *MAX-TOOL-RESULT-CHARS* budget.  An
+image block passes through whole — it is already capped in bytes by
+EVO.MEDIA:*MAX-IMAGE-BYTES*, and half an image is nothing."
+  (let ((left *max-tool-result-chars*))
+    (loop for block in blocks
+          collect (if (eq (pget block :type) :text)
+                      (let ((text (truncate-string (or (pget block :text) "") (max left 0))))
+                        (decf left (length text))
+                        (pput block :text text))
+                      block))))
+
+(defun result-display-text (blocks)
+  "What the host shows for a tool result: its text, with anything the model
+looks at rather than reads named in one line."
+  (string-join (string #\Newline)
+               (loop for block in blocks
+                     collect (case (pget block :type)
+                               (:text (or (pget block :text) ""))
+                               (:image (format nil "[image ~a]"
+                                               (evo.media:image-summary block)))
+                               (t (format nil "[~(~a~)]" (pget block :type)))))))
+
+(defun result-context-chars (blocks)
+  "Chars to charge the live context estimate for BLOCKS.  Images are priced
+in tokens, and every consumer of this number divides chars by 4."
+  (loop for block in blocks
+        sum (if (eq (pget block :type) :image)
+                (* 4 *image-block-tokens*)
+                (length (or (pget block :text) "")))))
 
 (defun run-tool-call (agent call)
   "Execute one tool call; append its tool-result entry."
@@ -303,7 +336,9 @@ an adapter that no longer knows the word."
               (multiple-value-setq (content details is-error)
                 (let ((*executing-agent* agent))
                   (execute-tool tool args)))))))
-    (let ((content (truncate-string (or content "") *max-tool-result-chars*)))
+    (let* ((blocks (or (truncate-result-blocks (tool-content-blocks content))
+                       (list (list :type :text :text ""))))
+           (display (result-display-text blocks)))
       (append-entry (agent-journal agent)
                     (append
                      (list :type :message
@@ -311,12 +346,12 @@ an adapter that no longer knows the word."
                                           :tool-call-id id
                                           :tool-name name
                                           :is-error (and is-error t)
-                                          :content (list (list :type :text :text content))))
+                                          :content blocks))
                      (when details (list :details details))))
       (emit-event agent :type :tool-result :name name :id id
                         :is-error (and is-error t)
-                        :content-chars (length content)
-                        :content (truncate-string content 500)))))
+                        :content-chars (result-context-chars blocks)
+                        :content (truncate-string display 500)))))
 
 (defun message-tool-calls (message)
   (remove-if-not (lambda (b) (eq (pget b :type) :tool-call))

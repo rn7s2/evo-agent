@@ -101,8 +101,42 @@ else every registered tool."
         :description (tool-description tool)
         :input-schema (schema->json-schema (tool-schema tool))))
 
+;;; Tool results are content blocks, not just text.
+;;;
+;;; A tool normally returns a string and means one text block by it.  It may
+;;; instead return content blocks — that is how a tool hands back something
+;;; the model has to SEE rather than read, an image being the only such
+;;; thing today (READ on a screenshot).  The two shapes are told apart by
+;;; the car: a block is a plist, so it starts with a keyword.
+
+(defparameter *image-block-tokens* 4800
+  "What one image costs in context, in tokens.  Both vision stacks resize an
+image to roughly 1568px on its long edge and tokenize the result, which lands
+near this; the number is flat because the block carries no dimensions.")
+
+(defparameter *tool-result-block-types* '(:text :image)
+  "Block types a tool result may carry.  Anything else a tool hands back is
+stringified into a text block here — a userspace tool is agent-written, and
+an unknown block reaching a wire adapter would fail the whole request at
+build time and name the adapter rather than the tool that produced it.")
+
+(defun tool-content-blocks (content)
+  "Normalize what a tool returned into a list of content blocks."
+  (labels ((text-block (x) (list :type :text :text (princ-to-string x)))
+           (block-p (x) (and (consp x)
+                             (member (pget x :type) *tool-result-block-types*)))
+           (as-block (x) (if (block-p x) x (text-block x))))
+    (cond ((null content) nil)
+          ((stringp content) (list (list :type :text :text content)))
+          ((not (consp content)) (list (text-block content)))
+          ;; A block is a plist, so it starts with a keyword; a list of
+          ;; blocks starts with a list.  That is the whole disambiguation.
+          ((keywordp (car content)) (list (as-block content)))
+          (t (loop for x in content unless (null x) collect (as-block x))))))
+
 (defun execute-tool (tool args)
-  "Run TOOL with ARGS (plist).  Returns (values content-string details is-error).
+  "Run TOOL with ARGS (plist).  Returns (values content details is-error),
+CONTENT being a string or a list of content blocks.
 Conditions become error results (errors-as-data at the loop boundary)."
   (handler-case
       (multiple-value-bind (content details) (funcall (tool-execute-fn tool) args)

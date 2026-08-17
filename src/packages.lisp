@@ -88,6 +88,7 @@
            #:tool #:tool-name #:tool-description #:tool-schema #:tool-execute-fn
            #:register-tool* #:find-tool #:all-tool-names #:active-tools
            #:schema->json-schema #:execute-tool
+           #:tool-content-blocks #:result-display-text
            ;; loop
            #:run #:run-until-settled #:make-agent #:agent
            #:agent-journal #:agent-events-cb #:agent-abort-flag

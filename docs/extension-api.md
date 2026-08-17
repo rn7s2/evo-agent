@@ -31,6 +31,14 @@ Every extension file starts with:
   `-`, the wire uses `_` (`:by-line` ⇄ `by_line`).
 - `:execute` gets a plist of arguments (same `-` convention) and returns the
   model-visible content string, optionally `(values content details)`.
+- `content` may instead be content blocks — a plist `(:type :text :text "...")`
+  or a list of them — for a tool that hands back something the model must
+  *see*: `(evo.media:attach-image-file path)` yields an `:image` block, which
+  is what `read` returns for a png/jpeg/gif/webp. The block travels inside the
+  tool result itself (Anthropic `tool_result` content, Responses
+  `function_call_output` content items). Text blocks share the 50k truncation
+  budget; images pass through whole and degrade to a text placeholder for a
+  model registered `:vision nil`.
 - Signal a condition for errors — the loop converts it to an error tool
   result; never return garbage silently.
 - A newly registered tool is callable from the next request. Re-registering
