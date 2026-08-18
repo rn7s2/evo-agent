@@ -2247,6 +2247,55 @@ that is how a human's next keystroke differs from a paste's last chunk."
                          (concatenate 'string "abcdefghijklmnopqrs " nl
                                       sv "<a>" rs r10 " tail"))))
       (evo.util:set-setting :math-inline-mode saved)))
+  ;; default policy: the bundled renderer is installed only when a caller opts in.
+  (let ((saved-default (uiop:getenv "EVO_MATH_DEFAULT"))
+        (saved-webview (uiop:getenv "EVO_WEBVIEW"))
+        (saved-setting (evo.util:setting :math :unset))
+        (saved-renderer evo.tui:*math-renderer*)
+        (saved-enabled evo.tui:*math-enabled*)
+        (saved-notes evo.kernel::*prompt-notes*))
+    (unwind-protect
+         (progn
+           (evo.port:setenv "EVO_MATH_DEFAULT" "")
+           (evo.port:setenv "EVO_WEBVIEW" "")
+           (remf evo.util:*settings* :math)
+           (setf evo.tui:*math-renderer* nil
+                 evo.tui:*math-enabled* nil)
+           (load (merge-pathnames "extensions/300-latex-math.lisp" (uiop:getcwd))
+                 :verbose nil :print nil)
+           (let ((math-on-p (uiop:find-symbol* :math-on-p :evo.user))
+                 (sync (uiop:find-symbol* :math-sync-prompt-note :evo.user)))
+             (check "latex-math extension is off by default"
+                    (not (funcall math-on-p)))
+             (check "latex-math does not install renderer by default"
+                    (null evo.tui:*math-enabled*))
+             (evo.port:setenv "EVO_WEBVIEW" "1")
+             (remf evo.util:*settings* :math)
+             (check "latex-math defaults on in VS Code Math Mode"
+                    (funcall math-on-p))
+             (evo.util:set-setting :math nil)
+             (check "explicit :math nil overrides VS Code Math Mode default"
+                    (not (funcall math-on-p)))
+             (evo.port:setenv "EVO_WEBVIEW" "")
+             (evo.port:setenv "EVO_MATH_DEFAULT" "1")
+             (remf evo.util:*settings* :math)
+             (check "EVO_MATH_DEFAULT opts latex-math in"
+                    (funcall math-on-p))
+             (evo.util:set-setting :math t)
+             (funcall sync)
+             (check "latex-math prompt note follows explicit opt-in"
+                    (or (not (evo.user::latex-toolchain-ready-p))
+                        (cdr (assoc "latex-math" evo.kernel::*prompt-notes*
+                                    :test #'equal))))))
+      (setf evo.tui:*math-renderer* saved-renderer
+            evo.tui:*math-enabled* saved-enabled
+            evo.kernel::*prompt-notes* saved-notes)
+      (if (eq saved-setting :unset)
+          (remf evo.util:*settings* :math)
+          (evo.util:set-setting :math saved-setting))
+      (evo.port:setenv "EVO_MATH_DEFAULT" (or saved-default ""))
+      (evo.port:setenv "EVO_WEBVIEW" (or saved-webview ""))))
+
   ;; disabled: byte-for-byte the old behaviour
   (let ((evo.tui:*math-enabled* nil))
     (check "math off leaves $x$ untouched"
