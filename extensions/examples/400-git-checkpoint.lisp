@@ -30,7 +30,8 @@
                        "true")
             (let ((sha (git-checkpoint--sh "git stash create 2>/dev/null")))
               (when (plusp (length sha))
-                (git-checkpoint--record sha))))))
+                (git-checkpoint--record sha)))))
+        :name :git-checkpoint)
 
 (evo:register-command "undo"
   (lambda (ctx)

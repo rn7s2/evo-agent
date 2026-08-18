@@ -45,36 +45,56 @@ Every extension file starts with:
   the same name replaces it (CL redefinition: applies to the NEXT call, not
   frames already running).
 
+### Ownership: the rule the whole threading design rests on
+
+**Every mutable object has exactly one owner thread.** Other threads send it
+messages; they never reach in and change its state or free its resources.
+
+| Object | Owner |
+| --- | --- |
+| TUI state (editor, task, todos, dirty flag) | the TUI loop |
+| Agent execution state (turn index, retries, abort latch) | the run worker |
+| A provider request and its socket | its own request thread |
+| A child process from a tool call | the worker that launched it |
+| An extension's hooks, tasks and patches | the extension generation that made them |
+
+Two consequences you will actually feel:
+
+- To make the TUI repaint from another thread, call `evo.tui:request-repaint`.
+  Do not set `tui-dirty` yourself.
+- To stop a run, call `evo.kernel:request-abort`. It only *posts* a message.
+
 ### Long-running tools and interruption
 
-When the user presses Escape, the TUI thread calls `request-abort`, which sets
-the agent's abort flag and runs every registered cleanup function. **Cleanups
-run on the TUI thread, not on the worker thread executing your tool.** This is
-a cross-thread data race for any resource tied to the spawning thread.
+When the user presses Escape, `request-abort` queues an abort. **The worker
+observes it at its next safe point** — `(evo.kernel:agent-abort-flag agent)` —
+which is also what runs any cleanups you registered. So a cleanup registered
+with `with-abort-cleanup` runs **on the worker thread that owns the resource**,
+not on the TUI thread.
 
-**Process handles are the worst case.** Both SBCL
+Long-running tools should poll:
+
+```lisp
+(loop until (done-p)
+      do (when (evo.kernel:agent-abort-flag evo.kernel:*executing-agent*)
+           (kill-my-child-process)      ; on THIS thread — you own it
+           (error "aborted by user"))
+         (sleep 0.05))
+```
+
+**Why the polling matters for process handles.** Both SBCL
 (`sb-ext:process-kill`/`process-wait`/`process-alive-p`) and ECL
-(`ext:terminate-process`/`ext:external-process-wait`/`ext:external-process-status`)
-are unsafe to call from a different thread than the one that launched the
-process. `process-wait` calls `waitpid(2)`, which is undefined behavior when
-invoked concurrently from two threads on the same PID. The process struct's
-status and exit-code slots are also unsynchronized — a reader on the worker
-thread can see a torn state mid-write. This can crash the runtime.
+(`ext:terminate-process`/`ext:external-process-wait`) are unsafe to call from a
+thread other than the one that launched the process: `process-wait` calls
+`waitpid(2)`, undefined behavior when invoked concurrently on the same PID from
+two threads, and the status/exit-code slots are unsynchronized. Polling keeps
+every one of those calls on the owning thread.
 
-**Closing a stream from another thread is also a data race** on the stream
-reference, though the consequences are typically caught by `ignore-errors`
-rather than crashing.
-
-If your tool spawns a child process or holds any thread-local resource:
-
-- **Do** poll `evo:*agent*`'s abort flag from the worker thread itself and
-  kill/wait the process there.
-- **Do not** register a `with-abort-cleanup` that calls `process-kill`,
-  `process-wait`, or `close` on a resource you did not create on this thread.
-
-The bundled `bash` tool (`src/kernel/builtin-tools.lisp`) follows this rule:
-it polls the abort flag in its own loop and kills the child process on the
-worker thread, never via a cross-thread cleanup.
+The bundled `bash` tool (`src/kernel/builtin-tools.lisp`) is the reference
+implementation, and the provider transport (`src/provider/core.lisp`) applies
+the same rule to sockets: cancellation interrupts the request's *own* thread so
+that its `unwind-protect` closes the stream, and the caller always joins it — a
+cancelled request is a stopped request, never one still running unobserved.
 
 ## Commands
 
@@ -88,8 +108,14 @@ worker thread, never via a cross-thread cleanup.
 ## Event hooks
 
 ```lisp
-(evo:on :tool-call (lambda (call) ...))   ; call: (:name "bash" :arguments (...))
+(evo:on :tool-call (lambda (call) ...)    ; call: (:name "bash" :arguments (...))
+        :name :my-gate)                   ; named = replaces on reload
 ```
+
+**Pass `:name`.** Your file is loaded again on every `/reload` and on `:load`
+replay. A named hook replaces its previous registration; an anonymous one is
+appended, so after three reloads it fires three times. Named registration is
+also how the bundled extensions stay idempotent.
 
 - `:tool-call` — THE interception point. Return `nil` to allow,
   `(:block t :reason "...")` to block, `(:arguments <new>)` to rewrite.
@@ -104,6 +130,34 @@ worker thread, never via a cross-thread cleanup.
   from `evo:custom-state` here; memory does NOT survive restart, the journal
   does.
 - `:todo-changed` — the todo list was replaced.
+
+## Lifecycle: background work and undoing yourself
+
+Anything your extension starts or patches belongs to it, and must go away when
+its generation is replaced. Two calls cover that:
+
+```lisp
+;; A tracked background thread: stopped and JOINED before the next generation
+;; loads, so a reload can never leave two of your pollers running.  Your :run
+;; must return promptly once :stop has been called — a thread still alive
+;; after ~5s is abandoned with a warning naming it, so a forgotten stop flag
+;; costs you a leaked thread and a loud message instead of freezing /reload.
+;; If :run blocks somewhere no flag can reach (a socket accept, a long read),
+;; have :stop interrupt the task's own thread with a private condition, the
+;; way the provider transport cancels a request.
+(evo:spawn-task :name :my-poller
+                :run  (lambda () (loop until *stop* do (work) (sleep 0.25)))
+                :stop (lambda () (setf *stop* t)))
+
+;; Anything the kernel cannot see — a function patch, a cache, a socket.
+(evo:on-unload (lambda () (restore-what-i-patched)))
+```
+
+Registrations the kernel *can* see (tools, commands, models, providers, APIs,
+prompt notes, named hooks, status segments) are withdrawn for you.
+
+`extensions/900-ide-context.lisp` is the worked example: a tracked poller, a
+named status segment, and an `on-unload` that puts back the function it wrapped.
 
 ## State
 
@@ -206,8 +260,9 @@ place. Claim a piece of it:
 The function is called with the TUI on **every repaint** and returns a display
 string — already styled, the renderer will not restyle it — or `nil` to show
 nothing this frame. So it must be cheap and must never block: cache in a poller
-thread if the value is expensive, and mark the TUI dirty when it changes. A
-segment that signals is skipped rather than taking the whole line down.
+task if the value is expensive, and call `evo.tui:request-repaint` when it
+changes (never set `tui-dirty` from your thread — the TUI owns it). A segment
+that signals is skipped rather than taking the whole line down.
 
 `:order` counts **inward from that side's edge** — on the left, ascending order
 runs left-to-right; on the right, ascending order runs right-to-left. So the

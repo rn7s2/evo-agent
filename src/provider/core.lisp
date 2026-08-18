@@ -233,65 +233,161 @@ else :done."
 ;;; parse-stream.  Lives here (not api.lisp) because it owns the HTTP/proxy
 ;;; helpers above.
 
+(define-condition provider-request-cancelled (serious-condition) ())
+
+(defstruct (provider-request-task (:conc-name request-task-))
+  "One HTTP request owned by its request thread.  The caller may request
+cancellation, but only the owner thread opens, parses and closes the stream.
+Every slot here is read or written under LOCK.
+
+THREAD is published by the owner itself as its first act, not by the thread's
+creator: MAKE-THREAD returns to the caller and the new thread starts in an
+unspecified order, so a caller-side assignment leaves a window in which the
+request is running but has no handle to interrupt."
+  (lock (bt:make-lock "evo-provider-request"))
+  thread
+  (state :starting)                    ; :starting, :streaming, :finished
+  (cancel-requested-p nil)
+  (interrupted-p nil)                  ; the one interrupt has been delivered
+  result
+  error)
+
+(defun request-task-finished-p (task)
+  (bt:with-lock-held ((request-task-lock task))
+    (eq (request-task-state task) :finished)))
+
+(defun request-task-outcome (task)
+  (bt:with-lock-held ((request-task-lock task))
+    (values (request-task-result task) (request-task-error task))))
+
+(defun cancel-request-task (task)
+  "Ask TASK to stop by interrupting its owner thread with a private condition.
+The condition unwinds Dexador on that same thread, so connection and stream
+cleanup remain owner-local; no other thread ever closes the stream.
+
+At most ONE interrupt is ever delivered (INTERRUPTED-P), so the owner's
+publish cleanup needs to survive at most one late-landing condition.  But the
+delivery *retries* across calls until the owner has published its handle: the
+first cancel can arrive in the instant before the thread's first form runs,
+and giving up then would leave the request uncancellable."
+  (let (thread)
+    (bt:with-lock-held ((request-task-lock task))
+      (setf (request-task-cancel-requested-p task) t)
+      (unless (or (request-task-interrupted-p task)
+                  (eq (request-task-state task) :finished))
+        (setf thread (request-task-thread task))
+        (when thread (setf (request-task-interrupted-p task) t))))
+    (when thread
+      (bt:interrupt-thread
+       thread (lambda () (error 'provider-request-cancelled))))
+    t))
+
+(defun request-task-cancelled-p (task)
+  (bt:with-lock-held ((request-task-lock task))
+    (request-task-cancel-requested-p task)))
+
 (defmethod perform-request ((api provider-api) url headers body
-                            &key on-event abort-flag abort-cleanup &allow-other-keys)
-  (let ((stream nil)
-        (done nil)
-        (cancelled nil)
-        (result nil)
-        (condition nil))
-    (labels ((aborted-result ()
-               (list :aborted-p t :content nil :stop-reason :aborted
-                     :usage (list :input 0 :output 0
-                                  :cache-read 0 :cache-write 0)))
-             (aborted-p ()
-               (or cancelled (and abort-flag (funcall abort-flag))))
-             (abort-stream ()
-               (when stream
-                 (ignore-errors (close stream :abort t))))
-             (emit (event)
-               (unless (aborted-p)
-                 (when on-event (funcall on-event event))))
-             (request-body ()
-               (unwind-protect
-                    (handler-case
-                        (setf result
-                              (progn
-                                (when (aborted-p)
-                                  (return-from request-body (setf result (aborted-result))))
-                                (with-proxy (proxy url)
-                                  (setf stream (apply #'dex:post url
-                                                      :headers headers :content body
-                                                      :want-stream t :force-binary t
-                                                      :keep-alive nil
-                                                      :connect-timeout 15
-                                                      :read-timeout 600
-                                                      (when proxy (list :proxy proxy)))))
-                                (if (aborted-p)
-                                    (aborted-result)
-                                    (parse-stream api
-                                                  (flexi-streams:make-flexi-stream
-                                                   stream :external-format :utf-8)
-                                                  :on-event #'emit
-                                                  :abort-flag #'aborted-p))))
-                      (serious-condition (e)
-                        (setf condition e)))
-                 (ignore-errors (close stream))
-                 (setf done t))))
-      (let* ((unregister (and abort-cleanup (funcall abort-cleanup #'abort-stream)))
-             (thread (bt:make-thread #'request-body :name "evo-provider-request")))
-        (unwind-protect
-             (loop
-               (cond (done
-                      (when condition (error condition))
-                      (return result))
-                     ((and abort-flag (funcall abort-flag))
-                      (abort-stream)
-                      (setf cancelled t)
-                      (return (aborted-result))))
-               (sleep 0.02))
-          (when unregister (funcall unregister))
-          (unless cancelled (ignore-errors (bt:join-thread thread))))))))
+                            &key on-event abort-flag &allow-other-keys)
+  (labels ((aborted-result ()
+             (list :aborted-p t :content nil :stop-reason :aborted
+                   :usage (list :input 0 :output 0
+                                :cache-read 0 :cache-write 0))))
+    (let ((task (make-provider-request-task)))
+      (labels ((emit (event)
+                 (unless (request-task-cancelled-p task)
+                   (when on-event (funcall on-event event))))
+               (request-body ()
+                 ;; This thread is the sole owner of the Dexador stream.  Even
+                 ;; cancellation runs here, by interrupting this thread with a
+                 ;; private condition; the unwind closes STREAM before the task
+                 ;; becomes :finished and before the caller can return.
+                 (let ((stream nil)
+                       (result nil)
+                       (failure nil))
+                   (labels ((publish ()
+                              ;; The one thing that must happen on EVERY exit:
+                              ;; close the stream and mark the task finished —
+                              ;; the caller's wait loop terminates on nothing
+                              ;; else.  NB. IGNORE-ERRORS does not catch the
+                              ;; cancel condition (a SERIOUS-CONDITION, not an
+                              ;; ERROR), hence the explicit handler.
+                              (ignore-errors (when stream (close stream)))
+                              (bt:with-lock-held ((request-task-lock task))
+                                (setf (request-task-result task)
+                                      (or result
+                                          (and (request-task-cancel-requested-p task)
+                                               (aborted-result)))
+                                      (request-task-error task) failure
+                                      (request-task-state task) :finished))))
+                     (unwind-protect
+                          (handler-case
+                              (setf result
+                                    (progn
+                                      ;; Publish the handle inside the protected
+                                      ;; form: from here on a cancel can find a
+                                      ;; thread to interrupt, and the interrupt
+                                      ;; can land no earlier than the cleanup
+                                      ;; below is armed.
+                                      (bt:with-lock-held ((request-task-lock task))
+                                        (setf (request-task-thread task)
+                                              (bt:current-thread)))
+                                      (when (request-task-cancelled-p task)
+                                        ;; The unwind cleanup publishes.
+                                        (return-from request-body))
+                                      (with-proxy (proxy url)
+                                        (setf stream
+                                              (apply #'dex:post url
+                                                     :headers headers :content body
+                                                     :want-stream t :force-binary t
+                                                     :keep-alive nil
+                                                     :connect-timeout 15
+                                                     :read-timeout 600
+                                                     (when proxy (list :proxy proxy)))))
+                                      (bt:with-lock-held ((request-task-lock task))
+                                        (setf (request-task-state task) :streaming))
+                                      (if (request-task-cancelled-p task)
+                                          (aborted-result)
+                                          (parse-stream
+                                           api
+                                           (flexi-streams:make-flexi-stream
+                                            stream :external-format :utf-8)
+                                           :on-event #'emit
+                                           :abort-flag
+                                           (lambda ()
+                                             (request-task-cancelled-p task))))))
+                            (provider-request-cancelled ()
+                              (setf result (aborted-result)))
+                            (serious-condition (e)
+                              (if (request-task-cancelled-p task)
+                                  (setf result (aborted-result))
+                                  (setf failure e))))
+                       ;; The single cancel interrupt can land HERE, after the
+                       ;; body's handlers have unwound; uncaught it would kill
+                       ;; the thread without publishing, and the caller would
+                       ;; wait forever.  One handler suffices because at most
+                       ;; one interrupt is ever delivered.
+                       (handler-case (publish)
+                         (provider-request-cancelled ()
+                           (setf result (or result (aborted-result)))
+                           (publish))))))))
+        ;; JOIN uses this handle, never the task slot: the slot exists so a
+        ;; canceller can interrupt the owner, and may still be unset in the
+        ;; instant before the thread runs its first form.
+        (let ((thread (bt:make-thread #'request-body :name "evo-provider-request")))
+          (unwind-protect
+               (progn
+                 (loop until (request-task-finished-p task)
+                       do (when (and abort-flag (funcall abort-flag))
+                            (cancel-request-task task))
+                          (sleep 0.02))
+                 (multiple-value-bind (result failure) (request-task-outcome task)
+                   (when failure (error failure))
+                   result))
+            ;; A request may never outlive the call that created it.  Joining is
+            ;; unconditional, including cancellation and non-local exits.
+            (unless (request-task-finished-p task)
+              (cancel-request-task task))
+            (ignore-errors (bt:join-thread thread))))))))
 
 (defun abortible-sleep (seconds abort-flag)
   "Sleep up to SECONDS, waking quickly when ABORT-FLAG becomes true."

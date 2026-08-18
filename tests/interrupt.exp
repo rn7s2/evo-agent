@@ -1,0 +1,126 @@
+#!/usr/bin/expect -f
+# interrupt.exp — cancelling a LIVE streaming request under a pty.
+#
+# This is the ownership path that is hardest to prove with unit tests: esc goes
+# to the TUI thread, which only posts an abort; the worker latches it; the
+# provider request is stopped by interrupting the thread that owns its socket;
+# and the task is joined before the TUI forgets it.
+#
+# The load-bearing assertion is the LAST one: the session still works after an
+# interrupt.  A cancel that left the request thread running, the task slot
+# occupied, or the abort latched would show up there as a session that never
+# runs anything again — the frozen-TUI bug this design exists to prevent.
+set timeout 180
+
+set repo [file dirname [file dirname [file normalize $argv0]]]
+set scratch [exec mktemp -d /tmp/evo-interrupt.XXXXXX]
+set env(EVO_HOME) "$scratch/home"
+file mkdir $env(EVO_HOME)
+
+proc envdef {name default} {
+    global env
+    return [expr {[info exists env($name)] ? $env($name) : $default}]
+}
+set base_url [envdef EVO_TEST_BASE_URL ""]
+set api_key  [envdef EVO_TEST_API_KEY  ""]
+set model    [envdef EVO_TEST_MODEL    ""]
+if {$base_url eq "" || $api_key eq "" || $model eq ""} {
+    puts stderr "interrupt.exp: set EVO_TEST_BASE_URL, EVO_TEST_API_KEY and EVO_TEST_MODEL (dev values in project memory)"
+    exit 1
+}
+foreach v {EVO_SUPERVISED_CHILD EVO_HEARTBEAT_FILE} {
+    if {[info exists env($v)]} { unset env($v) }
+}
+
+set f [open "$env(EVO_HOME)/init.lisp" w]
+puts $f "(evo:register-model \"$model\" :provider :anthropic :api :anthropic-messages :context-window 1000000 :max-output 64000 :thinking t)"
+puts $f "(evo:set-setting :model \"$model\")"
+puts $f "(evo:register-provider :anthropic :base-url \"$base_url\" :api-key \"$api_key\")"
+close $f
+
+set workdir "$scratch/work"
+file mkdir $workdir
+cd $workdir
+
+set pass 0
+set failures {}
+proc check {name} {
+    global pass
+    incr pass
+    puts "\nPASS: $name"
+}
+proc fail {name} {
+    global failures
+    lappend failures $name
+    puts "\nFAIL: $name"
+}
+# Draining wait: expect only reads the pty inside `expect`, so a Tcl sleep
+# would let the buffer fill and block evo's writes.
+proc settle {s} {
+    set timeout $s
+    expect { timeout {} }
+}
+
+spawn "$repo/build/evo"
+
+expect {
+    -re {ctx \d+k/\d+k} { check "startup status line" }
+    timeout { fail "startup status line"; exit 1 }
+}
+
+# 1. Start a long answer, then interrupt it mid-stream.
+send "Count slowly from 1 to 400, one number per line, with a short comment after each number.\r"
+# Wait until the run is genuinely streaming (the activity line is live).
+expect {
+    -re {working|thinking} { check "a live run is streaming" }
+    timeout { fail "a live run is streaming" }
+}
+send "\x1b"
+expect {
+    -re {interrupting} { check "esc interrupts the streaming run" }
+    timeout { fail "esc interrupts the streaming run" }
+}
+
+# 2. The run must actually end: the activity line falls back to idle.  If the
+#    request thread were still streaming, deltas would keep arriving and the
+#    status line would never settle.
+set settled 0
+for {set i 0} {$i < 30} {incr i} {
+    settle 1
+    send "\x0c"
+    expect {
+        -re {idle} { set settled 1 }
+        timeout {}
+    }
+    if {$settled} break
+}
+if {$settled} {
+    check "the interrupted run settles back to idle"
+} else {
+    fail "the interrupted run settles back to idle"
+}
+
+# 3. THE POINT: the session is still usable.  This only passes if the task was
+#    joined and cleared, and the abort latch was reset for the new run.
+send "Reply with exactly the word: after-interrupt-901\r"
+expect {
+    -re {after-interrupt-901} {
+        # first hit is the editor's own echo; the model's reply is the second
+        expect {
+            -re {after-interrupt-901} { check "a new run works after an interrupt" }
+            timeout { fail "a new run works after an interrupt" }
+        }
+    }
+    timeout { fail "a new run works after an interrupt" }
+}
+
+# 4. And it still quits cleanly: shutdown joins the task rather than abandoning it.
+send "/quit\r"
+expect {
+    eof { check "clean quit after interrupt" }
+    timeout { fail "clean quit after interrupt"; catch {close} }
+}
+
+puts "\n$pass checks passed, [llength $failures] failed ($scratch)"
+if {[llength $failures] > 0} { exit 1 }
+exit 0

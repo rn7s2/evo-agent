@@ -10,22 +10,67 @@
 (in-package :evo.kernel)
 
 ;;; Event hooks (the extension API builds on these).
+;;;
+;;; A hook is OWNED: it carries the extension generation that registered it, so
+;;; reloading a generation can withdraw exactly its own hooks.  A NAMEd hook is
+;;; additionally replace-on-re-register within one owner, which is what makes
+;;; loading the same file twice idempotent instead of cumulative.
 
-(defvar *event-hooks* (make-hash-table))  ; event-keyword -> list of fns
+(defvar *event-hooks* (make-hash-table)) ; event-keyword -> list of HOOK-ENTRY
 
-(defun add-hook (event fn)
+(defvar *extension-owner* nil
+  "Owner token (see extension.lisp) for registrations made while loading an
+extension file, or NIL for kernel-level registrations.")
+
+(defstruct (hook-entry (:constructor %make-hook-entry))
+  name          ; symbol/keyword, or NIL for an anonymous hook
+  owner         ; *EXTENSION-OWNER* captured at registration
+  fn)
+
+(defun add-hook (event fn &key name (owner *extension-owner*))
   "Append FN to EVENT's hook list.  Hooks run in registration order, and
 registration order is extension load order, so the `NNN-` rank in a file
 name decides who sees a payload first here too — the alternative (pushing)
-inverts the order the user wrote and makes the ranks lie."
-  (setf (gethash event *event-hooks*)
-        (append (gethash event *event-hooks*) (list fn)))
+inverts the order the user wrote and makes the ranks lie.
+
+NAME makes the registration idempotent for its owner: re-registering the same
+NAME replaces the previous entry in place, keeping its position.  An anonymous
+hook always appends, so a file that registers one and is loaded twice installs
+it twice — pass NAME from anything an extension reload can re-run."
+  (let* ((entries (gethash event *event-hooks*))
+         (existing (and name
+                        (find-if (lambda (e)
+                                   (and (equal (hook-entry-name e) name)
+                                        (eql (hook-entry-owner e) owner)))
+                                 entries))))
+    (cond (existing (setf (hook-entry-fn existing) fn))
+          (t (setf (gethash event *event-hooks*)
+                   (append entries (list (%make-hook-entry :name name :owner owner
+                                                           :fn fn)))))))
   fn)
+
+(defun remove-hooks-if (predicate)
+  "Withdraw every hook entry satisfying PREDICATE, returning how many went.
+Disposing an extension generation goes through here, so a reloaded extension
+does not leave its previous self subscribed."
+  (let ((removed 0))
+    (maphash (lambda (event entries)
+               (let ((kept (remove-if predicate entries)))
+                 (incf removed (- (length entries) (length kept)))
+                 (setf (gethash event *event-hooks*) kept)))
+             *event-hooks*)
+    removed))
+
+(defun event-hook-functions (event)
+  "The functions registered for EVENT, in run order.  Callers that drive hooks
+themselves (the context transform threads a value through them) go through this
+rather than touching the entry structs."
+  (mapcar #'hook-entry-fn (gethash event *event-hooks*)))
 
 (defun run-hooks (event payload)
   "Run hooks for EVENT.  Returns the list of non-nil hook results."
-  (loop for fn in (gethash event *event-hooks*)
-        for result = (handler-case (funcall fn payload)
+  (loop for entry in (gethash event *event-hooks*)
+        for result = (handler-case (funcall (hook-entry-fn entry) payload)
                        (error (e)
                          (warn "Hook for ~s failed: ~a" event e)
                          nil))
@@ -40,9 +85,10 @@ plugs in here.")
 
 (defstruct agent
   journal
-  (steering nil)          ; pending steering texts (FIFO)
-  (followups nil)         ; pending follow-up texts (FIFO)
-  (abort-flag nil)
+  (steering nil)          ; pending steering texts (FIFO), guarded by LOCK
+  (followups nil)         ; pending follow-up texts (FIFO), guarded by LOCK
+  (control nil)           ; TUI -> worker control messages, guarded by LOCK
+  (abort-latched nil)     ; worker-owned after it consumes :ABORT from CONTROL
   events-cb               ; fn (event-plist), or nil
   (run-id (gen-id))
   (turn-index 0)
@@ -50,10 +96,11 @@ plugs in here.")
   thinking-override
   (retry-count 0)
   (compact-retried nil)   ; overflow-recovery guard: compact + retry ONCE
-  (abort-cleanups nil)    ; fns that unblock the currently-running operation
-  ;; The TUI steers from its input thread while a run thread drains;
-  ;; queue access is the one cross-thread seam.
-  (lock (bt:make-lock "agent-queues")))
+  (abort-cleanups nil)    ; worker-owned fns, run when it consumes :ABORT
+  ;; The TUI sends immutable queue/control messages while the run worker drains
+  ;; them.  LOCK protects only those handoff queues; execution state above is
+  ;; otherwise owned by the one run worker and is never mutated by the TUI.
+  (lock (bt:make-lock "agent-mailbox")))
 
 ;; Heartbeat: the kernel touches a file on every event so the
 ;; supervisor can distinguish long tool calls from a hung process.
@@ -101,6 +148,28 @@ so that a message and its screenshots can never be split across turns."
   (bt:with-lock-held ((agent-lock agent))
     (pop (agent-followups agent))))
 
+(defun agent-pending-work-p (agent)
+  "True when session-owned input or control remains in AGENT's mailbox."
+  (bt:with-lock-held ((agent-lock agent))
+    (and (or (agent-steering agent)
+             (agent-followups agent)
+             (agent-control agent))
+         t)))
+
+(defun reset-agent-session-state (agent)
+  "Reset ephemeral execution state after a journal switch.  The caller must
+first prove there is no task and no pending mailbox work; this function never
+drops input as an implementation convenience."
+  (bt:with-lock-held ((agent-lock agent))
+    (setf (agent-control agent) nil
+          (agent-abort-latched agent) nil
+          (agent-abort-cleanups agent) nil))
+  (setf (agent-run-id agent) (gen-id)
+        (agent-turn-index agent) 0
+        (agent-retry-count agent) 0
+        (agent-compact-retried agent) nil)
+  agent)
+
 (defun steering-content (text images)
   "Content blocks for one queued user turn.  Images come first: both vision
 stacks read an image better when the text that asks about it follows it."
@@ -134,41 +203,50 @@ stacks read an image better when the text that asks about it follows it."
   "Agent whose tool call is currently executing on this thread, if any.")
 
 (defun request-abort (agent)
-  "Set AGENT's abort flag and run all registered unblock cleanups now.
+  "Queue an abort control message for AGENT's worker.  The caller never mutates
+worker-owned execution state or runs resource cleanup.  The worker consumes the
+message through AGENT-ABORT-FLAG, latches it, and runs its cleanup callbacks on
+the same thread that owns the in-flight operation."
+  (bt:with-lock-held ((agent-lock agent))
+    (unless (member :abort (agent-control agent))
+      (setf (agent-control agent)
+            (append (agent-control agent) (list :abort)))))
+  t)
 
-WARNING: cleanups run on THIS thread — the caller's, typically the TUI thread,
-NOT on the worker thread that registered them.  Any cleanup that touches a
-resource owned by the worker thread is a cross-thread data race.
-
-Process handles (SBCL's sb-ext:process-* or ECL's ext:external-process-*) are
-the most dangerous case: sb-ext:process-wait and ext:external-process-wait
-call waitpid(2) under the hood, and concurrent waitpid on the same PID from
-two threads is undefined behavior at the C level.  The process struct's
-status/exit-code slots are also unsynchronized — a reader on the worker
-thread can see a torn state mid-write.  This can crash the runtime.
-
-Tools that own thread-local resources (child processes, FFI handles) should
-poll agent-abort-flag themselves and tear down those resources on their own
-thread — do NOT register such teardowns here.
-
-Closing a stream from another thread is also a data race on the stream
-reference, though in practice the consequences are caught by ignore-errors.
-Setting a flag is the only truly safe cleanup."
-  (let (cleanups)
+(defun agent-abort-flag (agent)
+  "Worker-side cancellation safe point.  Consume queued control messages,
+latch abort for the rest of this run, and invoke registered cleanup callbacks
+on the worker thread.  Non-worker callers may inspect the result but must use
+REQUEST-ABORT to request a state change."
+  (let (abort cleanups)
     (bt:with-lock-held ((agent-lock agent))
-      (setf (agent-abort-flag agent) t)
-      (setf cleanups (copy-list (agent-abort-cleanups agent))))
+      (when (member :abort (agent-control agent))
+        (setf (agent-control agent)
+              (remove :abort (agent-control agent)))
+        (unless (agent-abort-latched agent)
+          (setf (agent-abort-latched agent) t
+                cleanups (copy-list (agent-abort-cleanups agent)))))
+      (setf abort (agent-abort-latched agent)))
     (dolist (cleanup cleanups)
       (ignore-errors (funcall cleanup)))
-    t))
+    abort))
+
+(defun reset-agent-run-control (agent)
+  "Empty AGENT's control mailbox and abort latch.  Called by the TUI thread
+only while no worker exists — before it publishes a new task, and after it has
+joined a finished one (clearing an :abort the finished run never consumed)."
+  (bt:with-lock-held ((agent-lock agent))
+    (setf (agent-control agent) nil
+          (agent-abort-latched agent) nil
+          (agent-abort-cleanups agent) nil)))
 
 (defun add-abort-cleanup (agent cleanup)
-  "Register CLEANUP until the returned unregister function is called.
-If AGENT is already aborted, CLEANUP is invoked immediately too."
+  "Register CLEANUP for the active operation.  CLEANUP is always invoked by
+the worker through AGENT-ABORT-FLAG, never by the TUI/requesting thread."
   (let (run-now)
     (bt:with-lock-held ((agent-lock agent))
       (push cleanup (agent-abort-cleanups agent))
-      (setf run-now (agent-abort-flag agent)))
+      (setf run-now (agent-abort-latched agent)))
     (when run-now
       (ignore-errors (funcall cleanup)))
     (lambda ()
@@ -178,25 +256,9 @@ If AGENT is already aborted, CLEANUP is invoked immediately too."
                       :test #'eq :count 1))))))
 
 (defmacro with-abort-cleanup ((agent cleanup) &body body)
-  "Register CLEANUP for cross-thread abort notification.
-
-PITFALL: CLEANUP runs on the aborting thread (the TUI thread), NOT on the
-worker thread that entered this macro.  This is a cross-thread data race for
-any resource tied to the spawning thread.
-
-Process handles (SBCL's sb-ext:process-* or ECL's ext:external-process-*) are
-the worst case: process-wait calls waitpid(2), which is undefined behavior
-when called concurrently from two threads on the same PID; the process
-struct's status/exit-code slots are also unsynchronized and a reader on the
-worker thread can see a torn state mid-write.  This can crash the runtime.
-
-Closing a stream from another thread is also a data race on the stream
-reference, though the consequences are typically caught by ignore-errors
-rather than crashing.
-
-If CLEANUP needs to tear down a thread-local resource (a child process, an
-FFI handle, a stream), do NOT use this macro.  Instead, poll
-agent-abort-flag from the worker thread and perform the teardown there."
+  "Run CLEANUP on the worker thread if AGENT receives an abort while BODY is
+active, and unregister it on every exit.  Cleanup therefore preserves resource
+ownership; it must not be treated as a callback on the requesting TUI thread."
   `(let ((unregister (add-abort-cleanup ,agent ,cleanup)))
      (unwind-protect
           (progn ,@body)
@@ -246,7 +308,7 @@ an adapter that no longer knows the word."
     ;; (transform-context) -> provider messages.  Extensions hook the
     ;; middle stage; output is never written back.
     (let ((messages (evo.journal:state-messages state)))
-      (dolist (hook (gethash :transform-context *event-hooks*))
+      (dolist (hook (event-hook-functions :transform-context))
         (let ((result (handler-case (funcall hook messages)
                         (error (e)
                           (warn "transform-context hook failed: ~a" e)

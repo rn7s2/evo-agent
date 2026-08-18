@@ -21,7 +21,7 @@ them.
 - **Self-extending.** A missing tool is not a blocker. The agent writes one,
   loads it into its own runtime, and keeps going. Common Lisp makes the
   load-and-redefine half nearly free; the engineering is in the safety rails
-  and the seed corpus (§12).
+  and the seed corpus (§13).
 - **Permissive.** There are no permission prompts. The trust boundary is the
   OS or container evo runs in, plus a kernel/userspace split that lets the
   agent break itself deliberately but not accidentally.
@@ -30,7 +30,7 @@ them.
   rather than a lost run.
 - **Minimal.** Core functionality of a real agent and nothing ceremonial. The
   omit-list — no permission popups, no MCP, no sub-agents — is deliberate and
-  each omission has a stated re-entry condition (§16).
+  each omission has a stated re-entry condition (§17).
 
 ## 2. Invariants
 
@@ -280,15 +280,68 @@ errors signal, and preflight catches them.
 - **Caching**: Anthropic uses four breakpoints (system prompt, last tool
   definition, last user message); OpenAI uses `prompt_cache_key` = session id.
   Protecting the cache prefix is a constraint the whole prompt design honors
-  (§10).
+  (§11).
 - **Model registry**: user-registered plists (id, context window, max output,
   thinking flag), registration-ordered for the `/model` picker. Token
   accounting only — no cost table.
 - CL stack: `dexador` with `:want-stream t` plus `cl+ssl` and explicit read
-  timeouts; `com.inuoe.jzon` on the wire. Abort is a cooperative flag plus
-  closing the socket from another thread, never `interrupt-thread`.
+  timeouts; `com.inuoe.jzon` on the wire. **A request is owned by its own
+  thread**: cancellation interrupts *that* thread with a private condition, so
+  the socket is closed by the `unwind-protect` that opened it, and the caller
+  joins before returning. Cancelling therefore *stops* the request — the earlier
+  design closed the socket from the caller's thread and skipped the join, which
+  raced the reader and let a cancelled request keep streaming.
 
-## 6. Agent loop
+## 6. Concurrency and ownership
+
+Few threads, and every mutable object has exactly one owner. Threads exchange
+*messages*; they never reach into each other's state or free each other's
+resources. Locks appear only at those handoff points, and there are no atomics
+or lock-free tricks anywhere — the model is meant to be checkable by reading.
+
+**Owners.** The TUI loop owns TUI state. One run worker owns agent execution
+state. A provider request owns its socket. A tool call owns any child process it
+launched. An extension generation owns its hooks, tasks and patches.
+
+**The seams**, each a queue guarded by one lock:
+
+- *TUI → worker*: steering, follow-ups, and the abort control message.
+  `request-abort` only posts; the worker latches it at `agent-abort-flag` and
+  runs cleanups there, on the thread that owns what is being torn down.
+- *worker/poller → TUI*: the event queue. `request-repaint` is the only way
+  another thread asks for a frame; `tui-dirty` is set by the TUI thread alone.
+
+**One task, not a set of flags.** A run or a manual compaction is a single
+`tui-task` (id, kind, thread). "Running" and "compacting" are questions asked of
+it, not booleans kept in sync, and a completion event names the task it
+finishes, so a late `:worker-done` cannot clear a newer task. A task is only
+forgotten after its thread is joined — including at shutdown.
+
+**Quiescence before structural change.** Switching journals (`/resume`,
+`/new`, `/fork`, `/tree`) requires a session with no task *and* an empty
+mailbox. Queued-but-unrun input counts: the model gate deliberately leaves a
+submit queued, and carrying it into a different journal would answer it in the
+wrong session. Rebuilding userspace (`/reload`) requires only that no task is
+running — a queued submit stays welcome there, because a submit gated on broken
+model config is *why* the user reloads, and the reload releases it.
+
+**Runtime generations.** `boot-userspace` builds a generation and installs its
+registries all-or-nothing: a build that fails anywhere restores the captured
+catalog (models, providers, APIs, tools, commands, settings, prompt notes),
+because a half-built runtime is worse than a stale one. Disposing the previous
+generation's hooks and tracked tasks — not re-running the files — is what makes
+a reload idempotent.
+
+**Generations must not overlap**, and that fixes the order: the outgoing
+generation is disposed *before* the incoming one loads. A reloaded file reuses
+the same package and the same globals, so an old `stop` closure writes the very
+variable the new task reads; disposing afterwards let the old poller silently
+kill the new one (found by driving four real reloads, and now asserted in
+`test-reload-generation-ordering`). The price is that a failed build leaves the
+old extensions withdrawn — consistent and repairable, unlike two generations of
+one extension running at once.
+
+## 7. Agent loop
 
 A **run** is many **turns**; a turn is one assistant message and its tool
 batch. The loop polls steering, calls the provider, executes tools, fires
@@ -311,7 +364,7 @@ messages remain — then polls follow-ups.
 - **Run-until-settled is kernel code**, not application code: an outer driver
   runs, then asks whether the error is retryable, whether compaction is
   needed, whether messages are queued, whether a goal is active — and
-  continues. The goal driver (§8) plugs in here.
+  continues. The goal driver (§9) plugs in here.
 - Tool interface: name, description, sexpr schema (emitted as JSON Schema),
   `execute` function, and a result split into `:content` (model-visible) and
   `:details` (host-visible). `:content` is a string in the common case, or
@@ -320,7 +373,7 @@ messages remain — then polls follow-ups.
   text budget (50k chars) applies to the text blocks only. Execution is
   sequential (D9).
 
-## 7. Context management
+## 8. Context management
 
 - **Projection pipeline**: journal entries → agent messages →
   `transform-context` → `convert-to-llm` → provider messages. It runs once per
@@ -347,9 +400,9 @@ messages remain — then polls follow-ups.
 - Summaries reach the model as ordinary user messages in `<summary>` tags. No
   provider features are involved.
 
-## 8. Goal system (`/goal`)
+## 9. Goal system (`/goal`)
 
-### 8.1 Model
+### 9.1 Model
 
 A goal is journal state; the current goal is a fold over `:goal` entries.
 
@@ -368,7 +421,7 @@ does not drive the goal directly; they express intent and the agent folds it
 in (this is by design — the same tool surface serves the human's requests and
 the agent's own judgement). Budget transitions belong to the system.
 
-### 8.2 Driver
+### 9.2 Driver
 
 - `/goal <objective>` creates or refines the goal. Refinement appends a new
   `:goal` entry and, if a run is active, injects an "objective updated"
@@ -396,9 +449,9 @@ the agent's own judgement). Budget transitions belong to the system.
   doubles as the runaway-cost brake; a session-level budget exists too.
 - A turn error moves the goal to `:blocked`, which is also the supervisor
   hook: on restart, a goal blocked by `turn-error` rather than by model
-  decision is eligible for automatic resumption (§14).
+  decision is eligible for automatic resumption (§15).
 
-### 8.3 Model-facing tools
+### 9.3 Model-facing tools
 
 `get_goal`; `create_goal`, which is for explicit user requests only and
 refuses while an unfinished goal exists; and `update_goal`, which changes
@@ -406,7 +459,7 @@ status (`complete`/`blocked`/`paused`/`active`) **and** refines the live goal
 (`objective` text, `done_when` verifier) — at least one field required, the
 audit language carried in the tool description itself.
 
-### 8.4 Verified completion
+### 9.4 Verified completion
 
 `:done-when` is designed for the **agent** to fill, not the user (D15). Users
 state objectives in prose; when an objective is mechanically checkable the
@@ -428,7 +481,7 @@ written before the work, when there is no victory to declare yet. The feature
 is optional — `/goal` works without it — and closes the premature-victory hole
 in about twenty lines of kernel code.
 
-## 9. Lore system (`/lore`)
+## 10. Lore system (`/lore`)
 
 Human knowledge, guidance, and constraints, durable across a whole session and
 immune to summarization.
@@ -450,7 +503,7 @@ immune to summarization.
   nearest last. Lore complements repository conventions rather than replacing
   them.
 
-## 10. The system prompt
+## 11. The system prompt
 
 The prompt is assembled fresh on every save point, from source, in a fixed
 order: base → tool one-liners → guidelines → own-docs paths → lore → project
@@ -492,7 +545,7 @@ and the prompt says so, telling the model the snapshot is stale by
 construction. `## Language` and `## gitStatus` are emitted only when they have
 something to say.
 
-## 11. Skills, prompt templates, slash commands, modes
+## 12. Skills, prompt templates, slash commands, modes
 
 - **Skills**: the Agent Skills standard (SKILL.md plus frontmatter) with
   progressive disclosure — only name, description, and path go into the prompt
@@ -512,7 +565,7 @@ something to say.
   keyed `:custom-message`, a `:transform-context` hook filters that key back
   out of the projection, and the `:tool-call` hook is the per-call gate.
 
-## 12. Self-extension
+## 13. Self-extension
 
 This is the evolution engine. Four mechanisms make it work.
 
@@ -521,11 +574,19 @@ This is the evolution engine. Four mechanisms make it work.
    mean a tool can load code from inside its own execution; the new definition
    applies from the next call, so no trampoline or queued reload is needed.
 2. **Registration API.** `(evo:register-tool ...)`,
-   `(evo:register-command ...)`, and `(evo:on <event> fn)`. Mutations refresh
-   the tool registry and rebuild the system prompt, so a newly registered tool
-   is callable on the next request. The `:tool-call` hook may mutate arguments
-   or return `(:block t :reason ...)` — the single interception point that
-   permission gates, read-only policies, and sandboxing all build on.
+   `(evo:register-command ...)`, and `(evo:on <event> fn :name ...)`. Mutations
+   refresh the tool registry and rebuild the system prompt, so a newly
+   registered tool is callable on the next request. The `:tool-call` hook may
+   mutate arguments or return `(:block t :reason ...)` — the single
+   interception point that permission gates, read-only policies, and sandboxing
+   all build on.
+   Registrations are **owned** by the loading file's generation, so a reload
+   withdraws exactly what that file installed. A named hook replaces its
+   previous registration; an anonymous one appends, which is how an unnamed
+   hook in a reloadable file ends up firing twice. Anything the kernel cannot
+   see — a background loop, a function patch — is declared with
+   `(evo:spawn-task ...)` and `(evo:on-unload ...)` so it can be stopped,
+   joined and undone (§6).
 3. **Filesystem convention.** `~/.evo/extensions/` and
    `<project>/.evo/extensions/` load at boot and are writable by the agent.
    Load order is the sorted file name and nothing else, so the name carries a
@@ -550,14 +611,17 @@ This is the evolution engine. Four mechanisms make it work.
   kernel — the system is permissive, not childproof — but only as an explicit,
   journaled, deliberate act.
 - **Reload discipline**: redefinition affects the next call, not frames
-  already running.
+  already running. `/reload` additionally requires an idle session and swaps a
+  whole runtime generation: the outgoing generation is disposed first (so two
+  generations never overlap), and a build that fails restores the previous
+  catalog rather than leaving a half-built runtime (§6).
 - **State discipline**: extension in-memory state does not survive a restart.
   Extensions rebuild it from `:custom` journal entries on `session-start`.
 - **Repair discipline**: because evolution replays from source, a broken
   runtime is fixed by editing a file (invariant 6), and the supervisor's
-  quarantine makes the offending file bisectable (§14).
+  quarantine makes the offending file bisectable (§15).
 
-## 13. Core extensions
+## 14. Core extensions
 
 The kernel owns the core loop and nothing else (D13). Everything outside it —
 **including the TUI** — is a *core extension*: bundled, written against the
@@ -575,7 +639,7 @@ Mechanically, core extensions are compiled into the image at build time — they
 are part of the ship, not runtime loads — but they register through the same
 API. The runtime loader is for user and agent extensions only.
 
-### 13.1 Todo lists (D14)
+### 14.1 Todo lists (D14)
 
 Long-running goal work needs a user-visible checklist. Interactive sessions
 can do without one; multi-hour unattended runs cannot, and this is the single
@@ -594,7 +658,7 @@ deliberate deviation from the minimal omit-list.
   steering, so a run re-steered after a crash or a compaction knows where it
   left off.
 
-## 14. Supervisor and self-healing
+## 15. Supervisor and self-healing
 
 The supervisor is the `evo` binary invoked plainly (D17). There is no wrapper
 script and no second executable: a wrapper would be another artifact to
@@ -624,10 +688,10 @@ in-process.
 5. **Bounded loss.** Write-ahead journaling means a crash mid-turn loses at
    most the in-flight provider stream. The transcript up to it is on disk.
 
-## 15. Interface
+## 16. Interface
 
 The CLI is newcomer-friendly and the TUI adapts to console size including live
-resize (D4). The TUI is itself a core extension (§13), built entirely on the
+resize (D4). The TUI is itself a core extension (§14), built entirely on the
 public API and not disableable.
 
 - Rendering goes into normal terminal scrollback — no alternate screen,
@@ -661,7 +725,7 @@ public API and not disableable.
     kitty keyboard protocol or `modifyOtherKeys` (CSI-u) is used where
     available, with a documented fallback of Alt+Enter or
     backslash-then-Enter elsewhere.
-- **Image input across terminals** (§15.1): the one feature whose plumbing is
+- **Image input across terminals** (§16.1): the one feature whose plumbing is
   entirely terminal-dependent, so it is specified as a ladder rather than a
   gesture.
 - Non-interactive modes are first-class: `evo -p "prompt"` for print mode and
@@ -702,7 +766,7 @@ through, so no two of them can drift apart.
   one. ANSI escape sequences and other control characters are dropped: a paste
   is text, not keystrokes.
 
-### 15.1 Image input is a ladder, not a gesture
+### 16.1 Image input is a ladder, not a gesture
 
 No terminal hands an application the image on the clipboard; the paste channel
 carries text. Every gesture therefore reduces to the same act — *something*
@@ -743,12 +807,12 @@ over ssh with no display, or a missing `wl-clipboard`/`xclip`, is not the
 user's clipboard being empty, and saying so sends them looking in the wrong
 place.
 
-## 16. How evo evolves
+## 17. How evo evolves
 
-Self-extension is a runtime capability (§12); this section is the policy that
+Self-extension is a runtime capability (§13); this section is the policy that
 governs where new capability *settles*.
 
-### 16.1 The promotion ladder
+### 17.1 The promotion ladder
 
 Capability enters at the bottom and moves up only when it earns the move. Each
 rung is more permanent, more reviewed, and harder to undo than the one below.
@@ -772,7 +836,7 @@ the fix is to widen the API — which benefits every extension including the
 agent's — never to add a private hook. A kernel change that would not survive
 being offered to userspace is the wrong change.
 
-### 16.2 Deliberate absences and their re-entry conditions
+### 17.2 Deliberate absences and their re-entry conditions
 
 Each omission is a decision, not an oversight, and each has a condition that
 would reopen it.
@@ -786,7 +850,7 @@ would reopen it.
 | Multimodal *output* (image generation, audio) | Input landed (`evo.media` + `:image` blocks, ctrl+v / paste-a-path / `/image` / `--image`); generation is a different shape — artifacts the agent produces, which the journal-as-text model has no place for yet | An artifact store with the same replay guarantees as the journal |
 | Cost tables | Token accounting is the honest unit; prices go stale | Nothing foreseen |
 
-### 16.3 What must not break
+### 17.3 What must not break
 
 Change filters, in descending order of severity. Violating one of these is not
 a refactor.
@@ -837,7 +901,7 @@ evo is not designed from scratch, and the borrowings are deliberate:
 - **codex** (`~/Projects/codex`, `codex-rs/ext/goal/`) — the goal system:
   persisted objective, idle continuation, audited completion, budgets.
 - **codex** again (`codex-rs/tui/src/clipboard_paste.rs`,
-  `tui/keyboard_modes.rs`) — the image-paste ladder of §15.1. Taken: ctrl+v
+  `tui/keyboard_modes.rs`) — the image-paste ladder of §16.1. Taken: ctrl+v
   *and* ctrl+alt+v as two doors to one clipboard read; pasted-path
   normalization (`file://`, quotes, shell escapes, Windows paths mapped into
   WSL); the PowerShell bridge that reaches the Windows clipboard from a WSL
@@ -846,7 +910,7 @@ evo is not designed from scratch, and the borrowings are deliberate:
   showed up on POSIX terminals and Windows joined the target list (D10): the
   idea of reconstructing a paste that arrived as a rapid stream of keypresses
   — though evo reads it off the poll batch rather than running codex's timer
-  state machine (§15). Added beyond it: reading
+  state machine (§16). Added beyond it: reading
   the empty bracketed paste as the cmd+v gesture, downscaling oversized
   images rather than failing at the provider, and images by value in the
   journal (D2) instead of paths that can go stale.

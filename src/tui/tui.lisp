@@ -8,19 +8,32 @@
 
 (in-package :evo.tui)
 
+(defstruct (tui-task (:conc-name tui-task-))
+  "One worker task published by the TUI thread.  KIND is :RUN or :COMPACT;
+ID lets completion events prove which task they finish, so an old event can
+never clear a newer task.  THREAD is joined before the task is forgotten."
+  id kind thread)
+
 (defstruct (tui (:conc-name tui-))
   agent
   stdin
   (input (make-input-state))
   (burst (make-paste-burst))
   (editor (make-edit-buffer))
+  ;; Worker threads publish immutable events here.  Every other TUI slot is
+  ;; owned exclusively by START-TUI's main loop and is never touched directly
+  ;; from a worker, poller, hook, or signal callback.
   (events nil) (events-lock (bt:make-lock "tui-events"))
-  worker
-  (running nil)
+  task
+  ;; Display-only echo of the worker's :compaction-start/:compaction-end
+  ;; events, so the activity line can say "compacting..." during a run's
+  ;; automatic compaction.  Not run state — the task is the run state — and
+  ;; owned like every other slot by the TUI thread, which sets it while
+  ;; draining events and clears it whenever a task starts or ends.
+  (auto-compacting nil)
   (partial "")
   (md (make-md))        ; markdown fence state for the streaming text
   (thinking-tail "")
-  (compacting nil)
   (spinner 0)
   (tick 0)
   (quiet-ticks 0)
@@ -53,9 +66,27 @@
 
 (defvar *tui* nil)
 
+(defun tui-running (tui)
+  "True when TUI owns a live run or compaction task."
+  (and (tui-task tui) t))
+
+(defun tui-compacting (tui)
+  "True when TUI's one task is a manual compaction."
+  (let ((task (tui-task tui)))
+    (and task (eq (tui-task-kind task) :compact))))
+
 (defun push-event (tui event)
   (bt:with-lock-held ((tui-events-lock tui))
     (push event (tui-events tui))))
+
+(defun request-repaint (&optional (tui *tui*))
+  "Ask the TUI to repaint.  This is the ONLY repaint entry point for a thread
+that is not the TUI loop: pollers and workers post an event, and the TUI thread
+sets TUI-DIRTY when it drains it.  Writing TUI-DIRTY from another thread would
+be a cross-thread mutation of TUI-owned state."
+  (when tui
+    (push-event tui (list :type :repaint))
+    t))
 
 (defun drain-events (tui)
   (bt:with-lock-held ((tui-events-lock tui))
@@ -137,28 +168,30 @@ and /reload are how the registry gets fixed."
       (when (steering-pending-p (tui-agent tui))
         (scroll tui (dim "input stays queued — it runs once the model resolves")))
       (return-from start-worker))
-    (setf (tui-running tui) t
-          (tui-compacting tui) nil
-          (agent-abort-flag (tui-agent tui)) nil)
-    (setf (tui-worker tui)
-          (bt:make-thread
-           (lambda ()
-             ;; Self-heal invariant: :worker-done ALWAYS arrives.  The
-             ;; handler catches SERIOUS-CONDITION (not just ERROR — think
-             ;; storage exhaustion), and the unwind-protect covers exits
-             ;; handler-case cannot see (thread interrupts, implementation
-             ;; aborts): a lost :worker-done leaves the TUI "running"
-             ;; forever with no worker behind it — the frozen-TUI bug.
-             (let ((outcome :error))
-               (unwind-protect
-                    (setf outcome
-                          (handler-case (run-until-settled (tui-agent tui))
-                            (serious-condition (e)
-                              (push-event tui (list :type :worker-error
-                                                    :text (format nil "~a" e)))
-                              :error)))
-                 (push-event tui (list :type :worker-done :outcome outcome)))))
-           :name "evo-run"))))
+    (reset-agent-run-control (tui-agent tui))
+    (setf (tui-auto-compacting tui) nil)   ; display echo never outlives a task
+    (let* ((id (gen-id))
+           (task (make-tui-task :id id :kind :run)))
+      ;; Publish the task before its thread starts.  From here until the matching
+      ;; :WORKER-DONE is handled, this object is the single source of run state.
+      (setf (tui-task tui) task)
+      (setf (tui-task-thread task)
+            (bt:make-thread
+             (lambda ()
+               ;; Self-heal invariant: :worker-done ALWAYS arrives.  TASK-ID
+               ;; prevents a delayed completion from clearing another task.
+               (let ((outcome :error))
+                 (unwind-protect
+                      (setf outcome
+                            (handler-case (run-until-settled (tui-agent tui))
+                              (serious-condition (e)
+                                (push-event tui (list :type :worker-error
+                                                      :task-id id
+                                                      :text (format nil "~a" e)))
+                                :error)))
+                   (push-event tui (list :type :worker-done :task-id id
+                                         :outcome outcome)))))
+             :name "evo-run")))))
 
 (defun start-compact-worker (tui hint)
   "Run manual compaction on the worker thread so the TUI can keep repainting
@@ -166,11 +199,12 @@ and ESC can interrupt the summarization request."
   (unless (tui-running tui)
     (unless (check-model-ready tui)     ; summarization needs the model too
       (return-from start-compact-worker))
-    (let ((agent (tui-agent tui)))
-      (setf (tui-running tui) t
-            (tui-compacting tui) t
-            (agent-abort-flag agent) nil)
-      (setf (tui-worker tui)
+    (let* ((agent (tui-agent tui))
+           (id (gen-id))
+           (task (make-tui-task :id id :kind :compact)))
+      (reset-agent-run-control agent)
+      (setf (tui-task tui) task)
+      (setf (tui-task-thread task)
             (bt:make-thread
              (lambda ()
                (let ((outcome :error))
@@ -184,25 +218,30 @@ and ESC can interrupt the summarization request."
                                     (if (agent-abort-flag agent)
                                         (progn
                                           (push-event tui (list :type :compact-result
+                                                                :task-id id
                                                                 :outcome :aborted))
                                           :aborted)
                                         (progn
                                           (push-event tui (list :type :compact-result
+                                                                :task-id id
                                                                 :outcome :stop))
                                           :stop)))
                                 (serious-condition (e)
                                   (if (agent-abort-flag agent)
                                       (progn
                                         (push-event tui (list :type :compact-result
+                                                              :task-id id
                                                               :outcome :aborted))
                                         :aborted)
                                       (progn
                                         (push-event tui (list :type :compact-result
+                                                              :task-id id
                                                               :outcome :error
                                                               :text (format nil "~a" e)))
                                         :error))))))
                    (emit-event agent :type :compaction-end)
-                   (push-event tui (list :type :worker-done :outcome outcome)))))
+                   (push-event tui (list :type :worker-done :task-id id
+                                         :outcome outcome)))))
              :name "evo-compact")))))
 
 (defun user-prompt-block (text &optional images)
@@ -427,11 +466,17 @@ inside the TUI tick loop and on session resume, so malformed ARGUMENTS
     (:todo-changed
      (setf (tui-todos tui) (pget event :todos)
            (tui-dirty tui) t))
+    (:repaint
+     ;; Somebody off-thread noticed something the status line renders.
+     (setf (tui-dirty tui) t))
     (:compaction-start
-     (setf (tui-compacting tui) t
+     ;; Automatic compaction is part of a :RUN task — the task stays the only
+     ;; run state.  This slot is a display echo so the activity line can say
+     ;; what the worker is doing; it dies with the task.
+     (setf (tui-auto-compacting tui) t
            (tui-dirty tui) t))
     (:compaction-end
-     (setf (tui-compacting tui) nil)
+     (setf (tui-auto-compacting tui) nil)
      (refresh-goal tui :reset-goal-run-tokens nil)
      (setf (tui-dirty tui) t))
     (:compact-result
@@ -442,27 +487,33 @@ inside the TUI tick loop and on session resume, so malformed ARGUMENTS
     (:worker-error
      (scroll tui (red (format nil "✗ internal error in run: ~a" (pget event :text)))))
     (:worker-done
-     ;; Reset the run state FIRST: if any of the rendering below signals,
-     ;; the TUI must already know the worker is gone (a stuck running=t
-     ;; with no worker means no run can ever start again).
-     (setf (tui-running tui) nil
-           (tui-worker tui) nil
-           (tui-compacting tui) nil
-           (tui-thinking-tail tui) "")
-     (flush-partial tui)
-     (setf (tui-md tui) (make-md))
-     (refresh-goal tui)
-     (let ((goal (tui-goal tui)))
-       (when (and goal (member (pget goal :status) '(:complete :blocked :budget-limited :paused)))
-         (scroll tui (yellow (format nil "◆ goal ~a: ~a"
-                                     (pget goal :goal-id)
-                                     (string-downcase (pget goal :status)))))))
-     ;; Race guard: input submitted while the worker was settling queues
-     ;; steering the run no longer polls — the tick loop handles keys
-     ;; before draining events, so restart the worker for it here.
-     (when (steering-pending-p (tui-agent tui))
-       (start-worker tui))
-     (setf (tui-dirty tui) t))
+     (let ((task (tui-task tui)))
+       ;; A task is forgotten only after its actual thread has exited.  Ignore a
+       ;; stale completion instead of letting it clear a newer task.
+       (when (and task (equal (pget event :task-id) (tui-task-id task)))
+         (ignore-errors (bt:join-thread (tui-task-thread task)))
+         ;; The worker is joined, so nobody owns the control mailbox: clear a
+         ;; queued :abort the run never got to consume.  Left behind, it would
+         ;; read as pending work and wedge session-quiescence — an abort for a
+         ;; finished run aborts nothing.
+         (reset-agent-run-control (tui-agent tui))
+         (setf (tui-task tui) nil
+               (tui-auto-compacting tui) nil
+               (tui-thinking-tail tui) "")
+         (flush-partial tui)
+         (setf (tui-md tui) (make-md))
+         (refresh-goal tui)
+         (let ((goal (tui-goal tui)))
+           (when (and goal (member (pget goal :status)
+                                   '(:complete :blocked :budget-limited :paused)))
+             (scroll tui (yellow (format nil "◆ goal ~a: ~a"
+                                         (pget goal :goal-id)
+                                         (string-downcase (pget goal :status)))))))
+         ;; Input submitted while this task settled belongs to the same session
+         ;; and starts a fresh task only after the old one is joined.
+         (when (steering-pending-p (tui-agent tui))
+           (start-worker tui))
+         (setf (tui-dirty tui) t))))
     (t nil)))
 
 ;;; Region composition.
@@ -522,8 +573,10 @@ change so the rendering thread never observes a partially updated list.")
 FUNCTION is called with the TUI on every repaint and returns a display string
 — already styled, since the renderer will not restyle it — or NIL to show
 nothing this frame.  It must be cheap and must not block; cache in a poller
-thread if the value is expensive.  Errors are swallowed: a segment that
-signals is skipped, it does not take the status line down with it.
+task (EVO:SPAWN-TASK) if the value is expensive, and have that task call
+REQUEST-REPAINT rather than setting TUI-DIRTY, which the TUI thread owns.
+Errors are swallowed: a segment that signals is skipped, it does not take the
+status line down with it.
 
 SIDE is :LEFT or :RIGHT.  ORDER counts inward from that side's edge, so on the
 right a lower ORDER sits closer to the right edge.  Registering an existing
@@ -674,7 +727,7 @@ inner right of the status line (order 200, inward of the model-load cell)."
   "The permanent activity indicator.  Always one line — settling to idle
 instead of disappearing, so the region height does not oscillate."
   (cond
-    ((and (tui-running tui) (tui-compacting tui))
+    ((and (tui-running tui) (or (tui-compacting tui) (tui-auto-compacting tui)))
      (dim (format nil "~c compacting...  esc interrupt"
                   (char *working-frames*
                         (mod (tui-spinner tui) (length *working-frames*))))))
@@ -1336,6 +1389,37 @@ first rather than left to reappear later."
       ;; 4. prompt templates
       ((command-as-template tui name args))
       (t (scroll tui (dim (format nil "unknown command /~a — /help lists commands" name)))))))
+
+(defun shutdown-task (tui &key (seconds 5))
+  "Stop TUI's task and reap it.  Returns T once no task is left.  Draining the
+event queue here is what delivers :WORKER-DONE, and that handler joins the
+thread — so a settled shutdown means the worker really exited, not that a flag
+was cleared behind its back."
+  (when (tui-running tui)
+    (request-abort (tui-agent tui))
+    (loop with deadline = (+ (get-internal-real-time)
+                             (* seconds internal-time-units-per-second))
+          while (and (tui-running tui)
+                     (< (get-internal-real-time) deadline))
+          do (dolist (event (drain-events tui))
+               (ignore-errors (handle-agent-event tui event)))
+             (sleep 0.02)))
+  (not (tui-running tui)))
+
+(defun session-quiescent-p (tui)
+  "True when switching journals or rebuilding userspace cannot strand work.
+A queued model-gated submission is work even though no task exists."
+  (and (not (tui-running tui))
+       (not (agent-pending-work-p (tui-agent tui)))))
+
+(defun require-session-quiescent (tui what)
+  (cond ((tui-running tui)
+         (scroll tui (dim (format nil "~a needs an idle agent (esc to interrupt)" what)))
+         nil)
+        ((agent-pending-work-p (tui-agent tui))
+         (scroll tui (dim (format nil "~a cannot switch sessions while input is queued; resolve the model and run it first" what)))
+         nil)
+        (t t)))
 
 (defun require-idle (tui what)
   (if (tui-running tui)
