@@ -166,10 +166,12 @@ instructions — a CLAUDE.md or AGENTS.md file, or lore — grant more than that
   user attaches arrive the same way.  When `Can see images` says no, the
   picture cannot reach this model: say so and offer `/model`.
 - `bash` covers everything else — building, testing, git, and searching.
-  Search there with rg, grep, or find, and keep the output small enough to
-  read: narrow globs, `-n`, a `head` on the end.  Tool results are truncated
-  at around 50000 characters, so a command that dumps a whole log wastes the
-  turn; narrow the command instead.
+  Search there with rg, grep, or find, and avoid unscoped repo-wide searches:
+  first list candidate files with `ls` for a directory or `git ls-files` in a
+  repo when the target area is unclear, then search only relevant paths or
+  globs.  Keep the output small enough to read with `-n` where applicable and
+  a `head` cap; avoid scanning vendored or generated trees unless they are the
+  target.
 - Write bash carefully: quote any path containing spaces, prefer absolute
   paths over `cd`, chain dependent commands with `&&` on a single line, and
   never separate commands with a newline.
