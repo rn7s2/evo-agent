@@ -47,8 +47,8 @@ somebody was looking at yesterday.")
 (defvar *ide-context-original-submit* nil
   "EVO.TUI::SUBMIT-TO-AGENT before this extension wrapped it.")
 
-(defvar *ide-context-poller-generation* 0)
-(defvar *ide-context-poller-thread* nil)
+(defvar *ide-context-poller-stop* nil
+  "Set by the tracked task's stop function; the poller loop watches it.")
 
 ;;; Reading the state file.
 
@@ -235,29 +235,46 @@ segments, so a segment that renders nothing leaves no dangling \" · \"."
   (evo.tui:add-status-segment :ide-selection #'ide-context-label
                               :side :left :order 600))
 
-(defun ide-context-generation-current-p (generation)
-  (= generation *ide-context-poller-generation*))
-
-(defun ide-context-poller-loop (generation)
-  "Repaint the status line when the selection changes.  The TUI only repaints
+(defun ide-context-poller-loop ()
+  "Ask the TUI to repaint when the selection changes.  The TUI only repaints
 when marked dirty, so somebody has to notice; a stat every quarter second is
-cheaper than a socket."
+cheaper than a socket.
+
+The repaint is REQUESTED through the event queue rather than by setting
+TUI-DIRTY here: every TUI slot belongs to the TUI thread, and a poller writing
+one directly is the same cross-thread mutation this design removed everywhere
+else."
   (let ((last nil))
-    (loop while (ide-context-generation-current-p generation)
-          do (let ((label (ignore-errors (ide-context-label)))
-                   (tui (ignore-errors evo.tui::*tui*)))
+    (loop until *ide-context-poller-stop*
+          do (let ((label (ignore-errors (ide-context-label))))
                (unless (equal label last)
                  (setf last label)
-                 (when tui (ignore-errors (setf (evo.tui::tui-dirty tui) t))))
+                 (ignore-errors (evo.tui:request-repaint)))
                (sleep *ide-context-poll-seconds*)))))
 
 (defun ide-context-start-poller ()
-  (incf *ide-context-poller-generation*)
-  (let ((generation *ide-context-poller-generation*))
-    (setf *ide-context-poller-thread*
-          (bt:make-thread (lambda () (ide-context-poller-loop generation))
-                          :name "evo-ide-context"))))
+  ;; Tracked: on /reload the task is stopped and JOINED before the next
+  ;; generation loads, so two pollers can never run at once.
+  (setf *ide-context-poller-stop* nil)
+  (evo:spawn-task :name :ide-context-poller
+                  :run #'ide-context-poller-loop
+                  :stop (lambda () (setf *ide-context-poller-stop* t))))
+
+(defun ide-context-uninstall-wrappers ()
+  "Put SUBMIT-TO-AGENT back the way this extension found it."
+  (when *ide-context-original-submit*
+    (let ((pkg (symbol-package 'evo.tui::submit-to-agent)))
+      (evo.port:unlock-package pkg)
+      (unwind-protect
+           (setf (symbol-function 'evo.tui::submit-to-agent)
+                 *ide-context-original-submit*)
+        (evo.port:lock-package pkg)))
+    (setf *ide-context-original-submit* nil))
+  (evo.tui:remove-status-segment :ide-selection))
 
 (when (ide-context-path)
   (ide-context-install-wrappers)
-  (ide-context-start-poller))
+  (ide-context-start-poller)
+  ;; The kernel cannot see a function patch, so this extension hands back the
+  ;; undo itself; without it a reload would stack wrapper on wrapper.
+  (evo:on-unload #'ide-context-uninstall-wrappers))

@@ -1563,14 +1563,15 @@ that is how a human's next keystroke differs from a paste's last chunk."
       ;; Activity animation: rotating slash working/compacting, pulsing star thinking,
       ;; static idle glyph.
       (check "idle glyph" (search "○ idle" (evo.tui::activity-line tui)))
-      (setf (evo.tui::tui-running tui) t)
+      (setf (evo.tui::tui-task tui)
+            (evo.tui::make-tui-task :id "probe-run" :kind :run))
       (check "working slash frame 0" (search "| working" (evo.tui::activity-line tui)))
       (incf (evo.tui::tui-spinner tui))
       (check "working slash rotates" (search "/ working" (evo.tui::activity-line tui)))
-      (setf (evo.tui::tui-compacting tui) t)
+      (setf (evo.tui::tui-task-kind (evo.tui::tui-task tui)) :compact)
       (check "compacting slash rotates"
              (search "/ compacting..." (evo.tui::activity-line tui)))
-      (setf (evo.tui::tui-compacting tui) nil
+      (setf (evo.tui::tui-task-kind (evo.tui::tui-task tui)) :run
             (evo.tui::tui-thinking-tail tui) "hm")
       (check "thinking pulse frame" (search "✳ thinking · hm" (evo.tui::activity-line tui)))
       (setf (evo.tui::tui-thinking-tail tui) "")
@@ -1695,7 +1696,8 @@ that is how a human's next keystroke differs from a paste's last chunk."
                (some (lambda (l) (search "more lines above" l)) lines)))
       ;; Same guarantee with a full todo panel and a long streaming tail
       ;; under it — nothing in the region may push it past the screen.
-      (setf (evo.tui::tui-running tui) t
+      (setf (evo.tui::tui-task tui)
+            (evo.tui::make-tui-task :id "region-probe" :kind :run)
             (evo.tui::tui-partial tui) (make-string 900 :initial-element #\z)
             (evo.tui::tui-todo-visible tui) t
             (evo.tui::tui-todos tui)
@@ -3630,7 +3632,8 @@ completion gating around all of it."
          (journal (progn (ensure-directories-exist dir) (make-session-journal dir)))
          (agent (make-agent :journal journal))
          (tui (evo.tui::make-tui :agent agent)))
-    (setf (evo.tui::tui-running tui) t)
+    (setf (evo.tui::tui-task tui)
+          (evo.tui::make-tui-task :id "interrupt-probe" :kind :run))
     (evo.tui::eb-insert-text (evo.tui::tui-editor tui) "/t")
     (with-output-to-string (fake-tty)
       (let ((evo.tui::*tty-out* fake-tty)
@@ -3649,7 +3652,8 @@ completion gating around all of it."
          (journal (progn (ensure-directories-exist dir) (make-session-journal dir)))
          (agent (make-agent :journal journal))
          (tui (evo.tui::make-tui :agent agent)))
-    (setf (evo.tui::tui-running tui) t)
+    (setf (evo.tui::tui-task tui)
+          (evo.tui::make-tui-task :id "interrupt-probe" :kind :run))
     (evo.tui::enter-select tui "pick:" (list (cons "item" :item)) #'identity)
     (with-output-to-string (fake-tty)
       (let ((evo.tui::*tty-out* fake-tty)
@@ -3665,7 +3669,6 @@ completion gating around all of it."
          (journal (progn (ensure-directories-exist dir) (make-session-journal dir)))
          (agent (make-agent :journal journal))
          (marker (merge-pathnames "started" dir))
-         (start (get-internal-real-time))
          (aborted nil)
          (worker
            (bt:make-thread
@@ -3705,7 +3708,6 @@ completion gating around all of it."
       (ignore-errors (delete-file marker))
       (let ((elapsed (/ (- (get-internal-real-time) abort-start)
                         internal-time-units-per-second)))
-        (declare (ignorable start))
         ;; Comfortably under the 5s the command would have slept: the kill
         ;; landed instead of the sleep being waited out.  taskkill /T is a
         ;; touch slower than a SIGKILL, hence the wider Windows margin.
@@ -3846,7 +3848,7 @@ completion gating around all of it."
 
 (defun run-transform-hooks (messages)
   "Project MESSAGES through the registered :transform-context hooks."
-  (dolist (hook (gethash :transform-context evo.kernel::*event-hooks*) messages)
+  (dolist (hook (evo.kernel::event-hook-functions :transform-context) messages)
     (setf messages (funcall hook messages))))
 
 (defmacro with-temp-hooks (&body body)
@@ -5565,6 +5567,446 @@ five identical restarts, each reporting a different error than the real one."
                  (evo.cli::parse-args '("--thinking" "bogus")))
   (check-signals "parse: unknown flag" (evo.cli::parse-args '("--wat"))))
 
+;;; Concurrency and ownership.
+;;;
+;;; These are the invariants the whole threading design rests on, so they are
+;;; asserted rather than trusted: one owner per mutable object, no resource
+;;; freed by a thread that does not own it, no task forgotten before it exits,
+;;; no runtime generation observed half-built.
+
+(defclass cancel-fixture-api (provider-api) ())
+(defvar *cancel-fixture-entered* nil)
+(defvar *cancel-fixture-exited* nil)
+(defvar *cancel-fixture-closed-by* nil)
+
+(defmethod endpoint-path ((api cancel-fixture-api)) "/fixture/cancel")
+(defmethod auth-headers ((api cancel-fixture-api) config) (declare (ignore config)) nil)
+(defmethod thinking-param ((api cancel-fixture-api) level) (declare (ignore level)) nil)
+(defmethod build-request ((api cancel-fixture-api) &key model system messages tools
+                                                        thinking-level cache-key)
+  (declare (ignore model system messages tools thinking-level cache-key))
+  "{}")
+
+;; A stream whose CLOSE records which thread closed it: that is the ownership
+;; claim under test, not merely "it was closed".  Binary, because the transport
+;; wraps the response in a flexi-stream, which reads bytes.
+(defclass recording-stream (trivial-gray-streams:fundamental-binary-input-stream)
+  ((open-p :initform t :accessor recording-stream-open-p)))
+
+(defmethod stream-element-type ((s recording-stream)) '(unsigned-byte 8))
+
+(defmethod trivial-gray-streams:stream-read-byte ((s recording-stream))
+  ;; Never returns on its own: only cancellation ends this read.
+  (loop (sleep 0.01)))
+
+(defmethod close ((s recording-stream) &key abort)
+  (declare (ignore abort))
+  (setf *cancel-fixture-closed-by* (bt:current-thread)
+        (recording-stream-open-p s) nil)
+  t)
+
+(defmethod parse-stream ((api cancel-fixture-api) char-stream &key on-event abort-flag)
+  (declare (ignore on-event abort-flag))
+  (setf *cancel-fixture-entered* t)
+  (unwind-protect
+       (read-char char-stream)          ; blocks until the owner is interrupted
+    (setf *cancel-fixture-exited* t)))
+
+(defun test-provider-request-ownership ()
+  "Cancelling a request must stop it, close its stream ON THE OWNER THREAD, and
+leave no thread behind.  The pre-fix transport closed the stream from the
+caller's thread and skipped the join, so a cancelled request kept running."
+  (let ((saved-post (symbol-function 'dex:post))
+        (stream (make-instance 'recording-stream))
+        (caller (bt:current-thread)))
+    (unwind-protect
+         (progn
+           (setf *cancel-fixture-entered* nil
+                 *cancel-fixture-exited* nil
+                 *cancel-fixture-closed-by* nil)
+           (setf (symbol-function 'dex:post)
+                 (lambda (&rest args) (declare (ignore args)) stream))
+           (let* ((api (make-instance 'cancel-fixture-api))
+                  (started (get-internal-real-time))
+                  (result (perform-request
+                           api "https://fixture.invalid/v1" nil "{}"
+                           :abort-flag
+                           (lambda ()
+                             ;; Abort once the request is genuinely streaming.
+                             (and *cancel-fixture-entered*
+                                  (> (/ (- (get-internal-real-time) started)
+                                        internal-time-units-per-second)
+                                     0.05)))))
+                  (elapsed (/ (- (get-internal-real-time) started)
+                              internal-time-units-per-second)))
+             (check "cancelled request reports an aborted result"
+                    (pget result :aborted-p))
+             (check "cancellation does not wait out the stream" (< elapsed 3))
+             ;; The join happens inside perform-request, so by the time it
+             ;; returns the owner has already unwound.
+             (check "request thread has exited when the call returns"
+                    *cancel-fixture-exited*)
+             (check "the stream is closed" (not (recording-stream-open-p stream)))
+             (check "the stream is closed by its owner thread, not the caller"
+                    (and *cancel-fixture-closed-by*
+                         (not (eq *cancel-fixture-closed-by* caller))))
+             (check "no provider request thread is left running"
+                    (notany (lambda (th)
+                              (and (bt:thread-alive-p th)
+                                   (equal (bt:thread-name th) "evo-provider-request")))
+                            (bt:all-threads)))))
+      (setf (symbol-function 'dex:post) saved-post))))
+
+(defun test-abort-is-a-message ()
+  "REQUEST-ABORT must only post a message; the worker latches it and runs the
+cleanups.  Previously the requesting thread ran them itself, which is what made
+cross-thread teardown of worker-owned resources possible in the first place."
+  (let* ((dir (uiop:ensure-directory-pathname
+               (format nil "~a/evo-abort-msg-~a/" (tmp-dir) (gen-id))))
+         (journal (progn (ensure-directories-exist dir) (make-session-journal dir)))
+         (agent (make-agent :journal journal))
+         (ran-on nil))
+    (evo.kernel::add-abort-cleanup agent (lambda () (setf ran-on (bt:current-thread))))
+    (request-abort agent)
+    (check "requesting an abort does not run cleanups on the caller's thread"
+           (null ran-on))
+    (check "the worker sees the abort at its next safe point"
+           (agent-abort-flag agent))
+    (check "and the cleanup ran on the thread that consumed it"
+           (eq ran-on (bt:current-thread)))
+    ;; Latched: a second look still reports aborted, and does not re-run.
+    (setf ran-on nil)
+    (check "abort stays latched for the rest of the run" (agent-abort-flag agent))
+    (check "cleanups run once, not on every poll" (null ran-on))
+    ;; A fresh run starts from a clean mailbox.
+    (reset-agent-run-control agent)
+    (check "a new run starts un-aborted" (not (agent-abort-flag agent)))))
+
+(defun test-session-quiescence ()
+  "A journal switch must not carry another session's queued input with it.
+The model gate leaves steering queued while nothing runs, which used to look
+idle enough to switch sessions under."
+  (let* ((dir (uiop:ensure-directory-pathname
+               (format nil "~a/evo-quiesce-~a/" (tmp-dir) (gen-id))))
+         (journal (progn (ensure-directories-exist dir) (make-session-journal dir)))
+         (agent (make-agent :journal journal))
+         (tui (evo.tui::make-tui :agent agent)))
+    (check "an idle empty session is quiescent" (evo.tui::session-quiescent-p tui))
+    (queue-steering agent "input typed against THIS session")
+    (check "queued steering is pending work, even with no task running"
+           (not (evo.tui::session-quiescent-p tui)))
+    (with-output-to-string (fake-tty)
+      (let ((evo.tui::*tty-out* fake-tty)
+            (evo.tui::*region-height* 0)
+            (evo.tui::*region-cursor-row* 0))
+        (check "a session switch is refused while input is queued"
+               (not (evo.tui::require-session-quiescent tui "/resume")))
+        (check "switch-journal refuses rather than migrating the queue"
+               (handler-case
+                   (progn (evo.tui::switch-journal tui (make-session-journal dir)) nil)
+                 (error () t)))
+        (check "the input is still queued in its own session"
+               (steering-pending-p agent))
+        ;; Drained (as a real run would), the switch is allowed.
+        (evo.kernel::drain-steering agent)
+        (check "a drained session is quiescent again"
+               (evo.tui::session-quiescent-p tui))
+        (let ((run-id (evo.kernel::agent-run-id agent)))
+          (setf (evo.kernel::agent-turn-index agent) 7
+                (evo.kernel::agent-retry-count agent) 2)
+          (evo.tui::switch-journal tui (make-session-journal dir))
+          (check "switching resets session-owned execution state"
+                 (and (not (equal run-id (evo.kernel::agent-run-id agent)))
+                      (zerop (evo.kernel::agent-turn-index agent))
+                      (zerop (evo.kernel::agent-retry-count agent)))))))))
+
+(defun test-tui-task-ownership ()
+  "Run state is one task object, and a stale completion event cannot clear a
+newer task — the failure the separate running/worker/compacting booleans made
+possible."
+  (let* ((dir (uiop:ensure-directory-pathname
+               (format nil "~a/evo-task-~a/" (tmp-dir) (gen-id))))
+         (journal (progn (ensure-directories-exist dir) (make-session-journal dir)))
+         (agent (make-agent :journal journal))
+         (tui (evo.tui::make-tui :agent agent)))
+    (check "no task means not running" (not (evo.tui::tui-running tui)))
+    (setf (evo.tui::tui-task tui)
+          (evo.tui::make-tui-task :id "task-2" :kind :run))
+    (check "a live task means running" (evo.tui::tui-running tui))
+    (check "a run task is not compacting" (not (evo.tui::tui-compacting tui)))
+    (with-output-to-string (fake-tty)
+      (let ((evo.tui::*tty-out* fake-tty)
+            (evo.tui::*region-height* 0)
+            (evo.tui::*region-cursor-row* 0))
+        ;; A late :worker-done from a previous task must be ignored.
+        (evo.tui::handle-agent-event tui '(:type :worker-done :task-id "task-1"
+                                           :outcome :stop))
+        (check "a stale worker-done cannot clear the current task"
+               (evo.tui::tui-running tui))
+        (evo.tui::handle-agent-event tui '(:type :worker-done :task-id "task-2"
+                                           :outcome :stop))
+        (check "the matching worker-done clears it"
+               (not (evo.tui::tui-running tui)))
+        ;; A run's automatic compaction: the activity display echoes the
+        ;; worker's events, and dies with the task.
+        (setf (evo.tui::tui-task tui)
+              (evo.tui::make-tui-task :id "task-3" :kind :run))
+        (evo.tui::handle-agent-event tui '(:type :compaction-start))
+        (check "auto compaction shows as compacting"
+               (search "compacting" (evo.tui::activity-line tui)))
+        (evo.tui::handle-agent-event tui '(:type :compaction-end))
+        (check "compaction end returns the display to working"
+               (search "working" (evo.tui::activity-line tui)))
+        ;; An abort the finished run never consumed is moot once its task is
+        ;; joined; left queued it would wedge session-quiescence.
+        (request-abort agent)
+        (check "an unconsumed abort counts as pending mailbox work"
+               (agent-pending-work-p agent))
+        (evo.tui::handle-agent-event tui '(:type :worker-done :task-id "task-3"
+                                           :outcome :aborted))
+        (check "joining the task clears the abort it never consumed"
+               (evo.tui::session-quiescent-p tui))))
+    ;; Off-thread repaint requests go through the queue, not the slot.
+    (setf (evo.tui::tui-dirty tui) nil)
+    (evo.tui::request-repaint tui)
+    (check "request-repaint does not touch TUI state directly"
+           (not (evo.tui::tui-dirty tui)))
+    (dolist (event (evo.tui::drain-events tui))
+      (evo.tui::handle-agent-event tui event))
+    (check "the TUI thread marks itself dirty when it drains the request"
+           (evo.tui::tui-dirty tui))))
+
+(defun test-extension-ownership ()
+  "Hooks, tasks and patches belong to the extension generation that made them.
+Reloading disposes the old generation instead of stacking another copy."
+  (let ((evo.kernel::*event-hooks* (make-hash-table))
+        (evo.kernel::*extension-disposers* nil)
+        (evo.kernel::*extension-tasks* nil)
+        (evo.kernel::*extension-generation* 10))
+    (let ((owner-a (evo.kernel::%make-extension-owner :path "/x/900-p.lisp"
+                                                     :generation 10)))
+      ;; An anonymous hook is what accumulated before: assert the named one does
+      ;; not, and that the anonymous one still appends (the API is explicit).
+      (evo.kernel:add-hook :probe (lambda (p) (declare (ignore p)) :named)
+                           :name :probe-hook :owner owner-a)
+      (evo.kernel:add-hook :probe (lambda (p) (declare (ignore p)) :named-again)
+                           :name :probe-hook :owner owner-a)
+      (check "a named hook replaces its previous registration"
+             (= 1 (length (gethash :probe evo.kernel::*event-hooks*))))
+      (check "and the replacement is the live one"
+             (equal '(:named-again) (evo.kernel:run-hooks :probe nil)))
+      (evo.kernel:add-hook :probe (lambda (p) (declare (ignore p)) :anon)
+                           :owner owner-a)
+      (check "an anonymous hook appends"
+             (= 2 (length (gethash :probe evo.kernel::*event-hooks*))))
+      ;; A tracked task, and a disposer standing in for a function patch.
+      (let* ((stop nil)
+             (undone nil)
+             (thread (let ((evo.kernel::*extension-owner* owner-a))
+                       (evo:spawn-task :name :probe-task
+                                       :run (lambda () (loop until stop
+                                                             do (sleep 0.01)))
+                                       :stop (lambda () (setf stop t))))))
+        (let ((evo.kernel::*extension-owner* owner-a))
+          (evo:on-unload (lambda () (setf undone t))))
+        (check "the task is running" (bt:thread-alive-p thread))
+        ;; A new generation arrives: dispose everything the old one owned.
+        (incf evo.kernel::*extension-generation*)
+        (evo.kernel:dispose-extension-owners
+         :before evo.kernel::*extension-generation*)
+        (check "disposal stops and joins the extension's task"
+               (not (bt:thread-alive-p thread)))
+        (check "disposal runs the extension's own undo" undone)
+        (check "disposal withdraws the extension's hooks"
+               (null (gethash :probe evo.kernel::*event-hooks*)))))
+    ;; A task that ignores its stop is abandoned after a bounded wait — one
+    ;; misbehaving extension must not be able to hang every future reload.
+    (let* ((evo.kernel::*task-stop-seconds* 0.2)
+           (owner-b (evo.kernel::%make-extension-owner
+                     :path "/x/900-stubborn.lisp"
+                     :generation evo.kernel::*extension-generation*)))
+      (let ((evo.kernel::*extension-owner* owner-b))
+        (evo:spawn-task :name :stubborn-task
+                        :run (lambda () (sleep 3))    ; outlives the bound, then dies
+                        :stop (lambda () nil)))       ; ignores its own stop
+      (incf evo.kernel::*extension-generation*)
+      (let ((started (get-internal-real-time)))
+        (handler-bind ((warning #'muffle-warning))
+          (evo.kernel:dispose-extension-owners
+           :before evo.kernel::*extension-generation*))
+        (check "a stubborn task is abandoned instead of hanging disposal"
+               (< (/ (- (get-internal-real-time) started)
+                     internal-time-units-per-second)
+                  2))))))
+
+(defparameter *catalog-good-init*
+  "(evo:register-model \"catalog-good\" :provider :anthropic :api :anthropic-messages
+   :context-window 1000 :max-output 100)
+(evo:set-setting :model \"catalog-good\")")
+
+(defun test-runtime-catalog-atomicity ()
+  "A failed reload must leave the previous runtime intact, not a half-built
+one — and must sweep the failed build's OWN registrations, or every retried
+reload stacks another copy of whatever loaded before the failure.
+
+The failure is real, not simulated: init files swallow ordinary errors (a
+broken config may not take the session down), so the poison is a non-ERROR
+serious condition in post-init, which unwinds BOOT-USERSPACE's own recovery
+path after the probe extension has already loaded."
+  (let* ((home (evo-home))
+         (extdir (merge-pathnames "extensions/" home))
+         (probe (merge-pathnames "500-atomicity-probe.lisp" extdir))
+         (global-init (merge-pathnames "init.lisp" home))
+         (global-post-init (merge-pathnames "post-init.lisp" home))
+         (cwd (merge-pathnames (format nil "catalog-test-~a/" (gen-id)) home)))
+    (ensure-directory extdir)
+    (ensure-directory cwd)
+    (flet ((live-tasks ()
+             (count-if (lambda (th)
+                         (and (bt:thread-alive-p th)
+                              (equal (bt:thread-name th) "ATOMICITY-PROBE-TASK")))
+                       (bt:all-threads)))
+           (probe-hooks ()
+             (length (gethash :atomicity-probe evo.kernel::*event-hooks*))))
+      (unwind-protect
+           (progn
+             (write-file-string global-init *catalog-good-init*)
+             (write-file-string
+              probe
+              "(in-package :evo.user)
+(defvar *atomicity-probe-stop* nil)
+(evo:on :atomicity-probe (lambda (ev) (declare (ignore ev)) nil)
+        :name :atomicity-probe-hook)
+(setf *atomicity-probe-stop* nil)
+(evo:spawn-task :name :atomicity-probe-task
+                :run (lambda () (loop until *atomicity-probe-stop* do (sleep 0.01)))
+                :stop (lambda () (setf *atomicity-probe-stop* t)))")
+             (evo.kernel:boot-userspace :cwd cwd)
+             (sleep 0.1)
+             (let ((generation evo.kernel::*extension-generation*))
+               (check "the good generation is installed"
+                      (and (equal "catalog-good" (setting :model))
+                           (find "catalog-good" (all-models)
+                                 :key (lambda (m) (pget m :id)) :test #'equal)))
+               (check "its extension's hook and task are live"
+                      (and (= 1 (probe-hooks)) (= 1 (live-tasks))))
+               ;; Poison the build.  The broken init means the failing build
+               ;; registers NO models and NO settings, so the assertions below
+               ;; can only pass if the catalog restore really happened.
+               (write-file-string global-init "(error \"broken init: registries stay empty\")")
+               (write-file-string
+                global-post-init
+                "(define-condition atomicity-boom (serious-condition) ())
+(error 'atomicity-boom)")
+               (let ((*error-output* (make-broadcast-stream)))
+                 (check "the poisoned build signals out of boot-userspace"
+                        (handler-case
+                            (progn (evo.kernel:boot-userspace :cwd cwd) nil)
+                          (serious-condition () t))))
+               (check "a failed build restores the previous model registry"
+                      (find "catalog-good" (all-models)
+                            :key (lambda (m) (pget m :id)) :test #'equal))
+               (check "a failed build restores the previous settings"
+                      (equal "catalog-good" (setting :model)))
+               (check "a failed build does not advance the generation"
+                      (= generation evo.kernel::*extension-generation*))
+               (check "the failed build's own hooks are swept, not stranded"
+                      (zerop (probe-hooks)))
+               (check "the failed build's own task is stopped and joined"
+                      (zerop (live-tasks)))
+               ;; The normal repair: fix the files and reload.  Without the
+               ;; failure-path sweep, the stranded registrations carry the
+               ;; rolled-back counter's NEXT generation number, read as
+               ;; current, and double up exactly here.
+               (delete-file global-post-init)
+               (write-file-string global-init *catalog-good-init*)
+               (evo.kernel:boot-userspace :cwd cwd)
+               (sleep 0.1)
+               (check "the repaired reload installs exactly one hook"
+                      (= 1 (probe-hooks)))
+               (check "and exactly one task" (= 1 (live-tasks)))))
+        ;; Stop the surviving task and dispose everything before leaving.
+        (ignore-errors
+          (let ((stop (find-symbol "*ATOMICITY-PROBE-STOP*" :evo.user)))
+            (when stop (setf (symbol-value stop) t))))
+        (ignore-errors (evo.kernel:dispose-extension-owners
+                        :before (1+ evo.kernel::*extension-generation*)))
+        (ignore-errors (delete-file probe))
+        (ignore-errors (delete-file global-init))
+        (ignore-errors (delete-file global-post-init))
+        (reset-user-registries)
+        (reset-settings)
+        (register-fixture-models)))))
+
+(defun test-reload-generation-ordering ()
+  "Generations must not overlap.  A reloaded file reuses the same package and
+the same globals, so if the outgoing generation were disposed AFTER the incoming
+one loaded, the old stop function would write the very variable the new task
+reads — and silently kill it.  Caught in exactly that form: one live poller
+became zero after the first reload."
+  (let* ((home (evo-home))
+         (extdir (merge-pathnames "extensions/" home))
+         (probe (merge-pathnames "500-reload-probe.lisp" extdir))
+         (global-init (merge-pathnames "init.lisp" home))
+         (cwd (merge-pathnames (format nil "reload-order-~a/" (gen-id)) home)))
+    (ensure-directory extdir)
+    (ensure-directory cwd)
+    (unwind-protect
+         (progn
+           (write-file-string
+            global-init
+            "(evo:register-model \"reload-probe-model\" :provider :anthropic
+   :api :anthropic-messages :context-window 1000 :max-output 100)")
+           ;; The shared global is the point: both generations see this symbol.
+           (write-file-string
+            probe
+            "(in-package :evo.user)
+(defvar *reload-probe-stop* nil)
+(defvar *reload-probe-unloads* 0)
+(evo:on :session-start (lambda (ev) (declare (ignore ev)) nil)
+        :name :reload-probe-hook)
+(setf *reload-probe-stop* nil)
+(evo:spawn-task :name :reload-probe-task
+                :run (lambda () (loop until *reload-probe-stop* do (sleep 0.01)))
+                :stop (lambda () (setf *reload-probe-stop* t)))
+(evo:on-unload (lambda () (incf *reload-probe-unloads*)))")
+           (flet ((live-tasks ()
+                    (count-if (lambda (th)
+                                (and (bt:thread-alive-p th)
+                                     (equal (bt:thread-name th) "RELOAD-PROBE-TASK")))
+                              (bt:all-threads)))
+                  (hooks ()
+                    (length (gethash :session-start evo.kernel::*event-hooks*))))
+             (evo.kernel:boot-userspace :cwd cwd)
+             (sleep 0.1)
+             (let ((hooks-after-first (hooks)))
+               (check "the extension's task is running after the first boot"
+                      (= 1 (live-tasks)))
+               (evo.kernel:boot-userspace :cwd cwd)
+               (sleep 0.1)
+               (check "a reload leaves exactly one live task, not zero and not two"
+                      (= 1 (live-tasks)))
+               (check "a reload does not accumulate hooks"
+                      (= hooks-after-first (hooks)))
+               (evo.kernel:boot-userspace :cwd cwd)
+               (sleep 0.1)
+               (check "still exactly one live task after a third boot"
+                      (= 1 (live-tasks)))
+               (check "each reload undid the previous generation once"
+                      (eql 2 (symbol-value (find-symbol "*RELOAD-PROBE-UNLOADS*"
+                                                        :evo.user)))))))
+      ;; Stop the surviving task before leaving, so it does not outlive the test.
+      (ignore-errors
+        (let ((stop (find-symbol "*RELOAD-PROBE-STOP*" :evo.user)))
+          (when stop (setf (symbol-value stop) t))))
+      (ignore-errors (evo.kernel:dispose-extension-owners
+                      :before (1+ evo.kernel::*extension-generation*)))
+      (ignore-errors (delete-file probe))
+      (ignore-errors (delete-file global-init))
+      (reset-user-registries)
+      (reset-settings)
+      (register-fixture-models))))
+
 (defun run-all ()
   (let ((*pass* 0) (*fail* 0))
     (test-sexpr-io)
@@ -5648,5 +6090,12 @@ five identical restarts, each reporting a different error than the real one."
     (test-image-tui-paste)
     (test-image-export)
     (test-image-read-tool)
+    (test-provider-request-ownership)
+    (test-abort-is-a-message)
+    (test-session-quiescence)
+    (test-tui-task-ownership)
+    (test-extension-ownership)
+    (test-runtime-catalog-atomicity)
+    (test-reload-generation-ordering)
     (format t "~%~d passed, ~d failed~%" *pass* *fail*)
     (if (zerop *fail*) 0 1)))

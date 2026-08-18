@@ -131,7 +131,10 @@ call repeatedly (idempotent) — from the command, and at load/session-start."
 
 ;; Rebuild the styler from settings when a session (re)starts — the journal
 ;; replays this file's load, and the styler lives in memory, not the journal.
-(evo:on :session-start (lambda (ev) (declare (ignore ev)) (bionic-apply)))
+;; NAMEd: this file is re-loaded on every /reload and on :load replay, and an
+;; anonymous hook would install another copy of itself each time.
+(evo:on :session-start (lambda (ev) (declare (ignore ev)) (bionic-apply))
+        :name :bionic-apply)
 
 ;; And install now, for the running session that just loaded us.
 (bionic-apply)

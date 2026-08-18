@@ -14,6 +14,84 @@
 (defvar *loaded-extension-paths* nil
   "Truenames loaded this boot; :load replay skips them.")
 
+;;; Extension ownership.
+;;;
+;;; Everything an extension file registers while it loads belongs to that file's
+;;; OWNER token: hooks, background tasks, function patches, and any cleanup it
+;;; registers itself.  A reload bumps the generation, so the previous
+;;; generation's registrations can be disposed wholesale instead of accumulating
+;;; — the difference between "load ran twice" and "the effect happens twice".
+
+(defvar *extension-generation* 0
+  "Bumped once per userspace boot.  Owners carry the generation they were
+created in; disposal targets owners from earlier generations.")
+
+(defstruct (extension-owner (:constructor %make-extension-owner))
+  path          ; namestring of the extension source, or NIL for the kernel
+  generation)
+
+(defvar *extension-disposers* nil
+  "Alist (OWNER . THUNK), newest first.  Run when OWNER's generation is
+disposed; each thunk must be idempotent and must not signal.")
+
+(defvar *extension-tasks* nil
+  "Alist (OWNER . TASK) of background tasks an extension owns.  A task is a
+plist (:name :thread :stop) — disposal calls :stop and then joins :thread, so a
+poller never outlives the generation that started it.")
+
+(defun register-extension-disposer (thunk &key (owner *extension-owner*))
+  "Register THUNK to run when OWNER's generation is disposed."
+  (push (cons owner thunk) *extension-disposers*)
+  thunk)
+
+(defun register-extension-task (&key name thread stop (owner *extension-owner*))
+  "Track a background THREAD owned by an extension.  STOP, when given, is
+called first and should make the thread return promptly."
+  (push (cons owner (list :name name :thread thread :stop stop))
+        *extension-tasks*)
+  thread)
+
+(defvar *task-stop-seconds* 5
+  "How long disposal waits for a tracked task's thread after calling its stop
+function.  A task that ignores its stop is abandoned with a warning naming it
+— one leaked thread and a loud message beat a reload that hangs forever.")
+
+(defun stop-extension-task (task)
+  "Stop TASK and reap its thread.  The join is bounded: an unbounded join
+would let one misbehaving extension freeze every future /reload with no
+diagnosis, which is an accident the kernel should not allow (extensions get to
+break things deliberately, not by forgetting to honour their own stop flag)."
+  (let ((stop (pget task :stop))
+        (thread (pget task :thread)))
+    (when stop (ignore-errors (funcall stop)))
+    (when thread
+      (loop repeat (ceiling (* *task-stop-seconds* 20))
+            while (bt:thread-alive-p thread)
+            do (sleep 0.05))
+      (if (bt:thread-alive-p thread)
+          (warn "Extension task ~s did not stop within ~ds; abandoning its thread"
+                (pget task :name) *task-stop-seconds*)
+          (ignore-errors (bt:join-thread thread))))))
+
+(defun dispose-extension-owners (&key (before *extension-generation*))
+  "Dispose every owner from a generation older than BEFORE: stop and join its
+tasks, then run its disposers, then withdraw its hooks.  Tasks go first — a
+disposer may free something a running task is still reading."
+  (flet ((stale-p (owner)
+           (and owner (< (extension-owner-generation owner) before))))
+    (let ((stale-tasks (remove-if-not #'stale-p *extension-tasks* :key #'car))
+          (stale-disposers (remove-if-not #'stale-p *extension-disposers* :key #'car)))
+      (setf *extension-tasks*
+            (remove-if #'stale-p *extension-tasks* :key #'car)
+            *extension-disposers*
+            (remove-if #'stale-p *extension-disposers* :key #'car))
+      (dolist (entry stale-tasks) (stop-extension-task (cdr entry)))
+      (dolist (entry stale-disposers) (ignore-errors (funcall (cdr entry))))
+      ;; Hooks last, and swept by generation rather than by the owners seen
+      ;; above: a hook may be the only thing an extension registered.
+      (remove-hooks-if (lambda (entry) (stale-p (hook-entry-owner entry))))))
+  t)
+
 (defun extension-fasl-path (source-path)
   "Return the expected fasl path for SOURCE-PATH (same dir, .fasl extension)."
   (make-pathname :type "fasl" :defaults source-path))
@@ -29,7 +107,12 @@ always recompiled (ECL may skip if the fasl is newer than the source)."
     (let ((fasl (extension-fasl-path path)))
       (when (probe-file fasl)
         (delete-file fasl)))
-    (let ((*package* (find-package :evo.user)))
+    (let ((*package* (find-package :evo.user))
+          ;; Everything this file registers belongs to this owner, so a later
+          ;; generation can withdraw exactly what this load installed.
+          (*extension-owner* (%make-extension-owner
+                              :path (namestring path)
+                              :generation *extension-generation*)))
       (handler-bind ((warning #'muffle-warning))
         (multiple-value-bind (fasl warnings-p failure-p)
             (compile-file path :verbose nil :print nil)
@@ -112,23 +195,102 @@ from source are cleaned up.")
             unless (member k keep :test #'equal)
             do (remhash k *tool-registry*)))))
 
+;;; The runtime catalog: everything a turn resolves against.  Reload builds a
+;;; new generation and installs it in one step; if the build dies partway, the
+;;; captured catalog goes back untouched, so a session never runs on a runtime
+;;; that is half old and half new.
+
+(defstruct (runtime-catalog (:constructor %make-runtime-catalog))
+  generation models providers apis tools commands settings prompt-notes)
+
+(defun capture-runtime-catalog ()
+  "Copy every registry a turn reads.  Copies, not aliases: the point is to be
+able to put this exact runtime back."
+  (%make-runtime-catalog
+   :generation *extension-generation*
+   :models (copy-list evo.provider::*models*)
+   :providers (mapcar (lambda (e) (cons (car e) (copy-list (cdr e))))
+                      evo.provider::*providers*)
+   :apis (copy-alist evo.provider::*apis*)
+   :tools (let ((copy (make-hash-table :test #'equal)))
+            (maphash (lambda (k v) (setf (gethash k copy) v)) *tool-registry*)
+            copy)
+   :commands (let ((copy (make-hash-table :test #'equal)))
+               (maphash (lambda (k v) (setf (gethash k copy) v)) evo::*commands*)
+               copy)
+   :settings (evo.util:capture-settings)
+   :prompt-notes (copy-alist *prompt-notes*)))
+
+(defun install-runtime-catalog (catalog)
+  "Make CATALOG the live runtime in one step."
+  (setf evo.provider::*models* (runtime-catalog-models catalog)
+        evo.provider::*providers* (runtime-catalog-providers catalog)
+        evo.provider::*apis* (runtime-catalog-apis catalog)
+        *prompt-notes* (runtime-catalog-prompt-notes catalog))
+  (clrhash *tool-registry*)
+  (maphash (lambda (k v) (setf (gethash k *tool-registry*) v))
+           (runtime-catalog-tools catalog))
+  (clrhash evo::*commands*)
+  (maphash (lambda (k v) (setf (gethash k evo::*commands*) v))
+           (runtime-catalog-commands catalog))
+  (evo.util:restore-settings (runtime-catalog-settings catalog))
+  (incf *registry-generation*)
+  catalog)
+
 (defun boot-userspace (&key journal (cwd (uiop:getcwd)))
-  "Reset user registries and settings, evaluate init files (global then
-project — an override is just a later call), then load extension
-directories, then evaluate post-init files (global then project) so
-extensions can register models before post-init picks a default.
-Init files are environment, not history: re-evaluated every
-boot, never journaled (unlike extension :load entries), so the reset makes
-this idempotent for /reload and repeated boots."
-  (evo.util:reset-settings)
-  (evo.provider:reset-user-registries)
-  (restore-extension-registries)
-  (load-init-file (merge-pathnames "init.lisp" (evo-home)))
-  (load-init-file (merge-pathnames "init.lisp" (project-evo-dir cwd)))
-  (snapshot-extension-registries)
-  (boot-extensions :journal journal :cwd cwd)
-  (load-init-file (merge-pathnames "post-init.lisp" (evo-home)))
-  (load-init-file (merge-pathnames "post-init.lisp" (project-evo-dir cwd))))
+  "Build a new userspace generation and install it.
+
+Order: settings and user registries reset, init files (global then project — an
+override is just a later call), extension directories, then post-init files, so
+extensions can register models before post-init picks a default.  Init files are
+environment, not history: re-evaluated every boot, never journaled.
+
+The registry build is all-or-nothing: a failure anywhere restores the previous
+catalog rather than leaving a half-built runtime.
+
+DISPOSAL HAPPENS FIRST, before a line of the new generation is loaded.  That
+ordering is not a detail: a reloaded file reuses the same package and the same
+globals, so an old generation's stop function writes the very variable the new
+generation's task reads.  Disposing afterwards therefore lets the outgoing
+generation reach into the incoming one — in practice, the old poller's `stop`
+silently killing the new poller.  Generations must not overlap.
+
+The cost is that a build which then fails leaves the previous generation's hooks
+and tasks withdrawn (its registries are restored), and the failed build's own
+registrations swept the same way.  That is the right way round: a
+stale-but-consistent runtime with no extensions beats two generations of the
+same extension running at once, and fixing the file and reloading again is the
+normal repair."
+  (let ((previous (capture-runtime-catalog))
+        (previous-generation *extension-generation*)
+        (installed nil))
+    (unwind-protect
+         (progn
+           (incf *extension-generation*)
+           ;; Retire the outgoing generation before the incoming one exists.
+           (dispose-extension-owners :before *extension-generation*)
+           (evo.util:reset-settings)
+           (evo.provider:reset-user-registries)
+           (restore-extension-registries)
+           (load-init-file (merge-pathnames "init.lisp" (evo-home)))
+           (load-init-file (merge-pathnames "init.lisp" (project-evo-dir cwd)))
+           (snapshot-extension-registries)
+           (boot-extensions :journal journal :cwd cwd)
+           (load-init-file (merge-pathnames "post-init.lisp" (evo-home)))
+           (load-init-file (merge-pathnames "post-init.lisp" (project-evo-dir cwd)))
+           (setf installed t)
+           (incf *registry-generation*)
+           t)
+      (unless installed
+        ;; The failed build may itself have registered hooks and started
+        ;; tasks.  Sweep them BEFORE rolling the counter back: they carry the
+        ;; aborted generation's number, which after the rollback would read as
+        ;; newer-than-live and dodge every later disposal — each retried
+        ;; reload would then stack another copy of whatever loaded before the
+        ;; failure.
+        (dispose-extension-owners :before (1+ *extension-generation*))
+        (setf *extension-generation* previous-generation)
+        (install-runtime-catalog previous)))))
 
 (defun replay-loads (state &key journal)
   "Replay a resumed session's :load entries against the files on disk.
@@ -183,10 +345,35 @@ resolved by the CLI's --command flag and by future frontends.")
   (setf (gethash name *commands*) (list :fn fn :description description))
   name)
 
-(defun on (event fn)
+(defun on (event fn &key name)
   "Subscribe FN to a kernel event: :session-start :turn-end :tool-call ...
-A :tool-call hook may return (:block t :reason ...) or (:arguments ...)."
-  (evo.kernel:add-hook event fn))
+A :tool-call hook may return (:block t :reason ...) or (:arguments ...).
+
+Pass NAME from any file a reload can re-run: a named hook REPLACES the previous
+registration of that name, while an anonymous one appends, so an unnamed hook in
+a reloadable extension fires once more after every reload.  Either way the hook
+belongs to the loading extension and is withdrawn when its generation is
+disposed."
+  (evo.kernel:add-hook event fn :name name))
+
+(defun on-unload (thunk)
+  "Run THUNK when the calling extension's generation is disposed (a /reload, or
+the extension being removed).  Use it to undo anything the kernel cannot see:
+a function patch, a cache, an external resource."
+  (evo.kernel:register-extension-disposer thunk))
+
+(defun spawn-task (&key name run stop)
+  "Start RUN in a background thread owned by the calling extension.
+
+The thread is tracked: on reload STOP is called and the thread is JOINED before
+the new generation loads, so a poller cannot outlive the extension that started
+it (the failure mode being two generations of the same poller running at once).
+RUN must return promptly once STOP has been called — a thread still alive after
+EVO.KERNEL:*TASK-STOP-SECONDS* is abandoned with a warning naming the task,
+because the alternative is a reload that hangs forever."
+  (let ((thread (bt:make-thread run :name (or (and name (string name)) "evo-extension-task"))))
+    (evo.kernel:register-extension-task :name name :thread thread :stop stop)
+    thread))
 
 (defun register-prompt-note (name text)
   "Append TEXT (a self-contained markdown snippet) to every system prompt,

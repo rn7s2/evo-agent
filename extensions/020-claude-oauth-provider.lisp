@@ -220,15 +220,30 @@ turns: one with text/thinking blocks and one with tool_use blocks."
         (with-open-file (in path :direction :input)
           (read in))))))
 
+(defvar *claude-oauth-token-lock* (bt:make-lock "claude-oauth-token")
+  "Serializes token refresh and persistence.  /claude-oauth:refresh, an
+auto-refresh from AUTH-HEADERS, and a login can all land at once; without this
+the last writer wins and a newer token is replaced by an older one.")
+
 (defun claude-oauth--write-tokens (access-token refresh-token &optional expires-at refresh-token-expires-at)
-  (let ((path (claude-oauth--token-file)))
+  "Persist the token set atomically: write a temporary file in the same
+directory, then rename over the target, so a concurrent reader sees either the
+old file or the new one — never a half-written one."
+  (let* ((path (claude-oauth--token-file))
+         (temporary (merge-pathnames (format nil "token.~a.tmp" (random 100000000))
+                                     (uiop:pathname-directory-pathname path))))
     (ensure-directories-exist path)
-    (with-open-file (out path :direction :output :if-exists :supersede
-                             :if-does-not-exist :create)
-      (prin1 (list :access-token access-token
-                   :refresh-token refresh-token
-                   :expires-at expires-at
-                   :refresh-token-expires-at refresh-token-expires-at) out))
+    (unwind-protect
+         (progn
+           (with-open-file (out temporary :direction :output
+                                          :if-exists :supersede
+                                          :if-does-not-exist :create)
+             (prin1 (list :access-token access-token
+                          :refresh-token refresh-token
+                          :expires-at expires-at
+                          :refresh-token-expires-at refresh-token-expires-at) out))
+           (uiop:rename-file-overwriting-target temporary path))
+      (when (probe-file temporary) (ignore-errors (delete-file temporary))))
     path))
 
 (defun claude-oauth--resolve-token ()
@@ -255,14 +270,28 @@ before it expires.  Set to NIL to rely on manual /claude-oauth:refresh.")
 
 (defun claude-oauth--refresh-and-store (refresh-token)
   "Refresh the access token with REFRESH-TOKEN, persist the returned token set,
-and return the fresh access token."
-  (let ((tokens (claude-oauth--refresh-token refresh-token)))
-    (claude-oauth--write-tokens (getf tokens :access-token)
-                                (getf tokens :refresh-token)
-                                (getf tokens :expires-at)
-                                (getf tokens :refresh-token-expires-at))
-    (format *error-output* "~&[claude-oauth] Access token auto-refreshed.~%")
-    (getf tokens :access-token)))
+and return the fresh access token.
+
+Serialized, and re-reads the stored token under the lock first: while this call
+waited, another thread may already have refreshed, in which case spending the
+(single-use) refresh token again would invalidate the newer one."
+  (bt:with-lock-held (*claude-oauth-token-lock*)
+    (let* ((stored (claude-oauth--read-tokens))
+           (fresh-enough
+             (and stored
+                  (getf stored :access-token)
+                  (getf stored :expires-at)
+                  (> (floor (/ (- (getf stored :expires-at) (claude-oauth--now-ms)) 1000))
+                     *claude-oauth-refresh-before-expiry*))))
+      (if fresh-enough
+          (getf stored :access-token)   ; somebody else already refreshed
+          (let ((tokens (claude-oauth--refresh-token refresh-token)))
+            (claude-oauth--write-tokens (getf tokens :access-token)
+                                        (getf tokens :refresh-token)
+                                        (getf tokens :expires-at)
+                                        (getf tokens :refresh-token-expires-at))
+            (format *error-output* "~&[claude-oauth] Access token auto-refreshed.~%")
+            (getf tokens :access-token))))))
 
 (defun claude-oauth--ensure-valid-token ()
   "Return the current OAuth access token, refreshing it first if needed.
@@ -427,6 +456,12 @@ or NIL."
            (url (substitute #\_ #\/ (substitute #\- #\+ b64))))
       ;; Strip trailing = padding
       (string-right-trim '(#\=) url))))
+
+(define-condition claude-oauth--login-cancelled (serious-condition) ()
+  (:documentation "Interrupts a login thread parked on the callback server, so
+disposal can join it without waiting out the browser timeout.  Same pattern as
+the provider transport's cancellation: the interrupt unwinds the owner thread,
+so the listening socket is closed by the UNWIND-PROTECT that opened it."))
 
 (defun claude-oauth--start-callback-server (port)
   "Start a TCP server on PORT that accepts one connection, reads the HTTP
@@ -702,25 +737,43 @@ Returns a list of registered model-id strings."
                      (quri:url-encode *claude-oauth-scope*)
                      (quri:url-encode state)
                      (quri:url-encode code-challenge))))
-      ;; Run the blocking callback server + token exchange in a background
-      ;; thread so the main event loop is not frozen.
-      (bt:make-thread
-        (lambda ()
-          (let ((code (claude-oauth--start-callback-server port)))
-            (cond
-              ((null code)
-               (format *error-output* "~&[claude-oauth] Login timed out.~%~%~%~%~%~%"))
-              (t
-               (handler-case
-                   (let ((tokens (claude-oauth--exchange-code code code-verifier redirect-uri state)))
-                     (claude-oauth--write-tokens (getf tokens :access-token)
-                                                 (getf tokens :refresh-token)
-                                                 (getf tokens :expires-at)
-                                                 (getf tokens :refresh-token-expires-at))
-                     (format *error-output* "~&[claude-oauth] Login successful. Token stored.~%~%~%~%~%~%"))
-                 (error (e)
-                   (format *error-output* "~&[claude-oauth] Login failed: ~a~%~%~%~%~%~%" e)))))))
-        :name "claude-oauth-login")
+      ;; Run the blocking callback server + token exchange as a TRACKED task, so
+      ;; a login still waiting on the browser is stopped and joined by a
+      ;; /reload instead of being left holding the callback port.  The stop
+      ;; interrupts the login thread with a private condition — the same
+      ;; owner-side cancellation the provider transport uses — so the callback
+      ;; socket is closed by its own thread's unwind and disposal never has to
+      ;; wait out the 120s browser timeout.
+      (let ((login-thread nil))
+        (setf login-thread
+              (evo:spawn-task
+               :name :claude-oauth-login
+               :run (lambda ()
+                      (handler-case
+                          (let ((code (claude-oauth--start-callback-server port)))
+                            (cond
+                              ((null code)
+                               (format *error-output* "~&[claude-oauth] Login timed out.~%~%~%~%~%~%"))
+                              (t
+                               (handler-case
+                                   (let ((tokens (claude-oauth--exchange-code code code-verifier redirect-uri state)))
+                                     (bt:with-lock-held (*claude-oauth-token-lock*)
+                                       (claude-oauth--write-tokens (getf tokens :access-token)
+                                                                   (getf tokens :refresh-token)
+                                                                   (getf tokens :expires-at)
+                                                                   (getf tokens :refresh-token-expires-at)))
+                                     (format *error-output* "~&[claude-oauth] Login successful. Token stored.~%~%~%~%~%~%"))
+                                 (error (e)
+                                   (format *error-output* "~&[claude-oauth] Login failed: ~a~%~%~%~%~%~%" e))))))
+                        (claude-oauth--login-cancelled ()
+                          (format *error-output* "~&[claude-oauth] Login cancelled by userspace reload.~%~%~%~%~%~%"))))
+               :stop (lambda ()
+                       (let ((thread login-thread))
+                         (when (and thread (bt:thread-alive-p thread))
+                           (ignore-errors
+                             (bt:interrupt-thread
+                              thread
+                              (lambda () (error 'claude-oauth--login-cancelled))))))))))
       ;; Open the browser immediately.
       (claude-oauth--open-browser auth-url)
       ;; Return immediately so the UI is not blocked.
@@ -737,18 +790,18 @@ Returns a list of registered model-id strings."
       (if (not refresh)
           "No refresh token: set CLAUDE_OAUTH_REFRESH_TOKEN or run /claude-oauth:login first."
           (progn
-            (bt:make-thread
-              (lambda ()
-                (handler-case
-                    (let ((tokens (claude-oauth--refresh-token refresh)))
-                      (claude-oauth--write-tokens (getf tokens :access-token)
-                                                  (getf tokens :refresh-token)
-                                                  (getf tokens :expires-at)
-                                                  (getf tokens :refresh-token-expires-at))
-                      (format *error-output* "~&[claude-oauth] Token refreshed and stored.~%~%~%~%~%~%"))
-                  (error (e)
-                    (format *error-output* "~&[claude-oauth] Token refresh failed: ~a~%~%~%~%~%~%" e))))
-              :name "claude-oauth-refresh")
+            ;; Tracked, and sharing the same refresh path as auto-refresh, so a
+            ;; manual /claude-oauth:refresh cannot race an automatic one into
+            ;; spending the same single-use refresh token twice.
+            (evo:spawn-task
+             :name :claude-oauth-refresh
+             :run (lambda ()
+                    (handler-case
+                        (progn
+                          (claude-oauth--refresh-and-store refresh)
+                          (format *error-output* "~&[claude-oauth] Token refreshed and stored.~%~%~%~%~%~%"))
+                      (error (e)
+                        (format *error-output* "~&[claude-oauth] Token refresh failed: ~a~%~%~%~%~%~%" e)))))
             "Refreshing token in background... Check stderr for status."))))
   :description "Refresh the Claude OAuth access token")
 

@@ -96,7 +96,9 @@ point.
   suffices.
 - **Hand-rolled SSE streaming** over one shared framing loop; per-API dispatch.
   Terminal-event guards, tolerant partial-JSON tool-argument parsing, and
-  cooperative abort (flag + socket close, never `interrupt-thread`).
+  owner-thread cancellation: a request is stopped by interrupting the thread
+  that owns its socket, and always joined, so a cancelled request is one that
+  has actually stopped.
 - **Handoff pass** at request build: same-model thinking replays verbatim;
   cross-model thinking degrades gracefully; orphaned tool calls get synthetic
   error results; errored and aborted turns are elided; images degrade to a
@@ -197,11 +199,15 @@ This is the evolution engine. Four mechanisms make it work:
    tool can load code from inside its own execution; the new definition applies
    from the next call, so no trampoline or queued reload is needed.
 2. **Registration API.** `(evo:register-tool ...)`, `(evo:register-command
-   ...)`, and `(evo:on <event> fn)`. Mutations refresh the tool registry and
-   rebuild the system prompt, so a newly registered tool is callable on the next
-   request. The `:tool-call` hook may mutate arguments or return
-   `(:block t :reason ...)` — the single interception point that permission
-   gates, read-only policies, and sandboxing all build on.
+   ...)`, and `(evo:on <event> fn :name ...)`. Mutations refresh the tool
+   registry and rebuild the system prompt, so a newly registered tool is
+   callable on the next request. The `:tool-call` hook may mutate arguments or
+   return `(:block t :reason ...)` — the single interception point that
+   permission gates, read-only policies, and sandboxing all build on.
+   Registrations belong to the loading file's generation, so `/reload` withdraws
+   exactly what that file installed; background loops and function patches
+   declare themselves with `(evo:spawn-task ...)` and `(evo:on-unload ...)` so
+   they are stopped, joined and undone rather than accumulating.
 3. **Filesystem convention.** `~/.evo/extensions/` and
    `<project>/.evo/extensions/` load at boot and are writable by the agent.
    File name is load order: `NNN-name.lisp`, `000`–`099` foundations,

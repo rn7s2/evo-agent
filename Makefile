@@ -65,6 +65,7 @@ integration: build
 # status line, and switching the system prompt's language.
 tui-test: build
 	tests/tui.exp
+	tests/interrupt.exp
 	tests/model-provider.exp
 	tests/image-paste.exp
 	tests/paste.exp

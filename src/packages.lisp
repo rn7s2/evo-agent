@@ -33,6 +33,7 @@
            #:evo-home #:project-evo-dir #:encode-cwd #:ensure-directory
            #:write-sexpr-line #:read-sexpr #:read-sexpr-stream #:validate-journal-value
            #:setting #:set-setting #:reset-settings #:*settings*
+           #:capture-settings #:restore-settings
            #:cat #:normalize-newlines #:crlf-newlines #:crlf-p
            #:string-join #:string-prefix-p #:truncate-string
            #:count-substring #:string-replace
@@ -93,8 +94,10 @@
            #:run #:run-until-settled #:make-agent #:agent
            #:agent-journal #:agent-events-cb #:agent-abort-flag
            #:agent-model-override #:agent-thinking-override
-           #:request-abort #:with-abort-cleanup
+           #:request-abort #:reset-agent-run-control #:with-abort-cleanup
+           #:*executing-agent*
            #:queue-steering #:queue-followup #:emit-event #:steering-pending-p
+           #:agent-pending-work-p #:reset-agent-session-state
            ;; prompt, skills, templates
            #:build-system-prompt #:register-prompt-note
            ;; prompt language packs
@@ -105,9 +108,15 @@
            #:available-skills #:find-skill
            #:find-template #:expand-template
            ;; extension api internals
-           #:run-hooks #:add-hook #:load-extension* #:boot-extensions
-           #:boot-userspace #:load-init-file
+           #:run-hooks #:add-hook #:event-hook-functions
+           #:remove-hooks-if #:load-extension*
+           #:boot-extensions #:boot-userspace #:load-init-file
            #:replay-loads #:lock-kernel-packages
+           ;; extension ownership + runtime generations
+           #:*extension-owner* #:*extension-generation*
+           #:register-extension-disposer #:register-extension-task
+           #:dispose-extension-owners #:*task-stop-seconds*
+           #:capture-runtime-catalog #:install-runtime-catalog
            #:effective-model-id #:effective-model-provider #:effective-thinking
            ;; goal
            #:current-goal #:goal-continuation-message #:goal-continuation-for
@@ -135,7 +144,8 @@
                 #:default-provider-key #:default-base-url #:default-api-key-env
                 #:provider-error)
   (:export #:cat #:normalize-newlines #:crlf-newlines #:with-proxy
-           #:register-tool #:register-command #:on #:load-extension
+           #:register-tool #:register-command #:on #:on-unload #:spawn-task
+           #:load-extension
            #:register-prompt-note #:register-prompt-language #:set-language
            #:register-model #:register-provider #:set-setting #:setting
            #:set-active-tools #:all-tools #:*agent* #:current-goal
@@ -178,6 +188,7 @@
            ;; Status line composition — the supported way for an extension to
            ;; claim a piece of the bottom line (see docs/extension-api.md).
            #:add-status-segment #:remove-status-segment #:status-segments
+           #:request-repaint
            ;; Math rendering seam — an extension installs a rasterizer here
            ;; (see extensions/300-latex-math.lisp and docs/extension-api.md).
            #:register-math-renderer #:*math-renderer* #:*math-enabled*

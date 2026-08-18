@@ -489,3 +489,10 @@ the validated vocabulary, plain prin1 output re-reads exactly."
 
 (defun reset-settings ()
   (setf *settings* nil))
+
+(defun capture-settings ()
+  "A copy of the settings plist, for restoring a runtime generation wholesale."
+  (copy-list *settings*))
+
+(defun restore-settings (settings)
+  (setf *settings* (copy-list settings)))

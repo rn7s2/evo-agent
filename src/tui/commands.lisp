@@ -89,7 +89,11 @@ ctrl+v."
   t)
 
 (defun switch-journal (tui journal &key note)
-  (setf (agent-journal (tui-agent tui)) journal)
+  (unless (session-quiescent-p tui)
+    (error "Cannot switch journals while the current session owns pending work"))
+  (let ((agent (tui-agent tui)))
+    (setf (agent-journal agent) journal)
+    (reset-agent-session-state agent))
   (replay-loads (fold-state journal))
   (run-hooks :session-start
              (list :agent (tui-agent tui)
@@ -149,7 +153,7 @@ ctrl+v."
                         (resume-session-summary s)))))
 
 (defun resume-command (tui)
-  (when (require-idle tui "/resume")
+  (when (require-session-quiescent tui "/resume")
     (let ((sessions (list-sessions)))
       (if (null sessions)
           (scroll tui (dim "no sessions for this directory"))
@@ -157,15 +161,20 @@ ctrl+v."
            tui "resume session:"
            (resume-select-items sessions)
            (lambda (path)
-             (switch-journal tui (open-journal path)
-                             :note (format nil "resumed ~a" path))
-             (show-history-tail tui)
-             ;; An active goal in a resumed session picks itself back up.
-             (let ((goal (current-goal (tui-agent tui))))
-               (when (and goal (eq (pget goal :status) :active))
-                 (queue-steering (tui-agent tui)
-                                 (goal-continuation-for (tui-agent tui) goal))
-                 (start-worker tui)))))))
+             ;; Re-check at pick time: the picker is modal for keys, but a
+             ;; settling task or a model-gated submit can land between opening
+             ;; it and choosing.  (The command frame is long gone by now, so
+             ;; this is a plain guard, never a non-local exit.)
+             (when (require-session-quiescent tui "/resume")
+               (switch-journal tui (open-journal path)
+                               :note (format nil "resumed ~a" path))
+               (show-history-tail tui)
+               ;; An active goal in a resumed session picks itself back up.
+               (let ((goal (current-goal (tui-agent tui))))
+                 (when (and goal (eq (pget goal :status) :active))
+                   (queue-steering (tui-agent tui)
+                                   (goal-continuation-for (tui-agent tui) goal))
+                   (start-worker tui))))))))
     t))
 
 (defun entry-label (entry)
@@ -196,7 +205,9 @@ ctrl+v."
       (t (format nil "~(~a~)" type)))))
 
 (defun tree-command (tui)
-  (when (require-idle tui "/tree")
+  ;; Moving the leaf re-parents what the next turn answers, so queued input
+  ;; must not survive the move: it was typed against the old leaf.
+  (when (require-session-quiescent tui "/tree")
     (let* ((journal (agent-journal (tui-agent tui)))
            (path (and (journal-leaf-id journal) (entry-path journal))))
       (if (null path)
@@ -208,22 +219,23 @@ ctrl+v."
                  collect (cons (format nil "~3d. ~a" i (entry-label entry))
                                (pget entry :id)))
            (lambda (id)
-             (let ((entry (find-entry journal id)))
-               (cond
-                 ((and (eq (pget entry :type) :message)
-                       (eq (pget (pget entry :message) :role) :user))
-                  ;; Selecting a user message: leaf -> its parent, text into
-                  ;; the editor (edit-and-resubmit = new branch).
-                  (setf (journal-leaf-id journal) (pget entry :parent-id))
-                  (let ((text (pget (find :text (pget (pget entry :message) :content)
-                                          :key (lambda (b) (pget b :type)))
-                                    :text)))
-                    (when text (eb-set-text (tui-editor tui) text)))
-                  (scroll tui (yellow "⎌ leaf moved — edit and resubmit to branch")))
-                 (t
-                  (setf (journal-leaf-id journal) id)
-                  (scroll tui (yellow (format nil "⎌ leaf moved to ~a" id)))))
-               (refresh-goal tui))))))
+             (when (require-session-quiescent tui "/tree")
+               (let ((entry (find-entry journal id)))
+                 (cond
+                   ((and (eq (pget entry :type) :message)
+                         (eq (pget (pget entry :message) :role) :user))
+                    ;; Selecting a user message: leaf -> its parent, text into
+                    ;; the editor (edit-and-resubmit = new branch).
+                    (setf (journal-leaf-id journal) (pget entry :parent-id))
+                    (let ((text (pget (find :text (pget (pget entry :message) :content)
+                                            :key (lambda (b) (pget b :type)))
+                                      :text)))
+                      (when text (eb-set-text (tui-editor tui) text)))
+                    (scroll tui (yellow "⎌ leaf moved — edit and resubmit to branch")))
+                   (t
+                    (setf (journal-leaf-id journal) id)
+                    (scroll tui (yellow (format nil "⎌ leaf moved to ~a" id)))))
+                 (refresh-goal tui)))))))
     t))
 
 (defun set-model (tui model)
@@ -474,24 +486,28 @@ already-painted scrollback keeps its colours."
         ((cmd "tree") (tree-command tui))
         ((cmd "resume" "sessions") (resume-command tui))
         ((cmd "fork")
-         (when (require-idle tui "/fork")
+         (when (require-session-quiescent tui "/fork")
            (let ((path (fork-session (agent-journal agent))))
              (switch-journal tui (open-journal path)
                              :note (format nil "forked to ~a" path))))
          t)
         ((cmd "new")
-         (when (require-idle tui "/new")
+         (when (require-session-quiescent tui "/new")
            (switch-journal tui (make-session-journal) :note "new session"))
          t)
         ((cmd "export") (export-command tui args))
         ((cmd "reload")
-         (boot-userspace :journal (agent-journal agent))
-         (refresh-goal tui)             ; model registry may have changed
-         (scroll tui (dim "userspace reloaded (init + extensions + post-init)"))
-         ;; Steering blocked on the model gate re-runs it; still-broken
-         ;; config re-scrolls the error instead of silently sitting.
-         (when (and (steering-pending-p agent) (not (tui-running tui)))
-           (start-worker tui))
+         ;; Reload rebuilds models, providers, APIs, tools, commands and hooks.
+         ;; A run holding the old generation must not observe the new one
+         ;; halfway through, so reload waits for an idle session.
+         (when (require-idle tui "/reload")
+           (boot-userspace :journal (agent-journal agent))
+           (refresh-goal tui)           ; model registry may have changed
+           (scroll tui (dim "userspace reloaded (init + extensions + post-init)"))
+           ;; Steering blocked on the model gate re-runs it; still-broken
+           ;; config re-scrolls the error instead of silently sitting.
+           (when (steering-pending-p agent)
+             (start-worker tui)))
          t)
         (t nil)))))
 
@@ -604,14 +620,13 @@ already-painted scrollback keeps its colours."
                           (ignore-errors
                             (scroll tui (red (format nil "✗ tui error: ~a" e))))))
                       (sleep 0.02)))
-           ;; Shut down: interrupt any in-flight run cooperatively and unblock it.
-           (when (tui-running tui)
-             (request-abort agent)
-             (loop repeat 250
-                   while (tui-running tui)
-                   do (dolist (event (drain-events tui))
-                        (handle-agent-event tui event))
-                      (sleep 0.02)))
+           ;; Shut down: ask the task to stop, then keep draining until its
+           ;; :worker-done arrives — that handler is what joins the thread, so
+           ;; draining here is how the task is actually reaped rather than
+           ;; merely abandoned.
+           (unless (shutdown-task tui)
+             (ignore-errors
+               (scroll tui (dim "a background task did not stop in time; exiting anyway"))))
            (bt:with-lock-held (*tui-lock*)
              (emit-scrollback (dim "bye.")))
            0)

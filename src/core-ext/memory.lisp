@@ -286,8 +286,8 @@
 (evo:register-command "global-memory" #'global-memory-command
   :description "show global user memory or ask the agent to refine it")
 
-(defvar *session-hook-installed* nil)
-
-(unless *session-hook-installed*
-  (evo:on :session-start (lambda (event) (inject-session-memory event)))
-  (setf *session-hook-installed* t))
+;; NAMEd rather than guarded by a load-once flag: the name is what makes the
+;; registration idempotent, and unlike the flag it survives this file being
+;; recompiled (which reinitialises the flag but not the hook list).
+(evo:on :session-start (lambda (event) (inject-session-memory event))
+        :name :inject-session-memory)

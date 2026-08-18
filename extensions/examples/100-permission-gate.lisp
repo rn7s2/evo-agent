@@ -21,4 +21,5 @@
                     when (search bad command)
                       return (list :block t
                                    :reason (format nil "permission-gate: '~a' matches denied pattern '~a'"
-                                                   command bad)))))))
+                                                   command bad))))))
+        :name :permission-gate)

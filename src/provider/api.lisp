@@ -70,9 +70,17 @@ level-only mapping, which is what a simple adapter needs."))
   (:documentation "Execute one request and return the result plist.  The
  default method (core.lisp) streams SSE over dexador and delegates to
  PARSE-STREAM; override for a non-SSE framing.  May signal transport
- errors — the retry loop in call-provider classifies them.  ABORT-CLEANUP,
- when supplied, registers a cleanup function that should unblock the
- current request (usually by closing its stream)."))
+ errors — the retry loop in call-provider classifies them.
+
+ OWNERSHIP: whichever thread opens the connection owns it and is the only one
+ allowed to close it.  The default method gives the request its own thread and
+ cancels by interrupting THAT thread, so the socket is closed by the same
+ unwind-protect that opened it, and the request is joined before this function
+ returns.  An override must not hand its stream to another thread to close.
+
+ ABORT-CLEANUP, when supplied, registers a thunk that runs on the WORKER thread
+ at its next abort safe point; use it to flip a flag your own loop polls, not to
+ tear down a resource owned by the request."))
 
 ;;; Self-seeding defaults: base URL and canonical API-key env var are
 ;;; properties of the API, seeded into the provider registry so an env key
