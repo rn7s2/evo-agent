@@ -5034,6 +5034,43 @@ selection journals the provider, and every resolution point honours it."
       (check "openai: no vision degrades the image to text"
              (and (equal (evo.provider::jget block "type") "input_text")
                   (search "image not shown" (evo.provider::jget block "text")))))
+    ;; Request-size guard: keep the latest image and omit older image payloads
+    ;; before the provider rejects the whole HTTP request as too large.
+    (let* ((evo.provider::*max-request-image-data-chars* 7)
+           (old (evo.media:make-image-block :data "OLDDATA" :media-type "image/png"
+                                            :name "old.png" :bytes 7))
+           (new (evo.media:make-image-block :data "NEWDATA" :media-type "image/png"
+                                            :name "new.png" :bytes 7))
+           (limited-history (list (list :role :user :content (list old))
+                                  (list :role :user :content (list new))))
+           (req (com.inuoe.jzon:stringify
+                 (com.inuoe.jzon:parse
+                  (build-request (find-api :anthropic-messages)
+                                 :model seeing :system "sys"
+                                 :messages limited-history :tools nil
+                                 :thinking-level nil)))))
+      (check "handoff: request-size guard keeps the newest image"
+             (and (search "NEWDATA" req)
+                  (not (search "OLDDATA" req))
+                  (search "old.png" req)
+                  (search "request size" req))))
+    ;; Anthropic cache breakpoints should stop before image-bearing messages:
+    ;; caching does not make the HTTP body smaller, and cached screenshot bytes
+    ;; make the cache prefix unstable and expensive.
+    (let* ((req (com.inuoe.jzon:parse
+                 (build-request (find-api :anthropic-messages)
+                                :model seeing :system "sys"
+                                :messages (list (list :role :user
+                                                       :content (list (list :type :text :text "before")
+                                                                      image)))
+                                :tools nil :thinking-level nil)))
+           (content (evo.provider::jget (aref (evo.provider::jget req "messages") 0)
+                                        "content"))
+           (before (aref content 0))
+           (image-json (aref content 1)))
+      (check "anthropic: cache breakpoint stays before image suffix"
+             (and (evo.provider::jget before "cache_control")
+                  (null (evo.provider::jget image-json "cache_control")))))
     ;; The registry default: a model registered without the flag can see.
     (check "registry: vision defaults on, and :vision nil is honoured"
            (and (model-vision-p '(:id "x"))

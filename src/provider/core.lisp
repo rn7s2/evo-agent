@@ -68,7 +68,15 @@
 ;;;  - errored/aborted assistant turns are elided
 ;;;  - same-model thinking replays verbatim; cross-model thinking is dropped
 ;;;  - images degrade to text for a model without vision
+;;;  - even with vision, old images may be omitted when inline base64 would make
+;;;    the HTTP request too large; latest images win
 ;;;  - orphaned tool calls get synthetic error results
+
+(defparameter *max-request-image-data-chars* (* 8 1024 1024)
+  "Maximum total base64 payload from image blocks in one provider request.
+Images are journaled by value, so repeated screenshots can exceed HTTP request
+size limits long before token/context accounting says to compact.  This budget
+is applied only to the request copy: the journal keeps the original blocks.")
 
 (defun message-role (m) (pget m :role))
 (defun message-content (m) (pget m :content))
@@ -83,6 +91,38 @@ rather than reading a conversation with a hole in it."
         :text (format nil "[image not shown: ~a — the current model has no vision]"
                       (pget block :name "image"))))
 
+(defun image-request-size-placeholder-block (block)
+  "What an image degrades to when it is too old to fit in the request body."
+  (list :type :text
+        :text (format nil "[image omitted to keep the request size under the limit: ~a]"
+                      (pget block :name "image"))))
+
+(defun image-data-chars (block)
+  (let ((data (and (eq (pget block :type) :image) (pget block :data))))
+    (if (stringp data) (length data) 0)))
+
+(defun enforce-image-request-budget (messages)
+  "Replace older image blocks with placeholders until the request-size budget fits.
+This rewrites only the request copy.  Chronologically latest images are kept so
+`read` followed by the next model turn still shows the picture the model just
+asked to inspect."
+  (let ((left *max-request-image-data-chars*))
+    (nreverse
+     (loop for message in (reverse messages)
+           collect
+           (if (find :image (message-content message) :key (lambda (b) (pget b :type)))
+               (pput message :content
+                     (nreverse
+                      (loop for block in (reverse (message-content message))
+                            collect
+                            (let ((n (image-data-chars block)))
+                              (cond ((zerop n) block)
+                                    ((<= n left)
+                                     (decf left n)
+                                     block)
+                                    (t (image-request-size-placeholder-block block)))))))
+               message)))))
+
 (defun degrade-images (content)
   (mapcar (lambda (block)
             (if (eq (pget block :type) :image) (image-placeholder-block block) block))
@@ -93,7 +133,7 @@ rather than reading a conversation with a hole in it."
 image blocks to text, so a session that collected screenshots survives a
 switch to a text-only model instead of failing every turn from then on."
   (let* ((messages (if vision
-                       messages
+                       (enforce-image-request-budget messages)
                        (mapcar (lambda (m)
                                  (if (find :image (message-content m) :key (lambda (b) (pget b :type)))
                                      (pput m :content (degrade-images (message-content m)))

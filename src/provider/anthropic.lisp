@@ -107,15 +107,36 @@ Consecutive user/tool-result messages merge into a single user message."
            (jobj "role" (car pair) "content" (coerce (cdr pair) 'vector)))
          (nreverse out))))
 
+(defun json-tree-has-image-p (value)
+  "Whether VALUE, already in provider JSON shape, contains an image block."
+  (typecase value
+    (hash-table
+     (or (equal (gethash "type" value) "image")
+         (loop for v being the hash-values of value
+               thereis (json-tree-has-image-p v))))
+    (vector
+     (loop for v across value thereis (json-tree-has-image-p v)))
+    (t nil)))
+
 (defun add-cache-control (json-messages)
-  "Mark the last block of the last message as a cache breakpoint."
-  (let ((last-msg (and (plusp (length json-messages))
-                       (aref json-messages (1- (length json-messages))))))
-    (when last-msg
-      (let ((content (gethash "content" last-msg)))
-        (when (plusp (length content))
-          (setf (gethash "cache_control" (aref content (1- (length content))))
-                (jobj "type" "ephemeral"))))))
+  "Mark a message cache breakpoint.
+
+If the request contains actual image blocks, stop the message-level breakpoint
+immediately before the first image-bearing content block.  Prompt caching does
+not shrink the HTTP JSON body, and caching megabytes of screenshot pixels churns
+the cache for little benefit.  System prompt and tool-schema breakpoints still
+apply."
+  (let ((candidate nil))
+    (loop named scan
+          for msg across json-messages
+          for content = (gethash "content" msg)
+          do (when content
+               (loop for block across content
+                     do (when (json-tree-has-image-p block)
+                          (return-from scan))
+                        (setf candidate block))))
+    (when candidate
+      (setf (gethash "cache_control" candidate) (jobj "type" "ephemeral"))))
   json-messages)
 
 (defun tools->json (tools)
