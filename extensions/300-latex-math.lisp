@@ -42,7 +42,7 @@
 ;;;; light/dark theme (the shared :theme setting, toggled by /theme).
 ;;;;
 ;;;; Settings (override in init.lisp, e.g. (evo:set-setting :math-dpi 120)):
-;;;;   :math              t     master on/off
+;;;;   :math              nil   master on/off; default t in evo-vscode Math Mode
 ;;;;   :math-dpi          110   on-screen size (CSS px); tune so $x$ ≈ prose
 ;;;;   :math-cell-px      18    terminal row height in CSS px (CSI 16 t)
 ;;;;   :math-cell-w-px    9     terminal column width in CSS px (CSI 16 t)
@@ -72,7 +72,19 @@
 
 (defun math-setting (key default) (evo:setting key default))
 
-(defun math-on-p () (and (math-setting :math t) t))
+(defun math-env-default-p (name)
+  (let ((value (uiop:getenv name)))
+    (and value
+         (not (member (string-downcase value)
+                      '("" "0" "false" "no" "off")
+                      :test #'string=)))))
+
+(defun math-auto-default-p ()
+  "Default math on only on surfaces that opt in explicitly (evo-vscode Math Mode)."
+  (or (math-env-default-p "EVO_MATH_DEFAULT")
+      (math-env-default-p "EVO_WEBVIEW")))
+
+(defun math-on-p () (and (math-setting :math (math-auto-default-p)) t))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Device-resolution surface (the evo-vscode webview terminal)
