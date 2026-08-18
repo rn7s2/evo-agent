@@ -280,10 +280,10 @@ kill/wait on the handle can race this poll and crash the runtime."
    :name "bash"
    ;; The shell is named, not assumed: on Windows this is PowerShell, and a
    ;; model told it is talking to /bin/sh writes commands that cannot run.
-   :description (format nil "Run a shell command via ~a in the working directory. Returns combined stdout/stderr and exit code. Output at or above 1 MiB is not returned inline: it is written to a temp file and the tool returns that path plus a short head preview — read it back selectively (this read tool with offset/limit, or grep/sed/head/tail) rather than dumping it whole. A command still running at its timeout is NOT killed: it moves to the background and returns a job_id — call `wait` with that id to collect its output or kill it. Do not sleep-and-poll for a long command; just let it run and use `wait`."
+   :description (format nil "Run a shell command via ~a in the working directory. Returns combined stdout/stderr and exit code. Search commands can hang or flood output if unscoped: list candidate files first, preferably with `ls` for a directory or `git ls-files` in a repo, then search only relevant paths/globs with `rg`/`grep`/`find`, `-n` where applicable, and a `head` cap. Large output is left on disk instead of returned inline; the tool returns the file path plus a short head preview, so read it back selectively rather than dumping it whole. A command still running at its timeout is NOT killed: it moves to the background and returns a job_id — call `wait` with that id to collect its output or kill it. Do not sleep-and-poll for a long command; just let it run and use `wait`."
                         (evo.port:shell-name))
    :schema '(:object
-             (:command :type :string :description "Shell command to run")
+             (:command :type :string :description "Shell command to run; for search, list candidate files first with ls or git ls-files when unsure, then scope rg/grep/find to relevant paths/globs")
              (:timeout :type :integer :optional t
               :description "Seconds to wait before the command moves to the background as a job (default 120, max 600)"))
    :execute #'tool-bash))
