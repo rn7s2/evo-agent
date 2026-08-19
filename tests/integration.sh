@@ -48,7 +48,7 @@ mkdir -p "$EVO_HOME" "$work"
 cat > "$EVO_HOME/init.lisp" <<EOF
 (evo:register-model "$EVO_TEST_MODEL"
   :provider :anthropic :api :anthropic-messages
-  :context-window 1000000 :max-output 64000 :thinking t)
+  :context-window 1000000 :max-output 64000)
 (evo:set-setting :model "$EVO_TEST_MODEL")
 (evo:set-setting :thinking :xhigh)
 (evo:register-provider :anthropic
@@ -62,7 +62,7 @@ if [ -n "$EVO_TEST_VISION_MODEL" ]; then
     cat >> "$EVO_HOME/init.lisp" <<EOF
 (evo:register-model "$EVO_TEST_VISION_MODEL"
   :provider :anthropic :api :anthropic-messages
-  :context-window 1000000 :max-output 64000 :thinking t :vision t)
+  :context-window 1000000 :max-output 64000 :vision t)
 EOF
 fi
 
@@ -233,7 +233,7 @@ for h in a b; do
     cat > "$scratch/home6$h/init.lisp" <<'EOF'
 (evo:register-model "id-probe"
   :provider :anthropic :api :anthropic-messages
-  :context-window 100000 :max-output 1000 :thinking t)
+  :context-window 100000 :max-output 1000)
 (evo:set-setting :model "id-probe")
 (evo:register-provider :anthropic :base-url "http://127.0.0.1:9" :api-key "sk-x")
 EOF

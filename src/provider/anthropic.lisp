@@ -20,34 +20,26 @@
 (defmethod default-base-url ((api anthropic-messages-api)) "https://api.anthropic.com")
 (defmethod default-api-key-env ((api anthropic-messages-api)) "ANTHROPIC_API_KEY")
 
-;;; Thinking levels -> the two native knobs.
+;;; Thinking levels -> the wire.
 ;;;
-;;; Newer models take `output_config.effort`, a request-level dial over the
+;;; The one dial is `output_config.effort`, a request-level dial over the
 ;;; whole response (thinking, prose, and tool calls alike); the levels are
-;;; exactly evo's ladder.  Older ones only take extended thinking's
-;;; `thinking.budget_tokens`.  Which knob a model has is registry data
-;;; (:effort, :thinking-mode), because support differs per model: Sonnet 4.5
-;;; has no effort at all, Opus 4.5 has effort but no xhigh/max and still
-;;; wants a budget, and 4.6-and-later models take effort with adaptive
-;;; thinking, where budget_tokens is deprecated or rejected outright.
+;;; exactly evo's ladder.  The supported Anthropic models — Sonnet 5,
+;;; Opus 5, Fable 5 — all take it, alongside adaptive thinking
+;;; (:thinking-mode :adaptive): the model decides when and how much to
+;;; think, and evo asks for summarized thinking so there is something to
+;;; display.  Extended thinking's `thinking.budget_tokens` is a retired
+;;; knob of retired models: those three reject it outright, so it is gone
+;;; from evo too.
 ;;;
-;;; Third-party endpoints speaking this API split the same way and are worth
-;;; probing rather than assuming: DeepSeek's, for one, accepts budget_tokens
-;;; and ignores it (measured: identical thinking length at 1k and 32k) while
-;;; output_config.effort moves it, so a model registered there without
-;;; :effort has a thinking dial that is wired to nothing.
-
-(defun thinking-budget (level)
-  (case level
-    (:low 2048)
-    (:medium 8192)
-    (:high 16384)
-    (:xhigh 32768)
-    (:max 60000)
-    (t nil)))
-
-(defmethod thinking-param ((api anthropic-messages-api) level)
-  (thinking-budget level))
+;;; Third-party endpoints speaking this API vary, which is why the
+;;; `thinking` object is per-model registry data (:thinking-mode) and worth
+;;; measuring rather than assuming.  :effort-only — the default — sends no
+;;; `thinking` object at all: effort is the whole dial, the smallest
+;;; request every Messages-compatible endpoint accepts.  Kimi Code's K3 is
+;;; one measured example — it always reasons, its documented dial is
+;;; low/high/max effort, and a `thinking` of type disabled would route the
+;;; request to an older model.
 
 (defun effort-string (level supported)
   "Wire value for `output_config.effort`, or NIL when the model has no
@@ -153,10 +145,7 @@ apply."
 
 (defun build-request-json (&key model system messages tools thinking-level)
   (let* ((model-id (pget model :id))
-         (adaptive (eq (model-thinking-mode model) :adaptive))
-         (thinking-on (and (pget model :thinking) thinking-level))
-         (budget (and thinking-on (not adaptive) (thinking-budget thinking-level)))
-         (effort (and thinking-on (effort-string thinking-level (model-effort model))))
+         (effort (effort-string thinking-level (model-effort model)))
          (req (jobj "model" model-id
                     "max_tokens" (model-max-output model)
                     "stream" t
@@ -176,22 +165,15 @@ apply."
     ;; Adaptive models decide when to think, so they take a mode rather than
     ;; a budget -- and `display` defaults to omitted there, which returns
     ;; signed but empty thinking blocks, so ask for summaries explicitly.
-    ;; The disabled branch is for a model registered :thinking nil: there is
-    ;; no off level, but a model can still declare it does not think, and on
-    ;; an adaptive model omitting the field would let the server think anyway.
-    (cond (budget
-           (setf (gethash "thinking" req)
-                 (jobj "type" "enabled" "budget_tokens" budget)))
-          ((and adaptive thinking-on)
-           (setf (gethash "thinking" req)
-                 (jobj "type" "adaptive" "display" "summarized")))
-          (adaptive
-           (setf (gethash "thinking" req) (jobj "type" "disabled"))))
+    ;; :effort-only sends no `thinking` object on purpose —
+    ;; output_config.effort above is its whole dial.
+    (when (eq (model-thinking-mode model) :adaptive)
+      (setf (gethash "thinking" req)
+            (jobj "type" "adaptive" "display" "summarized")))
     (jzon:stringify req)))
 
 (defmethod build-request ((api anthropic-messages-api)
-                          &key model system messages tools thinking-level cache-key)
-  (declare (ignore cache-key))          ; caching is cache_control breakpoints
+                          &key model system messages tools thinking-level)
   (build-request-json :model model :system system :messages messages
                       :tools tools :thinking-level thinking-level))
 

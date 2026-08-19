@@ -37,8 +37,8 @@ so shrinking on our side costs no fidelity and saves upload and tokens.")
 ;;;
 ;;; Sniffed from magic bytes, never from the file name: the extension is a
 ;;; user-supplied claim, and sending a mislabelled media_type is a provider
-;;; error the user cannot read.  These four are the intersection of what
-;;; Anthropic Messages and OpenAI Responses both accept.
+;;; error the user cannot read.  These are the types the Anthropic Messages
+;;; API accepts.
 
 (defparameter +image-magic+
   '(("image/png"  #(137 80 78 71 13 10 26 10))

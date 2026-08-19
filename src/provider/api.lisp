@@ -1,9 +1,10 @@
 ;;;; api.lisp — the provider-API protocol and its registry.
 ;;;;
-;;;; A provider API is one wire protocol (Anthropic Messages, OpenAI
-;;;; Responses, ...), implemented as a CLOS class with methods for request
-;;;; building and stream parsing.  The bundled APIs are registered at load
-;;;; time by the files in this module; an extension registers its own the
+;;;; A provider API is one wire protocol, implemented as a CLOS class with
+;;;; methods for request building and stream parsing.  One ships bundled:
+;;;; the Anthropic Messages API (anthropic.lisp), which also drives every
+;;;; Messages-compatible third-party endpoint (Kimi Code, DeepSeek, ...).
+;;;; It is registered at load time; an extension registers its own the
 ;;;; same way, through the public EVO surface (evo:register-api) — the
 ;;;; protocol is an extension point, not a kernel privilege.  Either way a
 ;;;; MODEL names its API by the :api keyword (registry.lisp).
@@ -45,25 +46,15 @@ resolved provider config plist (:base-url :api-key).  content-type is added
 by the transport, not here."))
 
 (defgeneric build-request (api &key model system messages tools
-                                    thinking-level cache-key)
+                                    thinking-level)
   (:documentation "Serialized JSON request body string.  Responsible for
-running the handoff pass over MESSAGES."))
+running the handoff pass over MESSAGES.  THINKING-LEVEL is a rung of
++EFFORT-LEVELS+; how it reaches the wire is per-model registry data
+\(:effort, :thinking-mode)."))
 
 (defgeneric parse-stream (api char-stream &key on-event abort-flag)
   (:documentation "Parse one response stream into the adapter result plist
 described in the file header."))
-
-(defgeneric thinking-param (api level)
-  (:documentation "Map a thinking LEVEL (:low :medium :high :xhigh :max) to
-the API's native parameter (Anthropic budget_tokens integer, OpenAI effort
-string).  NIL means the level names no rung on the ladder (there is no off
-rung), and the adapter should send no thinking parameter at all.
-
-Level alone is not always enough: where the native knob depends on the
-model as well — Anthropic's output_config.effort ladder differs per model,
-and only some models take adaptive thinking — BUILD-REQUEST consults the
-registry (:effort, :thinking-mode) directly.  This generic stays the
-level-only mapping, which is what a simple adapter needs."))
 
 (defgeneric perform-request (api url headers body &key on-event abort-flag
                                                  abort-cleanup &allow-other-keys)

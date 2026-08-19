@@ -58,8 +58,9 @@ degrades instead of failing."
                        when (and (<= i want) (member l supported))
                          collect l))))))
 
-(defun register-model* (id &key provider api context-window max-output (thinking t)
-                             (vision t) effort (thinking-mode :extended))
+(defun register-model* (id &key provider (api :anthropic-messages)
+                             context-window max-output
+                             (vision t) effort (thinking-mode :effort-only))
   "Register (or replace, keeping position) a model.  A model's identity is
 its (id, provider) pair: the same id under different providers (direct vs.
 proxy) are distinct, both selectable models; re-registering the same pair
@@ -76,12 +77,12 @@ time, not mid-run."
   (unless (and (integerp max-output) (plusp max-output))
     (error "register-model ~a: :max-output must be a positive integer, got ~s"
            id max-output))
-  (unless (member thinking-mode '(:extended :adaptive))
-    (error "register-model ~a: :thinking-mode must be :extended or :adaptive, got ~s"
+  (unless (member thinking-mode '(:adaptive :effort-only))
+    (error (cat "register-model ~a: :thinking-mode must be :adaptive "
+                "or :effort-only, got ~s")
            id thinking-mode))
   (let ((model (list :id id :provider provider :api api
                      :context-window context-window :max-output max-output
-                     :thinking (and thinking t)
                      :vision (and vision t)
                      :thinking-mode thinking-mode
                      :effort (normalize-effort id effort)))
@@ -119,22 +120,22 @@ the initial default.  No fallback: an unknown id is a config error."
                          "Registered providers for ~s: ~:[none~;~:*~{~(~a~)~^, ~}~]~%"
                          "Register it in init.lisp or post-init.lisp:~%  "
                          "(evo:register-model ~s~%    "
-                         ":provider ~(~s~) :api :anthropic-messages~%    "
-                         ":context-window 200000 :max-output 64000 :thinking t)")
+                         ":provider ~(~s~)~%    "
+                         ":context-window 200000 :max-output 64000)")
                     id provider id (model-providers id) id provider)))
         ((find id *models* :key (lambda (m) (pget m :id)) :test #'string=))
         (t (error (cat "Unknown model ~s: no registered model has that id.~%"
                        "Registered models: ~:[none — is your init.lisp or post-init.lisp missing?~;~:*~{~a~^, ~}~]~%"
                        "Register it in init.lisp or post-init.lisp:~%  "
                        "(evo:register-model ~s~%    "
-                       ":provider :anthropic :api :anthropic-messages~%    "
-                       ":context-window 200000 :max-output 64000 :thinking t)")
+                       ":provider :anthropic~%    "
+                       ":context-window 200000 :max-output 64000)")
                   id (mapcar (lambda (m) (pget m :id)) *models*) id))))
 
 (defun model-context-window (model) (pget model :context-window))
 (defun model-max-output (model) (pget model :max-output))
 (defun model-effort (model) (pget model :effort))
-(defun model-thinking-mode (model) (or (pget model :thinking-mode) :extended))
+(defun model-thinking-mode (model) (or (pget model :thinking-mode) :effort-only))
 
 (defun model-vision-p (model)
   "True when MODEL accepts image input.  Defaults to true for a model plist

@@ -79,9 +79,9 @@ evo (one binary)
    ├─ KERNEL  (locked packages: EVO.KERNEL, EVO.PROVIDER, EVO.JOURNAL, …)
    │    turn loop            errors-as-data, steering queues, save points
    │    journal              append-only sexpr entry tree + leaf pointer
-   │    provider APIs        CLOS protocol; anthropic-messages and
-   │                         openai-responses bundled; model and provider
-   │                         registries fed from init.lisp
+   │    provider APIs        CLOS protocol; anthropic-messages bundled;
+   │                         model and provider registries fed from
+   │                         init.lisp
    │    tool registry        register / activate / refresh, prompt rebuild
    │    extension API        register-tool, register-command, event hooks —
    │                         both extension tiers build on this
@@ -194,12 +194,12 @@ Three of these carry architectural weight:
 
 ## 5. Provider layer
 
-One unified message model, two bundled adapters, one extension point.
+One unified message model, one bundled adapter, one extension point.
 
 **Provider APIs are a protocol; models are configuration.** A wire protocol is
 a CLOS class implementing `endpoint-path`, `auth-headers`, `build-request`,
-`parse-stream`, `thinking-param`, and `perform-request`, dispatched from
-`call-provider` on the model's `:api` tag. The bundled protocols live in
+`parse-stream`, and `perform-request`, dispatched from
+`call-provider` on the model's `:api` tag. The bundled protocol lives in
 `src/provider/`; an extension registers its own through the same public `EVO`
 surface, specializing the same generics. The three self-seeding generics
 (`default-provider-key`, `default-base-url`, `default-api-key-env`) default to
@@ -232,9 +232,9 @@ errors signal, and preflight catches them.
 - **Images travel by value**: an `:image` block carries `:media-type` (sniffed
   from magic bytes, never from the file name) and base64 `:data`, so it is
   journal data like everything else and a session replays with no side files
-  to lose. Adapters encode it natively (Anthropic `image`/base64 source,
-  OpenAI `input_image` data URL); the handoff pass degrades it to a named text
-  placeholder for a model registered `:vision nil`, so a model switch cannot
+  to lose. The adapter encodes it natively (Anthropic `image`/base64 source);
+  the handoff pass degrades it to a named text placeholder for a model
+  registered `:vision nil`, so a model switch cannot
   poison a transcript that contains one. `evo.media` owns the read path —
   clipboard readers per platform, size cap, downscaling — and nothing above it
   knows where the bytes came from.
@@ -242,12 +242,10 @@ errors signal, and preflight catches them.
   legal tool result, so `read` on a png/jpeg/gif/webp returns the picture
   instead of line noise, and the agent can open a screenshot on its own
   initiative. The image stays *inside the result of the call that produced
-  it* on every wire that has a slot for it — Anthropic `tool_result` content,
-  Responses `function_call_output.output` as content items
-  (`input_text` + `input_image`, the string form kept for text-only results).
+  it* — Anthropic `tool_result` content has a slot for it.
   Injecting it as a separate user message instead would put words in the
-  user's mouth, break call/result adjacency, and move the cached prefix; the
-  Kimi chat-completions extension does exactly that, and only because a
+  user's mouth, break call/result adjacency, and move the cached prefix; a
+  chat-completions extension has to do exactly that, and only because a
   `tool` message there has nowhere else to carry one. A model registered
   `:vision nil` has the call refused outright — a result that merely explains
   still reads like success, and a megabyte of base64 it can never see costs
@@ -256,15 +254,13 @@ errors signal, and preflight catches them.
   never tries.
 - **Provider artifacts are a typed variant, not stringly-typed**: an Anthropic
   thinking signature is a base64 scalar accumulated from chunked
-  `signature_delta`; an OpenAI reasoning item is the whole item with
-  `encrypted_content`.
-- **Stateless replay** everywhere: full history per request, OpenAI
-  `store: false`, no `previous_response_id`.
+  `signature_delta`, replayed verbatim with its block.
+- **Stateless replay** everywhere: full history per request, no server-side
+  conversation state.
 - **Handoff pass** at request build: same-model thinking replays verbatim;
   cross-model thinking degrades to plain text or is dropped; orphaned tool
   calls receive synthetic error results; errored and aborted assistant turns
-  are elided; any model switch drops OpenAI `fc_*` item ids, since the server
-  validates `fc_*`↔`rs_*` same-response pairing.
+  are elided.
 - **Streaming** is hand-rolled SSE over one shared framing loop
   (`map-sse-events`: event and data accumulation, CR trim, abort flag); APIs
   supply only per-event dispatchers. Terminal-event guards make a stream that
@@ -277,13 +273,13 @@ errors signal, and preflight catches them.
   error normalization; and turn-level retry on finished error messages.
   Classification is on HTTP status plus typed error codes, not regexes over
   message strings.
-- **Caching**: Anthropic uses four breakpoints (system prompt, last tool
-  definition, last user message); OpenAI uses `prompt_cache_key` = session id.
+- **Caching**: `cache_control` breakpoints (system prompt, last tool
+  definition, last user message).
   Protecting the cache prefix is a constraint the whole prompt design honors
   (§11).
 - **Model registry**: user-registered plists (id, context window, max output,
-  thinking flag), registration-ordered for the `/model` picker. Token
-  accounting only — no cost table.
+  effort ladder, thinking mode, vision), registration-ordered for the
+  `/model` picker. Token accounting only — no cost table.
 - CL stack: `dexador` with `:want-stream t` plus `cl+ssl` and explicit read
   timeouts; `com.inuoe.jzon` on the wire. **A request is owned by its own
   thread**: cancellation interrupts *that* thread with a private condition, so
@@ -876,7 +872,7 @@ a refactor.
 | D3 | **Journal format is native sexprs**, one form per line, and sexprs are the default for every data format evo controls (lore, goal state). Config is not data: init.lisp is evaluated Lisp (D6). | Human-readable and `read`-able from Lisp with no external serialization dependency. |
 | D4 | **A CLI with an adaptive TUI**, mandatory live console-resize. Not Emacs/Swank-first. | Approachable for newcomers and adapts to the most contexts. Swank stays a developer side-door, not the product. |
 | D5 | **A supervisor owns launch, crash detection, restart, and resume.** | Long-running goal pursuit requires surviving self-inflicted death. |
-| D6 | **Both adapters ship** (Anthropic Messages, OpenAI Responses) as CLOS *provider APIs*; **models and endpoints are user-registered from init.lisp**. A wire protocol is an extension point, not a kernel privilege: `evo:register-api` takes any `provider-api` subclass. One unified message model for all APIs. | The API/registry split keeps bundled protocols curated while models stay configuration, avoiding a 40-provider table. Making the protocol registerable follows D13: if the TUI can be a core extension, a wire protocol can be a user one. |
+| D6 | **One adapter ships** (Anthropic Messages) as a CLOS *provider API*; **models and endpoints are user-registered from init.lisp**. A wire protocol is an extension point, not a kernel privilege: `evo:register-api` takes any `provider-api` subclass. One unified message model for all APIs. Anthropic's own models (Sonnet 5, Opus 5, Fable 5) and Messages-compatible third-party endpoints (Kimi Code K3, DeepSeek, proxies) all ride the same adapter; the OpenAI Responses adapter was deleted when it stopped earning its parsing surface. | The API/registry split keeps the bundled protocol curated while models stay configuration, avoiding a 40-provider table. Making the protocol registerable follows D13: if the TUI can be a core extension, a wire protocol can be a user one. |
 | D7 | The goal system follows **codex's design**: persisted goal, idle-continuation steering, explicit audited completion, budgets. Optional Lisp acceptance predicate as a kernel-side verifier. | See §8. |
 | D8 | The kernel/userspace split is enforced with **package locks** (SBCL native, ECL `si:package-lock`, both behind `evo.port`). | Permissive but not suicidal: touching the kernel requires an explicit, auditable unlock. |
 | D9 | Tool execution is **sequential**. | Parallelism is where the thread-discipline complexity lives, and nothing yet demands it. |

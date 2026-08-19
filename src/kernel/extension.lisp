@@ -415,30 +415,32 @@ is."
 
 (defun register-model (id &rest args)
   "Register a model in init.lisp:
- (evo:register-model \"deepseek-v4-pro\" :provider :deepseek
-   :api :anthropic-messages :context-window 1000000 :max-output 192000
-   :thinking t :effort t)
+ (evo:register-model \"claude-opus-5\" :provider :anthropic
+   :context-window 1000000 :max-output 128000
+   :effort t :thinking-mode :adaptive)
 A model's identity is its (id, provider) pair: register the same id under a
 different provider and both are selectable (e.g. direct vs. proxy).
 Re-registering the same pair replaces it in place; evo ships no built-in
-models.
+models.  :api defaults to :anthropic-messages, the one bundled wire API —
+every supported endpoint speaks it.
+
+The knobs are context window, max output, effort ladder, thinking mode and
+vision; a model that cannot think at all is not worth driving and has no
+switch.
 
 :effort declares the levels the model accepts for Anthropic's
 output_config.effort — t for all of (:low :medium :high :xhigh :max), a
-subset list for models that stop short (Opus 4.5 has no xhigh or max), nil
-(the default) for models without the parameter.  A thinking level above
-what the model supports is clamped down rather than rejected.  Worth
-checking per endpoint rather than assuming: a third-party API that accepts
-budget_tokens may quietly ignore it and steer on effort alone, and then a
-model registered without :effort has a thinking dial wired to nothing.
+subset list for a model that stops short, nil (the default) for one
+without the parameter.  A thinking level above what the model supports is
+clamped down rather than rejected.  Worth measuring per endpoint rather
+than assuming: an endpoint may accept the parameter and quietly ignore it,
+and then the /thinking dial is wired to nothing.
 
-:thinking is a capability, not a preference — nil for a model that does not
-think.  There is no off level; the ladder starts at :low.
-
-:thinking-mode is :extended (the default — thinking.budget_tokens) or
-:adaptive, where the model decides when to think and evo sends a mode
-instead of a budget.  Anthropic models from 4.6 on are :adaptive; on 4.7
-and later budget_tokens is rejected outright.
+:thinking-mode is :effort-only (the default — no `thinking` object on the
+wire, the smallest request every Messages-compatible endpoint accepts) or
+:adaptive, which also sends thinking {type adaptive, display summarized} —
+what Anthropic's own models (Sonnet 5, Opus 5, Fable 5) want, and what
+makes their reasoning summaries visible.
 
 :vision declares image input, and defaults to t.  Give :vision nil to a
 text-only model: pasted images then degrade to a text placeholder for that

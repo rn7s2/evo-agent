@@ -35,10 +35,9 @@ Every extension file starts with:
   or a list of them — for a tool that hands back something the model must
   *see*: `(evo.media:attach-image-file path)` yields an `:image` block, which
   is what `read` returns for a png/jpeg/gif/webp. The block travels inside the
-  tool result itself (Anthropic `tool_result` content, Responses
-  `function_call_output` content items). Text blocks share the 50k truncation
-  budget; images pass through whole and degrade to a text placeholder for a
-  model registered `:vision nil`.
+  tool result itself (Anthropic `tool_result` content). Text blocks share the
+  50k truncation budget; images pass through whole and degrade to a text
+  placeholder for a model registered `:vision nil`.
 - Signal a condition for errors — the loop converts it to an error tool
   result; never return garbage silently.
 - A newly registered tool is callable from the next request. Re-registering
@@ -182,19 +181,19 @@ idempotent and an override is just a later call.
 
 ```lisp
 (evo:register-model "deepseek-v4-pro"       ; evo has NO built-in models
-  :provider :deepseek :api :anthropic-messages
-  :context-window 1000000 :max-output 192000 :thinking t :effort t
+  :provider :deepseek
+  :context-window 1000000 :max-output 192000 :effort t
   :vision nil)                              ; image input; t is the default,
                                             ; nil degrades images to text
-(evo:register-provider :deepseek            ; :anthropic/:openai are pre-seeded,
+(evo:register-provider :deepseek            ; :anthropic is pre-seeded,
   :base-url "https://api.deepseek.com/anthropic"   ; others you register;
   :api-key-env "DEEPSEEK_API_KEY")          ; re-registering merges field-wise
 (evo:set-setting :model "deepseek-v4-pro")  ; required — no default model
 (evo:setting :model)                        ; read a setting
 ```
 
-`:api` names a registered provider API — `:anthropic-messages` and
-`:openai-responses` ship bundled, and you can add your own (below). Tools,
+`:api` names a registered provider API — `:anthropic-messages` ships bundled
+and is the default, and you can add your own (below). Tools,
 commands, and hooks may be registered from init files too.
 
 ## Provider APIs (new wire protocols)
@@ -210,11 +209,10 @@ same path the bundled adapters take; nothing about them is privileged.
 (defmethod evo:auth-headers ((api myco-api) config)
   (list (cons "authorization" (format nil "Bearer ~a" (getf config :api-key)))))
 (defmethod evo:build-request ((api myco-api) &key model system messages tools
-                                                  thinking-level cache-key)
+                                                  thinking-level)
   ...)                                ; -> JSON request body string
 (defmethod evo:parse-stream ((api myco-api) char-stream &key on-event abort-flag)
   ...)                                ; -> result plist; see src/provider/api.lisp
-(defmethod evo:thinking-param ((api myco-api) level) nil)
 
 (evo:register-api :myco-chat (make-instance 'myco-api))
 (evo:register-model "myco-large" :provider :myco :api :myco-chat

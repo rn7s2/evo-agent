@@ -72,12 +72,12 @@
            #:register-model* #:register-provider* #:provider-config
            #:reset-user-registries
            #:call-provider #:provider-error
-           #:parse-sse-stream #:parse-responses-sse-stream
+           #:parse-sse-stream
            ;; provider-API protocol — an extension point: subclass
            ;; PROVIDER-API, implement the generics, REGISTER-API it.
            #:provider-api #:find-api #:register-api #:api-keys
            #:endpoint-path #:auth-headers
-           #:build-request #:parse-stream #:thinking-param #:perform-request
+           #:build-request #:parse-stream #:perform-request
            #:map-sse-events
            #:default-provider-key #:default-base-url #:default-api-key-env
            #:message-role #:message-content #:message-stop-reason
@@ -140,7 +140,7 @@
   (:import-from :evo.provider
                 #:provider-api #:register-api #:find-api #:api-keys
                 #:endpoint-path #:auth-headers #:build-request #:parse-stream
-                #:thinking-param #:perform-request #:map-sse-events
+                #:perform-request #:map-sse-events
                 #:default-provider-key #:default-base-url #:default-api-key-env
                 #:provider-error)
   (:export #:cat #:normalize-newlines #:crlf-newlines #:with-proxy
@@ -153,7 +153,7 @@
            ;; provider-API protocol (imported from EVO.PROVIDER above)
            #:provider-api #:register-api #:find-api #:api-keys
            #:endpoint-path #:auth-headers #:build-request #:parse-stream
-           #:thinking-param #:perform-request #:map-sse-events
+           #:perform-request #:map-sse-events
            #:default-provider-key #:default-base-url #:default-api-key-env
            #:provider-error))
 

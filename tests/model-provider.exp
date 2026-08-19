@@ -43,8 +43,8 @@ foreach v {EVO_SUPERVISED_CHILD EVO_HEARTBEAT_FILE} {
 # :model setting resolves to — that makes the "before" half of the routing
 # check fail loudly instead of silently working.
 set f [open "$env(EVO_HOME)/init.lisp" w]
-puts $f "(evo:register-model \"$model\" :provider :deadend :api :anthropic-messages :context-window 1000000 :max-output 64000 :thinking t)"
-puts $f "(evo:register-model \"$model\" :provider :liveproxy :api :anthropic-messages :context-window 1000000 :max-output 64000 :thinking t)"
+puts $f "(evo:register-model \"$model\" :provider :deadend :api :anthropic-messages :context-window 1000000 :max-output 64000)"
+puts $f "(evo:register-model \"$model\" :provider :liveproxy :api :anthropic-messages :context-window 1000000 :max-output 64000)"
 puts $f "(evo:register-provider :deadend :base-url \"http://127.0.0.1:1\" :api-key \"$api_key\")"
 puts $f "(evo:register-provider :liveproxy :base-url \"$base_url\" :api-key \"$api_key\")"
 puts $f "(evo:set-setting :model \"$model\")"
