@@ -8,6 +8,13 @@
 ;;;; attribution into every OAuth request.  Includes OAuth login (PKCE +
 ;;;; local callback server) and token refresh.
 ;;;;
+;;;; What this registers
+;;;;   provider :anthropic-oauth — https://api.anthropic.com, Bearer auth
+;;;;   models   claude-sonnet-5 · claude-opus-5 · claude-fable-5 — the three
+;;;;            supported Anthropic models, statically (no /v1/models fetch):
+;;;;            1M context, 128K output, full effort ladder, adaptive
+;;;;            thinking, vision.
+;;;;
 ;;;; Environment variables:
 ;;;;   CLAUDE_OAUTH_ACCESS_TOKEN  — OAuth access token (sk-ant-oat-...)
 ;;;;   CLAUDE_OAUTH_REFRESH_TOKEN — OAuth refresh token
@@ -353,7 +360,7 @@ token itself is expired."
       ("anthropic-version" . "2023-06-01"))))
 
 (defmethod evo:build-request ((api claude-oauth-messages-api)
-                              &key model system messages tools thinking-level cache-key)
+                              &key model system messages tools thinking-level)
   (declare (ignore api))
   ;; 1. Split assistant messages that interleave text and tool_use blocks.
   ;;    The Anthropic API rejects assistant turns where non-tool_use blocks
@@ -374,8 +381,7 @@ token itself is expired."
                          :system shaped-system
                          :messages shaped-messages
                          :tools tools
-                         :thinking-level thinking-level
-                         :cache-key cache-key))))
+                         :thinking-level thinking-level))))
 
 (defmethod evo:parse-stream ((api claude-oauth-messages-api) char-stream
                              &key on-event abort-flag)
@@ -383,10 +389,6 @@ token itself is expired."
   (evo:parse-stream (claude-oauth--delegate-api) char-stream
                     :on-event on-event
                     :abort-flag abort-flag))
-
-(defmethod evo:thinking-param ((api claude-oauth-messages-api) level)
-  (declare (ignore api))
-  (evo:thinking-param (claude-oauth--delegate-api) level))
 
 (defmethod evo:default-provider-key ((api claude-oauth-messages-api))
   (declare (ignore api))
@@ -586,102 +588,6 @@ request arrives or 120 seconds elapse."
                                            (+ (claude-oauth--now-ms) 2592000000))))))
 
 ;;; ---------------------------------------------------------------------------
-;;; Fetch models from Anthropic
-;;; ---------------------------------------------------------------------------
-
-(defparameter *claude-oauth-models-url* "https://api.anthropic.com/v1/models")
-
-(defun claude-oauth--fetch-models ()
-  "Fetch the list of available models from the Anthropic API using the OAuth
-access token.  Returns a parsed JSON object (hash-table) or signals an error."
-  (labels ((fetch-with-token (token)
-             (let ((response
-                     (evo:with-proxy (proxy *claude-oauth-models-url*)
-                       (apply #'dex:get *claude-oauth-models-url*
-                              :headers `(("Authorization" . ,(format nil "Bearer ~a" token))
-                                         ("anthropic-version" . "2023-06-01"))
-                              (when proxy (list :proxy proxy))))))
-               (com.inuoe.jzon:parse response)))
-           (try-fetch (token)
-             (handler-case
-                 (values t (fetch-with-token token) nil nil)
-               (dexador.error:http-request-failed (e)
-                 (values nil nil
-                         (dexador.error:response-status e)
-                         (ignore-errors (dexador.error:response-body e))))))
-           (expired-access-token-p (status body)
-             (and (eql status 401)
-                  (let ((message (claude-oauth--extract-error body)))
-                    (and (stringp message)
-                         (or (search "expired" message :test #'char-equal)
-                             (search "invalid_token" message :test #'char-equal)
-                             (search "invalid token" message :test #'char-equal))))))
-           (fail (status body)
-             (error "Failed to fetch models from Anthropic: HTTP ~a~@[: ~a~]"
-                    status (claude-oauth--extract-error body)))
-           (fail-no-refresh (status body)
-             (error "Failed to fetch models from Anthropic: HTTP ~a~@[: ~a~]. Access token looked expired, but no refresh token is available; run /claude-oauth:login to re-authenticate."
-                    status (claude-oauth--extract-error body))))
-    (let ((token (claude-oauth--ensure-valid-token)))
-      (unless token
-        (error "No Claude OAuth token: set CLAUDE_OAUTH_ACCESS_TOKEN or run /claude-oauth:login"))
-      (multiple-value-bind (ok json status body)
-          (try-fetch token)
-        (cond
-          (ok json)
-          ((expired-access-token-p status body)
-           (let ((refresh (claude-oauth--resolve-refresh-token)))
-             (unless refresh
-               (fail-no-refresh status body))
-             (multiple-value-bind (retry-ok retry-json retry-status retry-body)
-                 (try-fetch (claude-oauth--refresh-and-store refresh))
-               (if retry-ok
-                   retry-json
-                   (fail retry-status retry-body)))))
-          (t
-           (fail status body)))))))
-
-(defun claude-oauth--cap-supported-p (obj key)
-  "T when OBJ (a capabilities hash-table) has KEY marked supported.  The
-/v1/models response nests one {\"supported\": bool} object per capability,
-including one per effort level, which is where a model's effort ladder and
-thinking mode come from."
-  (let ((sub (and obj (hash-table-p obj) (gethash key obj))))
-    (and sub (hash-table-p sub) (gethash "supported" sub) t)))
-
-(defun claude-oauth--register-fetched-models (json)
-  "Register every model in the JSON response (hash-table with \"data\" array).
-Returns a list of registered model-id strings."
-  (let ((data (gethash "data" json)))
-    (unless data
-      (error "Unexpected response from /v1/models: missing \"data\" key"))
-    (loop for entry across data
-          for id = (gethash "id" entry)
-          when id
-            collect (let* ((caps (gethash "capabilities" entry))
-                           (thinking-obj (and caps (gethash "thinking" caps)))
-                           (thinking (and thinking-obj (gethash "supported" thinking-obj)))
-                           (types (and thinking-obj (gethash "types" thinking-obj)))
-                           (adaptive (claude-oauth--cap-supported-p types "adaptive"))
-                           (effort-obj (and caps (gethash "effort" caps)))
-                           (effort (and (claude-oauth--cap-supported-p caps "effort")
-                                        (loop for level in '("low" "medium" "high"
-                                                             "xhigh" "max")
-                                              when (claude-oauth--cap-supported-p
-                                                    effort-obj level)
-                                                collect (intern (string-upcase level)
-                                                                :keyword)))))
-                      (evo:register-model id
-                                          :provider :anthropic-oauth
-                                          :api :anthropic-oauth-messages
-                                          :context-window (or (gethash "max_input_tokens" entry) 200000)
-                                          :max-output (or (gethash "max_tokens" entry) 64000)
-                                          :thinking (if thinking t nil)
-                                          :effort effort
-                                          :thinking-mode (if adaptive :adaptive :extended))
-                      id))))
-
-;;; ---------------------------------------------------------------------------
 ;;; Registration
 ;;; ---------------------------------------------------------------------------
 
@@ -690,19 +596,20 @@ Returns a list of registered model-id strings."
                        :base-url "https://api.anthropic.com"
                        :api-key-env "CLAUDE_OAUTH_ACCESS_TOKEN")
 
-;; Auto-register models from the API at load time (best-effort: needs a token).
-;; init.lisp runs before extensions, so it can pick the default model after
-;; registration is complete.  The extension only makes models available; it
-;; never overrides the user's choice.
-;;
-;; Silent when no token is present — users who don't use this provider
-;; shouldn't see any output on every startup.
-(when (claude-oauth--resolve-token)
-  (handler-case
-      (claude-oauth--register-fetched-models (claude-oauth--fetch-models))
-    (error (e)
-      (format *error-output* (cat "~&[claude-oauth] Could not fetch models at load time: ~a~%"
-                                  "Run /claude-oauth:login then /reload to register models.~%") e))))
+;;; Static, and no network: evo supports exactly three Anthropic models, and
+;;; their metadata is documented — 1M context, 128K output, the full effort
+;;; ladder, adaptive thinking, vision.  All three register whether or not a
+;;; token is present: a missing or expired token is a clear error at request
+;;; time, not a model that silently vanishes from the picker.  init.lisp runs
+;;; before extensions, so it can still pick one of these as :model — settings
+;;; are read after the whole boot.
+
+(dolist (id '("claude-sonnet-5" "claude-opus-5" "claude-fable-5"))
+  (evo:register-model id
+                      :provider :anthropic-oauth
+                      :api :anthropic-oauth-messages
+                      :context-window 1000000 :max-output 128000
+                      :effort t :thinking-mode :adaptive :vision t))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Slash commands

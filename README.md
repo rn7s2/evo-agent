@@ -44,13 +44,11 @@ it — copy the sample at [docs/examples/init.lisp](docs/examples/init.lisp) to
 `~/.evo/init.lisp` and edit:
 
 ```lisp
-(evo:register-provider :deepseek
-  :base-url "https://api.deepseek.com/anthropic" :api-key-env "DEEPSEEK_API_KEY")
-(evo:register-model "deepseek-v4-pro"
-  :provider :deepseek :api :anthropic-messages
-  :context-window 1000000 :max-output 192000
-  :thinking t :effort t)
-(evo:set-setting :model "deepseek-v4-pro")
+(evo:register-model "claude-opus-5"
+  :provider :anthropic                  ; pre-seeded: ANTHROPIC_API_KEY
+  :context-window 1000000 :max-output 128000
+  :effort t :thinking-mode :adaptive)
+(evo:set-setting :model "claude-opus-5")
 ```
 
 Without that, evo exits with a pointer to the sample.
@@ -79,20 +77,21 @@ and quarantines repeated boot failures with `--no-userspace`. Exit codes:
 
 ### Provider layer
 
-One unified message model, two bundled wire-protocol adapters, one extension
+One unified message model, one bundled wire-protocol adapter, one extension
 point.
 
-- **Adapters**: Anthropic Messages and OpenAI Responses — both stateless replay
-  (`store: false`, no `previous_response_id`), with prompt-cache breakpoints
-  tuned per provider.
+- **Adapter**: the Anthropic Messages API — stateless replay (full history per
+  request) with prompt-cache breakpoints. It drives Anthropic's own models
+  (Sonnet 5, Opus 5, Fable 5) and every Messages-compatible third-party
+  endpoint (Kimi Code, DeepSeek, proxies) alike.
 - **Provider APIs are a protocol, not a kernel privilege.** A wire protocol is
   a CLOS class implementing `endpoint-path`, `auth-headers`, `build-request`,
-  `parse-stream`, `thinking-param`, and `perform-request`. The bundled
-  protocols live in `src/provider/`; an extension registers its own through the
-  same public `EVO` surface. See [docs/extension-api.md](docs/extension-api.md).
+  `parse-stream`, and `perform-request`. The bundled protocol lives in
+  `src/provider/`; an extension registers its own through the same public
+  `EVO` surface. See [docs/extension-api.md](docs/extension-api.md).
 - **Models and endpoints are configuration**, fed from `init.lisp` through
-  ordered registries. There is no 40-provider table. Stock endpoints
-  (`:anthropic`, `:openai`) are pre-seeded from env vars, so an API key alone
+  ordered registries. There is no 40-provider table. The stock `:anthropic`
+  endpoint is pre-seeded from `ANTHROPIC_API_KEY`, so an API key alone
   suffices.
 - **Hand-rolled SSE streaming** over one shared framing loop; per-API dispatch.
   Terminal-event guards, tolerant partial-JSON tool-argument parsing, and
@@ -105,8 +104,8 @@ point.
   named text placeholder for a model registered `:vision nil`, so switching to
   a text-only model mid-session costs a screenshot, not every turn after it.
 - **Images are first-class input**: an `:image` block carries base64 bytes and
-  a sniffed media type, encoded as an Anthropic `image` source or an OpenAI
-  `input_image` data URL. See *Images in* below for how one gets there. The
+  a sniffed media type, encoded as an Anthropic `image` source. See *Images
+  in* below for how one gets there. The
   agent reads images too — `read` on a png/jpeg/gif/webp returns the picture,
   so it can open a screenshot itself instead of asking you to describe one.
 - **Retry** in three layers: in-request HTTP retry with `retry-after` and
@@ -377,38 +376,42 @@ evaluated in that order on every boot — an override is just a later call.
 `EVO_HOME` overrides `~/.evo`. `--no-userspace` skips config and extensions.
 
 ```lisp
+(evo:register-model "claude-opus-5"
+  :provider :anthropic
+  :context-window 1000000 :max-output 128000
+  :effort t                     ; effort ladder the endpoint accepts (t = all
+                                ;   of low/medium/high/xhigh/max, or a subset);
+                                ;   a level above it is clamped, not rejected
+  :thinking-mode :adaptive)     ; also send thinking {adaptive, summarized} —
+                                ;   what Anthropic's own models want.  The
+                                ;   default :effort-only sends no thinking
+                                ;   object at all: the smallest request, for
+                                ;   an endpoint whose only dial is effort
 (evo:register-model "deepseek-v4-pro"
-  :provider :deepseek :api :anthropic-messages    ; :api = wire protocol
-  :context-window 1000000 :max-output 192000 :thinking t
-  :vision nil                   ; text-only endpoint: pasted images degrade to
+  :provider :deepseek
+  :context-window 1000000 :max-output 192000
+  :effort t
+  :vision nil)                  ; text-only endpoint: pasted images degrade to
                                 ;   a text placeholder for it.  :vision
                                 ;   defaults to t, so declare nil for a model
                                 ;   that rejects images — or, worse, accepts
                                 ;   and silently ignores them
-  :effort t)                    ; effort ladder the endpoint accepts (t = all
-                                ;   of low/medium/high/xhigh/max, or a subset);
-                                ;   a level above it is clamped, not rejected.
-                                ;   Omit it and the level can only travel as
-                                ;   thinking.budget_tokens — which some
-                                ;   endpoints accept and ignore
-;; :thinking-mode :adaptive lets the model choose when to think (what
-;; Anthropic 4.6+ wants); the default :extended sends budget_tokens.
-(evo:set-setting :model "deepseek-v4-pro")
+(evo:set-setting :model "claude-opus-5")
 
 ;; Optional (kernel defaults exist for all of these):
 (evo:set-setting :thinking :medium)          ; low medium high xhigh max (no off rung)
 (evo:set-setting :goal-token-budget 2000000) ; per-goal token cap; omit = no limit
 ;; :compact-reserve / :compact-keep-recent tune compaction.
 
-;; Endpoints: :anthropic/:openai are pre-seeded (ANTHROPIC_API_KEY /
-;; OPENAI_API_KEY); any other key you register yourself, and re-registering
-;; overrides field-wise, e.g. to point a stock name at a proxy:
+;; Endpoints: :anthropic is pre-seeded (ANTHROPIC_API_KEY); any other key you
+;; register yourself, and re-registering overrides field-wise, e.g. to point a
+;; stock name at a proxy:
 (evo:register-provider :deepseek
   :base-url "https://api.deepseek.com/anthropic" :api-key-env "DEEPSEEK_API_KEY")
 (evo:register-provider :anthropic :base-url "http://127.0.0.1:8787" :api-key "sk-...")
 ```
 
-Two dialects ship bundled (`:anthropic-messages`, `:openai-responses`); models
+One dialect ships bundled (`:anthropic-messages`, the default `:api`); models
 and providers are yours, and so is the protocol — subclass `evo:provider-api`,
 implement the generics, `evo:register-api` it, and a model can name it via
 `:api`. Config runs in userspace with the full extension API, so
@@ -518,7 +521,6 @@ src/provider/            EVO.PROVIDER
   registry.lisp          model + provider registries (populated from init.lisp)
   core.lisp              shared provider core: handoff, SSE transport, retries
   anthropic.lisp         Anthropic Messages API
-  openai.lisp            OpenAI Responses API
 
 src/kernel/              EVO.KERNEL — the core loop and nothing else
   tools.lisp             tool registry, sexpr schema -> JSON Schema
@@ -551,7 +553,7 @@ docs/                    seed corpus (also installed to ~/.evo/docs)
 extensions/              vendored user extensions — copied ACTIVE into
                          ~/.evo/extensions by `make install-home`:
   020-claude-oauth-provider.lisp     Claude Pro/Max OAuth provider
-  020-kimi-provider.lisp             Moonshot AI Kimi K3 over chat completions
+  020-kimi-provider.lisp             Kimi Code K3 endpoint + models
   300-latex-math.lisp                LaTeX math rendered as inline images
   350-bionic-reader.lisp             bionic reading for agent prose (ASCII)
   400-efficiency.lisp                working/reasoning prompt section

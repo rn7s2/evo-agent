@@ -33,7 +33,7 @@ foreach v {EVO_SUPERVISED_CHILD EVO_HEARTBEAT_FILE} {
 }
 
 set f [open "$env(EVO_HOME)/init.lisp" w]
-puts $f "(evo:register-model \"$model\" :provider :anthropic :api :anthropic-messages :context-window 1000000 :max-output 64000 :thinking t)"
+puts $f "(evo:register-model \"$model\" :provider :anthropic :api :anthropic-messages :context-window 1000000 :max-output 64000)"
 puts $f "(evo:set-setting :model \"$model\")"
 puts $f "(evo:register-provider :anthropic :base-url \"$base_url\" :api-key \"$api_key\")"
 close $f

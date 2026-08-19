@@ -31,8 +31,7 @@
                               :components ((:file "api")
                                            (:file "registry")
                                            (:file "core")
-                                           (:file "anthropic")
-                                           (:file "openai")))
+                                           (:file "anthropic")))
                              (:module "kernel"
                               :serial t
                               :components ((:file "tools")

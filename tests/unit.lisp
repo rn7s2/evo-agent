@@ -241,573 +241,155 @@ line2")))
                    :key (lambda (b) (pget b :type))))
       (check "handoff no spurious synthesis" (= 3 (length out2))))))
 
-;;; OpenAI Responses SSE parsing
-
-(defparameter *oai-sse-sample*
-  (format nil (cat "event: response.created~%data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-5.6-luna\"}}~%~%"
-                   "event: response.output_item.added~%data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_1\",\"summary\":[]}}~%~%"
-                   "event: response.reasoning_summary_text.delta~%data: {\"type\":\"response.reasoning_summary_text.delta\",\"output_index\":0,\"delta\":\"think\"}~%~%"
-                   "event: response.output_item.done~%data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"reasoning\",\"id\":\"rs_1\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"think\"}],\"encrypted_content\":\"ENC\"}}~%~%"
-                   "event: response.output_item.added~%data: {\"type\":\"response.output_item.added\",\"output_index\":1,\"item\":{\"type\":\"message\",\"id\":\"msg_1\",\"role\":\"assistant\",\"content\":[]}}~%~%"
-                   "event: response.output_text.delta~%data: {\"type\":\"response.output_text.delta\",\"output_index\":1,\"delta\":\"hel\"}~%~%"
-                   "event: response.output_text.delta~%data: {\"type\":\"response.output_text.delta\",\"output_index\":1,\"delta\":\"lo\"}~%~%"
-                   "event: response.output_item.done~%data: {\"type\":\"response.output_item.done\",\"output_index\":1,\"item\":{\"type\":\"message\",\"id\":\"msg_1\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"hello\"}]}}~%~%"
-                   "event: response.output_item.added~%data: {\"type\":\"response.output_item.added\",\"output_index\":2,\"item\":{\"type\":\"function_call\",\"id\":\"fc_1\",\"call_id\":\"call_1\",\"name\":\"bash\",\"arguments\":\"\"}}~%~%"
-                   "event: response.function_call_arguments.delta~%data: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":2,\"delta\":\"{\\\"comm\"}~%~%"
-                   "event: response.function_call_arguments.delta~%data: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":2,\"delta\":\"and\\\": \\\"ls\\\"}\"}~%~%"
-                   "event: response.completed~%data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_1\",\"model\":\"gpt-5.6-luna\",\"status\":\"completed\",\"usage\":{\"input_tokens\":100,\"input_tokens_details\":{\"cached_tokens\":40},\"output_tokens\":10}}}~%~%")))
-
-(defun test-openai-sse ()
-  (let* ((events nil)
-         (result (with-input-from-string (in *oai-sse-sample*)
-                   (parse-responses-sse-stream
-                    in :on-event (lambda (ev) (push ev events))))))
-    (check "oai sse stopped" (pget result :stopped-p))
-    (check "oai sse stop reason inferred" (eq (pget result :stop-reason) :tool-use))
-    (check "oai sse model" (equal (pget result :model) "gpt-5.6-luna"))
-    (check "oai sse usage unbundles cached"
-           (let ((u (pget result :usage)))
-             (and (= (pget u :input) 60) (= (pget u :cache-read) 40)
-                  (= (pget u :output) 10))))
-    (let ((blocks (pget result :content)))
-      (check "oai sse three blocks" (= 3 (length blocks)))
-      (check "oai sse thinking summary"
-             (and (eq (pget (first blocks) :type) :thinking)
-                  (equal (pget (first blocks) :thinking) "think")))
-      (check "oai sse reasoning item kept for replay"
-             (equal (pget (pget (first blocks) :item) :encrypted-content) "ENC"))
-      (check "oai sse text with item id"
-             (and (equal (pget (second blocks) :text) "hello")
-                  (equal (pget (second blocks) :item-id) "msg_1")))
-      (check "oai sse tool call ids"
-             (and (equal (pget (third blocks) :id) "call_1")
-                  (equal (pget (third blocks) :item-id) "fc_1")))
-      (check "oai sse tool args across chunks"
-             (equal (pget (pget (third blocks) :arguments) :command) "ls")))
-    ;; The stream parser must NOT emit :tool-call-start — arguments are
-    ;; still streaming when the block opens.  The kernel emits it from
-    ;; run-tool-call, fully parsed, just before execution.
-    (check "oai sse leaves tool-call-start to the kernel"
-           (not (find :tool-call-start events
-                      :key (lambda (e) (pget e :type))))))
-  ;; A stream without a terminal response event is truncation (retry material).
-  (let ((result (with-input-from-string
-                    (in (format nil "event: response.created~%data: {\"type\":\"response.created\",\"response\":{}}~%~%"))
-                  (parse-responses-sse-stream in))))
-    (check "oai sse truncation detected" (not (pget result :stopped-p))))
-  ;; incomplete + max_output_tokens -> :length.
-  (let ((result (with-input-from-string
-                    (in (format nil "event: response.incomplete~%data: {\"type\":\"response.incomplete\",\"response\":{\"status\":\"incomplete\",\"incomplete_details\":{\"reason\":\"max_output_tokens\"},\"usage\":{\"input_tokens\":5,\"output_tokens\":7}}}~%~%"))
-                  (parse-responses-sse-stream in))))
-    (check "oai sse incomplete -> length"
-           (and (pget result :stopped-p)
-                (eq (pget result :stop-reason) :length)))))
-
-;;; OpenAI Responses request building
-
-(defun test-openai-request ()
-  (let* ((item '(:type "reasoning" :id "rs_1"
-                 :summary #((:type "summary_text" :text "s"))
-                 :encrypted-content "ENC"))
-         (history
-           (list '(:role :user :content ((:type :text :text "go")))
-                 (list :role :assistant :model "gpt-5.6-luna" :stop-reason :tool-use
-                       :usage '(:input 1 :output 1 :cache-read 0 :cache-write 0)
-                       :content (list (list :type :thinking :thinking "s" :item item)
-                                      '(:type :text :text "working" :item-id "msg_1")
-                                      '(:type :tool-call :id "call_a" :item-id "fc_a"
-                                        :name "bash" :arguments (:command "ls"))))
-                 '(:role :tool-result :tool-call-id "call_a" :tool-name "bash"
-                   :is-error nil :content ((:type :text :text "ok")))))
-         (tools (list (list :name "bash" :description "run"
-                            :input-schema (schema->json-schema
-                                           '(:object (:command :type :string :description "c"))))))
-         (raw (evo.provider::build-responses-request-json
-               :model (find-model "gpt-5.6-luna") :system "sys" :messages history
-               :tools tools :thinking-level :high :cache-key "sess-1"))
-         (req (com.inuoe.jzon:parse raw)))
-    (flet ((jget (&rest keys) (apply #'evo.provider::jget req keys)))
-      (check "oai req store false" (search "\"store\":false" raw))
-      (check "oai req instructions" (equal (jget "instructions") "sys"))
-      (check "oai req effort" (equal (jget "reasoning" "effort") "high"))
-      (check "oai req include encrypted reasoning"
-             (find "reasoning.encrypted_content" (jget "include") :test #'equal))
-      (check "oai req cache key" (equal (jget "prompt_cache_key") "sess-1"))
-      (check "oai req max output" (= (jget "max_output_tokens") 128000))
-      (check "oai req flat function tool"
-             (let ((tl (aref (jget "tools") 0)))
-               (and (equal (evo.provider::jget tl "type") "function")
-                    (equal (evo.provider::jget tl "name") "bash")
-                    (evo.provider::jget tl "parameters"))))
-      (let ((input (jget "input")))
-        (check "oai req item order"
-               (equal (map 'list (lambda (i) (evo.provider::jget i "type")) input)
-                      '("message" "reasoning" "message" "function_call"
-                        "function_call_output")))
-        (check "oai req reasoning replayed verbatim"
-               (and (equal (evo.provider::jget (aref input 1) "id") "rs_1")
-                    (equal (evo.provider::jget (aref input 1) "encrypted_content") "ENC")))
-        (check "oai req same-model ids kept"
-               (and (equal (evo.provider::jget (aref input 2) "id") "msg_1")
-                    (equal (evo.provider::jget (aref input 3) "id") "fc_a")))
-        (check "oai req function call wire form"
-               (and (equal (evo.provider::jget (aref input 3) "call_id") "call_a")
-                    (equal (pget (evo.provider::json->sexpr
-                                  (com.inuoe.jzon:parse
-                                   (evo.provider::jget (aref input 3) "arguments")))
-                                 :command)
-                           "ls")))
-        (check "oai req tool result output"
-               (and (equal (evo.provider::jget (aref input 4) "call_id") "call_a")
-                    (equal (evo.provider::jget (aref input 4) "output") "ok")))))
-    ;; Model switch: handoff drops the reasoning item; item ids don't replay
-    ;; (the server validates fc_*<->rs_* same-response pairing).
-    (let* ((raw2 (evo.provider::build-responses-request-json
-                  :model (find-model "gpt-5.6-sol") :system "sys" :messages history
-                  :thinking-level :high))
-           (input (evo.provider::jget (com.inuoe.jzon:parse raw2) "input")))
-      (check "oai req cross-model drops reasoning"
-             (equal (map 'list (lambda (i) (evo.provider::jget i "type")) input)
-                    '("message" "message" "function_call" "function_call_output")))
-      (check "oai req cross-model drops item ids"
-             (and (null (evo.provider::jget (aref input 1) "id"))
-                  (null (evo.provider::jget (aref input 2) "id")))))
-    ;; No off rung: a level off the ladder sends no reasoning field at all
-    ;; rather than an effort the endpoint would reject.
-    (let ((raw3 (evo.provider::build-responses-request-json
-                 :model (find-model "gpt-5.6-luna") :messages history
-                 :thinking-level :off)))
-      (check "oai req retired :off sends no reasoning field"
-             (not (search "\"reasoning\":" raw3)))
-      (check "oai req retired :off -> no include"
-             (not (search "reasoning.encrypted_content" raw3))))))
-
-;;; Kimi (Moonshot AI) provider — extensions/020-kimi-provider.lisp
+;;; Kimi Code provider — extensions/020-kimi-provider.lisp
 ;;;
-;;; The vendored extension owns a whole wire protocol (OpenAI-compatible chat
-;;; completions plus Kimi's extensions), so it is tested like a bundled
-;;; adapter: request shape, thinking dial, dynamically loaded tools, and SSE
-;;; parsing, each against what the Kimi API docs specify.
-
-(defparameter *kimi-sse-sample*
-  (format nil (cat "data: {\"id\":\"cmpl-1\",\"object\":\"chat.completion.chunk\",\"model\":\"kimi-k3\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"},\"finish_reason\":null}]}~%~%"
-                   "data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"think \"},\"finish_reason\":null}]}~%~%"
-                   "data: {\"choices\":[{\"index\":0,\"delta\":{\"reasoning_content\":\"hard\"},\"finish_reason\":null}]}~%~%"
-                   "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"},\"finish_reason\":null}]}~%~%"
-                   "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"bash\",\"arguments\":\"{\\\"comm\"}}]},\"finish_reason\":null}]}~%~%"
-                   "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"and\\\":\\\"ls\\\"}\"}}]},\"finish_reason\":null}]}~%~%"
-                   "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}~%~%"
-                   "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":10,\"total_tokens\":110,\"cached_tokens\":40}}~%~%"
-                   "data: [DONE]~%~%")))
-
-(defun kimi-fn (name)
-  "The extension's own function NAME, resolved after the file is loaded."
-  (symbol-function (find-symbol name :evo.user)))
-
-(defun kimi-history ()
-  (list '(:role :user :content ((:type :text :text "go")))
-        (list :role :assistant :model "kimi-k3" :stop-reason :tool-use
-              :usage '(:input 1 :output 1 :cache-read 0 :cache-write 0)
-              :content (list '(:type :thinking :thinking "let me look")
-                             '(:type :text :text "working")
-                             '(:type :tool-call :id "call_a" :name "bash"
-                               :arguments (:command "ls"))))
-        '(:role :tool-result :tool-call-id "call_a" :tool-name "bash"
-          :is-error nil :content ((:type :text :text "ok")))
-        (list :role :user
-              :content (list '(:type :text :text "and this?")
-                             '(:type :image :media-type "image/png" :data "AAAA"
-                               :name "shot.png")))))
-
-(defun kimi-tool (name)
-  (list :name name :description "run"
-        :input-schema (schema->json-schema
-                       '(:object (:command :type :string :description "c")))))
+;;; The extension is configuration, not a wire protocol: Kimi Code's
+;;; Anthropic-compatible endpoint is driven by the kernel's own
+;;; :anthropic-messages adapter.  So what is tested here is the config —
+;;; endpoint, both K3 ids, and the one thing K3 needs that stock Anthropic
+;;; models do not: effort as the only thinking dial, with no `thinking`
+;;; object on the wire (a budget is ignored there, and a disabled thinking
+;;; object routes the request to an older model).
 
 (defun test-kimi-provider ()
   (let ((saved-models evo.provider::*models*)
         (saved-providers (copy-alist evo.provider::*providers*))
-        (saved-apis (copy-alist evo.provider::*apis*))
-        (env-names '("MOONSHOT_API_KEY" "KIMI_API_KEY"
-                     "MOONSHOT_BASE_URL" "KIMI_BASE_URL"))
+        (env-names '("KIMI_API_KEY" "KIMI_BASE_URL"))
         (key "sk-kimi-test-key-0123456789"))
     (let ((saved-env (mapcar (lambda (name) (cons name (getenv name))) env-names)))
       (unwind-protect
-           (progn
+           (flet ((load-extension ()
+                    (load (merge-pathnames "extensions/020-kimi-provider.lisp"
+                                           (uiop:getcwd))
+                          :verbose nil :print nil))
+                  (forget-provider ()
+                    (setf evo.provider::*providers*
+                          (remove :kimi evo.provider::*providers* :key #'car))))
              (dolist (name env-names) (evo.port:setenv name ""))
-             (evo.port:setenv "MOONSHOT_API_KEY" key)
-             (load (merge-pathnames "extensions/020-kimi-provider.lisp"
-                                    (uiop:getcwd))
-                   :verbose nil :print nil)
-             ;; Registration: api, provider endpoint, model metadata.
-             (check "kimi api registered"
-                    (member :kimi-chat-completions (api-keys)))
-             (let ((config (provider-config :moonshotai)))
+             (evo.port:setenv "KIMI_API_KEY" key)
+             (load-extension)
+             (let ((config (provider-config :kimi)))
                (check "kimi provider base url"
-                      (equal (pget config :base-url) "https://api.moonshot.ai"))
-               (check "kimi provider key from MOONSHOT_API_KEY"
+                      (equal (pget config :base-url) "https://api.kimi.com/coding"))
+               (check "kimi provider key from KIMI_API_KEY"
                       (equal (pget config :api-key) key)))
-             (let ((model (find-model "kimi-k3" :moonshotai))
-                   (api (find-api :kimi-chat-completions)))
-               (check "kimi model context window"
-                      (= (model-context-window model) 1048576))
-               (check "kimi model max output" (= (model-max-output model) 131072))
-               (check "kimi model reasons" (pget model :thinking))
-               (check "kimi model takes images" (model-vision-p model))
-               (check "kimi model effort ladder"
-                      (equal (model-effort model) '(:low :high :max)))
-               (check "kimi endpoint path"
-                      (equal (endpoint-path api) "/v1/chat/completions"))
-               (check "kimi bearer auth"
-                      (equal (cdr (assoc "authorization"
-                                         (auth-headers api (provider-config :moonshotai))
-                                         :test #'equal))
-                             (concatenate 'string "Bearer " key)))
-               ;; thinkingLevelMap verbatim: only low/high/max name a rung.
-               (check "kimi thinking level map"
-                      (equal (mapcar (lambda (level) (thinking-param api level))
-                                     +effort-levels+)
-                             '("low" nil "high" nil "max")))
-               ;; A trailing /v1 in a configured base URL would double the
-               ;; endpoint path, so it is stripped.
-               (check "kimi base url normalizes a trailing /v1"
-                      (equal (funcall (kimi-fn "KIMI--NORMALIZE-BASE-URL")
-                                      "https://api.moonshot.cn/v1")
-                             "https://api.moonshot.cn"))
-               ;; No key is a loud provider error, not a mystery 401.
-               (evo.port:setenv "MOONSHOT_API_KEY" "")
-               (check-signals "kimi missing api key signals"
-                              (auth-headers api (list :base-url "x" :api-key "")))
-               (evo.port:setenv "MOONSHOT_API_KEY" key)
-               ;; Request building.
-               (let* ((build (kimi-fn "KIMI--BUILD-REQUEST-JSON"))
-                      (history (kimi-history))
-                      (tools (list (kimi-tool "bash")))
-                      (raw (funcall build :model model :system "sys"
-                                          :messages history :tools tools
-                                          :thinking-level :medium
-                                          :cache-key "kimi-sess-1"))
+             (let ((k3 (find-model "k3" :kimi))
+                   (k3-256k (find-model "k3-256k" :kimi)))
+               (check "kimi models speak the kernel's anthropic adapter"
+                      (and (eq (pget k3 :api) :anthropic-messages)
+                           (eq (pget k3-256k :api) :anthropic-messages)))
+               (check "kimi context windows"
+                      (and (= (model-context-window k3) 1048576)
+                           (= (model-context-window k3-256k) 262144)))
+               (check "kimi max output" (= (model-max-output k3) 131072))
+               (check "kimi models see"
+                      (and (model-vision-p k3) (model-vision-p k3-256k)))
+               ;; K3's official rungs, exactly: evo clamps an off-ladder
+               ;; level down itself, instead of letting the endpoint round
+               ;; medium up to high and xhigh up to max.
+               (check "kimi effort ladder is the official three rungs"
+                      (equal (model-effort k3) '(:low :high :max)))
+               (check "kimi thinking mode is effort-only"
+                      (and (eq (model-thinking-mode k3) :effort-only)
+                           (eq (model-thinking-mode k3-256k) :effort-only)))
+               ;; Request shape: effort dial, and no thinking object at all.
+               (let* ((raw (evo.provider::build-request-json
+                            :model k3-256k :system "sys"
+                            :messages '((:role :user
+                                         :content ((:type :text :text "go"))))
+                            :thinking-level :max))
                       (req (com.inuoe.jzon:parse raw)))
-                 (flet ((jget (&rest keys) (apply #'evo.provider::jget req keys)))
-                   (check "kimi req model" (equal (jget "model") "kimi-k3"))
-                   (check "kimi req streams" (eq (jget "stream") t))
-                   (check "kimi req asks for usage"
-                          (eq (jget "stream_options" "include_usage") t))
-                   (check "kimi req max_tokens field"
-                          (= (jget "max_tokens") 131072))
-                   (check "kimi req cache key"
-                          (equal (jget "prompt_cache_key") "kimi-sess-1"))
-                   ;; supportsStore false, and K3 fixes the sampling knobs.
-                   (check "kimi req sends no store/sampling fields"
-                          (notany (lambda (field) (search field raw))
-                                  '("\"store\"" "\"temperature\"" "\"top_p\""
-                                    "\"presence_penalty\"" "\"frequency_penalty\"")))
-                   ;; An unmapped rung clamps down the ladder rather than
-                   ;; falling through to the server default (which is max).
-                   (check "kimi req clamps :medium to low"
-                          (equal (jget "reasoning_effort") "low"))
-                   (check "kimi req tool is a strict-free function"
-                          (let ((tl (aref (jget "tools") 0)))
-                            (and (equal (evo.provider::jget tl "type") "function")
-                                 (equal (evo.provider::jget tl "function" "name") "bash")
-                                 (eq (evo.provider::jget tl "function" "strict") nil)
-                                 (evo.provider::jget tl "function" "parameters"))))
-                   (let ((messages (jget "messages")))
-                     (check "kimi req message roles"
-                            (equal (map 'list (lambda (m) (evo.provider::jget m "role"))
-                                        messages)
-                                   '("system" "user" "assistant" "tool" "user")))
-                     (check "kimi req system prompt is a system message"
-                            (equal (evo.provider::jget (aref messages 0) "content") "sys"))
-                     (check "kimi req assistant replays reasoning_content"
-                            (equal (evo.provider::jget (aref messages 2) "reasoning_content")
-                                   "let me look"))
-                     (check "kimi req assistant text kept"
-                            (equal (evo.provider::jget (aref messages 2) "content")
-                                   "working"))
-                     (check "kimi req tool call wire form"
-                            (let ((tc (aref (evo.provider::jget (aref messages 2)
-                                                                "tool_calls")
-                                            0)))
-                              (and (equal (evo.provider::jget tc "id") "call_a")
-                                   (equal (evo.provider::jget tc "type") "function")
-                                   (equal (evo.provider::jget tc "function" "name") "bash")
-                                   (equal (pget (evo.provider::json->sexpr
-                                                 (com.inuoe.jzon:parse
-                                                  (evo.provider::jget tc "function"
-                                                                      "arguments")))
-                                                :command)
-                                          "ls"))))
-                     (check "kimi req tool result"
-                            (and (equal (evo.provider::jget (aref messages 3) "tool_call_id")
-                                        "call_a")
-                                 (equal (evo.provider::jget (aref messages 3) "content")
-                                        "ok")))
-                     (check "kimi req image is an inline data url"
-                            (let ((block (aref (evo.provider::jget (aref messages 4)
-                                                                   "content")
-                                               1)))
-                              (and (equal (evo.provider::jget block "type") "image_url")
-                                   (equal (evo.provider::jget block "image_url" "url")
-                                          "data:image/png;base64,AAAA"))))))
-                 ;; A tool that hands back a picture (READ on a screenshot):
-                 ;; chat completions has no image inside a tool message, so the
-                 ;; image has to follow it as a user message or the model
-                 ;; answers blind about an image it was told it had.
-                 (let* ((img-history
-                          (list '(:role :user :content ((:type :text :text "look")))
-                                (list :role :assistant :model "kimi-k3"
-                                      :stop-reason :tool-use
-                                      :content (list '(:type :tool-call :id "call_i"
-                                                       :name "read"
-                                                       :arguments (:path "shot.png"))))
-                                (list :role :tool-result :tool-call-id "call_i"
-                                      :tool-name "read" :is-error nil
-                                      :content (list '(:type :text :text "Image shot.png")
-                                                     '(:type :image :media-type "image/png"
-                                                       :data "QUJD" :name "shot.png")))))
-                        (img-req (com.inuoe.jzon:parse
-                                  (funcall build :model model :system "sys"
-                                                 :messages img-history :tools tools
-                                                 :thinking-level :low :cache-key "k2")))
-                        (img-messages (evo.provider::jget img-req "messages")))
-                   (check "kimi req: a tool result image follows as a user message"
-                          (and (equal (map 'list
-                                           (lambda (m) (evo.provider::jget m "role"))
-                                           img-messages)
-                                      '("system" "user" "assistant" "tool" "user"))
-                               (search "QUJD" (com.inuoe.jzon:stringify
-                                               (aref img-messages 4)))))
-                   (check "kimi req: the tool message itself stays text"
-                          (stringp (evo.provider::jget (aref img-messages 3) "content"))))
-                 ;; :xhigh clamps to high, :max passes through.
-                 (check "kimi req clamps :xhigh to high"
-                        (equal (evo.provider::jget
-                                (com.inuoe.jzon:parse
-                                 (funcall build :model model :messages history
-                                                :thinking-level :xhigh))
-                                "reasoning_effort")
-                               "high"))
-                 (check "kimi req sends :max"
-                        (equal (evo.provider::jget
-                                (com.inuoe.jzon:parse
-                                 (funcall build :model model :messages history
-                                                :thinking-level :max))
-                                "reasoning_effort")
+                 (check "kimi req model" (equal (evo.provider::jget req "model")
+                                                "k3-256k"))
+                 (check "kimi req sends an official rung verbatim"
+                        (equal (evo.provider::jget req "output_config" "effort")
                                "max"))
-                 ;; NIL is JSON `false`, not "absent": an optional string the
-                 ;; caller did not supply has to be left out of the object
-                 ;; entirely, or the endpoint sees a boolean where it wants a
-                 ;; string.
-                 (let ((raw (funcall build :model model
-                                           :messages (list '(:role :tool-result
-                                                             :tool-call-id "call_a"
-                                                             :content ((:type :text
-                                                                        :text "ok"))))
-                                           :tools (list (list :name "bash"
-                                                              :input-schema
-                                                              (schema->json-schema
-                                                               '(:object)))))))
-                   (check "kimi req omits absent optional strings"
-                          (and (not (search "\"description\":false" raw))
-                               (not (search "\"name\":false" raw))
-                               (search "\"content\":\"ok\"" raw))))
-                 ;; Deferred tools: a tool that shows up mid-session is
-                 ;; declared in a trailing dynamic-tools system message, so the
-                 ;; cached prefix (and the top-level tool array) does not move.
-                 (funcall (kimi-fn "KIMI--FORGET-TOOL-BASELINE") "kimi-sess-2")
-                 (funcall build :model model :messages history
-                                :tools (list (kimi-tool "bash"))
-                                :cache-key "kimi-sess-2")
-                 (let* ((raw2 (funcall build :model model :messages history
-                                             :tools (list (kimi-tool "bash")
-                                                          (kimi-tool "web"))
-                                             :cache-key "kimi-sess-2"))
-                        (req2 (com.inuoe.jzon:parse raw2))
-                        (messages (evo.provider::jget req2 "messages"))
-                        (last (aref messages (1- (length messages)))))
-                   (check "kimi deferred: top-level tools unchanged"
-                          (and (= 1 (length (evo.provider::jget req2 "tools")))
-                               (equal (evo.provider::jget
-                                       (aref (evo.provider::jget req2 "tools") 0)
-                                       "function" "name")
-                                      "bash")))
-                   (check "kimi deferred: new tool in a trailing system message"
-                          (and (equal (evo.provider::jget last "role") "system")
-                               (null (evo.provider::jget last "content"))
-                               (equal (evo.provider::jget
-                                       (aref (evo.provider::jget last "tools") 0)
-                                       "function" "name")
-                                      "web")))
-                   ;; No cache key (a one-shot call) defers nothing.
-                   (check "kimi deferred: off without a session key"
-                          (let ((req3 (com.inuoe.jzon:parse
-                                       (funcall build :model model :messages history
-                                                      :tools (list (kimi-tool "bash")
-                                                                   (kimi-tool "web"))))))
-                            (= 2 (length (evo.provider::jget req3 "tools"))))))))
-             ;; SSE parsing.
-             (let* ((api (find-api :kimi-chat-completions))
-                    (events nil)
-                    (result (with-input-from-string (in *kimi-sse-sample*)
-                              (parse-stream api in
-                                            :on-event (lambda (ev) (push ev events))))))
-               (check "kimi sse stopped" (pget result :stopped-p))
-               (check "kimi sse model" (equal (pget result :model) "kimi-k3"))
-               (check "kimi sse stop reason" (eq (pget result :stop-reason) :tool-use))
-               (check "kimi sse usage unbundles cached tokens"
-                      (let ((u (pget result :usage)))
-                        (and (= (pget u :input) 60) (= (pget u :output) 10)
-                             (= (pget u :cache-read) 40) (= (pget u :cache-write) 0))))
-               (let ((blocks (pget result :content)))
-                 (check "kimi sse three blocks" (= 3 (length blocks)))
-                 (check "kimi sse reasoning_content becomes thinking"
-                        (and (eq (pget (first blocks) :type) :thinking)
-                             (equal (pget (first blocks) :thinking) "think hard")))
-                 (check "kimi sse text" (equal (pget (second blocks) :text) "hello"))
-                 (check "kimi sse tool call across chunks"
-                        (and (equal (pget (third blocks) :id) "call_1")
-                             (equal (pget (third blocks) :name) "bash")
-                             (equal (pget (pget (third blocks) :arguments) :command)
-                                    "ls"))))
-               (check "kimi sse emits deltas"
-                      (equal (remove-duplicates
-                              (mapcar (lambda (e) (pget e :type)) (reverse events))
-                              :from-end t)
-                             '(:message-start :thinking-delta :text-delta)))
-               (check "kimi sse leaves tool-call-start to the kernel"
-                      (not (find :tool-call-start events
-                                 :key (lambda (e) (pget e :type))))))
-             ;; A stream that ends without a finish_reason is truncation.
-             (let ((result (with-input-from-string
-                               (in (format nil "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}~%~%"))
-                             (parse-stream (find-api :kimi-chat-completions) in))))
-               (check "kimi sse truncation detected" (not (pget result :stopped-p))))
-             ;; finish_reason length -> :length; an error chunk is data.
-             (let ((result (with-input-from-string
-                               (in (format nil "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"length\"}]}~%~%data: [DONE]~%~%"))
-                             (parse-stream (find-api :kimi-chat-completions) in))))
-               (check "kimi sse length stop" (eq (pget result :stop-reason) :length)))
-             (let ((result (with-input-from-string
-                               (in (format nil "data: {\"error\":{\"type\":\"content_filter\",\"message\":\"nope\"}}~%~%"))
-                             (parse-stream (find-api :kimi-chat-completions) in))))
-               (check "kimi sse error chunk is data"
-                      (search "content_filter" (pget result :error-message))))
-             ;; Chat-completions chunks are full of explicit JSON nulls, which
-             ;; parse to a symbol rather than NIL: none of them may reach the
-             ;; transcript as a value, and a missing tool-call id still has to
-             ;; produce a callable block.
-             (let* ((result (with-input-from-string
-                                (in (format nil (cat "data: {\"model\":null,\"choices\":[{\"index\":0,\"delta\":{\"role\":null,\"content\":\"hi\",\"reasoning_content\":null,\"tool_calls\":[{\"index\":0,\"id\":null,\"function\":{\"name\":\"bash\",\"arguments\":null}}]},\"finish_reason\":null}],\"usage\":null}~%~%"
-                                                     "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}]}~%~%data: [DONE]~%~%")))
-                              (parse-stream (find-api :kimi-chat-completions) in)))
-                    (blocks (pget result :content)))
-               (check "kimi sse nulls never become values"
-                      (and (null (pget result :model))
-                           (= 2 (length blocks))
-                           (equal (pget (first blocks) :text) "hi")
-                           (equal (pget (second blocks) :name) "bash")
-                           (null (pget (second blocks) :arguments))))
-               (check "kimi sse synthesizes a missing tool call id"
-                      (equal (pget (second blocks) :id) "call_0"))
-               (check "kimi sse null usage counts as zero"
-                      (zerop (usage-total-tokens (pget result :usage)))))
-             ;; The config's cost block has no home in the model registry;
-             ;; /kimi:cost is where it is spent (USD per 1M tokens).
-             (check "kimi cost from usage"
-                    (< (abs (- (funcall (kimi-fn "KIMI--COST")
-                                        '(:input 1000000 :output 1000000
-                                          :cache-read 1000000 :cache-write 1000000))
-                               18.3d0))
-                       1d-4))
-             ;; End to end: model -> api -> endpoint -> assistant message.
-             (let ((saved-post (symbol-function 'dex:post))
-                   (seen nil))
-               (unwind-protect
-                    (progn
-                      (setf (symbol-function 'dex:post)
-                            (lambda (url &rest args)
-                              (setf seen (list :url url :args args))
-                              (flexi-streams:make-in-memory-input-stream
-                               (flexi-streams:string-to-octets
-                                *kimi-sse-sample* :external-format :utf-8))))
-                      (let ((message (call-provider
-                                      :model (find-model "kimi-k3" :moonshotai)
-                                      :system "sys" :messages (kimi-history)
-                                      :tools (list (kimi-tool "bash"))
-                                      :thinking-level :high
-                                      :cache-key "kimi-sess-3")))
-                        (check "kimi call: endpoint url"
-                               (equal (pget seen :url)
-                                      "https://api.moonshot.ai/v1/chat/completions"))
-                        (check "kimi call: bearer + json headers"
-                               (let ((headers (pget (pget seen :args) :headers)))
-                                 (and (equal (cdr (assoc "content-type" headers
-                                                         :test #'equal))
-                                             "application/json")
-                                      (equal (cdr (assoc "authorization" headers
-                                                         :test #'equal))
-                                             (concatenate 'string "Bearer " key)))))
-                        (check "kimi call: assistant message"
-                               (and (eq (pget message :role) :assistant)
-                                    (eq (pget message :provider) :moonshotai)
-                                    (equal (pget message :model) "kimi-k3")
-                                    (eq (pget message :stop-reason) :tool-use)
-                                    (= 3 (length (pget message :content)))))
-                        (check "kimi call: usage recorded"
-                               (= 110 (usage-total-tokens (pget message :usage))))))
-                 (setf (symbol-function 'dex:post) saved-post)))
+                 (check "kimi req sends no thinking object"
+                        (not (search "\"thinking\"" raw)))
+                 (check "kimi req max_tokens" (= (evo.provider::jget req "max_tokens")
+                                                 131072)))
+               ;; Off-ladder rungs clamp DOWN to an official one on the way
+               ;; out — never up: a request must not spend more than asked.
+               (flet ((effort-at (level)
+                        (evo.provider::jget
+                         (com.inuoe.jzon:parse
+                          (evo.provider::build-request-json
+                           :model k3 :system nil
+                           :messages '((:role :user
+                                        :content ((:type :text :text "go"))))
+                           :thinking-level level))
+                         "output_config" "effort")))
+                 (check "kimi req clamps medium down to low"
+                        (equal (effort-at :medium) "low"))
+                 (check "kimi req clamps xhigh down to high"
+                        (equal (effort-at :xhigh) "high")))
+               ;; Both spellings of the base URL work: the adapter supplies
+               ;; /v1/messages, so a configured /v1 would double it.
+               (check "kimi base url normalizes a trailing /v1"
+                      (equal (funcall (symbol-function
+                                       (find-symbol "KIMI--NORMALIZE-BASE-URL"
+                                                    :evo.user))
+                                      "https://api.kimi.com/coding/v1")
+                             "https://api.kimi.com/coding"))
+               ;; End to end: model -> endpoint url + x-api-key auth.
+               (let ((saved-post (symbol-function 'dex:post))
+                     (sse (format nil (cat "event: message_start~%data: {\"type\":\"message_start\",\"message\":{\"model\":\"k3-256k\",\"usage\":{\"input_tokens\":10,\"output_tokens\":0}}}~%~%"
+                                           "event: content_block_start~%data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\"}}~%~%"
+                                           "event: content_block_delta~%data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}~%~%"
+                                           "event: message_delta~%data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":2}}~%~%"
+                                           "event: message_stop~%data: {\"type\":\"message_stop\"}~%~%")))
+                     (seen nil))
+                 (unwind-protect
+                      (progn
+                        (setf (symbol-function 'dex:post)
+                              (lambda (url &rest args)
+                                (setf seen (list :url url :args args))
+                                (flexi-streams:make-in-memory-input-stream
+                                 (flexi-streams:string-to-octets
+                                  sse :external-format :utf-8))))
+                        (let ((message (call-provider
+                                        :model k3-256k :system "sys"
+                                        :messages '((:role :user
+                                                     :content ((:type :text :text "go"))))
+                                        :thinking-level :high)))
+                          (check "kimi call: endpoint url"
+                                 (equal (pget seen :url)
+                                        "https://api.kimi.com/coding/v1/messages"))
+                          (check "kimi call: x-api-key auth"
+                                 (equal (cdr (assoc "x-api-key"
+                                                    (pget (pget seen :args) :headers)
+                                                    :test #'equal))
+                                        key))
+                          (check "kimi call: assistant message"
+                                 (and (eq (pget message :role) :assistant)
+                                      (eq (pget message :provider) :kimi)
+                                      (equal (pget message :model) "k3-256k")))))
+                   (setf (symbol-function 'dex:post) saved-post))))
              ;; Config beats the environment.  init.lisp is evaluated before
              ;; extensions load and register-provider merges with the later
              ;; call winning, so the extension has to fill in only what config
              ;; left out — otherwise a key or endpoint written in init.lisp
              ;; would be silently undone by the extension that follows it.
-             (flet ((forget-provider ()
-                      (setf evo.provider::*providers*
-                            (remove :moonshotai evo.provider::*providers*
-                                    :key #'car)))
-                    (reload-extension ()
-                      (load (merge-pathnames "extensions/020-kimi-provider.lisp"
-                                             (uiop:getcwd))
-                            :verbose nil :print nil)))
-               (evo.port:setenv "MOONSHOT_API_KEY" "")
-               (evo.port:setenv "KIMI_API_KEY" "sk-env-alias")
-               (forget-provider)
-               (register-provider* :moonshotai
-                                   :base-url "https://api.moonshot.cn"
-                                   :api-key "sk-from-init")
-               (reload-extension)
-               (let ((config (provider-config :moonshotai)))
-                 (check "kimi: a base url from init.lisp survives the extension"
-                        (equal (pget config :base-url) "https://api.moonshot.cn"))
-                 (check "kimi: a key from init.lisp beats the env alias"
-                        (equal (pget config :api-key) "sk-from-init")))
-               ;; With nothing configured, the alias is what fills the gap.
-               (forget-provider)
-               (reload-extension)
-               (let ((config (provider-config :moonshotai)))
-                 (check "kimi: KIMI_API_KEY alias used when config is silent"
-                        (equal (pget config :api-key) "sk-env-alias"))
-                 (check "kimi: stock endpoint when config is silent"
-                        (equal (pget config :base-url) "https://api.moonshot.ai")))
-               ;; And MOONSHOT_API_KEY, the canonical variable, wins over the
-               ;; alias without anything being written into the registry.
-               (forget-provider)
-               (evo.port:setenv "MOONSHOT_API_KEY" key)
-               (reload-extension)
-               (check "kimi: MOONSHOT_API_KEY beats the alias"
-                      (equal (pget (provider-config :moonshotai) :api-key) key))
-               (evo.port:setenv "KIMI_API_KEY" ""))
-             ;; Unknown finish reasons are loud rather than guessed.
-             (check-signals "kimi sse unknown finish reason signals"
-                            (with-input-from-string
-                                (in (format nil "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"},\"finish_reason\":\"wat\"}]}~%~%data: [DONE]~%~%"))
-                              (parse-stream (find-api :kimi-chat-completions) in))))
+             (forget-provider)
+             (register-provider* :kimi :base-url "https://kimi.example/proxy"
+                                       :api-key "sk-from-init")
+             (load-extension)
+             (let ((config (provider-config :kimi)))
+               (check "kimi: a base url from init.lisp survives the extension"
+                      (equal (pget config :base-url) "https://kimi.example/proxy"))
+               (check "kimi: a key from init.lisp beats the env"
+                      (equal (pget config :api-key) "sk-from-init")))
+             ;; With nothing configured, KIMI_BASE_URL fills the gap.
+             (forget-provider)
+             (evo.port:setenv "KIMI_BASE_URL" "https://kimi.example/other/v1")
+             (load-extension)
+             (check "kimi: KIMI_BASE_URL used when config is silent"
+                    (equal (pget (provider-config :kimi) :base-url)
+                           "https://kimi.example/other")))
         (dolist (pair saved-env)
           (evo.port:setenv (car pair) (or (cdr pair) "")))
         (setf evo.provider::*models* saved-models
-              evo.provider::*providers* saved-providers
-              evo.provider::*apis* saved-apis)))))
+              evo.provider::*providers* saved-providers)))))
 
 ;;; Timeouts and proxy env detection
 
@@ -825,7 +407,7 @@ line2")))
   (let ((saved (mapcar (lambda (v) (cons v (getenv v)))
                        '("HTTPS_PROXY" "https_proxy" "HTTP_PROXY" "http_proxy"
                          "NO_PROXY" "no_proxy")))
-        (url "https://api.openai.com/v1/responses"))
+        (url "https://api.anthropic.com/v1/messages"))
     (unwind-protect
          (progn
            (dolist (pair saved) (evo.port:setenv (car pair) ""))
@@ -843,7 +425,7 @@ line2")))
                   (null (evo.util:env-proxy "http://127.0.0.1:8787/v1/messages")))
            (check "localhost bypasses proxy"
                   (null (evo.util:env-proxy "http://localhost:8787/v1/messages")))
-           (evo.port:setenv "no_proxy" "example.com, openai.com")
+           (evo.port:setenv "no_proxy" "example.com, anthropic.com")
            (check "no_proxy suffix match bypasses"
                   (null (evo.util:env-proxy url)))
            (evo.port:setenv "no_proxy" "example.com")
@@ -861,6 +443,8 @@ line2")))
          (saved-env (mapcar (lambda (name) (cons name (getenv name))) env-names))
          (saved-get (symbol-function 'dex:get))
          (saved-post (symbol-function 'dex:post))
+         (saved-models evo.provider::*models*)
+         (saved-providers (copy-alist evo.provider::*providers*))
          (calls nil)
          (proxy "http://lowercase-proxy:3128"))
     (unwind-protect
@@ -896,16 +480,16 @@ line2")))
            (funcall (symbol-function
                      (find-symbol "CLAUDE-OAUTH--REFRESH-TOKEN" :evo.user))
                     "refresh")
-           (funcall (symbol-function
-                     (find-symbol "CLAUDE-OAUTH--FETCH-MODELS" :evo.user)))
            (check "claude oauth guards all outbound requests"
-                  (= (length calls) 3))
+                  (= (length calls) 2))
            (check "claude oauth uses lowercase environment proxy"
                   (every (lambda (call)
                            (equal (getf (third call) :proxy) proxy))
                          calls)))
       (setf (symbol-function 'dex:get) saved-get
             (symbol-function 'dex:post) saved-post)
+      (setf evo.provider::*models* saved-models
+            evo.provider::*providers* saved-providers)
       (dolist (pair saved-env)
         (evo.port:setenv (car pair) (or (cdr pair) ""))))))
 
@@ -917,6 +501,8 @@ line2")))
          (saved-env (mapcar (lambda (name) (cons name (getenv name))) env-names))
          (saved-post (symbol-function 'dex:post))
          (saved-get (symbol-function 'dex:get))
+         (saved-models evo.provider::*models*)
+         (saved-providers (copy-alist evo.provider::*providers*))
          (refresh-calls nil)
          (token-dir (merge-pathnames "claude-oauth/"
                                      (or (getenv "EVO_HOME")
@@ -927,7 +513,8 @@ line2")))
            ;; Clean environment and token file.
            (dolist (name env-names) (evo.port:setenv name ""))
            (when (probe-file token-file) (delete-file token-file))
-           ;; Mock dex:get (fetch-models at load time) and dex:post (refresh).
+           ;; Mock dex:get (belt and braces: the extension makes no load-time
+           ;; requests any more) and dex:post (refresh).
            (setf (symbol-function 'dex:get)
                  (lambda (url &rest args)
                    (declare (ignore url args))
@@ -1013,110 +600,11 @@ line2")))
                     (find-symbol "*CLAUDE-OAUTH-AUTO-REFRESH*" :evo.user)) t)))
       (setf (symbol-function 'dex:post) saved-post
             (symbol-function 'dex:get) saved-get)
+      (setf evo.provider::*models* saved-models
+            evo.provider::*providers* saved-providers)
       (dolist (pair saved-env)
         (evo.port:setenv (car pair) (or (cdr pair) "")))
       (when (probe-file token-file) (delete-file token-file)))))
-
-(defun test-claude-oauth-model-fetch-refresh ()
-  (let* ((env-names '("HTTPS_PROXY" "https_proxy" "HTTP_PROXY" "http_proxy"
-                      "NO_PROXY" "no_proxy" "CLAUDE_OAUTH_ACCESS_TOKEN"
-                      "CLAUDE_OAUTH_REFRESH_TOKEN" "EVO_HOME"))
-         (saved-env (mapcar (lambda (name) (cons name (getenv name))) env-names))
-         (saved-post (symbol-function 'dex:post))
-         (saved-get (symbol-function 'dex:get))
-         (home (uiop:ensure-directory-pathname
-                (format nil "~a/evo-oauth-models-~a/" (tmp-dir) (gen-id))))
-         (refresh-calls nil)
-         (get-auths nil)
-         (next-access-token "sk-ant-oat-refreshed")
-         (next-refresh-token "rt-refreshed"))
-    (labels ((auth-header (args)
-               (cdr (assoc "Authorization" (getf args :headers) :test #'string=)))
-             (unauthorized-expired ()
-               (error 'dexador.error:http-request-failed
-                      :status 401
-                      :body "{\"error\":{\"type\":\"authentication_error\",\"message\":\"OAuth token expired\"}}"
-                      :headers nil
-                      :uri nil
-                      :method :get))
-             (success-body ()
-               "{\"data\":[]}"))
-      (unwind-protect
-           (progn
-             (ensure-directories-exist home)
-             (dolist (name env-names) (evo.port:setenv name ""))
-             (evo.port:setenv "EVO_HOME" (namestring home))
-             (setf (symbol-function 'dex:get)
-                   (lambda (url &rest args)
-                     (declare (ignore url args))
-                     (success-body)))
-             (setf (symbol-function 'dex:post)
-                   (lambda (url &rest args)
-                     (push (list url args) refresh-calls)
-                     (format nil "{\"access_token\":\"~a\",\"refresh_token\":\"~a\",\"expires_in\":3600}"
-                             next-access-token next-refresh-token)))
-             (load (merge-pathnames "extensions/020-claude-oauth-provider.lisp"
-                                    (uiop:getcwd))
-                   :verbose nil :print nil)
-             (let* ((now (funcall (find-symbol "CLAUDE-OAUTH--NOW-MS" :evo.user)))
-                    (fetch-models-fn (symbol-function
-                                      (find-symbol "CLAUDE-OAUTH--FETCH-MODELS" :evo.user)))
-                    (write-tokens-fn (symbol-function
-                                      (find-symbol "CLAUDE-OAUTH--WRITE-TOKENS" :evo.user))))
-               ;; Fresh stored token: model fetch should not refresh.
-               (funcall write-tokens-fn "sk-ant-oat-fresh" "rt-fresh"
-                        (+ now 3600000) (+ now 2592000000))
-               (setf refresh-calls nil
-                     get-auths nil)
-               (setf (symbol-function 'dex:get)
-                     (lambda (url &rest args)
-                       (declare (ignore url))
-                       (push (auth-header args) get-auths)
-                       (success-body)))
-               (funcall fetch-models-fn)
-               (check "model fetch: fresh token uses existing access token"
-                      (equal get-auths '("Bearer sk-ant-oat-fresh")))
-               (check "model fetch: fresh token does not refresh"
-                      (null refresh-calls))
-               ;; Expired stored token: proactive expiry check should refresh before GET.
-               (setf next-access-token "sk-ant-oat-proactive"
-                     next-refresh-token "rt-proactive-new")
-               (funcall write-tokens-fn "sk-ant-oat-expired" "rt-proactive"
-                        (- now 1000) (+ now 2592000000))
-               (setf refresh-calls nil
-                     get-auths nil)
-               (funcall fetch-models-fn)
-               (check "model fetch: expired token refreshes before GET"
-                      (equal get-auths '("Bearer sk-ant-oat-proactive")))
-               (check "model fetch: expired token calls refresh once"
-                      (= (length refresh-calls) 1))
-               ;; Missing expiry metadata: first GET can fail with an expiry-shaped
-               ;; auth error, then model fetch should refresh and retry once.
-               (setf next-access-token "sk-ant-oat-reactive"
-                     next-refresh-token "rt-reactive-new")
-               (funcall write-tokens-fn "sk-ant-oat-stale" "rt-reactive")
-               (setf refresh-calls nil
-                     get-auths nil)
-               (let ((get-count 0))
-                 (setf (symbol-function 'dex:get)
-                       (lambda (url &rest args)
-                         (declare (ignore url))
-                         (incf get-count)
-                         (push (auth-header args) get-auths)
-                         (if (= get-count 1)
-                             (unauthorized-expired)
-                             (success-body))))
-                 (funcall fetch-models-fn)
-                 (check "model fetch: expired 401 retries with refreshed token"
-                        (equal (nreverse get-auths)
-                               '("Bearer sk-ant-oat-stale"
-                                 "Bearer sk-ant-oat-reactive")))
-                 (check "model fetch: expired 401 refreshes once"
-                        (= (length refresh-calls) 1)))))
-        (setf (symbol-function 'dex:post) saved-post
-              (symbol-function 'dex:get) saved-get)
-        (dolist (pair saved-env)
-          (evo.port:setenv (car pair) (or (cdr pair) "")))))))
 
 ;;; Editor
 
@@ -3078,13 +2566,9 @@ completion gating around all of it."
   (declare (ignore api config))
   nil)
 
-(defmethod thinking-param ((api compact-fixture-api) level)
-  (declare (ignore api level))
-  nil)
-
 (defmethod build-request ((api compact-fixture-api)
-                          &key model system messages tools thinking-level cache-key)
-  (declare (ignore api model system messages tools thinking-level cache-key))
+                          &key model system messages tools thinking-level)
+  (declare (ignore api model system messages tools thinking-level))
   "{}")
 
 (defmethod perform-request ((api compact-fixture-api) url headers body
@@ -3114,8 +2598,7 @@ completion gating around all of it."
   (register-api :compact-fixture (make-instance 'compact-fixture-api))
   (register-provider* :compact-fixture :base-url "https://fixture.invalid")
   (register-model* "compact-fixture-model" :provider :compact-fixture
-                   :api :compact-fixture :context-window 10000 :max-output 100
-                   :thinking nil))
+                   :api :compact-fixture :context-window 10000 :max-output 100))
 
 (defun make-compact-fixture-tui (&key (old-chars 4000))
   (let* ((dir (uiop:ensure-directory-pathname
@@ -4057,7 +3540,7 @@ extensions still keep theirs."
   (reset-user-registries)
   (register-model* "reg-a" :provider :anthropic :api :anthropic-messages
                    :context-window 1000 :max-output 100)
-  (register-model* "reg-b" :provider :openai :api :openai-responses
+  (register-model* "reg-b" :provider :proxy-co
                    :context-window 2000 :max-output 200)
   (check "registration order preserved"
          (equal '("reg-a" "reg-b")
@@ -4115,26 +3598,13 @@ extensions still keep theirs."
   (check "reset clears models" (null (all-models)))
   (check "reset re-seeds anthropic"
          (equal "https://api.anthropic.com"
-                (pget (provider-config :anthropic) :base-url)))
-  (check "reset re-seeds openai"
-         (equal "https://api.openai.com"
-                (pget (provider-config :openai) :base-url))))
+                (pget (provider-config :anthropic) :base-url))))
 
 (defun test-apis ()
   (check "find-api anthropic" (find-api :anthropic-messages))
-  (check "find-api openai" (find-api :openai-responses))
   (check-signals "unknown api signals" (find-api :no-such-api))
-  (check "anthropic thinking-param is a budget"
-         (= 60000 (thinking-param (find-api :anthropic-messages) :max)))
-  (check "anthropic thinking-param: lowest rung still thinks"
-         (= 2048 (thinking-param (find-api :anthropic-messages) :low)))
-  (check "openai thinking-param is an effort string"
-         (equal "max" (thinking-param (find-api :openai-responses) :max)))
-  (check "openai thinking-param: lowest rung still thinks"
-         (equal "low" (thinking-param (find-api :openai-responses) :low)))
-  (check "endpoint paths"
-         (and (equal "/v1/messages" (endpoint-path (find-api :anthropic-messages)))
-              (equal "/v1/responses" (endpoint-path (find-api :openai-responses))))))
+  (check "endpoint path"
+         (equal "/v1/messages" (endpoint-path (find-api :anthropic-messages)))))
 
 ;;; Extension-defined provider APIs (a new wire protocol from userspace).
 
@@ -4142,8 +3612,6 @@ extensions still keep theirs."
 ;; for an extension, and the one that used to break /reload.
 (defclass bare-fixture-api (provider-api) ())
 (defmethod endpoint-path ((api bare-fixture-api)) "/v1/bare")
-(defmethod thinking-param ((api bare-fixture-api) level)
-  (declare (ignore level)) nil)
 
 ;; A self-seeding API: supplies the provider defaults too, so an env key
 ;; alone is enough config.
@@ -4162,7 +3630,7 @@ here must be reachable through the public EVO package with no ::."
   ;; generic the kernel actually calls.
   (dolist (name '("PROVIDER-API" "REGISTER-API" "FIND-API" "API-KEYS"
                   "ENDPOINT-PATH" "AUTH-HEADERS" "BUILD-REQUEST" "PARSE-STREAM"
-                  "THINKING-PARAM" "PERFORM-REQUEST" "MAP-SSE-EVENTS"
+                  "PERFORM-REQUEST" "MAP-SSE-EVENTS"
                   "DEFAULT-PROVIDER-KEY" "DEFAULT-BASE-URL" "DEFAULT-API-KEY-ENV"))
     (check (format nil "EVO exports ~a" name)
            (eq :external (nth-value 1 (find-symbol name :evo))))
@@ -4217,7 +3685,7 @@ here must be reachable through the public EVO package with no ::."
   ;; Provider first, padded so the id column starts at the same offset for
   ;; every row; the renderer then pads the whole label to align the context.
   (let* ((models '((:id "claude-opus-5" :provider :anthropic)
-                   (:id "gpt-5.6-luna" :provider :openai)
+                   (:id "k3" :provider :kimi)
                    (:id "m" :provider :a)))
          (width (reduce #'max models
                         :key (lambda (m) (length (string (pget m :provider))))
@@ -4226,7 +3694,7 @@ here must be reachable through the public EVO package with no ::."
     (check "provider leads the row"
            (evo.util:string-prefix-p "anthropic" (first labels*)))
     (check "provider is downcased"
-           (evo.util:string-prefix-p "openai" (second labels*)))
+           (evo.util:string-prefix-p "kimi" (second labels*)))
     ;; The id is always the label's suffix, so its start column is exact.
     (check "id column aligns across providers"
            (let ((starts (mapcar (lambda (m l) (- (length l) (length (pget m :id))))
@@ -4302,10 +3770,12 @@ selection journals the provider, and every resolution point honours it."
 
 (defun register-fixture-models ()
   "The unit suite's stand-in for init.lisp: the model registry ships empty."
-  (register-model* "gpt-5.6-luna" :provider :openai :api :openai-responses
-                   :context-window 272000 :max-output 128000 :thinking t)
-  (register-model* "gpt-5.6-sol" :provider :openai :api :openai-responses
-                   :context-window 272000 :max-output 128000 :thinking t))
+  (register-model* "claude-sonnet-5" :provider :anthropic
+                   :context-window 1000000 :max-output 128000
+                   :effort t :thinking-mode :adaptive)
+  (register-model* "claude-opus-5" :provider :anthropic
+                   :context-window 1000000 :max-output 128000
+                   :effort t :thinking-mode :adaptive))
 
 ;;; SSE transport framing
 
@@ -4343,7 +3813,8 @@ selection journals the provider, and every resolution point honours it."
 
 (defun test-anthropic-request ()
   (let* ((model '(:id "fixture-claude" :provider :anthropic :api :anthropic-messages
-                  :context-window 200000 :max-output 64000 :thinking t))
+                  :context-window 200000 :max-output 64000
+                  :thinking-mode :adaptive))
          (history
            (list '(:role :user :content ((:type :text :text "go")))
                  ;; errored turn: elided by the handoff pass
@@ -4373,8 +3844,10 @@ selection journals the provider, and every resolution point honours it."
              (let ((sys (aref (jget "system") 0)))
                (and (equal (evo.provider::jget sys "text") "sys")
                     (evo.provider::jget sys "cache_control"))))
-      (check "anth req thinking budget"
-             (= (jget "thinking" "budget_tokens") 16384))
+      (check "anth req adaptive thinking with summaries"
+             (and (equal (jget "thinking" "type") "adaptive")
+                  (equal (jget "thinking" "display") "summarized")
+                  (null (jget "thinking" "budget_tokens"))))
       (check "anth req tools cached on last"
              (let ((tl (aref (jget "tools") 0)))
                (and (equal (evo.provider::jget tl "name") "bash")
@@ -4394,9 +3867,8 @@ selection journals the provider, and every resolution point honours it."
     (let ((raw2 (build-request (find-api :anthropic-messages)
                                :model model :system nil :messages history
                                :tools nil :thinking-level :low)))
-      (check "anth req lowest rung is still a budget"
-             (= 2048 (evo.provider::jget (com.inuoe.jzon:parse raw2)
-                                         "thinking" "budget_tokens"))))
+      (check "anth req no budget_tokens at any rung"
+             (not (search "budget_tokens" raw2))))
     (check "anth req no output_config without :effort"
            (not (search "output_config" raw)))))
 
@@ -4406,26 +3878,25 @@ selection journals the provider, and every resolution point honours it."
   (let* ((history (list '(:role :user :content ((:type :text :text "go")))))
          (adaptive '(:id "fixture-adaptive" :provider :anthropic
                      :api :anthropic-messages :context-window 200000
-                     :max-output 64000 :thinking t :thinking-mode :adaptive
+                     :max-output 64000 :thinking-mode :adaptive
                      :effort (:low :medium :high :xhigh :max)))
          (capped '(:id "fixture-capped" :provider :anthropic
                    :api :anthropic-messages :context-window 200000
-                   :max-output 64000 :thinking t :thinking-mode :adaptive
+                   :max-output 64000 :thinking-mode :adaptive
                    :effort (:low :medium :high)))
-         (extended '(:id "fixture-extended" :provider :anthropic
-                     :api :anthropic-messages :context-window 200000
-                     :max-output 64000 :thinking t
-                     :effort (:low :medium :high)))
-         ;; No off level, but a model may still declare that it does not
-         ;; think at all -- a capability, not a per-turn dial.
-         (mute-adaptive '(:id "fixture-mute-adaptive" :provider :anthropic
-                          :api :anthropic-messages :context-window 200000
-                          :max-output 64000 :thinking nil
-                          :thinking-mode :adaptive :effort (:low :medium :high)))
-         (mute-extended '(:id "fixture-mute-extended" :provider :anthropic
-                          :api :anthropic-messages :context-window 200000
-                          :max-output 64000 :thinking nil
-                          :effort (:low :medium :high)))
+         ;; Effort is the whole dial on some endpoints (Kimi Code's K3):
+         ;; a thinking object there routes the request to a different
+         ;; model.  This is also the default mode, so DEFAULTED below —
+         ;; a plist without :thinking-mode at all — must behave the same.
+         (effort-only '(:id "fixture-effort-only" :provider :anthropic
+                        :api :anthropic-messages :context-window 200000
+                        :max-output 64000
+                        :thinking-mode :effort-only
+                        :effort (:low :medium :high :xhigh :max)))
+         (defaulted '(:id "fixture-defaulted" :provider :anthropic
+                      :api :anthropic-messages :context-window 200000
+                      :max-output 64000
+                      :effort (:low :medium :high :xhigh :max)))
          (req (lambda (model level)
                 (com.inuoe.jzon:parse
                  (build-request (find-api :anthropic-messages)
@@ -4452,19 +3923,13 @@ selection journals the provider, and every resolution point honours it."
                (and (equal "adaptive" (evo.provider::jget th "type"))
                     (equal "summarized" (evo.provider::jget th "display"))
                     (null (gethash "budget_tokens" th)))))
-      ;; On an adaptive model "does not think" has to be said out loud:
-      ;; omitting the field lets the server think anyway.
-      (check "adaptive: thinking disabled for a :thinking nil model"
-             (equal "disabled"
-                    (evo.provider::jget (thinking mute-adaptive :high) "type")))
-      (check "adaptive: no effort for a :thinking nil model"
-             (null (effort mute-adaptive :high)))
-      (check "extended: effort composes with budget_tokens"
-             (let ((r (funcall req extended :high)))
-               (and (equal "high" (evo.provider::jget r "output_config" "effort"))
-                    (= 16384 (evo.provider::jget r "thinking" "budget_tokens")))))
-      (check "extended: no thinking block for a :thinking nil model"
-             (null (thinking mute-extended :high))))))
+      (check "effort-only: effort dial, no thinking object"
+             (and (equal "xhigh" (effort effort-only :xhigh))
+                  (null (thinking effort-only :xhigh))
+                  (null (thinking effort-only :low))))
+      (check "effort-only is the default mode"
+             (and (equal "high" (effort defaulted :high))
+                  (null (thinking defaulted :high)))))))
 
 ;;; Model registry: effort declarations are validated and canonicalized.
 
@@ -4483,29 +3948,28 @@ selection journals the provider, and every resolution point honours it."
          (equal '(:low :max) (model-effort (find-model "eff-some"))))
   (check "registry: no effort by default"
          (null (model-effort (find-model "eff-none"))))
-  (check "registry: thinking mode recorded"
+  (check "registry: thinking mode recorded, effort-only by default"
          (and (eq :adaptive (model-thinking-mode (find-model "eff-all")))
-              (eq :extended (model-thinking-mode (find-model "eff-none")))))
+              (eq :effort-only (model-thinking-mode (find-model "eff-none")))))
   (check-signals "registry: bogus effort level rejected"
                  (register-model* "eff-bad" :provider :anthropic
                                   :api :anthropic-messages :context-window 1000
                                   :max-output 100 :effort '(:huge)))
-  (check "openai: effort clamped to a declared ladder"
-         (let* ((capped '(:id "fixture-capped-oai" :provider :openai
-                          :api :openai-responses :context-window 1000
-                          :max-output 100 :thinking t
-                          :effort (:low :medium :high)))
-                (open '(:id "fixture-open-oai" :provider :openai
-                        :api :openai-responses :context-window 1000
-                        :max-output 100 :thinking t)))
-           (and (equal "high" (evo.provider::model-reasoning-effort capped :max))
-                (equal "medium" (evo.provider::model-reasoning-effort capped :medium))
-                ;; No declaration: the level maps straight through, as before.
-                (equal "xhigh" (evo.provider::model-reasoning-effort open :xhigh)))))
+  (check "registry: :effort-only is a thinking mode"
+         (progn (register-model* "eff-only-mode" :provider :anthropic
+                                 :api :anthropic-messages :context-window 1000
+                                 :max-output 100 :thinking-mode :effort-only)
+                (eq :effort-only (model-thinking-mode (find-model "eff-only-mode")))))
   (check-signals "registry: bogus thinking mode rejected"
                  (register-model* "eff-bad-mode" :provider :anthropic
                                   :api :anthropic-messages :context-window 1000
                                   :max-output 100 :thinking-mode :sometimes))
+  ;; budget_tokens is a retired knob of retired models; the mode that sent
+  ;; it is gone with them.
+  (check-signals "registry: retired :extended mode rejected"
+                 (register-model* "eff-retired-mode" :provider :anthropic
+                                  :api :anthropic-messages :context-window 1000
+                                  :max-output 100 :thinking-mode :extended))
   (reset-user-registries)
   (register-fixture-models))
 
@@ -5030,7 +4494,7 @@ selection journals the provider, and every resolution point honours it."
          (history (list (list :role :user
                               :content (list image (list :type :text :text "what is this?")))))
          (seeing '(:id "fixture-vision" :provider :anthropic :api :anthropic-messages
-                   :context-window 200000 :max-output 64000 :thinking t :vision t))
+                   :context-window 200000 :max-output 64000 :vision t))
          (blind (pput seeing :vision nil)))
     ;; Anthropic: a base64 source block.  No thinking level: these assert the
     ;; shape of the image block, and a request with no dial asked for is the
@@ -5059,32 +4523,6 @@ selection journals the provider, and every resolution point honours it."
              (and (equal (evo.provider::jget block "type") "text")
                   (search "image not shown" (evo.provider::jget block "text"))
                   (search "shot.png" (evo.provider::jget block "text")))))
-    ;; OpenAI Responses: an input_image data URL.
-    (let* ((oai '(:id "fixture-gpt" :provider :openai :api :openai-responses
-                  :context-window 272000 :max-output 128000 :thinking t))
-           (req (com.inuoe.jzon:parse
-                 (build-request (find-api :openai-responses)
-                                :model oai :system "sys" :messages history
-                                :tools nil :thinking-level nil)))
-           (block (aref (evo.provider::jget (aref (evo.provider::jget req "input") 0)
-                                            "content")
-                        0)))
-      (check "openai: image goes as an input_image data url"
-             (and (equal (evo.provider::jget block "type") "input_image")
-                  (equal (evo.provider::jget block "image_url")
-                         "data:image/png;base64,QUJD"))))
-    (let* ((blind-oai '(:id "fixture-gpt-blind" :provider :openai :api :openai-responses
-                        :context-window 272000 :max-output 128000 :thinking t :vision nil))
-           (req (com.inuoe.jzon:parse
-                 (build-request (find-api :openai-responses)
-                                :model blind-oai :system "sys" :messages history
-                                :tools nil :thinking-level nil)))
-           (block (aref (evo.provider::jget (aref (evo.provider::jget req "input") 0)
-                                            "content")
-                        0)))
-      (check "openai: no vision degrades the image to text"
-             (and (equal (evo.provider::jget block "type") "input_text")
-                  (search "image not shown" (evo.provider::jget block "text")))))
     ;; Request-size guard: keep the latest image and omit older image payloads
     ;; before the provider rejects the whole HTTP request as too large.
     (let* ((evo.provider::*max-request-image-data-chars* 7)
@@ -5309,45 +4747,7 @@ selection journals the provider, and every resolution point honours it."
           (check "anthropic: the tool result carries the image"
                  (and (search "tool_result" json) (search data json)))
           (check "anthropic: a blind model gets a placeholder, not base64"
-                 (and (not (search data blind)) (search "image not shown" blind))))
-        ;; The Responses API has no image inside a function_call_output, so
-        ;; the image follows as a user message instead of being dropped.
-        (let* ((oai '(:id "reads-images-gpt" :provider :openai :api :openai-responses
-                      :context-window 272000 :max-output 128000))
-               (history (list (list :role :assistant :model "reads-images-gpt"
-                                    :content (list (list :type :tool-call :id "call_img"
-                                                         :name "read"
-                                                         :arguments (list :path "x.png"))))
-                              result))
-               (req (com.inuoe.jzon:parse
-                     (build-request (find-api :openai-responses)
-                                    :model oai :system "sys" :messages history
-                                    :tools nil :thinking-level nil)))
-               (items (evo.provider::jget req "input"))
-               (output (evo.provider::jget (aref items 1) "output")))
-          (check "openai: the image rides inside function_call_output"
-                 (and (vectorp output) (not (stringp output))
-                      (equal (evo.provider::jget (aref output 0) "type") "input_text")
-                      (equal (evo.provider::jget (aref output 1) "type") "input_image")
-                      (search data (evo.provider::jget (aref output 1) "image_url"))))
-          (check "openai: no separate user message is injected"
-                 (and (= (length items) 2)
-                      (notany (lambda (item)
-                                (equal (evo.provider::jget item "role") "user"))
-                              (coerce items 'list))))
-          ;; A text-only result keeps the plain-string output shape.
-          (let* ((plain (list :role :tool-result :tool-call-id "call_img"
-                              :tool-name "bash" :is-error nil
-                              :content (list (list :type :text :text "ok"))))
-                 (req2 (com.inuoe.jzon:parse
-                        (build-request (find-api :openai-responses)
-                                       :model oai :system "sys"
-                                       :messages (list (first history) plain)
-                                       :tools nil :thinking-level nil))))
-            (check "openai: a text-only result is still a plain string"
-                   (equal (evo.provider::jget (aref (evo.provider::jget req2 "input") 1)
-                                              "output")
-                          "ok")))))
+                 (and (not (search data blind)) (search "image not shown" blind)))))
       ;; A model that cannot see gets the truth instead of a megabyte of base64.
       (let* ((dir (uiop:ensure-directory-pathname
                    (format nil "~a/evo-imgblind-~a/" (tmp-dir) (gen-id))))
@@ -5408,7 +4808,7 @@ selection journals the provider, and every resolution point honours it."
 (evo:set-setting :model \"init-a\")")
     (write-file-string
      project-init
-     "(evo:register-model \"init-b\" :provider :openai :api :openai-responses
+     "(evo:register-model \"init-b\" :provider :proxy-co
    :context-window 2000 :max-output 200)
 (evo:set-setting :model \"init-b\")")
     (unwind-protect
@@ -5487,7 +4887,7 @@ selection journals the provider, and every resolution point honours it."
            (handler-case (progn (evo.cli::preflight-model agent journal nil) nil)
              (error (e) (search "init.lisp" (format nil "~a" e)))))
     (register-fixture-models)
-    (set-setting :model "gpt-5.6-luna")
+    (set-setting :model "claude-sonnet-5")
     (check "preflight passes with configured model"
            (progn (evo.cli::preflight-model agent journal nil) t))
     (set-setting :model "gone-model")
@@ -5581,10 +4981,9 @@ five identical restarts, each reporting a different error than the real one."
 
 (defmethod endpoint-path ((api cancel-fixture-api)) "/fixture/cancel")
 (defmethod auth-headers ((api cancel-fixture-api) config) (declare (ignore config)) nil)
-(defmethod thinking-param ((api cancel-fixture-api) level) (declare (ignore level)) nil)
 (defmethod build-request ((api cancel-fixture-api) &key model system messages tools
-                                                        thinking-level cache-key)
-  (declare (ignore model system messages tools thinking-level cache-key))
+                                                        thinking-level)
+  (declare (ignore model system messages tools thinking-level))
   "{}")
 
 ;; A stream whose CLOSE records which thread closed it: that is the ownership
@@ -6025,14 +5424,11 @@ became zero after the first reload."
     (test-anthropic-effort)
     (test-model-effort-registration)
     (test-retired-off-level)
-    (test-openai-sse)
-    (test-openai-request)
     (test-kimi-provider)
     (test-port-timeout)
     (test-env-proxy)
     (test-claude-oauth-proxy-guards)
     (test-claude-oauth-auto-refresh)
-    (test-claude-oauth-model-fetch-refresh)
     (test-init-files)
     (test-extension-load-order)
     (test-preflight)

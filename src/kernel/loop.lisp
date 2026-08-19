@@ -319,8 +319,6 @@ an adapter that no longer knows the word."
             :messages messages
             :model model
             :thinking thinking
-            ;; Session id = OpenAI prompt_cache_key (cache affinity).
-            :cache-key (pget (evo.journal:journal-header (agent-journal agent)) :id)
             :system (build-system-prompt tools
                                          :lore (all-lore-entries :state state)
                                          :model model-id
@@ -463,7 +461,6 @@ Returns :stop :length :error :aborted."
                       :messages (pget ctx :messages)
                       :tools (mapcar #'tool->provider-spec (pget ctx :tools))
                       :thinking-level (pget ctx :thinking)
-                      :cache-key (pget ctx :cache-key)
                       :abort-flag (lambda () (agent-abort-flag agent))
                       :abort-cleanup (lambda (cleanup)
                                        (add-abort-cleanup agent cleanup))

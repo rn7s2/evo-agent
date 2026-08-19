@@ -1,7 +1,7 @@
 ;;;; core.lisp — provider infrastructure shared by all APIs: the JSON
 ;;;; bridge, the handoff pass, the SSE transport loop, HTTP + retry, and
-;;;; API dispatch in call-provider.  The wire adapters live in
-;;;; anthropic.lisp and openai.lisp (protocol: api.lisp).
+;;;; API dispatch in call-provider.  The bundled wire adapter lives in
+;;;; anthropic.lisp (protocol: api.lisp).
 ;;;;
 ;;;; One unified message model; stateless replay (full history each request);
 ;;;; hand-rolled SSE; errors are data — this layer never signals into the
@@ -398,13 +398,13 @@ and giving up then would leave the request uncancellable."
         do (sleep (min 0.05 (/ (max 0 (- deadline (get-internal-real-time)))
                                internal-time-units-per-second)))))
 
-(defun call-provider (&key model system messages tools thinking-level cache-key
+(defun call-provider (&key model system messages tools thinking-level
                            on-event abort-flag abort-cleanup)
   "Make one streamed request.  ALWAYS returns an assistant message plist —
 errors come back as data with :stop-reason :error/:aborted, never signals.
 The model's :api tag names the wire API; its :provider names the endpoint
-config.  CACHE-KEY (the session id) becomes prompt_cache_key on OpenAI;
-Anthropic uses cache_control breakpoints instead."
+config.  Prompt caching is the adapter's business (cache_control
+breakpoints on Anthropic Messages)."
   (let* ((model (if (consp model) model (find-model model)))
          (api (find-api (pget model :api)))
          (config (provider-config (pget model :provider)))
@@ -415,8 +415,7 @@ Anthropic uses cache_control breakpoints instead."
                         (auth-headers api config)))
          (body (build-request api :model model :system system
                               :messages messages :tools tools
-                              :thinking-level thinking-level
-                              :cache-key cache-key))
+                              :thinking-level thinking-level))
          (last-error nil))
     (flet ((finish (result)
              (let ((usage (pget result :usage)))

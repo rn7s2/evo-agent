@@ -36,12 +36,11 @@ Config: ~/.evo/init.lisp, then <cwd>/.evo/init.lisp, then extensions, then
 ~/.evo/post-init.lisp, then <cwd>/.evo/post-init.lisp (Lisp, evaluated in order;
 later calls override).  post-init.lisp runs after extensions, so it can reference
 models registered by extensions.  evo ships no built-in model table, e.g.
-  (evo:register-model \"deepseek-v4-pro\"
-    :provider :deepseek :api :anthropic-messages
-    :context-window 1000000 :max-output 192000 :thinking t :effort t)
-  (evo:set-setting :model \"deepseek-v4-pro\")
-  (evo:register-provider :deepseek :base-url \"https://api.deepseek.com/anthropic\"
-    :api-key-env \"DEEPSEEK_API_KEY\")")
+  (evo:register-model \"claude-opus-5\"
+    :provider :anthropic
+    :context-window 1000000 :max-output 128000
+    :effort t :thinking-mode :adaptive)
+  (evo:set-setting :model \"claude-opus-5\")")
 
 (defun parse-args (argv)
   "Parse ARGV into a plist.  Signals on unknown flags."
@@ -194,12 +193,11 @@ repeat across processes."
 (defun no-model-message (opts)
   (format nil (cat "No model is configured. evo ships no built-in model table: create~%"
                    "~a~%(or <project>/.evo/init.lisp) and register the models you use, then pick a default:~%~%  "
-                   "(evo:register-provider :deepseek~%    "
-                   ":base-url \"https://api.deepseek.com/anthropic\" :api-key-env \"DEEPSEEK_API_KEY\")~%  "
-                   "(evo:register-model \"deepseek-v4-pro\"~%    "
-                   ":provider :deepseek :api :anthropic-messages~%    "
-                   ":context-window 1000000 :max-output 192000 :thinking t :effort t)~%  "
-                   "(evo:set-setting :model \"deepseek-v4-pro\")~%~%"
+                   "(evo:register-model \"claude-opus-5\"~%    "
+                   ":provider :anthropic~%    "
+                   ":context-window 1000000 :max-output 128000~%    "
+                   ":effort t :thinking-mode :adaptive)~%  "
+                   "(evo:set-setting :model \"claude-opus-5\")~%~%"
                    "A commented sample is at docs/examples/init.lisp (installed to~%"
                    "~a by `make install-home`)."
                    "~@[~%~%~a~]")
