@@ -194,9 +194,12 @@ point.
 This is the evolution engine. Four mechanisms make it work:
 
 1. **Loader.** `evo:load-extension <path>` compiles and loads a file into
-   userspace and journals a `:load` entry. CL redefinition semantics mean a
-   tool can load code from inside its own execution; the new definition applies
-   from the next call, so no trampoline or queued reload is needed.
+   userspace and journals a `:load` entry. The agent reaches it through the
+   `eval` tool, which evaluates arbitrary Lisp in the live image: everything
+   ephemeral (compute a number, check a claim, inspect a global) stops there,
+   and only a loaded FILE is journaled and replayed. CL redefinition semantics
+   mean a tool can load code from inside its own execution; the new definition
+   applies from the next call, so no trampoline or queued reload is needed.
 2. **Registration API.** `(evo:register-tool ...)`, `(evo:register-command
    ...)`, and `(evo:on <event> fn :name ...)`. Mutations refresh the tool
    registry and rebuild the system prompt, so a newly registered tool is
@@ -533,8 +536,10 @@ src/kernel/              EVO.KERNEL — the core loop and nothing else
   goal.lisp              goal driver, audited tools, done-when
 
 src/core-ext/            core extensions: bundled, but built on the same public
-  todo.lisp              API as user ones — EVO.TODO: todo checklists
+  lang-en.lisp           API as user ones — the English prompt language pack
+  todo.lisp              EVO.TODO: todo checklists
   memory.lisp            EVO.MEMORY: global/project memory stores
+  eval.lisp              EVO.EVAL: /eval, the `eval` tool, completion source
 
 src/tui/                 EVO.TUI — also a core extension, essential so
   term.lisp              it cannot be disabled

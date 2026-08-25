@@ -1,6 +1,6 @@
 ;;;; bionic-done.lisp — the goal's done_when predicate.
 ;;;;
-;;;; Loaded into the live runtime with load_extension; attached via
+;;;; Loaded into the live runtime with (evo:load-extension ...); attached via
 ;;;; update_goal done_when="bionic-reader-done-p".  Returns T iff the bionic
 ;;;; reader feature is really in place — proven from the on-disk source, not
 ;;;; from this session's memory:

@@ -3534,6 +3534,64 @@ extensions still keep theirs."
            (plusp (length (eval-command-output
                            "(let ((x (list 1 2))) (setf (cdr (last x)) x) x)"))))))
 
+;;; The `eval` tool — the same evaluator, reached by the model.  It replaced
+;;; load_extension in the tool set: the loader is now one form away, and the
+;;; load it performs is still journaled, which is the only thing the removed
+;;; tool did that bare evaluation does not.
+
+(defun eval-tool-output (code)
+  "Run the eval tool on CODE.  Returns (values CONTENT IS-ERROR)."
+  (multiple-value-bind (content details is-error)
+      (execute-tool (find-tool "eval") (list :code code))
+    (declare (ignore details))
+    (values content is-error)))
+
+(defun test-eval-tool ()
+  (check "eval is a tool" (find-tool "eval"))
+  (check "load_extension is not a tool" (null (find-tool "load_extension")))
+  (check "tool evaluates one form" (equal "⇒ 3" (eval-tool-output "(+ 1 2)")))
+  ;; A body, unlike the command: defining a helper and calling it is one
+  ;; thought, so it is one tool call.
+  (check "tool evaluates a body and returns the last value"
+         (equal "⇒ 7" (eval-tool-output
+                       "(defun eval-tool-probe (x) (+ x 4)) (eval-tool-probe 3)")))
+  (check "arithmetic is exact" (equal "⇒ 1/3" (eval-tool-output "(/ 1 3)")))
+  (check "printed output comes back above the value"
+         (equal (format nil "printed~%⇒ :done")
+                (eval-tool-output "(princ \"printed\") :done")))
+  ;; A condition is a FAILED tool call, not a success whose text starts with
+  ;; a cross — the turn has to be able to tell them apart.
+  (multiple-value-bind (content is-error) (eval-tool-output "(error \"boom\")")
+    (check "a failing form fails the tool call" is-error)
+    (check "the failure carries the condition text" (search "boom" content)))
+  (multiple-value-bind (content is-error) (eval-tool-output "(+ 1 2")
+    (check "unreadable code fails the tool call" is-error)
+    (check "unreadable code says what was wrong" (search "unreadable code" content)))
+  (multiple-value-bind (content is-error) (eval-tool-output "   ")
+    (check "empty code fails the tool call" is-error)
+    (check "empty code says what was missing"
+           (search "nothing to evaluate" content)))
+  ;; The durable half: evo:load-extension journals against the live agent, so
+  ;; a file loaded from inside eval replays when the session resumes.
+  (let* ((dir (uiop:ensure-directory-pathname
+               (format nil "~a/evo-evaltool-~a/" (tmp-dir) (gen-id))))
+         (file (progn (ensure-directories-exist dir)
+                      (merge-pathnames "300-eval-tool-load.lisp" dir)))
+         (journal (make-session-journal dir))
+         (agent (make-agent :journal journal))
+         (evo:*agent* agent))
+    (with-open-file (out file :direction :output :if-exists :supersede)
+      (write-string "(in-package :evo.user)
+(defun eval-tool-loaded-p () t)" out))
+    (eval-tool-output (format nil "(evo:load-extension ~s)" (namestring file)))
+    (check "a file loaded through eval is really loaded"
+           (let ((sym (find-symbol "EVAL-TOOL-LOADED-P" :evo.user)))
+             (and sym (fboundp sym) (funcall sym))))
+    (check "and its load is journaled for replay"
+           (find (namestring (truename file))
+                 (evo.journal:state-loads (fold-state journal))
+                 :key (lambda (e) (pget e :path)) :test #'equal))))
+
 ;;; Model/provider registries + provider-API protocol
 
 (defun test-registry ()
@@ -5473,6 +5531,7 @@ became zero after the first reload."
     (test-injected-context-extension-point)
     (test-custom-state-extension-point)
     (test-eval)
+    (test-eval-tool)
     (test-eval-completion)
     (test-eval-completion-source)
     (test-base64)

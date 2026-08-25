@@ -443,7 +443,9 @@ evo:*agent*                       ; the live agent
 (evo:set-active-tools agent '("read" "bash"))  ; gate the tool set (nil = all)
 (evo:all-tools)                   ; every registered tool name
 (evo:current-goal)                ; goal plist or nil
-(evo:load-extension "/path/x.lisp") ; compile+load+journal a source file
+(evo:load-extension "/path/x.lisp") ; compile+load+journal a source file —
+                                  ;   the durable half of self-extension;
+                                  ;   what the `eval` tool calls to install
 
 (evo:cat "long control " "string")  ; constant-folded concatenation
 (evo:normalize-newlines text)       ; CR-LF / lone CR -> LF
