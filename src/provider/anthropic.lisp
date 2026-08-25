@@ -80,20 +80,44 @@ effort parameter."
 
 (defun messages->json (messages)
   "Convert unified messages to Anthropic wire messages.
-Consecutive user/tool-result messages merge into a single user message."
-  (let ((out nil))     ; list of (role . blocks-list), reversed
-    (dolist (m messages)
-      (ecase (message-role m)
-        (:assistant
-         (push (cons "assistant" (map 'list #'content-block->json (message-content m)))
-               out))
-        ((:user :tool-result)
-         (let ((blocks (if (eq (message-role m) :tool-result)
-                           (list (tool-result->json-block m))
-                           (map 'list #'content-block->json (message-content m)))))
-           (if (and out (equal (caar out) "user"))
-               (setf (cdr (car out)) (append (cdr (car out)) blocks))
-               (push (cons "user" blocks) out))))))
+
+A run of user and tool-result messages — the journal writes one entry per
+tool result and one per thing the user said — becomes at most two wire
+messages: the tool_result blocks in one, everything else in another, results
+first.  Two rules meet here, and only this shape satisfies both.
+
+Tool results must be merged: parallel tool calls are answered by one user
+message carrying every tool_result, and one wire message per journal entry
+would instead leave a tool_use unanswered.
+
+Tool results must not be mixed: an endpoint may require the message
+answering a tool call to carry nothing else.  Anthropic itself tolerates
+trailing text there, Kimi Code answers 400 — and since the user can type
+while a tool runs, the plain merge produced exactly that message, so a
+conversation with an interjection in it became unsendable to Kimi from then
+on.  Consecutive same-role messages are accepted (probed against
+api.anthropic.com; the OAuth extension already splits assistant turns the
+same way), so keeping them apart costs nothing.
+
+Results lead their run whatever order the journal holds them in, so the
+answer to a tool call still lands in the message directly after it."
+  (let ((out nil)        ; list of (role . blocks-list), reversed
+        (results nil)    ; tool_result blocks of the open user run, reversed
+        (others nil))    ; its text/image blocks, reversed
+    (flet ((close-user-run ()
+             (when results (push (cons "user" (nreverse results)) out))
+             (when others (push (cons "user" (nreverse others)) out))
+             (setf results nil others nil)))
+      (dolist (m messages)
+        (ecase (message-role m)
+          (:assistant
+           (close-user-run)
+           (push (cons "assistant" (map 'list #'content-block->json (message-content m)))
+                 out))
+          (:tool-result (push (tool-result->json-block m) results))
+          (:user (dolist (block (map 'list #'content-block->json (message-content m)))
+                   (push block others)))))
+      (close-user-run))
     (map 'vector
          (lambda (pair)
            (jobj "role" (car pair) "content" (coerce (cdr pair) 'vector)))
