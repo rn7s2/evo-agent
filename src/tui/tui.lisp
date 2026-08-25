@@ -350,7 +350,7 @@ a file onto the terminal arrives here as its escaped path."
     ("create_goal" . ("objective"))
     ("update_goal" . ("status" "objective"))
     ("todo" . ("items"))
-    ("load_extension" . ("path")))
+    ("eval" . ("code")))
   "Alist mapping tool name -> list of key argument names to show.")
 
 (defun tool-arg-value (arguments name)

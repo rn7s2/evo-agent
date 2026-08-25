@@ -409,7 +409,14 @@ is."
   (evo.kernel:set-prompt-language code agent))
 
 (defun load-extension (path &key (reason "requested"))
-  (evo.kernel:load-extension* path :reason reason))
+  "Compile and load PATH into userspace (package EVO.USER), journaling the
+load so a resumed session replays it.  This is the durable half of
+self-extension — code evaluated into the image dies with the process, a
+loaded FILE comes back — and it is what the `eval` tool calls to install a
+new tool, command, or hook mid-session."
+  (evo.kernel:load-extension*
+   path :reason reason
+   :journal (and *agent* (evo.kernel:agent-journal *agent*))))
 
 ;;; Config (init.lisp) API: models, providers, settings.
 

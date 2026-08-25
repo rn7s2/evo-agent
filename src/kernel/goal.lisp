@@ -68,7 +68,7 @@ brake when the user (or settings :goal-token-budget) sets one explicitly.")
         (verifier-nudge
           (unless (pget goal :done-when)
             "
-- No done-when verifier is attached yet. If this objective is mechanically checkable, write a named zero-argument predicate (returns true iff the goal is done) into a userspace .lisp file, load it with load_extension, and attach it with update_goal done_when=\"<name>\" — do this before the work so completion is verified automatically. Skip only if the objective genuinely cannot be checked by code.")))
+- No done-when verifier is attached yet. If this objective is mechanically checkable, write a named zero-argument predicate (returns true iff the goal is done) into a userspace .lisp file, load it with eval `(evo:load-extension \"<path>\")`, and attach it with update_goal done_when=\"<name>\" — do this before the work so completion is verified automatically. Skip only if the objective genuinely cannot be checked by code.")))
     (format nil
             "You are idle but your goal is still active. Continue working toward it now.
 
@@ -136,7 +136,7 @@ a future session should take. Goal objective: ~a"
   "Run the named userspace predicate.  Returns (values done-p output)."
   (let ((sym (find-symbol (string-upcase name) :evo.user)))
     (cond ((or (null sym) (not (fboundp sym)))
-           (values nil (format nil "done-when predicate ~a is not defined in userspace (define it in a file and load it with load_extension)" name)))
+           (values nil (format nil "done-when predicate ~a is not defined in userspace (define it in a .lisp file and load it with eval (evo:load-extension \"<path>\"))" name)))
           (t (handler-case
                  (let ((result (funcall (symbol-function sym))))
                    (values (and result t)
@@ -238,14 +238,6 @@ status change or stand alone."
            "Goal resumed. Continuing toward the objective.")
           (t (error "status must be one of \"complete\", \"blocked\", \"paused\", \"active\".")))))))
 
-(defun tool-load-extension (args)
-  (let ((path (pget args :path)))
-    (unless (and (stringp path) (probe-file path))
-      (error "File not found: ~a" path))
-    (load-extension* path :reason (or (pget args :reason) "agent request")
-                     :journal (agent-journal evo:*agent*))
-    (format nil "Loaded ~a into userspace (package EVO.USER). New definitions apply from the next call." path)))
-
 (defun register-goal-tools ()
   (register-tool*
    :name "get_goal"
@@ -254,7 +246,7 @@ status change or stand alone."
    :execute #'tool-get-goal)
   (register-tool*
    :name "create_goal"
-   :description "Create a goal. Use ONLY when the user explicitly asks for a goal. Refuses if an unfinished goal exists. If the objective is mechanically checkable, write a named zero-argument predicate function into a userspace .lisp file, load it with load_extension, and pass its name as done_when — completion is then verified by running it. If you set the goal without a done_when up front, attach one later with update_goal done_when."
+   :description "Create a goal. Use ONLY when the user explicitly asks for a goal. Refuses if an unfinished goal exists. If the objective is mechanically checkable, write a named zero-argument predicate function into a userspace .lisp file, load it with eval `(evo:load-extension \"<path>\")`, and pass its name as done_when — completion is then verified by running it. If you set the goal without a done_when up front, attach one later with update_goal done_when."
    :schema '(:object
              (:objective :type :string :description "What done means, in the user's words")
              (:token-budget :type :integer :optional t :description "Token budget for this goal; omit for no limit (the default)")
@@ -265,7 +257,7 @@ status change or stand alone."
    :name "update_goal"
    :description "Update the current goal. You can refine it or change its status; give at least one of status, objective, done_when.
 - objective: rewrite the goal's objective text (same goal, a revision) — use this to fold in a change the user asked for.
-- done_when: attach or replace the name of a zero-arg userspace predicate that verifies completion (author it with load_extension first). Set one early when the objective is mechanically checkable.
+- done_when: attach or replace the name of a zero-arg userspace predicate that verifies completion (author it in a .lisp file and load it with eval `(evo:load-extension \"<path>\")` first). Set one early when the objective is mechanically checkable.
 - status \"complete\": audited — prove it from current evidence (files, test output, runtime behavior) requirement by requirement, and if a done_when is set the kernel runs it and rejects the claim on failure.
 - status \"blocked\": only after the same blocker has recurred 3 consecutive goal turns; requires a reason.
 - status \"paused\": stop the idle-continuation loop when you genuinely need the user before proceeding — do this instead of spinning.
@@ -280,13 +272,6 @@ status change or stand alone."
               :description "Name of a zero-arg userspace predicate that returns true iff the goal is done")
              (:reason :type :string :optional t
               :description "Required when status is blocked: what is blocking. Optional note when pausing."))
-   :execute #'tool-update-goal)
-  (register-tool*
-   :name "load_extension"
-   :description "Compile and load a Lisp source file into your userspace runtime (package EVO.USER). Use this to give yourself new functions or tools: write the file first (in-package :evo.user), then load it. The load is journaled and replayed on session resume."
-   :schema '(:object
-             (:path :type :string :description "Path to the .lisp file to load")
-             (:reason :type :string :optional t :description "Why this load"))
-   :execute #'tool-load-extension))
+   :execute #'tool-update-goal))
 
 (register-goal-tools)

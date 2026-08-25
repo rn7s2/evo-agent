@@ -1,17 +1,20 @@
-;;;; eval.lisp — /eval, a core extension.
+;;;; eval.lisp — /eval and the `eval` tool, a core extension.
 ;;;;
-;;;; A REPL into the running image.  `/eval <sexpr>` evaluates the command's
-;;;; content in EVO.USER — the very package agent-written code and every
-;;;; extension is loaded into — so the whole image is reachable without
-;;;; ceremony: registered tools (evo:all-tools, evo.kernel:find-tool),
-;;;; extension functions and state, the live agent (evo:*agent*), the kernel
-;;;; packages one prefix away.  No sandbox, no separate environment: this is
-;;;; the user's own hand on the image the session is running in.
+;;;; A REPL into the running image, offered twice: `/eval <sexpr>` to the
+;;;; user, the `eval` tool to the model.  Both evaluate in EVO.USER — the
+;;;; very package agent-written code and every extension is loaded into — so
+;;;; the whole image is reachable without ceremony: registered tools
+;;;; (evo:all-tools, evo.kernel:find-tool), extension functions and state,
+;;;; the live agent (evo:*agent*), the kernel packages one prefix away.  No
+;;;; sandbox, no separate environment: this is a hand on the image the
+;;;; session is running in.
 ;;;;
-;;;; Exactly one form, deliberately.  Two forms on a line hide a typo — a
-;;;; stray paren silently makes a second one — and leave "the result"
-;;;; ambiguous, so the rejection names the count and points at (progn ...):
-;;;; explicit sequencing, one value.
+;;;; The command takes exactly one form, deliberately.  Two forms on a line
+;;;; hide a typo — a stray paren silently makes a second one — and leave
+;;;; "the result" ambiguous, so the rejection names the count and points at
+;;;; (progn ...): explicit sequencing, one value.  The tool takes a body,
+;;;; equally deliberately: its caller is writing a program, not typing a
+;;;; line, and defining a helper and then calling it is one thought.
 ;;;;
 ;;;; Reading runs with *read-eval* off.  The arity check must happen before
 ;;;; anything executes, or rejecting a second form could still have run the
@@ -110,13 +113,18 @@ frontend down."
     (serious-condition (e)
       (format nil "#<unprintable ~(~a~): ~a>" (type-of value) e))))
 
-(defun format-result (values output condition)
+(defun format-result (values output condition &key (error-prefix "✗ "))
+  "Everything the evaluation produced, as one string: what it printed, then
+its values or the condition that stopped it.  ERROR-PREFIX marks the failure
+line for a reader with nothing else to go on — the command's own output.  The
+tool passes none: its failures arrive already marked as failed tool calls,
+and a second marker would just be noise inside one."
   (with-output-to-string (out)
     (when (plusp (length output))
       (write-string (string-right-trim '(#\Newline #\Return) output) out)
       (terpri out))
     (cond
-      (condition (format out "✗ ~(~a~): ~a" (type-of condition) condition))
+      (condition (format out "~a~(~a~): ~a" error-prefix (type-of condition) condition))
       ((null values) (write-string "⇒ ; no values" out))
       (t (format out "~{⇒ ~a~^~%~}" (mapcar #'print-value values))))))
 
@@ -259,3 +267,46 @@ whole image rather than complete anything."
 
 (evo:register-command "eval" #'eval-command
   :description "evaluate one sexpr in the live image")
+
+;;; The tool.
+;;;
+;;; The same evaluator, reached by the model instead of the user, and the
+;;; shortest path it has to a number that must be right or a fact about the
+;;; runtime it is inside: no file to write, no shell to spawn, no other
+;;; language's arithmetic — CL's rationals and bignums are exact.
+;;;
+;;; A condition is signalled rather than rendered, so a failed evaluation
+;;; comes back as a failed tool call instead of a success whose text happens
+;;; to begin with a cross; captured output survives inside the message.
+;;;
+;;; What eval does not do is persist.  Definitions made here live in the
+;;; image until the process exits and nothing journals them, so anything
+;;; worth keeping goes in a file loaded with (evo:load-extension "..."):
+;;; that load IS journaled, and replays when the session resumes.
+
+(defparameter *tool-result-limit* (* 16 1024 1024)
+  "Chars of rendered result the tool hands back.  Not the context budget —
+the loop trims every tool result to the shared EVO.KERNEL::*MAX-TOOL-RESULT-CHARS*
+after this — but a backstop against a runaway print, which is unbounded in a
+way the journal and the heap are not.  Deliberately far above anything a
+deliberate evaluation produces: truncating a real result is the loop's job,
+and doing it twice would hide half an answer for no reason.")
+
+(defun tool-eval (args)
+  (let ((forms (handler-case (read-forms (or (pget args :code) ""))
+                 (serious-condition (e) (error "unreadable code — ~a" e)))))
+    (when (null forms)
+      (error "nothing to evaluate — `code` must hold at least one sexpr"))
+    (multiple-value-bind (values output condition)
+        (eval-form (if (rest forms) (cons 'progn forms) (first forms)))
+      (let ((text (truncate-string
+                   (format-result values output condition :error-prefix "")
+                   *tool-result-limit*)))
+        (if condition (error "~a" text) text)))))
+
+(evo:register-tool "eval"
+  :description "Evaluate Common Lisp in your own runtime (package EVO.USER) and get the values back. Reach for this FIRST for any deterministic computation or check: arithmetic is exact (rationals and bignums, no float error, no overflow, no silent truncation), and it beats doing sums in your head or spawning a shell for them. It is also how you interrogate the image you are running inside — (evo:all-tools), evo:*agent*, (describe 'foo), (apropos \"pattern\"), any function you have loaded — and how you verify a claim before making it. `code` is a body: several forms run in order, the last one's values come back, and anything printed is shown above them. Definitions made here are NOT journaled and vanish on restart; for something durable, write a .lisp file and evaluate (evo:load-extension \"/path/x.lisp\"), which is journaled and replayed on resume. No sandbox and no timeout: it runs on the session's thread, so an unbounded loop wedges the session."
+  :schema '(:object
+            (:code :type :string
+             :description "One or more Lisp forms, evaluated in order in EVO.USER; the last form's values are the result"))
+  :execute #'tool-eval)

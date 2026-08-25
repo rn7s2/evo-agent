@@ -508,8 +508,9 @@ pure enough to rebuild that often, which is what keeps invariant 5 honest.
 
 Its content is the agent's operating manual, and it states the things the
 architecture cannot enforce: that evo is permissive and pre-authorized to
-extend itself, how to reach for `load_extension` rather than declaring a
-capability missing, how to weigh reversibility when nothing prompts for
+extend itself, how to reach for `eval` — for a number that has to be right as
+much as for `(evo:load-extension ...)` — rather than declaring a capability
+missing, how to weigh reversibility when nothing prompts for
 permission, how to handle git, and how to treat injected system material.
 
 **Language packs.** The kernel owns the assembly order; the *words* belong to
