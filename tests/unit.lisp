@@ -241,6 +241,61 @@ line2")))
                    :key (lambda (b) (pget b :type))))
       (check "handoff no spurious synthesis" (= 3 (length out2))))))
 
+;;; Wire message shaping — MESSAGES->JSON.
+;;;
+;;; The journal writes one entry per tool result and one per thing the user
+;;; said; the wire wants a turn per role.  Merging them is required (parallel
+;;; tool calls answer in ONE user message), and mixing them is refused (Kimi
+;;; Code answers 400 when the message answering a tool call also carries
+;;; text, which is what a user typing while a tool ran used to produce).
+
+(defun wire-messages (messages)
+  "MESSAGES->JSON as a list of (role . block-type-list)."
+  (loop for m across (evo.provider::messages->json messages)
+        collect (cons (gethash "role" m)
+                      (loop for b across (gethash "content" m)
+                            collect (gethash "type" b)))))
+
+(defun test-wire-message-shaping ()
+  (let ((assistant '(:role :assistant :model "m" :stop-reason :tool-use
+                     :usage (:input 1 :output 1 :cache-read 0 :cache-write 0)
+                     :content ((:type :tool-call :id "a" :name "bash" :arguments nil))))
+        (result-a '(:role :tool-result :tool-call-id "a" :tool-name "bash"
+                    :is-error nil :content ((:type :text :text "ok"))))
+        (result-b '(:role :tool-result :tool-call-id "b" :tool-name "bash"
+                    :is-error nil :content ((:type :text :text "ok"))))
+        (said '(:role :user :content ((:type :text :text "继续"))))
+        (said-again '(:role :user :content ((:type :text :text "继续")))))
+    ;; The reported break: a tool result followed by everything the user
+    ;; typed while it ran, merged into one user message with the result.
+    (check "a tool result never shares a message with text"
+           (equal '(("assistant" "tool_use")
+                    ("user" "tool_result")
+                    ("user" "text" "text"))
+                  (wire-messages (list assistant result-a said said-again))))
+    ;; Parallel tool calls still answer in ONE message, or a tool_use is left
+    ;; unanswered.
+    (check "tool results merge with each other"
+           (equal '(("assistant" "tool_use")
+                    ("user" "tool_result" "tool_result"))
+                  (wire-messages (list assistant result-a result-b))))
+    (check "plain user turns still merge"
+           (equal '(("user" "text" "text"))
+                  (wire-messages (list said said-again))))
+    ;; Results lead their run whatever order the journal holds: the answer to
+    ;; a tool call lands in the message directly after it.
+    (check "results lead the run they belong to"
+           (equal '(("assistant" "tool_use")
+                    ("user" "tool_result")
+                    ("user" "text"))
+                  (wire-messages (list assistant said result-a))))
+    (check "a new assistant turn closes the run"
+           (equal '(("assistant" "tool_use")
+                    ("user" "tool_result")
+                    ("assistant" "tool_use")
+                    ("user" "tool_result"))
+                  (wire-messages (list assistant result-a assistant result-b))))))
+
 ;;; Kimi Code provider — extensions/020-kimi-provider.lisp
 ;;;
 ;;; The extension is configuration, not a wire protocol: Kimi Code's
@@ -3911,16 +3966,22 @@ selection journals the provider, and every resolution point honours it."
                (and (equal (evo.provider::jget tl "name") "bash")
                     (evo.provider::jget tl "cache_control"))))
       (let ((messages (jget "messages")))
-        (check "anth req errored turn elided, merged tail"
+        ;; The errored turn is elided; the tail is the tool result and what
+        ;; the user said next, in a message each — see MESSAGES->JSON.
+        (check "anth req errored turn elided, tail split by kind"
                (equal (map 'list (lambda (m) (evo.provider::jget m "role")) messages)
-                      '("user" "assistant" "user")))
-        (let ((blocks (evo.provider::jget (aref messages 2) "content")))
-          (check "anth req tool-result + user merged"
-                 (and (= 2 (length blocks))
-                      (equal (evo.provider::jget (aref blocks 0) "type") "tool_result")
-                      (equal (evo.provider::jget (aref blocks 1) "type") "text")))
+                      '("user" "assistant" "user" "user")))
+        (let ((result-blocks (evo.provider::jget (aref messages 2) "content"))
+              (said-blocks (evo.provider::jget (aref messages 3) "content")))
+          (check "anth req answers the tool call with tool_result alone"
+                 (and (= 1 (length result-blocks))
+                      (equal (evo.provider::jget (aref result-blocks 0) "type")
+                             "tool_result")))
+          (check "anth req keeps what the user said in its own message"
+                 (and (= 1 (length said-blocks))
+                      (equal (evo.provider::jget (aref said-blocks 0) "type") "text")))
           (check "anth req cache breakpoint on last block"
-                 (evo.provider::jget (aref blocks (1- (length blocks)))
+                 (evo.provider::jget (aref said-blocks (1- (length said-blocks)))
                                      "cache_control")))))
     (let ((raw2 (build-request (find-api :anthropic-messages)
                                :model model :system nil :messages history
@@ -5478,6 +5539,7 @@ became zero after the first reload."
     (test-sse)
     (test-sse-transport)
     (test-handoff)
+    (test-wire-message-shaping)
     (test-anthropic-request)
     (test-anthropic-effort)
     (test-model-effort-registration)
