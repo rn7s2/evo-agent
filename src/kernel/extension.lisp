@@ -346,7 +346,8 @@ resolved by the CLI's --command flag and by future frontends.")
   name)
 
 (defun on (event fn &key name)
-  "Subscribe FN to a kernel event: :session-start :turn-end :tool-call ...
+  "Subscribe FN to a kernel event: :session-start :session-end :turn-end
+:tool-call ...
 A :tool-call hook may return (:block t :reason ...) or (:arguments ...).
 
 Pass NAME from any file a reload can re-run: a named hook REPLACES the previous

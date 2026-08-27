@@ -88,6 +88,23 @@ be a cross-thread mutation of TUI-owned state."
     (push-event tui (list :type :repaint))
     t))
 
+(defun tui-live-p (&optional (tui *tui*))
+  "True when an interactive TUI session is up.  Off-thread producers use this
+to tell whether input they queue can be consumed at all: headless sessions
+have nobody to start a run for it."
+  (and tui t))
+
+(defun request-run (&key (tui *tui*) text)
+  "Ask the TUI to start a run worker for ALREADY-QUEUED steering.  This is the
+off-thread entry point for input that did not come through the editor (a
+notification reply, say): the TUI thread owns task state, so the caller posts
+an event and the loop starts the worker.  TEXT, when given, is echoed as the
+user's submission so off-thread input reads like typed input.  Returns T when
+the request was posted, NIL when no TUI is running."
+  (when tui
+    (push-event tui (list :type :run-requested :text text))
+    t))
+
 (defun drain-events (tui)
   (bt:with-lock-held ((tui-events-lock tui))
     (nreverse (shiftf (tui-events tui) nil))))
@@ -469,6 +486,13 @@ inside the TUI tick loop and on session resume, so malformed ARGUMENTS
     (:repaint
      ;; Somebody off-thread noticed something the status line renders.
      (setf (tui-dirty tui) t))
+    (:run-requested
+     ;; Off-thread input (a notification reply): it queued steering already;
+     ;; echo it like a typed submission and start the worker that consumes it.
+     ;; START-WORKER's own guards make a duplicate request harmless.
+     (let ((text (pget event :text)))
+       (when text (scroll tui (user-prompt-block text nil))))
+     (start-worker tui))
     (:compaction-start
      ;; Automatic compaction is part of a :RUN task — the task stays the only
      ;; run state.  This slot is a display echo so the activity line can say
