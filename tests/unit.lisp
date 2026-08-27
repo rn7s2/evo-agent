@@ -2109,6 +2109,92 @@ notifying.  New signature: the poster takes the agent, the title and the body."
                          0)))
            (ignore-errors (delete-file "/tmp/baby-evo-test-reply.out"))
 
+           ;; --- the reply watch: what a typed reply DOES ---------------------
+           ;; This path had zero coverage, which is how a reply could silently
+           ;; land in the follow-up mailbox — drained only INSIDE a run, and
+           ;; the watch fires precisely when no run exists.  A reply must do
+           ;; what a typed submission does: queue steering and ask the
+           ;; frontend to start a run.
+           (flet ((fake-watch (agent reply-text &key (code 0) cancelled)
+                    "Run the watch body with a fake finished process; return
+the list of replies a run was requested for."
+                    (let ((runs nil))
+                      (evo.util:write-file-string
+                       "/tmp/baby-evo-test-watch.out" (or reply-text ""))
+                      (progv '(evo.user::*baby-evo-process-waiter*
+                               evo.user::*baby-evo-run-requester*
+                               evo.user::*baby-evo-alert*)
+                          (list (lambda (p) (declare (ignore p))
+                                  (values :exited code))
+                                (lambda (text) (push text runs))
+                                (evo.user::%make-baby-evo-alert
+                                 :process nil :thread nil
+                                 :cancelled-p cancelled))
+                        (evo.user::baby-evo-watch-reply
+                         agent nil "/tmp/baby-evo-test-watch.out" "T"))
+                      (nreverse runs))))
+             (let ((agent (make-agent)))
+               (check "baby-evo reply steers evo and asks for a run"
+                      (equal (fake-watch agent "do the next thing")
+                             (list "do the next thing")))
+               (check "baby-evo reply lands in the steering mailbox"
+                      (evo.kernel:steering-pending-p agent))
+               (check "baby-evo reply never touches follow-ups"
+                      (null (evo.kernel::agent-followups agent))))
+             (let ((agent (make-agent)))
+               (check "baby-evo reply timeout neither steers nor runs"
+                      (and (null (fake-watch agent "@TIMEOUT" :code 6))
+                           (not (evo.kernel:agent-pending-work-p agent)))))
+             (let ((agent (make-agent)))
+               (check "baby-evo cancelled alert drops the reply"
+                      (and (null (fake-watch agent "stale input" :cancelled t))
+                           (not (evo.kernel:agent-pending-work-p agent)))))
+             (let ((agent (make-agent)))
+               (check "baby-evo dismissed banner neither steers nor runs"
+                      (and (null (fake-watch agent "@CLOSED"))
+                           (not (evo.kernel:agent-pending-work-p agent)))))
+             (progv '(evo.user::*baby-evo-last-result*)
+                 (list (list :at "now" :ok t))
+               (fake-watch (make-agent) "record me")
+               (check "baby-evo records the reply in the last-attempt record"
+                      (equal (evo.util:pget
+                              (symbol-value
+                               (uiop:find-symbol* :*baby-evo-last-result*
+                                                  :evo.user))
+                              :reply)
+                             "record me"))))
+
+           ;; --- the reply gate: only an interactive session can answer --------
+           (progv '(evo.user::*baby-evo-macos-p*
+                    evo.user::*baby-evo-interactive-p*
+                    evo.user::*baby-evo-terminal-notifier*)
+               (list t (lambda () nil) evo.user::*baby-evo-osascript*)
+             (check "baby-evo offers no reply field without an interactive frontend"
+                    (not (evo.user::baby-evo-reply-possible-p))))
+           ;; The positive case needs SOME program standing in for
+           ;; terminal-notifier; osascript exists on every macOS test host.
+           (when (evo.port:program-in-path "osascript")
+             (progv '(evo.user::*baby-evo-macos-p*
+                      evo.user::*baby-evo-interactive-p*
+                      evo.user::*baby-evo-terminal-notifier*)
+                 (list t (lambda () t) "osascript")
+               (check "baby-evo offers the reply field when interactive"
+                      (evo.user::baby-evo-reply-possible-p))))
+
+           ;; --- the frontend seam: request-run / tui-live-p --------------------
+           (let ((tui (evo.tui::make-tui)))
+             (check "tui-live-p is nil without a TUI"
+                    (not (evo.tui:tui-live-p nil)))
+             (check "tui-live-p is t with a TUI"
+                    (evo.tui:tui-live-p tui))
+             (check "request-run posts a :run-requested event with the reply"
+                    (progn (evo.tui:request-run :tui tui :text "from the banner")
+                           (equal (evo.tui::drain-events tui)
+                                  '((:type :run-requested
+                                     :text "from the banner")))))
+             (check "request-run without a TUI posts nothing"
+                    (null (evo.tui:request-run :tui nil :text "nowhere"))))
+
            ;; --- the OS gate -------------------------------------------------
            (progv '(evo.user::*baby-evo-macos-p*) '(nil)
              (check "baby-evo is unsupported off macOS"
@@ -2227,8 +2313,11 @@ notifying.  New signature: the poster takes the agent, the title and the body."
 
            ;; --- the alert lifecycle: cancel on new work -------------------------
            ;; A 'done' banner must be dismissed the instant evo works again,
-           ;; and a stale reply must not steer.
-           (progv '(evo.user::*baby-evo-macos-p*) '(t)
+           ;; and a stale reply must not steer.  (terminal-notifier is stubbed
+           ;; out of these so a real banner is never removed mid-test.)
+           (progv '(evo.user::*baby-evo-macos-p*
+                    evo.user::*baby-evo-terminal-notifier*)
+               '(t "baby-evo-test-no-such-program")
              ;; Install a fake outstanding alert, then cancel it.
              (progv '(evo.user::*baby-evo-alert*)
                  (list (evo.user::%make-baby-evo-alert :process nil :thread nil))
@@ -2240,7 +2329,14 @@ notifying.  New signature: the poster takes the agent, the title and the body."
                       (null (symbol-value
                              (uiop:find-symbol* :*baby-evo-alert* :evo.user))))
                (check "cancelling again is a safe no-op"
-                      (null (evo.user::baby-evo-cancel-alert)))))
+                      (null (evo.user::baby-evo-cancel-alert))))
+             ;; Session end is the last cancel: the banner comes down WITH evo.
+             (progv '(evo.user::*baby-evo-alert*)
+                 (list (evo.user::%make-baby-evo-alert :process nil :thread nil))
+               (evo.user::baby-evo-session-end nil)
+               (check "session end pulls the outstanding banner down"
+                      (null (symbol-value
+                             (uiop:find-symbol* :*baby-evo-alert* :evo.user))))))
 
            ;; --- /notify ------------------------------------------------------
            (check "/notify is a registered command"

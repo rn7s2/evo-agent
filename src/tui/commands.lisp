@@ -650,6 +650,10 @@ already-painted scrollback keeps its colours."
                           (ignore-errors
                             (scroll tui (red (format nil "✗ tui error: ~a" e))))))
                       (sleep 0.02)))
+           ;; The session is going away: tell extensions BEFORE task shutdown
+           ;; so anything held open on the user's behalf (a notification
+           ;; waiting for a reply) comes down while the session still owns it.
+           (run-hooks :session-end (list :agent agent))
            ;; Shut down: ask the task to stop, then keep draining until its
            ;; :worker-done arrives — that handler is what joins the thread, so
            ;; draining here is how the task is actually reaped rather than

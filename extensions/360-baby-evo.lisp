@@ -11,9 +11,13 @@
 ;;;; the notification carries a reply field: whatever you type there is queued
 ;;;; as evo's next turn.  terminal-notifier waits for that reply, so while the
 ;;;; banner is up Baby Evo holds a lightweight process open in the background
-;;;; and evo stays idle until you reply, dismiss it, or it times out.  With no
-;;;; terminal-notifier it falls back to a plain osascript banner — fire and
-;;;; forget, no reply — so the feature still works everywhere on macOS.
+;;;; and evo stays idle until you reply, dismiss it, or it times out.  Replies
+;;;; need an interactive session to steer: a headless run (`evo -p`) gets the
+;;;; plain osascript banner instead — fire and forget, no reply — because a
+;;;; reply field that outlives the process would swallow whatever is typed
+;;;; into it.  For the same reason quitting evo pulls an outstanding reply
+;;;; banner down (:session-end cancels it and removes it from Notification
+;;;; Center); a crash cannot, and the reply timeout is what bounds those.
 ;;;;
 ;;;; WHERE "IDLE" COMES FROM.  The one honest definition of idle is "the outer
 ;;;; driver returned": EVO.KERNEL:RUN-UNTIL-SETTLED is what the TUI's run
@@ -44,7 +48,8 @@
 ;;;;   :baby-evo            t       master on/off
 ;;;;   :baby-evo-body-chars 140     how much of the last response to show
 ;;;;   :baby-evo-sound      "Glass"  macOS sound name; NIL for a silent banner
-;;;;   :baby-evo-reply      t       offer the reply field (needs terminal-notifier)
+;;;;   :baby-evo-reply      t       offer the reply field (interactive sessions
+;;;;                                  with terminal-notifier only)
 ;;;;   :baby-evo-timeout    120     seconds to wait for a reply; NIL = forever
 ;;;;
 ;;;; Command:  /notify [status] | on | off | doctor
@@ -94,11 +99,20 @@ half-working notifier is worse than an honest refusal."
   (let ((v (evo:setting :baby-evo-reply t)))
     (and (not (null v)) t)))
 
+(defvar *baby-evo-interactive-p* (lambda () (evo.tui:tui-live-p))
+  "True when an interactive frontend that can act on a queued reply is up.
+A reply banner posted into a headless session would outlive the process and
+swallow whatever is typed into it, so headless gets the plain banner.  A
+variable so the tests can simulate both frontends.")
+
 (defun baby-evo-reply-possible-p ()
-  "True when a reply-capable banner can be posted right now."
+  "True when a reply-capable banner can be posted right now: terminal-notifier
+available, the setting on, and an interactive session running to steer the
+answer into."
   (and (baby-evo-supported-p)
        (baby-evo-reply-wanted-p)
-       (baby-evo-terminal-notifier-p)))
+       (baby-evo-terminal-notifier-p)
+       (funcall *baby-evo-interactive-p*)))
 
 (defun baby-evo-timeout ()
   "Seconds terminal-notifier waits for a reply; NIL means wait forever.  120
@@ -321,15 +335,35 @@ return immediately.")
 
 (defvar *baby-evo-alert-lock* (bt:make-lock "baby-evo-alert"))
 
+(defvar *baby-evo-last-result* nil
+  "Plist (:at :ok :detail :body :reply) for the most recent attempt — what
+/notify status reports, and what makes a silent failure visible instead of
+silent.  Defined up here, with the other state, because the reply watch below
+writes its :reply slot.")
+
+(defun baby-evo-remove-banner ()
+  "Remove the delivered baby-evo banner from Notification Center, best-effort.
+Killing terminal-notifier does NOT pull its banner down — the system owns it —
+so a cancelled reply field would stay on screen, still accepting text nobody
+will read.  `-remove GROUP` is the only way to take it back."
+  (when (baby-evo-terminal-notifier-p)
+    (ignore-errors
+      (uiop:run-program (list *baby-evo-terminal-notifier*
+                              "-remove" +baby-evo-group+)
+                        :output nil :error-output nil
+                        :ignore-error-status t)))
+  nil)
+
 (defun baby-evo-cancel-alert ()
-  "Dismiss the outstanding reply banner, if any: kill its process and ask the
-watch thread to stop.  Safe to call repeatedly and from any thread; the watch
-thread reaps its own process.  Returns T if there was an alert to cancel.
+  "Dismiss the outstanding reply banner, if any: kill its process, remove the
+delivered banner, and ask the watch thread to stop.  Safe to call repeatedly
+and from any thread; the watch thread reaps its own process.  Returns T if
+there was an alert to cancel.
 
 Called whenever evo stops being idle — the user submitted a new message, a
-goal re-steered, the feature was switched off — because a 'I am done' banner
-is a lie the instant evo is working again, and a stale reply field must not
-steer a turn the user has moved past."
+goal re-steered, the feature was switched off, the session is ending —
+because a 'I am done' banner is a lie the instant evo is working again, and a
+stale reply field must not steer a turn the user has moved past."
   (let ((alert (bt:with-lock-held (*baby-evo-alert-lock*)
                  (prog1 *baby-evo-alert*
                    (when *baby-evo-alert*
@@ -340,6 +374,7 @@ steer a turn the user has moved past."
         (when (and (baby-evo-alert-process alert)
                    (evo.port:process-alive-p (baby-evo-alert-process alert)))
           (evo.port:process-kill (baby-evo-alert-process alert))))
+      (baby-evo-remove-banner)
       ;; Interrupt the watch thread so it returns promptly even if the process
       ;; is mid-wait; it reaps its own child in its unwind-protect.
       (let ((thread (baby-evo-alert-thread alert)))
@@ -362,11 +397,21 @@ timeout exits 6 with @TIMEOUT, a click prints @ACTIONCLICKED, a close @CLOSED."
            nil)
           (t trimmed))))
 
+(defvar *baby-evo-run-requester*
+  (lambda (text) (evo.tui:request-run :text text))
+  "How a queued reply asks the frontend to start a run that consumes it.
+Called with the reply text, which the frontend echoes as the user's
+submission.  A variable so the tests can count requests without a TUI.")
+
 (defun baby-evo-watch-reply (agent process outfile title)
   "The body of the background watch thread: block on PROCESS, then either
 steer AGENT with the reply or do nothing.  This thread OWNS the process — it
 launched nothing but it is the only thread that waits on or reaps it, which is
-what the process-ownership rule requires.  Never signals."
+what the process-ownership rule requires.  Never signals.
+
+The reply goes to the STEERING mailbox, not follow-ups: follow-ups are only
+drained inside a run, and this thread fires precisely when no run exists.
+Steering plus a run request is exactly what a typed submission does."
   (catch :baby-evo-stop
     (unwind-protect
          (handler-case
@@ -381,10 +426,11 @@ what the process-ownership rule requires.  Never signals."
                                         (baby-evo-alert-cancelled-p
                                          *baby-evo-alert*)))))
                    (when (and reply (not cancelled))
-                     (evo.kernel:queue-followup agent reply)
-                     ;; The agent may be sitting idle; nudge a repaint so the
-                     ;; queued follow-up is noticed at the next opportunity.
-                     (ignore-errors (evo.tui:request-repaint))))))
+                     (evo.kernel:queue-steering agent reply)
+                     (funcall *baby-evo-run-requester* reply)
+                     ;; What came back is worth one glance at /notify status.
+                     (when *baby-evo-last-result*
+                       (setf (getf *baby-evo-last-result* :reply) reply))))))
            (error (e)
              (warn "baby-evo: reply watch failed for ~s: ~a" title e)))
       (ignore-errors
@@ -456,11 +502,6 @@ one over a cosmetic banner."
 ;;; ---------------------------------------------------------------------------
 ;;; Announce + record
 ;;; ---------------------------------------------------------------------------
-
-(defvar *baby-evo-last-result* nil
-  "Plist (:at :ok :detail :body :reply) for the most recent attempt — what
-/notify status reports, and what makes a silent failure visible instead of
-silent.")
 
 (defun baby-evo-record (ok detail body &key reply)
   (setf *baby-evo-last-result*
@@ -694,24 +735,26 @@ watch, so the undo is handed back via ON-UNLOAD."
                           "switch on here.")
              (software-type)))
     (t
-     (let ((reply (baby-evo-reply-possible-p)))
-       (format nil (evo:cat "baby-evo ~a · idle seam ~a · body ~d chars · "
-                            "sound ~a~%"
-                            "mode: ~a~%"
-                            "title: ~a~%"
-                            "last: ~a")
-               (if (evo:setting :baby-evo t) "on" "off")
-               (if (baby-evo-installed-p) "installed" "NOT installed")
-               (baby-evo-body-chars)
-               (or (baby-evo-sound-name) "silent")
-               (cond (reply (format nil "reply field (waits ~:[forever~;~as~])"
-                                    (baby-evo-timeout) (baby-evo-timeout)))
-                     ((baby-evo-terminal-notifier-p)
-                      "banner only — :baby-evo-reply is off")
-                     (t "banner only — no terminal-notifier (replies need it; /notify doctor)"))
-               +baby-evo-title+
-               (or (baby-evo-last-attempt-text)
-                   "nothing posted yet — /notify doctor sets up and tests it"))))))
+     (format nil (evo:cat "baby-evo ~a · idle seam ~a · body ~d chars · "
+                          "sound ~a~%"
+                          "mode: ~a~%"
+                          "title: ~a~%"
+                          "last: ~a")
+             (if (evo:setting :baby-evo t) "on" "off")
+             (if (baby-evo-installed-p) "installed" "NOT installed")
+             (baby-evo-body-chars)
+             (or (baby-evo-sound-name) "silent")
+             (cond ((baby-evo-reply-possible-p)
+                    (format nil "reply field (waits ~:[forever~;~as~])"
+                            (baby-evo-timeout) (baby-evo-timeout)))
+                   ((not (baby-evo-reply-wanted-p))
+                    "banner only — :baby-evo-reply is off")
+                   ((not (baby-evo-terminal-notifier-p))
+                    "banner only — no terminal-notifier (replies need it; /notify doctor)")
+                   (t "banner only — no interactive session to answer replies"))
+             +baby-evo-title+
+             (or (baby-evo-last-attempt-text)
+                 "nothing posted yet — /notify doctor sets up and tests it")))))
 
 (defun baby-evo-doctor-prompt ()
   "The turn Baby Evo asks the agent to take when the user types /notify doctor.
@@ -758,9 +801,13 @@ STYLE is human-set and a CLI cannot write it."
            "Script Editor; its row (enable + Alert Style = Persistent) is the "
            "fallback equivalent, and there is no \"evo\" row.~%"
            "- The notification sound is the :baby-evo setting `:baby-evo-sound` "
-           "(default \"Ping\"). Any name from `(evo.user::baby-evo-sound-names)` "
+           "(default \"Glass\"). Any name from `(evo.user::baby-evo-sound-names)` "
            "works; NIL makes a silent banner. This is a real, changeable "
            "setting — offer to set it if the user asks.~%"
+           "- A reply steers evo only while this session is running: quitting "
+           "pulls the banner down, and a reply typed after that goes nowhere. "
+           "A banner orphaned by a crash dies by the reply timeout "
+           "(`:baby-evo-timeout`, default 120s).~%"
            "- Both tools exit 0 whether or not a banner appeared, so the only "
            "proof is the user's own eyes. Always ask.~%"
            "- A Focus mode silently suppresses banners; if they see nothing "
@@ -845,9 +892,18 @@ but the patch lives in memory, not in the journal."
   (declare (ignore payload))
   (when (baby-evo-supported-p) (baby-evo-install)))
 
+(defun baby-evo-session-end (payload)
+  "The session is going away: pull any outstanding reply banner down with it.
+A banner that outlives the session still shows its reply field, and whatever
+is typed there goes nowhere — the same lie a stale banner tells, one last
+time.  (A crash cannot run this; the reply timeout bounds those banners.)"
+  (declare (ignore payload))
+  (baby-evo-cancel-alert))
+
 ;; NAMEd: this file is re-loaded on every /reload and on :load replay, and an
 ;; anonymous hook would install another copy of itself each time.
 (when (baby-evo-supported-p)
   (evo:on :session-start #'baby-evo-session-start :name :baby-evo-install)
+  (evo:on :session-end #'baby-evo-session-end :name :baby-evo-cancel)
   (baby-evo-install)
   (evo:on-unload #'baby-evo-uninstall))
