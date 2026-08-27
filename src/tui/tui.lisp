@@ -505,7 +505,7 @@ inside the TUI tick loop and on session resume, so malformed ARGUMENTS
          (refresh-goal tui)
          (let ((goal (tui-goal tui)))
            (when (and goal (member (pget goal :status)
-                                   '(:complete :blocked :budget-limited :paused)))
+                                   '(:complete :budget-limited :paused)))
              (scroll tui (yellow (format nil "◆ goal ~a: ~a"
                                          (pget goal :goal-id)
                                          (string-downcase (pget goal :status)))))))
@@ -942,7 +942,7 @@ wrapped between two rules, and the model status line under the editbox."
 
 (defparameter *builtin-commands*
   '(("help" . "commands and keys")
-    ("goal" . "show, create, or refine the goal")
+    ("goal" . "show, create, refine, pause, or resume the goal")
     ("todo" . "toggle the todo panel")
     ("theme" . "switch the light/dark theme (math colours follow it)")
     ("model" . "pick the model from a list, or set it directly")

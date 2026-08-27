@@ -4,7 +4,8 @@
 ;;;; is an idle-continuation loop: whenever the agent settles and the goal is
 ;;;; :active, a continuation steering prompt re-seeds the run.  "Doing
 ;;;; nothing" is NOT completion — termination is explicit (update-goal
-;;;; :complete/:blocked under audit rules), a budget trip, or a user pause.
+;;;; :complete under audit rules), a budget trip, or a user pause (the human's
+;;;; /goal pause — the agent cannot pause a goal, and a goal is never blocked).
 ;;;; The Lisp addition: an optional agent-authored :done-when predicate
 ;;;; the kernel runs before accepting completion.
 
@@ -83,8 +84,8 @@ Your current todo list (update it with the todo tool as you go):
 Rules:
 - Do not shrink the scope: the objective means what it says, requirement by requirement. Partial delivery is not completion.
 - Completion must be PROVEN from current evidence — files on disk, test output, runtime behavior — checked requirement by requirement right now, not from memory or intent. Only then call update-goal with status \"complete\".~@[~a~]
-- If you are stuck, try a different approach first. Declare the goal blocked (update-goal status \"blocked\") only after the SAME blocker has defeated you in 3 consecutive goal turns, and say what the blocker is.
-- If you genuinely need the user before you can go on, pause the goal (update_goal status \"paused\") instead of spinning; resume it (status \"active\") when you can proceed.
+- A goal is never declared blocked: if you are stuck, try a different approach and keep going.
+- Only the user can pause this goal (with /goal pause); update_goal status \"paused\" is rejected. If you genuinely need the user before you can go on, say so plainly in your reply and keep doing what you can.
 - Otherwise: take the next concrete step toward the objective."
             objective (goal-budget-line goal used) todo-text verifier-nudge)))
 
@@ -111,9 +112,10 @@ a future session should take. Goal objective: ~a"
     (when (and goal (eq (pget goal :status) :active))
       (cond
         ((eq outcome :error)
-         ;; Turn error -> goal :blocked (codex behavior); the supervisor hook —
-         ;; a goal blocked by turn-error is eligible for auto-resume.
-         (update-goal-entry agent goal :status :blocked :blocked-reason "turn-error")
+         ;; A failed turn no longer blocks the goal: it stays :active.
+         ;; Headless exits 1 and the supervisor's --resume restart picks the
+         ;; goal back up; in the TUI the error is shown and the next session
+         ;; (or a user message) re-steers.
          nil)
         (t
          (let* ((used (goal-tokens-used agent goal))
@@ -157,7 +159,7 @@ a future session should take. Goal objective: ~a"
 
 (defun tool-create-goal (args)
   (let ((existing (current-goal evo:*agent*)))
-    (when (and existing (member (pget existing :status) '(:active :paused :blocked :budget-limited)))
+    (when (and existing (member (pget existing :status) '(:active :paused :budget-limited)))
       (error "An unfinished goal already exists (~a: ~a). Complete it first."
              (pget existing :goal-id) (pget existing :objective))))
   (let ((objective (pget args :objective)))
@@ -170,16 +172,16 @@ a future session should take. Goal objective: ~a"
 
 (defun tool-update-goal (args)
   "Model-facing goal control.  The model may: refine the objective text,
-attach/replace the done-when verifier, pause an active goal, resume a paused
-one, or transition to complete/blocked.  At least one of status/objective/
-done-when must be given.  Refinements (objective/done-when) ride along with a
-status change or stand alone."
+attach/replace the done-when verifier, resume a paused goal, or transition
+to complete.  At least one of status/objective/done-when must be given.
+Refinements (objective/done-when) ride along with a status change or stand
+alone.  Pausing is human-only (/goal pause): status \"paused\" is rejected,
+and there is no \"blocked\" status — a goal is never given up on."
   (let* ((agent evo:*agent*)
          (goal (current-goal agent))
          (status (pget args :status))
          (objective (pget args :objective))
-         (done-when (pget args :done-when))
-         (reason (pget args :reason)))
+         (done-when (pget args :done-when)))
     (unless goal (error "No goal is set."))
     (unless (or status objective done-when)
       (error "Nothing to update: give a status, an objective, and/or a done_when."))
@@ -218,25 +220,14 @@ status change or stand alone."
                           output))))
              (commit :status :complete :tokens-used (goal-tokens-used agent goal))
              "Goal marked complete. Well done."))
-          ((equal status "blocked")
-           (unless (member cur '(:active :budget-limited))
-             (error "Goal is ~(~a~); it cannot be blocked from here." cur))
-           (unless (and (stringp reason) (plusp (length reason)))
-             (error "Declaring blocked requires a reason describing the blocker."))
-           (commit :status :blocked :blocked-reason reason
-                   :tokens-used (goal-tokens-used agent goal))
-           "Goal marked blocked.")
           ((equal status "paused")
-           (unless (eq cur :active)
-             (error "Only an active goal can be paused (this one is ~(~a~))." cur))
-           (commit :status :paused :pause-reason reason)
-           "Goal paused. The idle-continuation loop is stopped; resume it with update_goal status \"active\" when you can proceed.")
+           (error "Pausing a goal is human-only: the user pauses it with /goal pause. You cannot pause — if you need the user before you can go on, say so plainly in your reply and keep doing what you can."))
           ((equal status "active")
            (unless (eq cur :paused)
              (error "Only a paused goal can be resumed (this one is ~(~a~))." cur))
            (commit :status :active)
            "Goal resumed. Continuing toward the objective.")
-          (t (error "status must be one of \"complete\", \"blocked\", \"paused\", \"active\".")))))))
+          (t (error "status must be one of \"complete\", \"active\".")))))))
 
 (defun register-goal-tools ()
   (register-tool*
@@ -259,19 +250,16 @@ status change or stand alone."
 - objective: rewrite the goal's objective text (same goal, a revision) — use this to fold in a change the user asked for.
 - done_when: attach or replace the name of a zero-arg userspace predicate that verifies completion (author it in a .lisp file and load it with eval `(evo:load-extension \"<path>\")` first). Set one early when the objective is mechanically checkable.
 - status \"complete\": audited — prove it from current evidence (files, test output, runtime behavior) requirement by requirement, and if a done_when is set the kernel runs it and rejects the claim on failure.
-- status \"blocked\": only after the same blocker has recurred 3 consecutive goal turns; requires a reason.
-- status \"paused\": stop the idle-continuation loop when you genuinely need the user before proceeding — do this instead of spinning.
-- status \"active\": resume a paused goal and continue working."
+- status \"active\": resume a paused goal and continue working.
+Pausing is human-only — the user runs /goal pause; update_goal status \"paused\" is always rejected. A goal is never declared blocked: when stuck, change approach and keep going."
    :schema '(:object
              (:status :type :string :optional t
-              :enum ("complete" "blocked" "paused" "active")
-              :description "complete | blocked | paused | active (resume a paused goal)")
+              :enum ("complete" "active")
+              :description "complete | active (resume a paused goal)")
              (:objective :type :string :optional t
               :description "Rewrite the goal's objective text (refinement)")
              (:done-when :type :string :optional t
-              :description "Name of a zero-arg userspace predicate that returns true iff the goal is done")
-             (:reason :type :string :optional t
-              :description "Required when status is blocked: what is blocking. Optional note when pausing."))
+              :description "Name of a zero-arg userspace predicate that returns true iff the goal is done"))
    :execute #'tool-update-goal))
 
 (register-goal-tools)

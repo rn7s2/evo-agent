@@ -69,7 +69,7 @@ Invoked plainly, `evo` is its own supervisor: the parent process re-spawns the
 same binary as a supervised child (inherited stdio, so the TUI just works),
 monitors a heartbeat file, restarts with `--resume` after crashes and hangs,
 and quarantines repeated boot failures with `--no-userspace`. Exit codes:
-`0` done · `1` error · `2` goal blocked/paused · `3` budget-limited · `64` usage error.
+`0` done · `1` error · `2` goal paused · `3` budget-limited · `64` usage error.
 
 `--no-supervisor` (or `EVO_NO_SUPERVISOR=1`) runs the session in-process.
 
@@ -160,18 +160,18 @@ point.
 
 - **Goals are journal state.** `/goal <objective>` creates a persisted goal;
   the current goal is a fold over `:goal` entries. Statuses: `:active`,
-  `:paused`, `:blocked`, `:budget-limited`, `:complete`.
+  `:paused`, `:budget-limited`, `:complete` — a goal is never declared
+  blocked; a failed approach means a new approach.
 - **Idle continuation**: whenever the agent goes idle with an active goal, the
   driver opens a new turn seeded with a continuation prompt carrying the
-  objective, budget numbers, anti-scope-shrinking fidelity rules, a completion
-  audit (prove it from current evidence, requirement by requirement), and a
-  blocked audit (declare `:blocked` only after the same blocker recurs across
-  three consecutive goal turns). Doing nothing is never completion.
-- **The agent owns the goal, not just its status.** `update_goal` lets the
-  model refine the live objective, attach or replace the `done_when` verifier,
-  pause the goal when it needs the user (which stops the idle loop), and resume
-  it — as well as complete/block it. The user doesn't drive the goal directly;
-  they state intent and the agent folds it in.
+  objective, budget numbers, anti-scope-shrinking fidelity rules, and a
+  completion audit (prove it from current evidence, requirement by
+  requirement). Doing nothing is never completion.
+- **The agent owns the objective, the user owns the pause.** `update_goal`
+  lets the model refine the live objective, attach or replace the `done_when`
+  verifier, resume a paused goal, and complete it under audit. Pausing is
+  human-only: `/goal pause` stops the idle loop, `/goal resume` restarts it,
+  and `update_goal` status `paused` is rejected with an explanation.
 - **Budgets** run every turn over tokens. Exhaustion moves the goal to
   `:budget-limited` and the next steering is a wrap-up template. A
   session-level budget exists too.
@@ -187,7 +187,7 @@ point.
   heartbeat file, restarts with `--resume`, and on repeated boot failures
   retries with `--no-userspace` (kernel and core extensions only), reporting
   which `:load` entry was reached — making the culprit bisectable. A goal
-  blocked by `turn-error` is eligible for automatic resumption on restart.
+  that was active when its turn failed is picked back up by the restart.
 
 ### Self-extension
 

@@ -275,12 +275,12 @@ instructions — a CLAUDE.md or AGENTS.md file, or lore — grant more than that
 - Completion must be proven from current evidence — files, test output,
   runtime behavior — requirement by requirement, never from memory or
   intent.  Do not shrink the objective to fit what you managed to do.
-- Declare yourself blocked only after the same blocker has recurred across
-  three consecutive goal turns, and name it exactly.
-- If you genuinely need the user before you can go on, pause the goal
-  (`update_goal` status \"paused\") rather than spinning; it stops the idle
-  loop until you resume it (status \"active\").  When the user comes back to a
-  paused goal, resume it instead of starting over.
+- A goal is never declared blocked: when an approach fails, change approach
+  and keep going.
+- Only the user can pause a goal (with `/goal pause`); `update_goal` status
+  \"paused\" is rejected.  If you genuinely need the user before you can go
+  on, say so plainly in your reply and keep doing what you can.  When the
+  user resumes a paused goal, pick it up instead of starting over.
 - When the user asks to change what the goal is about, fold the change into
   the goal itself with `update_goal` objective — do not just carry it in your
   head.  If the objective is mechanically checkable and has no verifier yet,

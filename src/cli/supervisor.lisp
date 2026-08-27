@@ -8,7 +8,7 @@
 ;;;; boot failures with --no-userspace.
 ;;;;
 ;;;; Exit-code protocol (child -> parent):
-;;;;   0 done · 1 error (restart-eligible) · 2 goal blocked ·
+;;;;   0 done · 1 error (restart-eligible) · 2 goal paused ·
 ;;;;   3 budget-limited · 64 usage error — 0/2/3/64 stop, everything else
 ;;;;   (including signals) restarts.
 
@@ -96,7 +96,7 @@ Returns (values exit-code hung-p)."
             (setf first nil)
             (case code
               (0 (return 0))
-              (2 (format *error-output* "~&evo: goal blocked or paused by the model — human needed~%")
+              (2 (format *error-output* "~&evo: goal paused — human needed~%")
                  (return 2))
               (3 (format *error-output* "~&evo: goal budget-limited — human needed~%")
                  (return 3))
