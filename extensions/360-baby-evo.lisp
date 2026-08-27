@@ -43,7 +43,7 @@
 ;;;; Settings (override in init.lisp):
 ;;;;   :baby-evo            t       master on/off
 ;;;;   :baby-evo-body-chars 140     how much of the last response to show
-;;;;   :baby-evo-sound      "Ping"  macOS sound name; NIL for a silent banner
+;;;;   :baby-evo-sound      "Glass"  macOS sound name; NIL for a silent banner
 ;;;;   :baby-evo-reply      t       offer the reply field (needs terminal-notifier)
 ;;;;   :baby-evo-timeout    120     seconds to wait for a reply; NIL = forever
 ;;;;
@@ -228,7 +228,7 @@ leave the rest of the sentence to run as AppleScript."
 
 (defun baby-evo-sound-name ()
   "Configured sound name, or NIL for a silent banner."
-  (let ((v (evo:setting :baby-evo-sound "Ping")))
+  (let ((v (evo:setting :baby-evo-sound "Glass")))
     (and (stringp v) (plusp (length v)) v)))
 
 (defun baby-evo-script (title body &optional (sound (baby-evo-sound-name)))
