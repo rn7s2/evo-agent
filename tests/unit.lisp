@@ -1948,6 +1948,368 @@ that is how a human's next keystroke differs from a paste's last chunk."
       (evo.util:set-setting :bionic saved-on)
       (evo.util:set-setting :bionic-fixation saved-fix))))
 
+;;; Baby Evo extension (extensions/360-baby-evo.lisp): a macOS notification
+;;; when the agent goes idle.  The real extension loads here on every platform
+;;; — the OS gate is one variable, so the supported and unsupported paths are
+;;; both reachable from a single test run — and the notification transport is
+;;; another, so nothing here ever posts a real banner or shells out.
+;;;
+;;; PROGV, not LET: this file is compiled before the extension exists, so a
+;;; LET on EVO.USER::*BABY-EVO-MACOS-P* would make a LEXICAL binding the
+;;; extension's own code would never see.
+
+(defun baby-evo-recorder (box)
+  "A stand-in poster that records (AGENT TITLE BODY) into BOX instead of
+notifying.  New signature: the poster takes the agent, the title and the body."
+  (lambda (agent title body)
+    (declare (ignore agent))
+    (setf (car box) (list title body))
+    (values t nil)))
+
+(defun test-baby-evo ()
+  (let ((saved-on (evo.util:setting :baby-evo :unset))
+        (saved-chars (evo.util:setting :baby-evo-body-chars :unset))
+        (saved-driver (symbol-function 'evo.kernel:run-until-settled)))
+    (unwind-protect
+         (progn
+           (load (merge-pathnames "extensions/360-baby-evo.lisp" (uiop:getcwd))
+                 :verbose nil :print nil)
+           (evo.util:set-setting :baby-evo t)
+
+           ;; --- the message ------------------------------------------------
+           (check "baby-evo title is the required string"
+                  (equal (symbol-value (uiop:find-symbol* :+baby-evo-title+ :evo.user))
+                         "Baby Evo: I'm done!"))
+           ;; Body takes an explicit prefix arg so the tests don't depend on
+           ;; whether the test CWD is a git repo.
+           (check "baby-evo body passes short text through"
+                  (equal (evo.user::baby-evo-body "all done" "") "all done"))
+           (check "baby-evo body flattens a response to one line"
+                  (equal (evo.user::baby-evo-body (format nil "a~%~%   b~tc") "")
+                         "a b c"))
+           (evo.util:set-setting :baby-evo-body-chars 10)
+           (check "baby-evo body truncates at the configured length"
+                  (equal (evo.user::baby-evo-body "0123456789ABCDEF" "")
+                         (format nil "0123456789~c" (code-char #x2026))))
+           (evo.util:set-setting :baby-evo-body-chars 140)
+           (check "baby-evo body is never empty"
+                  (plusp (length (evo.user::baby-evo-body "" ""))))
+           (check "baby-evo body survives a nonsense length setting"
+                  (progn (evo.util:set-setting :baby-evo-body-chars "eight")
+                         (prog1 (equal (evo.user::baby-evo-body "short" "") "short")
+                           (evo.util:set-setting :baby-evo-body-chars 140))))
+           ;; The git prefix is prepended before the response text.
+           (check "baby-evo body prepends the git prefix"
+                  (equal (evo.user::baby-evo-body "did the thing" "[evo-agent:main] ")
+                         "[evo-agent:main] did the thing"))
+           (progv '(evo.user::*baby-evo-git-lookup*)
+               (list (lambda (dir) (declare (ignore dir)) "myrepo:feature"))
+             (check "baby-evo git prefix formats name:branch"
+                    (equal (evo.user::baby-evo-git-prefix) "[myrepo:feature] ")))
+           (progv '(evo.user::*baby-evo-git-lookup*)
+               (list (lambda (dir) (declare (ignore dir)) nil))
+             (check "baby-evo git prefix is empty outside a repo"
+                    (equal (evo.user::baby-evo-git-prefix) "")))
+           ;; The body comes from the journal, not from extension memory, so it
+           ;; is still right after a reload or a resume.
+           (let ((journal (make-session-journal)))
+             (append-entry journal
+                           (list :type :message
+                                 :message (list :role :user
+                                                :content (list (list :type :text
+                                                                     :text "ask")))))
+             (append-entry journal
+                           (list :type :message
+                                 :message (list :role :assistant
+                                                :content (list (list :type :text
+                                                                     :text "the answer")))))
+             (check "baby-evo reads the last response out of the journal"
+                    (equal (evo.user::baby-evo-last-response-text
+                            (make-agent :journal journal))
+                           "the answer")))
+           (check "baby-evo tolerates an agent with no journal"
+                  (null (evo.user::baby-evo-last-response-text (make-agent))))
+
+           ;; --- the AppleScript (fallback path) ------------------------------
+           (check "baby-evo escapes quotes instead of closing the literal"
+                  (let ((s (evo.user::baby-evo-script "T" "say \"hi\"" nil)))
+                    (and (search "\\\"hi\\\"" s)
+                         (search "with title \"T\"" s))))
+           (check "baby-evo escapes backslashes"
+                  (search "\\\\" (evo.user::baby-evo-script "T" "a\\b" nil)))
+           (check "baby-evo strips control characters from the body"
+                  (not (find #\Newline
+                             (evo.user::baby-evo-script
+                              "T" (format nil "a~%b") nil))))
+           (check "baby-evo names the sound when one is configured"
+                  (search "sound name \"Ping\""
+                          (evo.user::baby-evo-script "T" "B" "Ping")))
+           (check "baby-evo omits the sound clause when silent"
+                  (not (search "sound name"
+                               (evo.user::baby-evo-script "T" "B" nil))))
+
+           ;; --- the reply argv ------------------------------------------------
+           (evo.util:set-setting :baby-evo-sound "Ping")
+           (evo.util:set-setting :baby-evo-timeout 120)
+           (let ((argv (evo.user::baby-evo-reply-argv "T" "B")))
+             (check "reply argv carries title, message, group and reply field"
+                    (and (member "-reply" argv :test #'equal)
+                         (member "-group" argv :test #'equal)
+                         (member "baby-evo" argv :test #'equal)
+                         (member "-title" argv :test #'equal)))
+             (check "reply argv carries the sound setting"
+                    (member "Ping" argv :test #'equal))
+             (check "reply argv carries the timeout"
+                    (member "120" argv :test #'equal)))
+           (evo.util:set-setting :baby-evo-sound nil)
+           (check "reply argv omits sound when silent"
+                  (not (member "-sound"
+                               (evo.user::baby-evo-reply-argv "T" "B")
+                               :test #'equal)))
+           (evo.util:set-setting :baby-evo-sound "Ping")
+           (evo.util:set-setting :baby-evo-timeout nil)
+           (check "reply argv omits -timeout when waiting forever"
+                  (not (member "-timeout"
+                               (evo.user::baby-evo-reply-argv "T" "B")
+                               :test #'equal)))
+           (evo.util:set-setting :baby-evo-timeout 120)
+
+           ;; --- reading the reply ---------------------------------------------
+           (check "a typed reply is read"
+                  (equal (evo.user::baby-evo-read-reply
+                          (progn (evo.util:write-file-string
+                                  "/tmp/baby-evo-test-reply.out" "do the next thing")
+                                 "/tmp/baby-evo-test-reply.out")
+                          0)
+                         "do the next thing"))
+           (check "a timeout reads as no reply"
+                  (null (evo.user::baby-evo-read-reply
+                         (progn (evo.util:write-file-string
+                                 "/tmp/baby-evo-test-reply.out" "@TIMEOUT")
+                                "/tmp/baby-evo-test-reply.out")
+                         6)))
+           (check "a bare click reads as no reply"
+                  (null (evo.user::baby-evo-read-reply
+                         (progn (evo.util:write-file-string
+                                 "/tmp/baby-evo-test-reply.out" "@ACTIONCLICKED")
+                                "/tmp/baby-evo-test-reply.out")
+                         0)))
+           (ignore-errors (delete-file "/tmp/baby-evo-test-reply.out"))
+
+           ;; --- the OS gate -------------------------------------------------
+           (progv '(evo.user::*baby-evo-macos-p*) '(nil)
+             (check "baby-evo is unsupported off macOS"
+                    (not (evo.user::baby-evo-supported-p)))
+             (check "baby-evo cannot be enabled off macOS"
+                    (not (evo.user::baby-evo-enabled-p)))
+             (check "baby-evo refuses to post off macOS"
+                    (multiple-value-bind (ok detail)
+                        (evo.user::baby-evo-post (make-agent) "T" "B")
+                      (and (null ok) (search "macOS" detail))))
+             (check "/notify explains itself off macOS"
+                    (let ((s (evo.user::baby-evo-command '(:args ""))))
+                      (and (search "unsupported" s) (search "macOS" s))))
+             (check "/notify on refuses off macOS"
+                    (search "macOS" (evo.user::baby-evo-command '(:args "on"))))
+             (check "/notify doctor refuses off macOS"
+                    (search "macOS" (evo.user::baby-evo-command '(:args "doctor"))))
+             (check "baby-evo installs nothing at session start off macOS"
+                    (null (evo.user::baby-evo-session-start nil))))
+
+           ;; --- the idle guard: what counts as "idle" -------------------------
+           ;; The whole correctness of the feature.  :stop/:error/:length are
+           ;; idle (notify); :aborted and pending-work are not (stay silent).
+           (progv '(evo.user::*baby-evo-macos-p*) '(t)
+             (let ((agent (make-agent)))
+               (check "a finished run (:stop) is idle"
+                      (evo.user::baby-evo-idle-outcome-p agent :stop))
+               (check "a final error (:error) is idle — the agent is stuck"
+                      (evo.user::baby-evo-idle-outcome-p agent :error))
+               (check "a truncated run (:length) is idle"
+                      (evo.user::baby-evo-idle-outcome-p agent :length))
+               (check "an escape (:aborted) is NOT idle — the user is here"
+                      (not (evo.user::baby-evo-idle-outcome-p agent :aborted)))
+               (check "queued steering means NOT idle"
+                      (progn (evo.kernel:queue-steering agent "more work")
+                             (prog1 (not (evo.user::baby-evo-idle-outcome-p agent :stop))
+                               ;; drain it so it does not leak into other checks
+                               (setf (evo.kernel::agent-steering agent) nil))))))
+
+           ;; --- the idle seam ------------------------------------------------
+           (evo.user::baby-evo-install)
+           (check "baby-evo wraps evo.kernel:run-until-settled"
+                  (and (evo.user::baby-evo-installed-p)
+                       (eq (symbol-function 'evo.kernel:run-until-settled)
+                           #'evo.user::baby-evo-run-until-settled)))
+           (check "baby-evo install is idempotent — no wrapper on wrapper"
+                  (progn (evo.user::baby-evo-install)
+                         (evo.user::baby-evo-install)
+                         (not (eq (symbol-value
+                                   (uiop:find-symbol*
+                                    :*baby-evo-original-run-until-settled*
+                                    :evo.user))
+                                  #'evo.user::baby-evo-run-until-settled))))
+           ;; Going idle posts, with the title and the truncated last response.
+           (let ((journal (make-session-journal)))
+             (append-entry journal
+                           (list :type :message
+                                 :message (list :role :assistant
+                                                :content
+                                                (list (list :type :text
+                                                            :text (format nil "line one~%line two"))))))
+             (let ((box (list nil)))
+               (progv '(evo.user::*baby-evo-macos-p*
+                        evo.user::*baby-evo-poster*
+                        evo.user::*baby-evo-original-run-until-settled*)
+                   (list t (baby-evo-recorder box)
+                         (lambda (a) (declare (ignore a)) :stop))
+                 (evo.user::baby-evo-run-until-settled (make-agent :journal journal)))
+               (check "going idle posts the required title"
+                      (equal (first (car box)) "Baby Evo: I'm done!"))
+               ;; The body carries the response; the git prefix is a stub in
+               ;; the real poster, so just check the response text is present.
+               (check "going idle posts the truncated last response"
+                      (search "line one line two" (second (car box))))))
+           (let ((box (list nil)))
+             (progv '(evo.user::*baby-evo-macos-p*
+                      evo.user::*baby-evo-poster*
+                      evo.user::*baby-evo-original-run-until-settled*)
+                 (list t (baby-evo-recorder box)
+                       (lambda (a) (declare (ignore a)) :error))
+               (evo.user::baby-evo-run-until-settled (make-agent)))
+             (check "an errored run notifies too — it is idle as well"
+                    (car box)))
+           (let ((box (list nil)))
+             (progv '(evo.user::*baby-evo-macos-p*
+                      evo.user::*baby-evo-poster*)
+                 (list t (baby-evo-recorder box))
+               (evo.user::baby-evo-on-idle (make-agent) :aborted))
+             (check "an aborted run stays silent — the user is already here"
+                    (null (car box))))
+           (let ((box (list nil)))
+             (evo.util:set-setting :baby-evo nil)
+             (progv '(evo.user::*baby-evo-macos-p*
+                      evo.user::*baby-evo-poster*)
+                 (list t (baby-evo-recorder box))
+               (evo.user::baby-evo-on-idle (make-agent) :stop))
+             (evo.util:set-setting :baby-evo t)
+             (check "switched off means silent" (null (car box))))
+           (check "the wrapper returns the driver's outcome unchanged"
+                  (progv '(evo.user::*baby-evo-macos-p*
+                           evo.user::*baby-evo-poster*
+                           evo.user::*baby-evo-original-run-until-settled*)
+                      (list t (baby-evo-recorder (list nil))
+                            (lambda (a) (declare (ignore a)) :length))
+                    (eq :length (evo.user::baby-evo-run-until-settled (make-agent)))))
+           (check "a signalling notifier cannot break the run"
+                  (progv '(evo.user::*baby-evo-macos-p*
+                           evo.user::*baby-evo-poster*
+                           evo.user::*baby-evo-original-run-until-settled*)
+                      (list t
+                            (lambda (agent title body) (declare (ignore agent title body))
+                              (error "notifier exploded"))
+                            (lambda (a) (declare (ignore a)) :stop))
+                    (handler-bind ((warning #'muffle-warning))
+                      (eq :stop (evo.user::baby-evo-run-until-settled (make-agent))))))
+
+           ;; --- the alert lifecycle: cancel on new work -------------------------
+           ;; A 'done' banner must be dismissed the instant evo works again,
+           ;; and a stale reply must not steer.
+           (progv '(evo.user::*baby-evo-macos-p*) '(t)
+             ;; Install a fake outstanding alert, then cancel it.
+             (progv '(evo.user::*baby-evo-alert*)
+                 (list (evo.user::%make-baby-evo-alert :process nil :thread nil))
+               (check "an outstanding alert exists to cancel"
+                      (symbol-value
+                       (uiop:find-symbol* :*baby-evo-alert* :evo.user)))
+               (evo.user::baby-evo-cancel-alert)
+               (check "cancelling clears the outstanding alert"
+                      (null (symbol-value
+                             (uiop:find-symbol* :*baby-evo-alert* :evo.user))))
+               (check "cancelling again is a safe no-op"
+                      (null (evo.user::baby-evo-cancel-alert)))))
+
+           ;; --- /notify ------------------------------------------------------
+           (check "/notify is a registered command"
+                  (gethash "notify" evo::*commands*))
+           (progv '(evo.user::*baby-evo-macos-p*) '(t)
+             (check "bare /notify shows status"
+                    (let ((s (evo.user::baby-evo-command '(:args ""))))
+                      (and (search "baby-evo" s)
+                           (search "Baby Evo: I'm done!" s)
+                           (search "idle seam" s))))
+             (check "status reports the mode (reply field or banner only)"
+                    (search "mode:" (evo.user::baby-evo-command '(:args "status"))))
+             (check "/notify status is the same as bare /notify"
+                    (equal (evo.user::baby-evo-command '(:args ""))
+                           (evo.user::baby-evo-command '(:args "status"))))
+             (check "/notify off switches it off"
+                    (progn (evo.user::baby-evo-command '(:args "off"))
+                           (null (evo.util:setting :baby-evo))))
+             (check "/notify status says off"
+                    (search "baby-evo off"
+                            (evo.user::baby-evo-command '(:args "status"))))
+             (check "/notify on switches it back on"
+                    (progn (evo.user::baby-evo-command '(:args "on"))
+                           (and (evo.util:setting :baby-evo) t)))
+             (check "/notify subcommands are case-insensitive"
+                    (equal (evo.user::baby-evo-command '(:args "STATUS"))
+                           (evo.user::baby-evo-command '(:args "status"))))
+             (check "an unknown /notify subcommand shows usage"
+                    (let ((s (evo.user::baby-evo-command '(:args "wat"))))
+                      (and (search "usage" s) (search "doctor" s))))
+             ;; Doctor is a chat turn, not a script: it steers the agent and
+             ;; lets the normal loop run.
+             (let ((agent (make-agent)))
+               (evo.user::baby-evo-command (list :agent agent :args "doctor"))
+               (check "/notify doctor queues a turn for the agent"
+                      (steering-pending-p agent)))
+             (let ((p (evo.user::baby-evo-doctor-prompt)))
+               (check "doctor asks the agent to work interactively"
+                      (and (search "interactively" p)
+                           (search "one step at a time" p)
+                           (search "ASK" p)))
+               (check "doctor guides the terminal-notifier alert style to Persistent"
+                      (and (search "Persistent" p)
+                           (search "terminal-notifier" p)))
+               (check "doctor guides terminal-notifier's notification permission"
+                      (search "Allow notifications" p))
+               (check "doctor mentions the sound setting"
+                      (search "baby-evo-sound" p))
+               (check "doctor names the install helper for brew"
+                      (search "baby-evo-install-terminal-notifier" p))
+               (check "doctor names the functions the agent can call"
+                      (and (search "baby-evo-send-test-notification" p)
+                           (search "baby-evo-diagnose" p))))
+             (let ((box (list nil)))
+               (evo.util:set-setting :baby-evo nil)
+               (progv '(evo.user::*baby-evo-poster*) (list (baby-evo-recorder box))
+                 (evo.user::baby-evo-send-test-notification "probe"))
+               (evo.util:set-setting :baby-evo t)
+               (check "doctor's test notification ignores the on/off setting"
+                      (and (car box)
+                           (equal (first (car box)) "Baby Evo: I'm done!")
+                           (search "probe" (second (car box)))))))
+
+           ;; --- uninstall puts the kernel back --------------------------------
+           (evo.user::baby-evo-uninstall)
+           (check "baby-evo uninstall restores run-until-settled"
+                  (and (not (evo.user::baby-evo-installed-p))
+                       (eq (symbol-function 'evo.kernel:run-until-settled)
+                           saved-driver))))
+      (ignore-errors (evo.user::baby-evo-uninstall))
+      (let ((pkg (symbol-package 'evo.kernel:run-until-settled)))
+        (evo.port:unlock-package pkg)
+        (unwind-protect
+             (setf (symbol-function 'evo.kernel:run-until-settled) saved-driver)
+          (evo.port:lock-package pkg)))
+      (if (eq saved-on :unset)
+          (remf evo.util:*settings* :baby-evo)
+          (evo.util:set-setting :baby-evo saved-on))
+      (if (eq saved-chars :unset)
+          (remf evo.util:*settings* :baby-evo-body-chars)
+          (evo.util:set-setting :baby-evo-body-chars saved-chars)))))
+
 ;;; Light/dark theme: semantic colours resolve through the :theme setting.
 
 (defun test-theme ()
@@ -5578,6 +5940,7 @@ became zero after the first reload."
     (test-math)
     (test-prose-styler)
     (test-bionic)
+    (test-baby-evo)
     (test-theme)
     (test-user-prompt-block)
     (test-input-history)
