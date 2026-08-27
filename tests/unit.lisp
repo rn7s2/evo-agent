@@ -2311,11 +2311,15 @@ notifying.  New signature: the poster takes the agent, the title and the body."
                        (eq (symbol-function 'evo.kernel:run-until-settled)
                            saved-driver))))
       (ignore-errors (evo.user::baby-evo-uninstall))
+      ;; The extension's install/uninstall lock EVO.KERNEL around their patch,
+      ;; which is correct at runtime — but the unit image never locks the
+      ;; kernel packages, and the source-reading lint that runs later reads
+      ;; files whose IN-PACKAGE is EVO.KERNEL: a locked package refuses to
+      ;; intern, failing the lint.  Leave the package the way the suite found
+      ;; it (unlocked), with the original driver restored.
       (let ((pkg (symbol-package 'evo.kernel:run-until-settled)))
         (evo.port:unlock-package pkg)
-        (unwind-protect
-             (setf (symbol-function 'evo.kernel:run-until-settled) saved-driver)
-          (evo.port:lock-package pkg)))
+        (setf (symbol-function 'evo.kernel:run-until-settled) saved-driver))
       (if (eq saved-on :unset)
           (remf evo.util:*settings* :baby-evo)
           (evo.util:set-setting :baby-evo saved-on))
