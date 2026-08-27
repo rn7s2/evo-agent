@@ -261,13 +261,24 @@ confirm delivery."
 (defparameter +baby-evo-reply-prompt+ "Reply to steer…"
   "The placeholder in the notification's reply field.")
 
+(defun baby-evo-tn-escape (text)
+  "Escape TEXT for terminal-notifier's -message/-title: a leading '[', '(',
+'{' or '\"' must be backslash-escaped or the tool rejects it ('Could not read
+the -message value').  Only the FIRST character is special — the git prefix
+\"[repo:branch] \" is exactly what trips this."
+  (if (and (plusp (length text))
+           (member (char text 0) '(#\[ #\( #\{ #\")))
+      (concatenate 'string "\\" text)
+      text))
+
 (defun baby-evo-reply-argv (title body)
   "The terminal-notifier argv for a reply banner.  No -timeout when the
 setting is NIL, which is what makes it wait forever.  -sound carries the
 configured notification sound (a macOS sound name); omitting it is how a NIL
-:baby-evo-sound asks for a silent banner."
-  (append (list "-title" title
-                "-message" body
+:baby-evo-sound asks for a silent banner.  Title and message are escaped for
+terminal-notifier's leading-character rule (see BABY-EVO-TN-ESCAPE)."
+  (append (list "-title" (baby-evo-tn-escape title)
+                "-message" (baby-evo-tn-escape body)
                 "-group" +baby-evo-group+
                 "-reply" +baby-evo-reply-prompt+)
           (let ((sound (baby-evo-sound-name)))

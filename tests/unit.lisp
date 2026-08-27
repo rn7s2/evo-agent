@@ -2075,6 +2075,19 @@ notifying.  New signature: the poster takes the agent, the title and the body."
            (evo.util:set-setting :baby-evo-timeout 120)
 
            ;; --- reading the reply ---------------------------------------------
+           (check "a leading [ in the message is escaped for terminal-notifier"
+                  (equal (evo.user::baby-evo-tn-escape "[repo:main] body")
+                         "\\[repo:main] body"))
+           (check "a leading ( { and quote are escaped too"
+                  (and (equal (evo.user::baby-evo-tn-escape "(x") "\\(x")
+                       (equal (evo.user::baby-evo-tn-escape "{x") "\\{x")
+                       (equal (evo.user::baby-evo-tn-escape "\"x") "\\\"x")))
+           (check "a plain message is not escaped"
+                  (equal (evo.user::baby-evo-tn-escape "plain body") "plain body"))
+           (check "the reply argv escapes a git-prefixed body"
+                  (let ((argv (evo.user::baby-evo-reply-argv
+                               "T" "[evo-agent:main] did it")))
+                    (member "\\[evo-agent:main] did it" argv :test #'equal)))
            (check "a typed reply is read"
                   (equal (evo.user::baby-evo-read-reply
                           (progn (evo.util:write-file-string
