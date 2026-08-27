@@ -8,7 +8,7 @@
 (defparameter *builtin-help*
   "commands:
   /help                this list
-  /goal [objective]    show, create, or refine the goal
+  /goal [text]         show, create, or refine the goal; /goal pause|resume
   /todo                toggle the todo panel
   /theme [dark|light]  switch the light/dark theme (math colours follow it)
   /model [id]          pick the model from a list, or set it directly
@@ -45,8 +45,13 @@ images: no terminal can hand an app the image itself, so evo reads the clipboard
       no argument (works always), or paste/drop the file's path.")
 
 (defun goal-command (tui args)
+  "/goal [text|pause|resume] — with no args, show the goal; with prose,
+create or refine it.  pause/resume are the human's goal controls: only the
+user can pause an active goal (the agent's update_goal cannot), and a paused
+goal is resumed from here too."
   (let* ((agent (tui-agent tui))
-         (goal (current-goal agent)))
+         (goal (current-goal agent))
+         (verb (string-downcase (string-trim '(#\Space #\Tab) args))))
     (cond
       ((zerop (length args))
        (scroll tui (if goal
@@ -57,6 +62,31 @@ images: no terminal can hand an app the image itself, so evo reads the clipboard
                                (pget goal :token-budget)
                                (pget goal :done-when))
                        (dim "no goal — /goal <objective> to set one"))))
+      ((equal verb "pause")
+       (if (and goal (eq (pget goal :status) :active))
+           (progn
+             (update-goal-entry agent goal :status :paused)
+             (refresh-goal tui)
+             ;; An in-flight run settles first; the settled hook then sees
+             ;; :paused and stops the idle-continuation loop.
+             (scroll tui (yellow (format nil "◆ goal paused~:[~; — the run in flight finishes first~]"
+                                         (tui-running tui)))))
+           (scroll tui (dim (if goal
+                                (format nil "goal is ~(~a~) — only an active goal can be paused"
+                                        (pget goal :status))
+                                "no goal to pause")))))
+      ((equal verb "resume")
+       (if (and goal (eq (pget goal :status) :paused))
+           (progn
+             (update-goal-entry agent goal :status :active)
+             (refresh-goal tui)
+             (scroll tui (yellow (format nil "◆ goal resumed: ~a" (pget goal :objective))))
+             (queue-steering agent (goal-continuation-for agent (current-goal agent)))
+             (start-worker tui))
+           (scroll tui (dim (if goal
+                                (format nil "goal is ~(~a~) — only a paused goal can be resumed"
+                                        (pget goal :status))
+                                "no goal to resume")))))
       ((and goal (eq (pget goal :status) :active))
        ;; Refine: new :goal entry, same id; steer if a run is active.
        (append-entry (agent-journal agent)

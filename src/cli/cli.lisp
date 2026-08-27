@@ -17,7 +17,7 @@ Usage:
   evo -p \"prompt\"              run one task in print mode, stream text to stdout
   evo --image <path> -p ...      attach an image to the first prompt (repeatable)
   evo --goal \"objective\" [-p \"first prompt\"]
-                                 create a goal and run until complete/blocked/budget
+                                 create a goal and run until complete or budget
   evo --resume [path] [-p ...]   resume a session (default: latest for this cwd);
                                  with an active goal and no -p, continues the goal
   evo --events ...               emit line-delimited sexpr events instead of text
@@ -30,7 +30,7 @@ Usage:
 
 evo supervises itself: crashes and hangs restart the session with --resume;
 a goal that was active picks itself back up.  Exit codes: 0 done, 1 error,
-2 goal blocked or paused, 3 budget-limited, 64 usage error.
+2 goal paused, 3 budget-limited, 64 usage error.
 
 Config: ~/.evo/init.lisp, then <cwd>/.evo/init.lisp, then extensions, then
 ~/.evo/post-init.lisp, then <cwd>/.evo/post-init.lisp (Lisp, evaluated in order;
@@ -157,7 +157,7 @@ models registered by extensions.  evo ships no built-in model table, e.g.
 
 (defun main (&optional (argv (evo.port:argv)))
   "Exit codes are supervisor protocol: 0 done, 1 error (restart-eligible),
-2 goal blocked, 3 budget-limited, 64 usage error (never restart)."
+2 goal paused, 3 budget-limited, 64 usage error (never restart)."
   (let ((opts (handler-case (parse-args argv)
                 (error (e)
                   (format *error-output* "evo: ~a~%" e)
@@ -305,13 +305,11 @@ prompt without the image the user asked for is worse than not running."
           (format *error-output* "goal ~a: ~a~%"
                   (pget goal :goal-id) (string-downcase (pget goal :status))))
         ;; Exit codes are supervisor protocol: 0 done, 1 error
-        ;; (restart-eligible), 2 blocked/paused by model, 3 budget-limited —
-        ;; 2 and 3 need a human, the supervisor must NOT restart them.  A goal
-        ;; the model paused wants the user before it proceeds: same as blocked,
-        ;; don't auto-restart — the human resumes it later with --resume.
+        ;; (restart-eligible), 2 paused, 3 budget-limited — 2 and 3 need a
+        ;; human, the supervisor must NOT restart them.  A turn error leaves
+        ;; the goal active and lands on the (t 1) branch, so the
+        ;; supervisor's --resume restart picks the goal back up.
         (cond ((and goal (eq (pget goal :status) :complete)) 0)
-              ((and goal (eq (pget goal :status) :blocked))
-               (if (equal (pget goal :blocked-reason) "turn-error") 1 2))
               ((and goal (eq (pget goal :status) :paused)) 2)
               ((and goal (eq (pget goal :status) :budget-limited)) 3)
               ((eq outcome :stop) 0)

@@ -2459,8 +2459,8 @@ just the pack that ships as a core extension, and what the user picked
   "Flip switch read by the userspace done-when predicate in test-goal-tools.")
 
 (defun test-goal-tools ()
-  "update_goal: refine objective/done-when, pause/resume, and the guards +
-completion gating around all of it."
+  "update_goal: refine objective/done-when, human-only pause, resume, and
+the guards + completion gating around all of it."
   (let* ((dir (uiop:ensure-directory-pathname
                (format nil "~a/evo-goaltools-~a/" (tmp-dir) (gen-id))))
          (journal (progn (ensure-directories-exist dir) (make-session-journal dir)))
@@ -2493,19 +2493,29 @@ completion gating around all of it."
              (equal (pget (current-goal agent) :status) :active))
       (check "status=active+done_when still appends a journal entry"
              (> (length (evo.journal::journal-entries (agent-journal agent))) before)))
-    ;; Pause: reachable, records its reason, guards double-pause.
-    (evo.kernel::tool-update-goal '(:status "paused" :reason "need the user"))
-    (check "goal paused" (eq (pget (current-goal agent) :status) :paused))
-    (check "pause reason recorded"
-           (equal (pget (current-goal agent) :pause-reason) "need the user"))
-    (check-signals "cannot pause an already-paused goal"
-                   (evo.kernel::tool-update-goal '(:status "paused")))
+    ;; Pausing is human-only: the tool rejects it with an explicit message
+    ;; and the goal is untouched.
+    (let ((msg (handler-case
+                   (progn (evo.kernel::tool-update-goal '(:status "paused")) nil)
+                 (error (e) (princ-to-string e)))))
+      (check "update_goal status=paused signals" (not (null msg)))
+      (check "pause rejection points at /goal pause"
+             (and msg (not (null (search "/goal pause" msg))))))
+    (check "goal still active after a rejected pause"
+           (eq (pget (current-goal agent) :status) :active))
+    ;; "blocked" is gone from the tool's vocabulary entirely.
+    (check-signals "update_goal status=blocked rejected"
+                   (evo.kernel::tool-update-goal '(:status "blocked" :reason "stuck")))
+    ;; A human pause (what /goal pause journals) stops the idle loop...
+    (evo.kernel:update-goal-entry agent (current-goal agent) :status :paused)
+    (check "goal paused by the human"
+           (eq (pget (current-goal agent) :status) :paused))
     ;; The idle-continuation hook must NOT re-steer a paused goal.
     (check "settled hook re-steers nothing while paused"
            (null (evo.kernel::goal-settled-hook agent :stop)))
     (check "no steering queued while paused"
            (not (evo.kernel:steering-pending-p agent)))
-    ;; Resume, then guard double-resume.
+    ;; ...and the agent can still resume it from there.
     (evo.kernel::tool-update-goal '(:status "active"))
     (check "goal resumed to active" (eq (pget (current-goal agent) :status) :active))
     (check-signals "cannot resume an already-active goal"
