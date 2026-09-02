@@ -28,7 +28,8 @@
 (defpackage :evo.util
   (:use :cl)
   (:export #:getenv #:env-proxy #:with-proxy #:*request-proxy*
-           #:ensure-winhttp-proxy #:iso8601-now #:format-local-timestamp #:local-timezone-name
+           #:ensure-winhttp-proxy #:iso8601-now #:iso8601-utc
+           #:format-local-timestamp #:local-timezone-name
            #:gen-id #:reseed-ids #:pget #:pput #:plist-merge
            #:evo-home #:project-evo-dir #:encode-cwd #:ensure-directory
            #:write-sexpr-line #:read-sexpr #:read-sexpr-stream #:validate-journal-value
@@ -61,7 +62,8 @@
            #:state-messages #:state-model #:state-model-provider #:state-thinking
            #:state-tools
            #:state-goal #:state-loads #:state-name #:state-custom #:custom-state
-           #:list-sessions #:latest-session #:sessions-directory))
+           #:list-sessions #:latest-session #:sessions-directory
+           #:session-updated #:sort-sessions))
 
 (defpackage :evo.provider
   (:use :cl :evo.util)

@@ -250,16 +250,46 @@ Entry ids are preserved (the parent chain must stay intact)."
 
 ;;; Session listing — bounded header scan.
 
+(defun session-updated (path)
+  "Last-write time of session file PATH as an ISO-8601 UTC string, or NIL.
+The journal is append-only, so the file's mtime is the moment the session
+was last worked in — which is not its creation time once you resume an old
+session and keep going."
+  (let ((written (ignore-errors (file-write-date path))))
+    (and written (iso8601-utc written))))
+
+(defun session-newer-p (a b)
+  "Order two session plists: most recently updated first.  Both keys are
+fixed-width strings, so this is a plain lexicographic compare; the path
+breaks ties (mtime has one-second resolution, and two sessions can easily
+share a second)."
+  (let ((ua (or (pget a :updated) ""))
+        (ub (or (pget b :updated) "")))
+    (if (string= ua ub)
+        (and (string> (or (pget a :path) "") (or (pget b :path) "")) t)
+        (and (string> ua ub) t))))
+
+(defun sort-sessions (sessions)
+  "SESSIONS, most recently updated first."
+  (sort (copy-list sessions) #'session-newer-p))
+
 (defun list-sessions (&optional (cwd (uiop:getcwd)))
-  "List sessions for CWD, newest first: plists of :path + header fields."
-  (let ((files (sort (directory (merge-pathnames "*.sexp" (sessions-directory cwd)))
-                     #'string> :key #'namestring)))
-    (loop for path in files
-          for header = (ignore-errors
-                        (with-open-file (in path :direction :input :external-format :utf-8)
-                          (read-sexpr-stream in)))
-          when (and (consp header) (eq (pget header :type) :session))
-            collect (list* :path (namestring path) header))))
+  "List sessions for CWD, most recently updated first: plists of :path,
+:updated (last write, ISO-8601 UTC) + header fields.  Ordering by last
+write rather than by creation is what makes the newest entry the session
+you were last in, even if you got there through /resume."
+  (sort-sessions
+   (loop for path in (directory (merge-pathnames "*.sexp" (sessions-directory cwd)))
+         for header = (ignore-errors
+                       (with-open-file (in path :direction :input :external-format :utf-8)
+                         (read-sexpr-stream in)))
+         when (and (consp header) (eq (pget header :type) :session))
+           collect (list* :path (namestring path)
+                          :updated (session-updated path)
+                          header))))
 
 (defun latest-session (&optional (cwd (uiop:getcwd)))
+  "Path of the session for CWD that was worked in most recently — which is
+what a bare `--resume` and a supervisor restart should reopen, even when the
+last thing you did was resume an older session."
   (pget (first (list-sessions cwd)) :path))

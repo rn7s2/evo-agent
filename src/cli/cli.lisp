@@ -18,10 +18,11 @@ Usage:
   evo --image <path> -p ...      attach an image to the first prompt (repeatable)
   evo --goal \"objective\" [-p \"first prompt\"]
                                  create a goal and run until complete or budget
-  evo --resume [path] [-p ...]   resume a session (default: latest for this cwd);
+  evo --resume [path] [-p ...]   resume a session (default: the one most recently
+                                 worked in, for this cwd);
                                  with an active goal and no -p, continues the goal
   evo --events ...               emit line-delimited sexpr events instead of text
-  evo --list-sessions            list sessions for this cwd
+  evo --list-sessions            list sessions for this cwd, last worked in first
   evo --model <id>               model id (default: the :model setting from init.lisp)
   evo --thinking <level>         low|medium|high|xhigh|max (default medium)
   evo --no-userspace             boot without init.lisp, post-init.lisp, or extensions (quarantine mode)

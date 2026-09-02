@@ -60,7 +60,7 @@ evo                                     # interactive TUI (on a tty)
 evo -p "run ls and summarize"           # print mode: text on stdout
 evo --events -p "..."                  # line-delimited sexpr events
 evo --goal "make ./test.sh pass"       # goal run; survives its own death
-evo --resume                           # reopen the latest session here
+evo --resume                           # reopen the last session worked in here
 evo --image shot.png -p "what broke?"  # attach an image to the prompt
 evo --list-sessions
 ```

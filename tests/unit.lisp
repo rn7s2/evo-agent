@@ -1436,6 +1436,10 @@ that is how a human's next keystroke differs from a paste's last chunk."
                             :message (:role :assistant :stop-reason :stop :model "m"
                                       :usage (:input 1 :output 1 :cache-read 0 :cache-write 0)
                                       :content ((:type :text :text "ok")))))
+    ;; A later turn must not steal the row: the opening prompt is the label.
+    (append-entry journal '(:type :message
+                            :message (:role :user
+                                      :content ((:type :text :text "continue")))))
     (let* ((path (namestring (journal-path journal)))
            (timestamp "2024-01-01T16:30:00Z")
            (expected (%expected-local-timestamp-prefix timestamp))
@@ -1452,12 +1456,58 @@ that is how a human's next keystroke differs from a paste's last chunk."
                   (search "Asia/Shanghai" label)))
       (check "resume item value is session path"
              (equal value path))
-      (check "resume description uses leaf user prompt"
+      (check "resume description uses first user prompt"
              (and (search "first line second line" desc)
+                  (not (search "continue" desc))
                   (not (find #\Newline desc))))
       (check "resume description is bounded"
              (and (<= (length desc) evo.tui::*resume-summary-max-chars*)
                   (char= (char desc (1- (length desc))) #\…))))))
+
+;;; Session ordering: /resume lists by last write, not by creation.
+
+(defun test-session-ordering ()
+  ;; Pure ordering, no filesystem: an old session written to recently must
+  ;; outrank a newer one left untouched, and equal mtimes fall back to path.
+  (let* ((old-but-active (list :path "a.sexp" :timestamp "2024-01-01T00:00:00Z"
+                                              :updated "2024-06-01T10:00:00Z"))
+         (new-but-idle (list :path "b.sexp" :timestamp "2024-05-01T00:00:00Z"
+                                            :updated "2024-05-01T00:00:00Z"))
+         (unreadable (list :path "c.sexp" :timestamp "2024-04-01T00:00:00Z"
+                                          :updated nil))
+         (sorted (sort-sessions (list new-but-idle unreadable old-but-active))))
+    (check "resumed-and-worked session sorts above a newer idle one"
+           (equal (pget (first sorted) :path) "a.sexp"))
+    (check "sessions with no mtime sink to the bottom"
+           (equal (pget (third sorted) :path) "c.sexp"))
+    (check "equal update times break ties by path, newest name first"
+           (equal (mapcar (lambda (s) (pget s :path))
+                          (sort-sessions
+                           (list (list :path "x1.sexp" :updated "2024-06-01T10:00:00Z")
+                                 (list :path "x2.sexp" :updated "2024-06-01T10:00:00Z"))))
+                  '("x2.sexp" "x1.sexp"))))
+  ;; And the real listing carries :updated, so the sort key is never empty.
+  (let* ((dir (uiop:ensure-directory-pathname
+               (format nil "~a/evo-sessions-~a/" (tmp-dir) (gen-id))))
+         (journal (progn (ensure-directories-exist dir) (make-session-journal dir))))
+    (append-entry journal '(:type :message
+                            :message (:role :user
+                                      :content ((:type :text :text "hi")))))
+    ;; Nothing hits disk until the first assistant message.
+    (append-entry journal '(:type :message
+                            :message (:role :assistant :stop-reason :stop :model "m"
+                                      :usage (:input 1 :output 1 :cache-read 0 :cache-write 0)
+                                      :content ((:type :text :text "ok")))))
+    (let ((session (first (list-sessions dir))))
+      (check "list-sessions reports the file's last write"
+             (and (stringp (pget session :updated))
+                  (string>= (pget session :updated) (pget session :timestamp))))
+      (check "list-sessions still reports creation timestamp and path"
+             ;; DIRECTORY hands back truenames, and the temp home lives behind
+             ;; a symlink on macOS, so compare resolved paths.
+             (and (equal (truename (pget session :path))
+                         (truename (journal-path journal)))
+                  (stringp (pget session :timestamp)))))))
 
 ;;; Region draw anchoring: repaints must not climb into scrollback
 
@@ -6046,6 +6096,7 @@ became zero after the first reload."
     (test-status-segments)
     (test-tui-compose)
     (test-resume-picker)
+    (test-session-ordering)
     (test-render-anchor)
     (test-display-width)
     (test-wrap-visible)
