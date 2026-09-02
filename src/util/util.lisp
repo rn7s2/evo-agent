@@ -95,12 +95,17 @@ enough on Unix and is ignored on Windows (see ENSURE-WINHTTP-PROXY)."
      (ensure-winhttp-proxy)
      ,@body))
 
-(defun iso8601-now ()
-  "Current UTC time as an ISO-8601 string."
+(defun iso8601-utc (universal-time)
+  "UNIVERSAL-TIME as an ISO-8601 UTC string.  Fixed width, so string order
+is time order — sorting session listings leans on that."
   (multiple-value-bind (sec min hour day month year)
-      (decode-universal-time (get-universal-time) 0)
+      (decode-universal-time universal-time 0)
     (format nil "~4,'0d-~2,'0d-~2,'0dT~2,'0d:~2,'0d:~2,'0dZ"
             year month day hour min sec)))
+
+(defun iso8601-now ()
+  "Current UTC time as an ISO-8601 string."
+  (iso8601-utc (get-universal-time)))
 
 (defun %trim-nonempty (string)
   (let ((trimmed (and string

@@ -157,9 +157,12 @@ ctrl+v."
               :key (lambda (b) (pget b :type)))
         :text))
 
-(defun leaf-user-prompt (journal)
-  "Last user text on JOURNAL's current leaf path, or NIL."
-  (loop for entry in (reverse (entry-path journal))
+(defun first-user-prompt (journal)
+  "First user text on JOURNAL's current leaf path, or NIL.  The opening
+prompt is what makes a session recognisable months later; the last one is
+usually \"continue\" or an injected goal-continuation nudge, which looks the
+same in every row."
+  (loop for entry in (entry-path journal)
         for message = (and (eq (pget entry :type) :message)
                            (pget entry :message))
         when (and message (eq (pget message :role) :user))
@@ -168,11 +171,14 @@ ctrl+v."
 (defun resume-session-summary (session)
   "Dimmed description text for one /resume SESSION row."
   (let ((prompt (ignore-errors
-                  (leaf-user-prompt (open-journal (pget session :path))))))
+                  (first-user-prompt (open-journal (pget session :path))))))
     (and prompt (resume-summary-text prompt))))
 
 (defun resume-select-items (sessions &key timezone-name)
-  "Build choose-box items for /resume: local time label + leaf prompt summary."
+  "Build choose-box items for /resume: creation-time label + opening prompt
+summary.  SESSIONS arrive from LIST-SESSIONS already ordered by last write,
+so the label time and the row order deliberately disagree: you scan from the
+top for the session you touched most recently, and read the date to place it."
   (let ((timezone-name (or timezone-name (local-timezone-name))))
     (loop for s in sessions
           for i from 1
