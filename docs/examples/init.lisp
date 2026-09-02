@@ -44,9 +44,9 @@
 ;;; advertises none may accept the request and quietly drop the image, which
 ;;; is worse — the model then answers about a picture it never saw.
 
-;; The three supported Anthropic models, on the stock :anthropic endpoint
+;; The supported Anthropic models, on the stock :anthropic endpoint
 ;; (pre-seeded: api.anthropic.com + ANTHROPIC_API_KEY, see Providers below).
-;; All three: 1M context, 128K output, the full effort ladder, adaptive
+;; All: 1M context, 128K output, the full effort ladder, adaptive
 ;; thinking, vision.
 (evo:register-model "claude-sonnet-5"
   :provider :anthropic
@@ -59,6 +59,11 @@
   :effort t :thinking-mode :adaptive)
 
 (evo:register-model "claude-fable-5"
+  :provider :anthropic
+  :context-window 1000000 :max-output 128000
+  :effort t :thinking-mode :adaptive)
+
+(evo:register-model "claude-fable-5-1"
   :provider :anthropic
   :context-window 1000000 :max-output 128000
   :effort t :thinking-mode :adaptive)

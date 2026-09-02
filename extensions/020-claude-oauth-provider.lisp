@@ -10,8 +10,9 @@
 ;;;;
 ;;;; What this registers
 ;;;;   provider :anthropic-oauth — https://api.anthropic.com, Bearer auth
-;;;;   models   claude-sonnet-5 · claude-opus-5 · claude-fable-5 — the three
-;;;;            supported Anthropic models, statically (no /v1/models fetch):
+;;;;   models   claude-sonnet-5 · claude-opus-5 · claude-fable-5 ·
+;;;;            claude-fable-5-1 — the supported Anthropic models, statically
+;;;;            (no /v1/models fetch):
 ;;;;            1M context, 128K output, full effort ladder, adaptive
 ;;;;            thinking, vision.
 ;;;;
@@ -28,7 +29,7 @@
 ;;; Billing-header constants (must match the current Claude Code release)
 ;;; ---------------------------------------------------------------------------
 
-(defparameter *claude-code-version* "2.1.220")
+(defparameter *claude-code-version* "2.1.258")
 (defparameter *billing-header-salt* "59cf53e54c78")
 (defparameter *billing-header-positions* #(4 7 20))
 (defparameter *claude-code-entrypoint* "sdk-cli")
@@ -125,11 +126,14 @@
                    (when block (return (getf block :text))))))))
 
 (defun build-billing-header-value (messages)
-  "Build the x-anthropic-billing-header value from MESSAGES, or NIL."
+  "Build the x-anthropic-billing-header value from MESSAGES, or NIL.
+Matches Claude Code 2.1.258's e4t/Mct construction: cc_version is
+VERSION.suffix, cc_entrypoint is the entrypoint, and cch is always the
+literal 00000 for firstParty (direct api.anthropic.com, no custom base
+URL) — no longer a hash of the first user message."
   (let ((text (first-user-text messages)))
     (unless text (return-from build-billing-header-value nil))
-    (let* ((cch (subseq (sha256-hex text) 0 5))
-           (sampled (with-output-to-string (s)
+    (let* ((sampled (with-output-to-string (s)
                       (loop for idx across *billing-header-positions*
                             do (write-char (if (< idx (length text))
                                               (char text idx)
@@ -141,8 +145,8 @@
                                     sampled
                                     *claude-code-version*))
                            0 3)))
-      (format nil "x-anthropic-billing-header: cc_version=~a.~a; cc_entrypoint=~a; cch=~a;"
-              *claude-code-version* suffix *claude-code-entrypoint* cch))))
+      (format nil "x-anthropic-billing-header: cc_version=~a.~a; cc_entrypoint=~a; cch=00000;"
+              *claude-code-version* suffix *claude-code-entrypoint*))))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Assistant message reordering (matches upstream splitAssistantToolUseTrailingContent)
@@ -596,15 +600,15 @@ request arrives or 120 seconds elapse."
                        :base-url "https://api.anthropic.com"
                        :api-key-env "CLAUDE_OAUTH_ACCESS_TOKEN")
 
-;;; Static, and no network: evo supports exactly three Anthropic models, and
+;;; Static, and no network: evo supports the Anthropic models, and
 ;;; their metadata is documented — 1M context, 128K output, the full effort
-;;; ladder, adaptive thinking, vision.  All three register whether or not a
+;;; ladder, adaptive thinking, vision.  All register whether or not a
 ;;; token is present: a missing or expired token is a clear error at request
 ;;; time, not a model that silently vanishes from the picker.  init.lisp runs
 ;;; before extensions, so it can still pick one of these as :model — settings
 ;;; are read after the whole boot.
 
-(dolist (id '("claude-sonnet-5" "claude-opus-5" "claude-fable-5"))
+(dolist (id '("claude-sonnet-5" "claude-opus-5" "claude-fable-5" "claude-fable-5-1"))
   (evo:register-model id
                       :provider :anthropic-oauth
                       :api :anthropic-oauth-messages
