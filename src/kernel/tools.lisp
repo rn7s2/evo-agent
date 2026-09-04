@@ -13,20 +13,27 @@
 (defstruct tool
   name          ; string
   description   ; string
-  schema        ; sexpr schema (see below)
-  execute-fn    ; (lambda (args-plist) ...) -> string, or (values content details)
-  (source :builtin))
+  schema        ; sexpr schema (see below), or a ready-made JSON Schema hash-table
+  execute-fn    ; (lambda (args) ...) -> string, or (values content details)
+  (source :builtin)
+  ;; What EXECUTE-FN is handed: :plist, the keywordized plist every evo tool
+  ;; reads, or :json, the model's arguments exactly as it wrote them (jzon
+  ;; values: hash-tables, vectors, strings).  See TOOL-CALL-ARGUMENTS.
+  (arguments :plist))
 
 (defvar *tool-registry* (make-hash-table :test #'equal))
 (defvar *registry-generation* 0
   "Bumped on every registry mutation; the loop rebuilds the system prompt when it changes.")
 
-(defun register-tool* (&key name description schema execute (source :builtin))
+(defun register-tool* (&key name description schema execute (source :builtin)
+                            (arguments :plist))
   (check-type name string)
   (check-type execute function)
+  (assert (member arguments '(:plist :json)) ()
+          "Tool ~a: :arguments must be :plist or :json, not ~s" name arguments)
   (setf (gethash name *tool-registry*)
         (make-tool :name name :description description :schema schema
-                   :execute-fn execute :source source))
+                   :execute-fn execute :source source :arguments arguments))
   (incf *registry-generation*)
   name)
 
@@ -87,7 +94,16 @@ else every registered tool."
     (values h (coerce (nreverse required) 'vector))))
 
 (defun schema->json-schema (schema)
-  "SCHEMA: (:object <prop>...) -> JSON Schema hash-table."
+  "SCHEMA: (:object <prop>...) -> JSON Schema hash-table.
+
+A hash-table is already a JSON Schema and passes through verbatim.  That is
+the escape hatch for a tool whose contract was written somewhere else — an
+MCP server's inputSchema, an OpenAPI operation — where re-expressing it in
+the sexpr DSL would silently drop everything the DSL cannot say
+\(additionalProperties, unions, min/max) and hand the model a schema its
+server will then reject."
+  (when (hash-table-p schema)
+    (return-from schema->json-schema schema))
   (assert (eq (first schema) :object))
   (let ((h (make-hash-table :test #'equal)))
     (setf (gethash "type" h) "object")
@@ -134,8 +150,43 @@ build time and name the adapter rather than the tool that produced it.")
           ((keywordp (car content)) (list (as-block content)))
           (t (loop for x in content unless (null x) collect (as-block x))))))
 
+;;; What a tool call is handed.
+;;;
+;;; The JSON<->plist bridge upcases keys and swaps `_` for `-`, which is what
+;;; makes `(:by-line t)` pleasant to read — and what makes it lossy when the
+;;; keys are data rather than a fixed contract: a map of file paths to
+;;; contents comes back as `src/app.jsx`, a knob named `bgColor` as `bgcolor`.
+;;; Evo's own tools have fixed lowercase contracts and never notice.  A tool
+;;; whose schema came from elsewhere does, so it may register :arguments :json
+;;; and be handed the model's arguments exactly as written.
+
+(defun tool-call-arguments (tool call args)
+  "The value TOOL's execute function receives for CALL.
+
+ARGS is the plist after :tool-call interception; a hook that rewrote it wins
+over the raw text, because the rewrite is the thing that must run.  Falls back
+to re-encoding the plist when no raw text survives (a resumed session journaled
+before this existed), so a :json tool degrades to lossy rather than broken."
+  (if (eq (tool-arguments tool) :plist)
+      args
+      (let ((raw (and (eq args (pget call :arguments)) (pget call :arguments-json))))
+        (or (and raw (handler-case (jzon:parse raw) (error () nil)))
+            (and args (evo.provider::sexpr->json args))
+            (make-hash-table :test #'equal)))))
+
+(defun tool-call-display-arguments (name arguments arguments-json)
+  "What a frontend shows for a call's arguments: the model's raw JSON text for
+a :json tool, whose plist form has lossy keys, and the plist for everyone else
+\(where `key=value` reads better than JSON)."
+  (let ((tool (find-tool name)))
+    (or (and tool (eq (tool-arguments tool) :json) (stringp arguments-json)
+             arguments-json)
+        arguments)))
+
 (defun execute-tool (tool args)
-  "Run TOOL with ARGS (plist).  Returns (values content details is-error),
+  "Run TOOL with ARGS — the plist, or the model's exact JSON for a tool
+registered :arguments :json (see TOOL-CALL-ARGUMENTS, which the loop calls to
+decide).  Returns (values content details is-error),
 CONTENT being a string or a list of content blocks.
 Conditions become error results (errors-as-data at the loop boundary)."
   (handler-case

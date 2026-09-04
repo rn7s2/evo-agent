@@ -89,8 +89,10 @@
   (:use :cl :evo.util :evo.journal :evo.provider)
   (:export ;; tools
            #:tool #:tool-name #:tool-description #:tool-schema #:tool-execute-fn
+           #:tool-arguments
            #:register-tool* #:find-tool #:all-tool-names #:active-tools
-           #:schema->json-schema #:execute-tool
+           #:schema->json-schema #:execute-tool #:tool-call-arguments
+           #:tool-call-display-arguments
            #:tool-content-blocks #:result-display-text
            ;; loop
            #:run #:run-until-settled #:make-agent #:agent

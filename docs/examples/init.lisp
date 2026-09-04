@@ -189,5 +189,18 @@
 ;; (evo:set-setting :math-border "1pt")          ; whitespace around a formula
 ;; (evo:set-setting :math-max-bytes 786432)      ; largest PNG to emit
 
+;;; MCP servers (extensions/500-mcp.lisp).  Each server listed here is
+;;; contacted at startup over Streamable HTTP and its tools are registered as
+;;; `<name>__<tool>`; `/mcp` shows what connected, `/reload` reconnects.  No
+;;; auth flow: whatever a server needs goes in :headers, verbatim, on every
+;;; request.  A server that is unreachable is reported and skipped, and costs
+;;; the session nothing but its own tools.
+;;
+;; (evo:set-setting :mcp-servers
+;;   '((:name "example"
+;;      :url "https://example.com/mcp"
+;;      :headers (("Authorization" . "Bearer sk-...")))))
+;; (evo:set-setting :mcp-timeout 120)   ; per-request read timeout, seconds
+
 ;;; Anything an extension can do, config can do too: register-tool,
 ;;; register-command, event hooks (evo:on), evo:load-extension.

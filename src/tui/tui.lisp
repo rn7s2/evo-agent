@@ -380,11 +380,22 @@ so both spellings match."
           when (and (symbolp k) (equal (canon (string k)) (canon name)))
             return v)))
 
-(defun format-tool-call-plain (name arguments)
+(defun format-tool-call-plain (name arguments &optional arguments-json)
   "Format a tool call as one line, no ANSI: ⏺ name(key=\"val\", ...),
 truncated at *tool-call-max-width*.  Total by construction: this renders
 inside the TUI tick loop and on session resume, so malformed ARGUMENTS
-(non-list, dotted, odd-length) degrade to the bare name — never signal."
+(non-list, dotted, odd-length) degrade to the bare name — never signal.
+
+A :json tool is shown its raw ARGUMENTS-JSON instead: the plist spelling of
+its keys is not what the tool received, and a display that renames the file
+the model just wrote is worse than no display."
+  (when (and arguments-json
+             (eq arguments-json
+                 (tool-call-display-arguments name arguments arguments-json)))
+    (return-from format-tool-call-plain
+      (truncate-string (format nil "⏺ ~a(~a)" name
+                               (substitute #\Space #\Newline arguments-json))
+                       *tool-call-max-width* "…")))
   (or (ignore-errors
         (let* ((arguments (and (listp arguments) arguments))
                (keys (or (cdr (assoc name *tool-key-args* :test #'equal))
@@ -406,9 +417,9 @@ inside the TUI tick loop and on session resume, so malformed ARGUMENTS
            *tool-call-max-width* "…")))
       (format nil "⏺ ~a" name)))
 
-(defun format-tool-call (name arguments)
+(defun format-tool-call (name arguments &optional arguments-json)
   "FORMAT-TOOL-CALL-PLAIN in scrollback colors."
-  (cyan (format-tool-call-plain name arguments)))
+  (cyan (format-tool-call-plain name arguments arguments-json)))
 
 (defun interrupt-run (tui)
   "Interrupt the active run and unblock the worker's current operation."
@@ -444,8 +455,9 @@ inside the TUI tick loop and on session resume, so malformed ARGUMENTS
        (setf (tui-dirty tui) t)))
     (:tool-call-start
      (flush-partial tui)
-     (scroll tui (format-tool-call (or (pget event :name) "?")
-                                   (pget event :arguments))))
+     (let ((name (or (pget event :name) "?")))
+       (scroll tui (format-tool-call name (pget event :arguments)
+                                     (pget event :arguments-json)))))
     (:tool-result
      ;; Tool results enter the next request's context: grow the live
      ;; estimate (chars/4, same rule as compaction accounting).
@@ -937,8 +949,10 @@ wrapped between two rules, and the model status line under the editbox."
            (case (pget block :type)
              (:text (scroll tui (md-render-text
                                  (truncate-string (pget block :text) 2000))))
-             (:tool-call (scroll tui (format-tool-call (pget block :name)
-                                                         (pget block :arguments)))))))
+             (:tool-call
+              (scroll tui (format-tool-call (pget block :name)
+                                            (pget block :arguments)
+                                            (pget block :arguments-json)))))))
         (t nil)))))
 
 ;;; Rewind (double-escape).

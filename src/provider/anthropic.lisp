@@ -58,8 +58,15 @@ effort parameter."
     (:tool-call (jobj "type" "tool_use"
                       "id" (pget block :id)
                       "name" (pget block :name)
-                      "input" (let ((args (pget block :arguments)))
-                                (if args (sexpr->json args) (jobj)))))
+                      ;; Replay the model's own JSON when it was kept: the
+                      ;; plist bridge downcases keys, so re-encoding it would
+                      ;; hand the model a corrupted copy of its own call.
+                      "input" (let ((raw (pget block :arguments-json))
+                                    (args (pget block :arguments)))
+                                (or (and raw (handler-case (jzon:parse raw)
+                                               (error () nil)))
+                                    (and args (sexpr->json args))
+                                    (jobj)))))
     (:image (let ((data (pget block :data)))
               (if data
                   (jobj "type" "image"
@@ -318,7 +325,15 @@ apply."
                                            (if (eq args :parse-error)
                                                (list :arguments nil :arguments-error
                                                      (truncate-string raw 2000))
-                                               (list :arguments args)))))
+                                               ;; The plist is the readable
+                                               ;; form; the raw text is the
+                                               ;; exact one (see
+                                               ;; TOOL-CALL-ARGUMENTS), and
+                                               ;; replays byte-for-byte.
+                                               (append
+                                                (list :arguments args)
+                                                (when (plusp (length raw))
+                                                  (list :arguments-json raw)))))))
                                 (:unknown (list :type :text :text ""))))))
         (list :content content
               :model model

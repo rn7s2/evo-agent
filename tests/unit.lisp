@@ -3880,6 +3880,132 @@ the guards + completion gating around all of it."
 ;;; Tool-call display: one line, key arguments only, and total — malformed
 ;;; arguments must degrade, never signal (this renders in the tick loop).
 
+(defun test-json-tool-contract ()
+  "Tools whose contract was written somewhere else — an MCP server's
+inputSchema — speak JSON on both ends: a ready-made JSON Schema goes to the
+model verbatim, and the tool is handed the model's arguments exactly as
+written.  The plist bridge upcases keys and swaps _ for -, which reads well
+for a fixed contract like `path` and destroys keys that are data."
+  (let* ((schema (com.inuoe.jzon:parse
+                  (cat "{\"type\":\"object\",\"properties\":{\"files\":{\"type\":\"object\","
+                       "\"additionalProperties\":{\"type\":[\"string\",\"null\"]}}},"
+                       "\"required\":[\"files\"]}")))
+         (raw "{\"files\":{\"src/App.jsx\":\"x\",\"README.md\":null}}")
+         (plist (evo.provider::json->sexpr (com.inuoe.jzon:parse raw)))
+         (seen :unset))
+    (unwind-protect
+         (progn
+           (evo.kernel:register-tool*
+            :name "json-probe" :description "probe" :schema schema
+            :arguments :json :source :extension
+            :execute (lambda (args) (setf seen args) "ok"))
+           (evo.kernel:register-tool*
+            :name "plist-probe" :description "probe"
+            :schema '(:object (:path :type :string :description "p"))
+            :source :extension :execute (lambda (args) (declare (ignore args)) "ok"))
+           (check "a hash-table schema passes through verbatim"
+                  (eq schema (schema->json-schema schema)))
+           (check "the provider spec carries it unconverted"
+                  (eq schema (pget (evo.kernel::tool->provider-spec (find-tool "json-probe"))
+                                   :input-schema)))
+           (check-signals ":arguments must be :plist or :json"
+                          (evo.kernel:register-tool*
+                           :name "json-probe-bad" :schema schema :arguments :sexpr
+                           :execute (lambda (args) args)))
+           ;; The lossiness this seam exists for.
+           (check "the plist form mangles keys that are data"
+                  (and (null (getf (getf plist :files) :|src/App.jsx|))
+                       (equal "x" (getf (getf plist :files) :|SRC/APP.JSX|))))
+           (let* ((call (list :type :tool-call :id "tc_1" :name "json-probe"
+                              :arguments plist :arguments-json raw))
+                  (tool (find-tool "json-probe"))
+                  (args (evo.kernel:tool-call-arguments tool call plist)))
+             (check "a :json tool is handed the model's exact keys"
+                    (let ((files (gethash "files" args)))
+                      (and (equal "x" (gethash "src/App.jsx" files))
+                           (nth-value 1 (gethash "README.md" files))
+                           (null (nth-value 1 (gethash "SRC/APP.JSX" files))))))
+             (check "a :plist tool is unaffected"
+                    (eq plist (evo.kernel:tool-call-arguments
+                               (find-tool "plist-probe") call plist)))
+             ;; A gate that rewrote the arguments must win over the raw text:
+             ;; the rewrite is the thing that has to run.
+             (let ((rewritten (evo.kernel:tool-call-arguments
+                               tool call '(:files (:safe "y")))))
+               (check "a rewritten call is re-encoded, not replayed raw"
+                      (and (equal "y" (gethash "safe" (gethash "files" rewritten)))
+                           (null (nth-value 1 (gethash "src/App.jsx"
+                                                       (gethash "files" rewritten)))))))
+             ;; A journal written before :arguments-json existed still runs,
+             ;; lossily rather than not at all.
+             (let ((degraded (evo.kernel:tool-call-arguments
+                              tool (list :type :tool-call :arguments plist) plist)))
+               (check "no raw text degrades to the plist encoding"
+                      (nth-value 1 (gethash "src/app.jsx" (gethash "files" degraded)))))
+             (check "no arguments at all is an empty object"
+                    (let ((empty (evo.kernel:tool-call-arguments
+                                  tool (list :type :tool-call) nil)))
+                      (and (hash-table-p empty) (zerop (hash-table-count empty)))))
+             ;; End to end through the executor.
+             (execute-tool tool (evo.kernel:tool-call-arguments tool call plist))
+             (check "execute-tool passes the JSON object through"
+                    (equal "x" (gethash "src/App.jsx" (gethash "files" seen))))
+             ;; What the human sees must be what the tool got.
+             (check "the display shows a :json tool's raw arguments"
+                    (search "src/App.jsx"
+                            (evo.tui::format-tool-call-plain "json-probe" plist raw)))
+             (check "the display leaves a :plist tool alone"
+                    (equal "⏺ plist-probe(path=\"f\")"
+                           (evo.tui::format-tool-call-plain
+                            "plist-probe" '(:path "f") "{\"path\":\"f\"}")))))
+      (remhash "json-probe" evo.kernel::*tool-registry*)
+      (remhash "plist-probe" evo.kernel::*tool-registry*))
+    ;; The wire: the model's own JSON is kept on parse and replayed verbatim.
+    (let* ((fixture
+             (cat "event: message_start" (string #\Newline)
+                  "data: {\"type\":\"message_start\",\"message\":{\"model\":\"m\"}}"
+                  (string #\Newline) (string #\Newline)
+                  "event: content_block_start" (string #\Newline)
+                  "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":"
+                  "{\"type\":\"tool_use\",\"id\":\"tc_1\",\"name\":\"json-probe\"}}"
+                  (string #\Newline) (string #\Newline)
+                  "event: content_block_delta" (string #\Newline)
+                  "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":"
+                  "{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"files\\\":{\\\"src/A\"}}"
+                  (string #\Newline) (string #\Newline)
+                  "event: content_block_delta" (string #\Newline)
+                  "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":"
+                  "{\"type\":\"input_json_delta\",\"partial_json\":\"pp.jsx\\\":1}}\"}}"
+                  (string #\Newline) (string #\Newline)
+                  "event: message_delta" (string #\Newline)
+                  "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"}}"
+                  (string #\Newline) (string #\Newline)
+                  "event: message_stop" (string #\Newline)
+                  "data: {\"type\":\"message_stop\"}" (string #\Newline) (string #\Newline)))
+           (result (with-input-from-string (in fixture)
+                     (parse-stream (find-api :anthropic-messages) in)))
+           (block (first (pget result :content))))
+      (check "parse keeps the model's raw tool arguments"
+             (equal "{\"files\":{\"src/App.jsx\":1}}" (pget block :arguments-json)))
+      (check "parse still produces the readable plist"
+             (equal 1 (getf (getf (pget block :arguments) :files) :|SRC/APP.JSX|)))
+      (let ((request (build-request
+                      (find-api :anthropic-messages)
+                      :model '(:id "m" :provider :anthropic :api :anthropic-messages
+                               :context-window 1000 :max-output 100)
+                      :system nil :tools nil :thinking-level nil
+                      :messages (list '(:role :user :content ((:type :text :text "go")))
+                                      (list :role :assistant :model "m"
+                                            :stop-reason :tool-use
+                                            :usage '(:input 1 :output 1)
+                                            :content (list block))
+                                      '(:role :tool-result :tool-call-id "tc_1"
+                                        :tool-name "json-probe" :is-error nil
+                                        :content ((:type :text :text "ok")))))))
+        (check "replay sends the model its own JSON, not the plist spelling"
+               (and (search "src/App.jsx" request)
+                    (not (search "src/app.jsx" request))))))))
+
 (defun test-tool-call-display ()
   (check "known tool shows its key arg"
          (equal (evo.tui::format-tool-call-plain "bash" '(:command "ls -la"))
@@ -6124,6 +6250,7 @@ became zero after the first reload."
     (test-interrupt)
     (test-jobs)
     (test-tool-call-display)
+    (test-json-tool-contract)
     (test-no-modes)
     (test-tool-call-gate-extension-point)
     (test-active-tools-extension-point)
