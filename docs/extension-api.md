@@ -44,6 +44,32 @@ Every extension file starts with:
   the same name replaces it (CL redefinition: applies to the NEXT call, not
   frames already running).
 
+### Tools whose contract was written elsewhere
+
+A tool proxying a remote one — an MCP server, an OpenAPI operation — did not
+get to choose its schema, and re-expressing it in the DSL silently drops
+everything the DSL cannot say. Two opt-ins keep such a tool honest, and they
+are the whole reason `extensions/500-mcp.lisp` needs nothing else:
+
+```lisp
+(evo:register-tool "notes__files_write"
+  :description "…"
+  :schema (com.inuoe.jzon:parse remote-input-schema) ; JSON Schema, verbatim
+  :arguments :json                                   ; exact JSON, not a plist
+  :execute (lambda (args)                            ; args: a hash-table
+             (call-the-remote-tool args)))
+```
+
+- **`:schema` may be a hash-table** — a ready-made JSON Schema, handed to the
+  model as-is instead of through the sexpr DSL.
+- **`:arguments :json`** hands `:execute` the model's arguments exactly as it
+  wrote them (jzon values: hash-tables, vectors, strings, `t`/`nil`) instead of
+  the keywordized plist. The plist spelling upcases keys and swaps `_` for `-`,
+  which reads well for a fixed contract like `path` and *destroys* keys that
+  are data: `{"files": {"src/App.jsx": …}}` arrives as `:|SRC/APP.JSX|` and
+  goes back out as `src/app.jsx`. A `:tool-call` hook that rewrites the
+  arguments still wins — the rewrite is re-encoded and is what runs.
+
 ### Ownership: the rule the whole threading design rests on
 
 **Every mutable object has exactly one owner thread.** Other threads send it

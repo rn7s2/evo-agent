@@ -99,12 +99,15 @@ models registered by extensions.  evo ships no built-in model table, e.g.
        (when *printed-text-p*
          (terpri *standard-output*) (force-output *standard-output*)
          (setf *printed-text-p* nil))
-       (let ((args (pget event :arguments)))
+       (let ((args (evo.kernel:tool-call-display-arguments
+                    (pget event :name) (pget event :arguments)
+                    (pget event :arguments-json))))
          (if args
              ;; One bounded line: a write call carries whole files in :content.
              (format *error-output* "~&⏺ ~a ~a~%" (pget event :name)
                      (evo.util:truncate-string
-                      (substitute #\Space #\Newline (format nil "~s" args))
+                      (substitute #\Space #\Newline
+                                  (if (stringp args) args (format nil "~s" args)))
                       200 "…"))
              (format *error-output* "~&⏺ ~a~%" (pget event :name))))
        (force-output *error-output*))

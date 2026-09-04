@@ -1,0 +1,135 @@
+#!/usr/bin/expect -f
+# mcp.exp — the MCP client extension against a stub server, through a real pty.
+#
+# No backend: nothing here calls a model.  tests/mcp-server.py is the server
+# (see its header for what it deliberately makes hard), and /eval calls the
+# registered tool directly, so the whole path — initialize, tools/list over
+# SSE, tools/call, session recovery — is exercised without a model in it.
+#
+# Every assertion matches a token that appears NOWHERE in what this script
+# types, because the editor echoes each keystroke: "exact:" is prepended by
+# the server, and "note-yes" is assembled by FORMAT inside the /eval form.  A
+# pattern that could match the echo would pass with no server at all.
+set timeout 20
+
+if {[catch {exec which python3}]} {
+    puts "python3 not found; skipping mcp.exp"
+    exit 0
+}
+
+set repo [file dirname [file dirname [file normalize $argv0]]]
+set scratch [exec mktemp -d /tmp/evo-mcp.XXXXXX]
+set portfile "$scratch/port"
+set server [exec python3 "$repo/tests/mcp-server.py" $portfile &]
+
+# The stub writes the port it was given by the OS; wait for it to appear.
+set port ""
+for {set i 0} {$i < 100} {incr i} {
+    if {[file exists $portfile] && [file size $portfile] > 0} {
+        set f [open $portfile r]
+        set port [string trim [read $f]]
+        close $f
+        break
+    }
+    exec sleep 0.1
+}
+if {$port eq ""} {
+    puts "\nFAIL: stub MCP server never reported a port"
+    catch {exec kill $server}
+    exit 1
+}
+
+set env(EVO_HOME) "$scratch/home"
+file mkdir "$env(EVO_HOME)/extensions"
+exec cp "$repo/extensions/500-mcp.lisp" "$env(EVO_HOME)/extensions/"
+foreach v {EVO_SUPERVISED_CHILD EVO_HEARTBEAT_FILE} {
+    if {[info exists env($v)]} { unset env($v) }
+}
+
+# A model must be registered for the TUI to start; it is never called.  Three
+# servers: the stub twice — once with headers as an alist, once as a keyword
+# plist, which must produce `authorization` and not `:authorization` (the stub
+# 401s anything else, so connecting at all is the assertion) — and one that is
+# unreachable on purpose, because a dead MCP server must not cost the session
+# its other tools, nor its startup.
+set f [open "$env(EVO_HOME)/init.lisp" w]
+puts $f {(evo:register-model "mcp-test" :provider :none :api :anthropic-messages :context-window 100000 :max-output 4000)}
+puts $f {(evo:set-setting :model "mcp-test")}
+puts $f {(evo:register-provider :none :base-url "http://127.0.0.1:1/unused" :api-key "unused")}
+puts $f "(evo:set-setting :mcp-servers
+  (list (list :name \"echo\" :url \"http://127.0.0.1:$port/mcp\"
+              :headers (list (cons \"Authorization\" \"Bearer test-token\")))
+        (list :name \"kw\" :url \"http://127.0.0.1:$port/mcp\"
+              :headers (list :authorization \"Bearer test-token\"))
+        (list :name \"dead\" :url \"http://127.0.0.1:1/mcp\")))"
+close $f
+
+set workdir "$scratch/work"
+file mkdir $workdir
+cd $workdir
+
+set failures {}
+proc check {name} { puts "\nPASS: $name" }
+proc fail {name} { global failures; lappend failures $name; puts "\nFAIL: $name" }
+
+set stty_init "rows 40 cols 110"
+spawn "$repo/build/evo"
+
+expect {
+    -re {ctx \d+k/\d+k} { check "startup status line" }
+    timeout { fail "startup status line"; catch {exec kill $server}; exit 1 }
+}
+
+# /mcp: what connected, what it registered, and what did not.
+send "/mcp\r"
+expect {
+    -re {connected . 1 tool} { check "the stub server connected and listed its tool" }
+    timeout { fail "the stub server connected and listed its tool" }
+}
+expect {
+    -re {echo__echo_args} { check "the remote tool is registered as <server>__<tool>" }
+    timeout { fail "the remote tool is registered as <server>__<tool>" }
+}
+expect {
+    -re {kw__echo_args} { check "keyword-plist headers reach the wire as real header names" }
+    timeout { fail "keyword-plist headers reach the wire as real header names" }
+}
+expect {
+    -re {not connected} { check "an unreachable server is reported, not fatal" }
+    timeout { fail "an unreachable server is reported, not fatal" }
+}
+
+# The server's own instructions reach the system prompt.  The marker is
+# assembled by FORMAT so the typed line cannot match it.
+send {/eval (format nil "note~a" (if (search "call echo_args." (evo.kernel:build-system-prompt nil)) "-yes" "-no"))}
+send "\r"
+expect {
+    -re {note-yes} { check "server instructions reach the system prompt" }
+    -re {note-no} { fail "server instructions reach the system prompt" }
+    timeout { fail "server instructions reach the system prompt" }
+}
+
+# Call the tool the way the loop does — the plist the JSON bridge produces
+# plus the raw text, dispatched through TOOL-CALL-ARGUMENTS — with the shape
+# that breaks the plist bridge: keys that are data.  The stub 404s this first
+# call, so a result at all proves the client re-initialized and retried;
+# "exact:src/App.jsx" proves the key survived (the plist spelling of it is
+# "src/app.jsx", which the stub would echo just as happily).
+send {/eval (let* ((raw "{\"files\":{\"src/App.jsx\":\"x\"}}") (tool (evo.kernel:find-tool "echo__echo_args")) (call (list :name "echo__echo_args" :arguments (evo.provider::json->sexpr (com.inuoe.jzon:parse raw)) :arguments-json raw))) (evo.kernel:execute-tool tool (evo.kernel:tool-call-arguments tool call (getf call :arguments))))}
+send "\r"
+expect {
+    -re {exact:src/App\.jsx} { check "exact JSON keys survive the round trip" }
+    -re {exact:src/app\.jsx} { fail "exact JSON keys survive the round trip" }
+    -re {exact:} { fail "exact JSON keys survive the round trip" }
+    timeout { fail "exact JSON keys survive the round trip" }
+}
+
+send "/quit\r"
+expect eof
+
+catch {exec kill $server}
+if {[llength $failures] > 0} {
+    puts "\nFAILURES: $failures"
+    exit 1
+}
+puts "\nmcp.exp: all checks passed"

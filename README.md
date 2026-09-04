@@ -17,8 +17,9 @@ Five properties define the system:
 - **Self-healing.** Crash, restart, resume, continue the goal. The supervisor
   and the journal together make process death a recoverable event.
 - **Minimal.** Real agent functionality and nothing ceremonial. Every omission
-  (no MCP, no sub-agents, no permission popups) is deliberate, with a stated
-  re-entry condition.
+  (no sub-agents, no permission popups) is deliberate, with a stated re-entry
+  condition — and what is *not* omitted stays out of the kernel: MCP is a
+  userspace extension, not a protocol in the core.
 
 See [design.md](design.md) for the full architecture — invariants, layers,
 decision record, and provenance.
@@ -335,6 +336,37 @@ extension loaded; `/bionic status | on | off | fixation <0..1>` tunes it, and
 the seam is documented in
 [docs/extension-api.md](docs/extension-api.md#prose-styling-evotui).
 
+### MCP servers
+
+An MCP server's tools can be used as evo tools, and the client is a userspace
+extension — `extensions/500-mcp.lisp`, built on the same public API as
+everything else, with no protocol in the kernel. List the servers in
+`init.lisp`:
+
+```lisp
+(evo:set-setting :mcp-servers
+  '((:name "notes"
+     :url "https://notes.example.com/mcp"
+     :headers (("Authorization" . "Bearer sk-...")))))
+```
+
+At startup each one is contacted (`initialize` → `tools/list`) and its tools
+are registered as `<server>__<tool>`, with the server's own JSON Schema and its
+`instructions`, if it sends any, as a system-prompt note. Results come back as
+content blocks, so a server that renders images hands the model a picture.
+`/mcp` shows what connected and what it registered; `/reload` re-reads the
+config and reconnects. A server that is unreachable is reported and skipped —
+it costs the session nothing but its own tools.
+
+Deliberately small: one transport (Streamable HTTP — no stdio children, no
+SSE-only servers), tools only (no resources, prompts, or sampling), and no auth
+flow — whatever a server needs goes in `:headers`, verbatim, on every request.
+The two kernel seams it rides are open to any extension: a tool may register a
+ready-made JSON Schema, and `:arguments :json` hands it the model's arguments
+exactly as written (the plist spelling would turn `src/App.jsx` into
+`src/app.jsx`). See
+[docs/extension-api.md](docs/extension-api.md#tools-whose-contract-was-written-elsewhere).
+
 ### Skills, templates, slash commands
 
 - **Skills**: the Agent Skills standard (SKILL.md + frontmatter) with
@@ -562,6 +594,7 @@ extensions/              vendored user extensions — copied ACTIVE into
   300-latex-math.lisp                LaTeX math rendered as inline images
   350-bionic-reader.lisp             bionic reading for agent prose (ASCII)
   400-efficiency.lisp                working/reasoning prompt section
+  500-mcp.lisp                       MCP servers over Streamable HTTP
   900-ide-context.lisp               editor/IDE bridge
 extensions/examples/     reference-only example extensions (installed to
                          ~/.evo/docs/examples) — user extensions, distinct from

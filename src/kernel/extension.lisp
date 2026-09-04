@@ -328,13 +328,26 @@ requires an explicit, auditable evo.port:unlock-package."
 (defvar *agent* nil
   "The live agent, bound by the CLI for the duration of a session.")
 
-(defmacro register-tool (name &key description schema execute)
+(defmacro register-tool (name &key description schema execute (arguments :plist))
   "Register a tool.  NAME is a string; SCHEMA is a sexpr schema
 \(:object (prop :type :string :description \"...\") ...); EXECUTE is a
-function of one argument (the args plist) returning the model-visible
-content string (optionally (values content details))."
+function of one argument — the args plist, or the model's exact JSON when
+ARGUMENTS is :json (below) — returning the model-visible content string
+(optionally (values content details)).
+
+Two escape hatches for a tool whose contract was written elsewhere (an MCP
+server, an OpenAPI operation) rather than in this file:
+
+  SCHEMA may be a ready-made JSON Schema hash-table, passed to the model
+  verbatim instead of through the sexpr DSL.
+
+  ARGUMENTS :json hands EXECUTE the model's arguments exactly as written
+  (jzon values: hash-tables, vectors, strings) instead of the keywordized
+  plist, whose keys are upcased and de-underscored — fine for a fixed
+  contract, wrong when the keys are data (file paths, knob names)."
   `(evo.kernel:register-tool* :name ,name :description ,description
                               :schema ,schema :execute ,execute
+                              :arguments ,arguments
                               :source :extension))
 
 (defvar *commands* (make-hash-table :test #'equal)

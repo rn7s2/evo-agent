@@ -29,8 +29,9 @@ them.
   supervisor and the journal together make process death a recoverable event
   rather than a lost run.
 - **Minimal.** Core functionality of a real agent and nothing ceremonial. The
-  omit-list — no permission popups, no MCP, no sub-agents — is deliberate and
-  each omission has a stated re-entry condition (§17).
+  omit-list — no permission popups, no sub-agents, no MCP *in the kernel* (it
+  is a userspace extension) — is deliberate and each omission has a stated
+  re-entry condition (§17).
 
 ## 2. Invariants
 
@@ -368,6 +369,16 @@ messages remain — then polls follow-ups.
   rather than read — `read` on an image is the one such tool today, and the
   text budget (50k chars) applies to the text blocks only. Execution is
   sequential (D9).
+- **A foreign contract stays foreign.** A tool proxying a remote one did not
+  write its own schema, so the schema may instead be a ready-made JSON Schema
+  (passed through untouched), and the tool may ask for `:arguments :json` — the
+  model's arguments exactly as written, rather than the keywordized plist. The
+  plist spelling (`by_line` ⇄ `:by-line`) is readable and lossy: it upcases
+  keys and swaps `_` for `-`, which is invisible for a fixed contract and
+  wrong when the keys are *data* (`{"files": {"src/App.jsx": …}}`). The wire
+  adapter therefore keeps the model's raw argument JSON on the tool-call block
+  and replays it verbatim, so the model is never shown a corrupted copy of its
+  own call. `extensions/500-mcp.lisp` is the client this exists for (§17.2).
 
 ## 8. Context management
 
@@ -842,7 +853,7 @@ would reopen it.
 |---|---|---|
 | Sub-agents | The journal tree already models a child session as a forked journal; nothing forces the feature yet (D16) | A workload where context isolation demonstrably beats one transcript |
 | Parallel tool execution | Sequential execution is where the thread-discipline complexity *isn't* (D9) | Measured wall-clock loss on independent calls, plus a thread discipline for the journal writer |
-| MCP | `register-tool` plus a userspace client covers the same ground without a protocol in the kernel | A tool ecosystem that cannot be reached any other way |
+| MCP *in the kernel* | It shipped as a userspace extension instead (`extensions/500-mcp.lisp`: Streamable HTTP, tools only, no auth flow beyond configured headers) — `register-tool` plus an HTTP client is the whole client. The kernel gained no protocol, only the two seams any foreign contract needs: a JSON Schema passed through verbatim, and `:arguments :json` so a tool receives the model's exact JSON rather than the lossy plist spelling | A transport that cannot be written in userspace — stdio servers (child process + pipes) are the candidate |
 | Permission prompts | Permissiveness is a defining property; the `:tool-call` hook is the seam, and `permission-gate.lisp` is the worked example | A deployment context where the OS boundary is not the trust boundary |
 | Multimodal *output* (image generation, audio) | Input landed (`evo.media` + `:image` blocks, ctrl+v / paste-a-path / `/image` / `--image`); generation is a different shape — artifacts the agent produces, which the journal-as-text model has no place for yet | An artifact store with the same replay guarantees as the journal |
 | Cost tables | Token accounting is the honest unit; prices go stale | Nothing foreseen |

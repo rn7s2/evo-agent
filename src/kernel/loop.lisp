@@ -380,7 +380,8 @@ in tokens, and every consumer of this number divides chars by 4."
     ;; Announce the call up front, with the fully-parsed arguments: the
     ;; display must show what is running while it runs, not after.
     (emit-event agent :type :tool-call-start :name name :id id
-                      :arguments (pget call :arguments))
+                      :arguments (pget call :arguments)
+                      :arguments-json (pget call :arguments-json))
     (cond
       ((pget call :arguments-error)
        (setf content (format nil "Tool arguments were not valid JSON: ~a"
@@ -395,7 +396,7 @@ in tokens, and every consumer of this number divides chars by 4."
              (setf content (format nil "Tool call blocked: ~a" reason) is-error t)
               (multiple-value-setq (content details is-error)
                 (let ((*executing-agent* agent))
-                  (execute-tool tool args)))))))
+                  (execute-tool tool (tool-call-arguments tool call args))))))))
     (let* ((blocks (or (truncate-result-blocks (tool-content-blocks content))
                        (list (list :type :text :text ""))))
            (display (result-display-text blocks)))
