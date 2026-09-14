@@ -68,15 +68,27 @@
 ;;;  - errored/aborted assistant turns are elided
 ;;;  - same-model thinking replays verbatim; cross-model thinking is dropped
 ;;;  - images degrade to text for a model without vision
-;;;  - even with vision, old images may be omitted when inline base64 would make
-;;;    the HTTP request too large; latest images win
+;;;  - even with vision, only the last few images ride along as pixels; older
+;;;    ones become named placeholders
 ;;;  - orphaned tool calls get synthetic error results
 
-(defparameter *max-request-image-data-chars* (* 8 1024 1024)
+(defparameter *max-request-images* 3
+  "How many of the most recent image blocks a request carries as pixels.
+
+Images travel by value and every request re-uploads the ones it carries, so a
+session that keeps taking screenshots pays for all of them on every turn, for
+the rest of the session.  A real session measured here: eighteen screenshots,
+8.9 MB of base64 in each of 305 requests, 1.2 GB uploaded in under an hour —
+and one link hiccup during any of those uploads is indistinguishable from a
+hang.  The model needs the picture it just asked to see, not the one from
+forty turns ago; what it can no longer see, it can read again.")
+
+(defparameter *max-request-image-data-chars* (* 4 1024 1024)
   "Maximum total base64 payload from image blocks in one provider request.
-Images are journaled by value, so repeated screenshots can exceed HTTP request
-size limits long before token/context accounting says to compact.  This budget
-is applied only to the request copy: the journal keeps the original blocks.")
+The second gate, and the one that bites when the pictures are large: a handful
+of recent screenshots is still megabytes, and providers cap the HTTP request
+itself.  Both gates apply only to the request copy: the journal keeps the
+original blocks, so the session file and a later replay are unaffected.")
 
 (defun message-role (m) (pget m :role))
 (defun message-content (m) (pget m :content))
@@ -92,21 +104,37 @@ rather than reading a conversation with a hole in it."
                       (pget block :name "image"))))
 
 (defun image-request-size-placeholder-block (block)
-  "What an image degrades to when it is too old to fit in the request body."
+  "What an image degrades to when its bytes no longer fit the request body."
   (list :type :text
         :text (format nil "[image omitted to keep the request size under the limit: ~a]"
                       (pget block :name "image"))))
+
+(defun image-stale-placeholder-block (block)
+  "What an image degrades to once newer images have pushed it out of the
+request window.  The name stays, and so does the way back: an agent that
+needs the old picture again can simply read it again."
+  (list :type :text
+        :text (format nil (cat "[image not resent: ~a — only the ~d most recent "
+                               "images stay in the request; read the file again to look]")
+                      (pget block :name "image") *max-request-images*)))
 
 (defun image-data-chars (block)
   (let ((data (and (eq (pget block :type) :image) (pget block :data))))
     (if (stringp data) (length data) 0)))
 
 (defun enforce-image-request-budget (messages)
-  "Replace older image blocks with placeholders until the request-size budget fits.
-This rewrites only the request copy.  Chronologically latest images are kept so
-`read` followed by the next model turn still shows the picture the model just
-asked to inspect."
-  (let ((left *max-request-image-data-chars*))
+  "Keep the newest images as pixels and replace the rest with placeholders —
+by count (*MAX-REQUEST-IMAGES*) and by bytes (*MAX-REQUEST-IMAGE-DATA-CHARS*),
+whichever bites first.  This rewrites only the request copy.
+
+The walk is newest-first, so `read` followed by the next model turn still
+shows the picture the model just asked to inspect, and the oldest image is
+always the one to go.  That direction is also what keeps the prompt cache
+survivable: the placeholder swap moves *forward* through the transcript, so a
+new screenshot invalidates the cached prefix from the image it evicts and
+never from further back."
+  (let ((left *max-request-image-data-chars*)
+        (slots *max-request-images*))
     (nreverse
      (loop for message in (reverse messages)
            collect
@@ -117,8 +145,11 @@ asked to inspect."
                             collect
                             (let ((n (image-data-chars block)))
                               (cond ((zerop n) block)
+                                    ((not (plusp slots))
+                                     (image-stale-placeholder-block block))
                                     ((<= n left)
                                      (decf left n)
+                                     (decf slots)
                                      block)
                                     (t (image-request-size-placeholder-block block)))))))
                message)))))
@@ -179,18 +210,41 @@ switch to a text-only model instead of failing every turn from then on."
 
 ;;; SSE transport: the framing loop shared by every SSE-based API.
 
+(defvar *sse-progress* nil
+  "Called by MAP-SSE-EVENTS with :ALIVE or :CONTENT while a stream is read.
+Bound by PERFORM-REQUEST on the request thread, so the stall watchdog is fed
+by the one framing loop every SSE adapter already shares — no API has to
+thread a callback of its own down through PARSE-STREAM.")
+
+(defun note-sse-progress (kind)
+  "Report stream progress to whoever is watching: :ALIVE means bytes arrived,
+:CONTENT means the response actually advanced.  A keepalive is the whole
+reason the two are not the same thing."
+  (let ((fn *sse-progress*))
+    (when fn (funcall fn kind))))
+
+(defun sse-keepalive-p (event-type)
+  "Is this SSE event a heartbeat rather than a piece of the response?"
+  (and event-type (string-equal event-type "ping")))
+
 (defun map-sse-events (char-stream dispatch &key abort-flag)
   "Drive the SSE framing loop: event:/data: accumulation, CR trimming,
 dispatch on blank lines (multi-line data joined with newlines), final
 flush at EOF.  DISPATCH is called as (event-type-or-nil data-string);
 return :stop to end the stream.  Returns :aborted when ABORT-FLAG fires,
-else :done."
+else :done.
+
+Every line read reports :ALIVE progress and every non-keepalive event reports
+:CONTENT (see NOTE-SSE-PROGRESS): the transport above uses the first to tell a
+dead connection from a live one, and the second to tell a live connection from
+one that is only breathing."
   (let ((event-type nil) (data-lines nil))
     (flet ((flush ()
              (when data-lines
                (let ((type event-type)
                      (data (string-join (string #\Newline) (nreverse data-lines))))
                  (setf event-type nil data-lines nil)
+                 (unless (sse-keepalive-p type) (note-sse-progress :content))
                  (funcall dispatch type data)))))
       (loop for line = (read-line char-stream nil :eof)
             do (when (and abort-flag (funcall abort-flag))
@@ -198,6 +252,7 @@ else :done."
                (when (eq line :eof)
                  (flush)
                  (return :done))
+               (note-sse-progress :alive)
                (let ((line (string-right-trim '(#\Return) line)))
                  (cond ((zerop (length line))
                         (when (eq (flush) :stop) (return :done)))
@@ -229,6 +284,27 @@ else :done."
 
 (defparameter *max-attempts* 4)
 
+;;; Deadlines.  The socket read timeout below is SO_RCVTIMEO — it fires per
+;;; read, so it cannot see a request that was never answered at all, and a
+;;; stream that only carries keepalives resets it forever.  These two are the
+;;; deadlines that matter, and both are measured in *progress*, not in wall
+;;; clock: a model that legitimately streams for twenty minutes must not be
+;;; killed for taking twenty minutes.
+
+(defparameter *request-stall-timeout* 120
+  "Seconds a request may go without a single byte of response before evo
+gives up on the attempt and retries it.  The window covers connect, the
+upload of the whole request body, the provider's prefill and the first SSE
+frame — everything that can silently never happen.  Generous, because the
+body can be megabytes on a bad link, but finite, because a request that has
+said nothing for two minutes is a hang, and the observed one lasted nine.")
+
+(defparameter *request-idle-timeout* 600
+  "Seconds a *live* stream may go without producing any content before evo
+gives up on the attempt.  This is the ping-only zombie: bytes keep arriving,
+the read timeout never fires, and nothing is ever said.  Much longer than the
+stall timeout, because a long prefill behind a chatty keepalive is normal.")
+
 ;;; Default transport: streamed SSE POST over dexador, parsed by the API's
 ;;; parse-stream.  Lives here (not api.lisp) because it owns the HTTP/proxy
 ;;; helpers above.
@@ -243,18 +319,52 @@ Every slot here is read or written under LOCK.
 THREAD is published by the owner itself as its first act, not by the thread's
 creator: MAKE-THREAD returns to the caller and the new thread starts in an
 unspecified order, so a caller-side assignment leaves a window in which the
-request is running but has no handle to interrupt."
+request is running but has no handle to interrupt.
+
+ALIVE-TIME and CONTENT-TIME are the watchdog's two clocks, written by the
+owner as it makes progress and read by the caller, which is the only thread
+that may decide the request has stalled."
   (lock (bt:make-lock "evo-provider-request"))
   thread
   (state :starting)                    ; :starting, :streaming, :finished
   (cancel-requested-p nil)
   (interrupted-p nil)                  ; the one interrupt has been delivered
+  (alive-time (get-internal-real-time))
+  (content-time (get-internal-real-time))
   result
   error)
 
 (defun request-task-finished-p (task)
   (bt:with-lock-held ((request-task-lock task))
     (eq (request-task-state task) :finished)))
+
+(defun note-request-progress (task kind)
+  "Restart the watchdog's clocks: KIND :ALIVE means the connection produced
+something, :CONTENT means the response itself moved on."
+  (bt:with-lock-held ((request-task-lock task))
+    (let ((now (get-internal-real-time)))
+      (setf (request-task-alive-time task) now)
+      (when (eq kind :content)
+        (setf (request-task-content-time task) now)))))
+
+(defun request-task-stall-reason (task)
+  "Why this request should be given up on now, as a message — or NIL while it
+is making progress.  Called only by the caller's watchdog loop."
+  (bt:with-lock-held ((request-task-lock task))
+    (unless (eq (request-task-state task) :finished)
+      (let ((now (get-internal-real-time)))
+        (flet ((silent-since (then)
+                 (/ (- now then) internal-time-units-per-second)))
+          (cond ((and *request-stall-timeout*
+                      (> (silent-since (request-task-alive-time task))
+                         *request-stall-timeout*))
+                 (format nil "No response from the provider for ~ds — giving up on this attempt"
+                         (round *request-stall-timeout*)))
+                ((and *request-idle-timeout*
+                      (> (silent-since (request-task-content-time task))
+                         *request-idle-timeout*))
+                 (format nil "Stream open but silent for ~ds — giving up on this attempt"
+                         (round *request-idle-timeout*)))))))))
 
 (defun request-task-outcome (task)
   (bt:with-lock-held ((request-task-lock task))
@@ -294,6 +404,10 @@ and giving up then would leave the request uncancellable."
                                 :cache-read 0 :cache-write 0))))
     (let ((task (make-provider-request-task)))
       (labels ((emit (event)
+                 ;; An adapter that emits without going through MAP-SSE-EVENTS
+                 ;; still counts as progress: the watchdog must never be
+                 ;; blinded by a non-SSE framing.
+                 (note-request-progress task :content)
                  (unless (request-task-cancelled-p task)
                    (when on-event (funcall on-event event))))
                (request-body ()
@@ -345,16 +459,23 @@ and giving up then would leave the request uncancellable."
                                                      (when proxy (list :proxy proxy)))))
                                       (bt:with-lock-held ((request-task-lock task))
                                         (setf (request-task-state task) :streaming))
+                                      ;; Response headers are back: the upload
+                                      ;; and the prefill are behind us, so the
+                                      ;; stall clock starts again from here.
+                                      (note-request-progress task :alive)
                                       (if (request-task-cancelled-p task)
                                           (aborted-result)
-                                          (parse-stream
-                                           api
-                                           (flexi-streams:make-flexi-stream
-                                            stream :external-format :utf-8)
-                                           :on-event #'emit
-                                           :abort-flag
-                                           (lambda ()
-                                             (request-task-cancelled-p task))))))
+                                          (let ((*sse-progress*
+                                                  (lambda (kind)
+                                                    (note-request-progress task kind))))
+                                            (parse-stream
+                                             api
+                                             (flexi-streams:make-flexi-stream
+                                              stream :external-format :utf-8)
+                                             :on-event #'emit
+                                             :abort-flag
+                                             (lambda ()
+                                               (request-task-cancelled-p task)))))))
                             (provider-request-cancelled ()
                               (setf result (aborted-result)))
                             (serious-condition (e)
@@ -373,16 +494,29 @@ and giving up then would leave the request uncancellable."
         ;; JOIN uses this handle, never the task slot: the slot exists so a
         ;; canceller can interrupt the owner, and may still be unset in the
         ;; instant before the thread runs its first form.
-        (let ((thread (bt:make-thread #'request-body :name "evo-provider-request")))
+        (let ((thread (bt:make-thread #'request-body :name "evo-provider-request"))
+              (stalled nil))
           (unwind-protect
                (progn
+                 ;; The watchdog lives here, in the caller, because cancelling
+                 ;; is the caller's move: the owner is the thread that is stuck.
+                 ;; Cancellation is re-requested every pass, like the abort path
+                 ;; — the first request can land before the owner has published
+                 ;; a thread to interrupt, and giving up then would hang here.
                  (loop until (request-task-finished-p task)
-                       do (when (and abort-flag (funcall abort-flag))
+                       do (unless stalled
+                            (setf stalled (request-task-stall-reason task)))
+                          (when (or stalled (and abort-flag (funcall abort-flag)))
                             (cancel-request-task task))
                           (sleep 0.02))
                  (multiple-value-bind (result failure) (request-task-outcome task)
                    (when failure (error failure))
-                   result))
+                   ;; A stall is the caller's verdict on its own request, so the
+                   ;; caller rewrites its own return value: an error the retry
+                   ;; loop can act on, never the :aborted the user alone means.
+                   (if (and stalled (not (and abort-flag (funcall abort-flag))))
+                       (list :error-message stalled)
+                       result)))
             ;; A request may never outlive the call that created it.  Joining is
             ;; unconditional, including cancellation and non-local exits.
             (unless (request-task-finished-p task)
@@ -493,6 +627,16 @@ breakpoints on Anthropic Messages)."
                (cond ((null delay)
                       (return (error-message last-error t)))
                      ((< attempt (1- *max-attempts*))
+                      ;; Say so.  A silent retry re-sends the whole request —
+                      ;; megabytes, sometimes minutes — behind a spinner that
+                      ;; looks exactly like progress, and the user is left
+                      ;; guessing whether evo is working or wedged.
+                      (when on-event
+                        (funcall on-event (list :type :provider-retry
+                                                :attempt (1+ attempt)
+                                                :max *max-attempts*
+                                                :delay delay
+                                                :reason last-error)))
                       (abortible-sleep delay abort-flag)
                       (when (and abort-flag (funcall abort-flag))
                         (return (aborted-message)))))))))))))

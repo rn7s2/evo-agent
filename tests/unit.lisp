@@ -5323,6 +5323,48 @@ selection journals the provider, and every resolution point honours it."
                   (not (search "OLDDATA" req))
                   (search "old.png" req)
                   (search "request size" req))))
+    ;; Recency window: the bytes gate is the backstop, but the count gate is
+    ;; what keeps a screenshot-heavy session from re-uploading its whole photo
+    ;; album on every single turn.  The newest images stay; older ones become
+    ;; named placeholders that say how to get the picture back.
+    (let* ((evo.provider::*max-request-images* 2)
+           (mk (lambda (tag)
+                 (evo.media:make-image-block :data (format nil "DATA~a" tag)
+                                             :media-type "image/png"
+                                             :name (format nil "shot~a.png" tag)
+                                             :bytes 5)))
+           (windowed (list (list :role :user :content (list (funcall mk 1)))
+                           (list :role :user :content (list (funcall mk 2)))
+                           (list :role :user :content (list (funcall mk 3)))))
+           (req (com.inuoe.jzon:stringify
+                 (com.inuoe.jzon:parse
+                  (build-request (find-api :anthropic-messages)
+                                 :model seeing :system "sys"
+                                 :messages windowed :tools nil
+                                 :thinking-level nil)))))
+      (check "handoff: image window keeps the newest N as pixels"
+             (and (search "DATA2" req) (search "DATA3" req)))
+      (check "handoff: image window drops the oldest payload"
+             (not (search "DATA1" req)))
+      (check "handoff: dropped image leaves a named, actionable placeholder"
+             (and (search "shot1.png" req)
+                  (search "image not resent" req)
+                  (search "read the file again" req)))
+      ;; Two images, two messages, and the transcript is otherwise untouched:
+      ;; the window rewrites the request copy only.
+      (check "handoff: image window does not rewrite the journal's blocks"
+             (equal "DATA1"
+                    (pget (first (pget (first windowed) :content)) :data))))
+    ;; A window of zero is the vision-less case in all but name, and must not
+    ;; send pixels at all.
+    (let* ((evo.provider::*max-request-images* 0)
+           (req (com.inuoe.jzon:stringify
+                 (com.inuoe.jzon:parse
+                  (build-request (find-api :anthropic-messages)
+                                 :model seeing :system "sys" :messages history
+                                 :tools nil :thinking-level nil)))))
+      (check "handoff: a zero window sends no image payload"
+             (and (not (search "QUJD" req)) (search "shot.png" req))))
     ;; Anthropic cache breakpoints should stop before image-bearing messages:
     ;; caching does not make the HTTP body smaller, and cached screenshot bytes
     ;; make the cache prefix unstable and expensive.
@@ -5836,6 +5878,186 @@ caller's thread and skipped the join, so a cancelled request kept running."
                             (bt:all-threads)))))
       (setf (symbol-function 'dex:post) saved-post))))
 
+;;; Deadlines.  A request that is never answered has to end itself: the socket
+;;; read timeout is SO_RCVTIMEO, fires per read, and therefore cannot see a
+;;; response that never starts — nor one that only ever sends keepalives.
+
+(defun test-sse-progress-grading ()
+  "MAP-SSE-EVENTS grades progress for the watchdog: bytes are liveness, but
+only a non-keepalive event means the response actually moved."
+  (let ((seen nil))
+    (let ((evo.provider::*sse-progress* (lambda (kind) (push kind seen))))
+      (with-input-from-string
+          (in (format nil "event: ping~%data: {}~%~%event: message_start~%data: {\"type\":\"message_start\"}~%~%"))
+        (map-sse-events in (lambda (type data) (declare (ignore type data)) nil))))
+    (setf seen (nreverse seen))
+    (check "sse: every line counts as liveness" (= 6 (count :alive seen)))
+    (check "sse: a keepalive is not content" (= 1 (count :content seen)))
+    (check "sse: content is reported when the real event arrives"
+           (eq :content (car (last seen))))))
+
+(defun test-request-stall-watchdog ()
+  "A provider that accepts the request and then says nothing must not hang the
+session: the caller's watchdog cancels the attempt and reports an error the
+retry loop can act on — never the :aborted that only the user means."
+  (let ((saved-post (symbol-function 'dex:post))
+        (stream (make-instance 'recording-stream)))
+    (unwind-protect
+         (progn
+           (setf *cancel-fixture-entered* nil
+                 *cancel-fixture-exited* nil
+                 *cancel-fixture-closed-by* nil)
+           (setf (symbol-function 'dex:post)
+                 (lambda (&rest args) (declare (ignore args)) stream))
+           (let* ((evo.provider::*request-stall-timeout* 0.2)
+                  (api (make-instance 'cancel-fixture-api))
+                  (started (get-internal-real-time))
+                  (result (perform-request api "https://fixture.invalid/v1" nil "{}"))
+                  (elapsed (/ (- (get-internal-real-time) started)
+                              internal-time-units-per-second)))
+             (check "a silent request ends itself" (pget result :error-message))
+             (check "the stall names itself in the message"
+                    (search "No response from the provider"
+                            (or (pget result :error-message) "")))
+             (check "a stall is not an abort" (not (pget result :aborted-p)))
+             (check "the watchdog fires on its own clock, not the read timeout"
+                    (< elapsed 10))
+             (check "the stalled request's thread is gone" *cancel-fixture-exited*)
+             (check "and its stream was closed by its owner"
+                    (and *cancel-fixture-closed-by*
+                         (not (recording-stream-open-p stream))))))
+      (setf (symbol-function 'dex:post) saved-post))))
+
+(defun test-stall-clocks ()
+  "The two clocks, without the transport around them: bytes restart the stall
+clock, only content restarts the idle clock."
+  (let ((task (evo.provider::make-provider-request-task))
+        (evo.provider::*request-stall-timeout* 0.05)
+        (evo.provider::*request-idle-timeout* 3600))
+    (check "a fresh request has not stalled"
+           (null (evo.provider::request-task-stall-reason task)))
+    (sleep 0.1)
+    (check "silence stalls it"
+           (evo.provider::request-task-stall-reason task))
+    (evo.provider::note-request-progress task :alive)
+    (check "bytes restart the stall clock"
+           (null (evo.provider::request-task-stall-reason task)))
+    ;; Liveness alone must not hold a mute stream open forever.
+    (let ((evo.provider::*request-stall-timeout* 3600)
+          (evo.provider::*request-idle-timeout* 0.05))
+      (sleep 0.1)
+      (evo.provider::note-request-progress task :alive)
+      (check "keepalives alone do not count as progress"
+             (search "silent" (or (evo.provider::request-task-stall-reason task) "")))
+      (evo.provider::note-request-progress task :content)
+      (check "content restarts the idle clock"
+             (null (evo.provider::request-task-stall-reason task))))
+    ;; A finished request is never stalled, whatever its clocks say.
+    (let ((evo.provider::*request-stall-timeout* 0.01))
+      (sleep 0.05)
+      (setf (evo.provider::request-task-state task) :finished)
+      (check "a finished request is never declared stalled"
+             (null (evo.provider::request-task-stall-reason task))))))
+
+;;; Retry visibility.  A silent retry re-sends the whole request behind a
+;;; spinner that looks exactly like progress; the user cannot tell a slow turn
+;;; from a wedged one, and the session file keeps no trace that it happened.
+
+(defclass retry-fixture-api (provider-api) ())
+(defvar *retry-fixture-attempts* 0)
+
+(defmethod endpoint-path ((api retry-fixture-api)) "/fixture/retry")
+(defmethod auth-headers ((api retry-fixture-api) config)
+  (declare (ignore config)) nil)
+(defmethod build-request ((api retry-fixture-api) &key model system messages
+                                                       tools thinking-level)
+  (declare (ignore model system messages tools thinking-level))
+  "{}")
+(defmethod perform-request ((api retry-fixture-api) url headers body
+                            &key on-event abort-flag abort-cleanup
+                            &allow-other-keys)
+  (declare (ignore url headers body on-event abort-flag abort-cleanup))
+  (incf *retry-fixture-attempts*)
+  (list :error-message "HTTP 529: {\"error\":\"overloaded\"}"))
+
+(defun test-retry-is-visible ()
+  (let ((saved-models evo.provider::*models*)
+        (saved-providers (copy-alist evo.provider::*providers*))
+        (events nil))
+    (unwind-protect
+         (progn
+           (register-api :retry-fixture (make-instance 'retry-fixture-api))
+           (register-provider* :retry-fixture :base-url "https://fixture.invalid")
+           (register-model* "retry-fixture-model" :provider :retry-fixture
+                            :api :retry-fixture :context-window 10000
+                            :max-output 100)
+           (setf *retry-fixture-attempts* 0)
+           (let* ((evo.provider::*max-attempts* 2)
+                  (message (call-provider :model "retry-fixture-model"
+                                          :system "sys" :messages nil :tools nil
+                                          :on-event (lambda (ev) (push ev events)))))
+             (setf events (nreverse events))
+             (check "retry: every attempt is actually made"
+                    (= 2 *retry-fixture-attempts*))
+             (let ((ev (find :provider-retry events :key (lambda (e) (pget e :type)))))
+               (check "retry: the frontend is told an attempt failed" ev)
+               (check "retry: the event says which attempt and why"
+                      (and (eql 1 (pget ev :attempt))
+                           (eql 2 (pget ev :max))
+                           (search "529" (or (pget ev :reason) ""))
+                           (numberp (pget ev :delay)))))
+             (check "retry: exhaustion still lands as a retryable error message"
+                    (and (eq (pget message :stop-reason) :error)
+                         (pget message :retryable)))))
+      (setf evo.provider::*models* saved-models
+            evo.provider::*providers* saved-providers))))
+
+(defun test-retry-is-journaled ()
+  "The successful attempt is the only one that leaves a message, so without an
+entry of its own a request that took four tries is indistinguishable in the
+session file from one that was simply slow.  The fold ignores the entry."
+  (let* ((dir (uiop:ensure-directory-pathname
+               (format nil "~a/evo-retry-journal-~a/" (tmp-dir) (gen-id))))
+         (journal (progn (ensure-directories-exist dir) (make-session-journal dir)))
+         (agent (make-agent :journal journal)))
+    (evo.kernel::handle-provider-event
+     agent (list :type :provider-retry :attempt 2 :max 4 :delay 3
+                 :reason "HTTP 529: overloaded"))
+    (let ((entry (find :provider-retry (journal-entries journal)
+                       :key (lambda (e) (pget e :type)))))
+      (check "retry: journaled for the postmortem"
+             (and entry (eql 2 (pget entry :attempt))
+                  (search "overloaded" (or (pget entry :reason) ""))))
+      (check "retry: invisible to the transcript"
+             (null (state-messages (fold-state journal)))))))
+
+(defun test-activity-line ()
+  "The activity line is the only thing a waiting user has to read.  A spinner
+says the loop is alive; the clock and the retry notice say what is happening."
+  (let ((tui (evo.tui::make-tui)))
+    (check "idle stays idle" (search "idle" (evo.tui::activity-line tui)))
+    (setf (evo.tui::tui-task tui)
+          (evo.tui::make-tui-task :id "clock" :kind :run
+                                  :started (- (get-universal-time) 135)))
+    (check "a running turn shows its age"
+           (search "working · 2m" (evo.tui::activity-line tui)))
+    (with-output-to-string (fake-tty)
+      (let ((evo.tui::*tty-out* fake-tty)
+            (evo.tui::*region-height* 0))
+        (setf (evo.tui::tui-partial tui) "half a sentence from the dead attempt")
+        (evo.tui::handle-agent-event
+         tui '(:type :provider-retry :attempt 2 :max 4 :delay 3
+               :reason "HTTP 529: overloaded"))
+        (check "a retry drops the partial it is about to re-stream"
+               (equal "" (evo.tui::tui-partial tui)))
+        (let ((line (evo.tui::activity-line tui)))
+          (check "a retry says which attempt" (search "retry 2/4" line))
+          (check "a retry says why" (search "529" line)))
+        (evo.tui::handle-agent-event tui '(:type :message-start))
+        (check "the notice clears once the attempt talks"
+               (and (null (evo.tui::tui-retry tui))
+                    (search "working" (evo.tui::activity-line tui))))))))
+
 (defun test-abort-is-a-message ()
   "REQUEST-ABORT must only post a message; the worker latches it and runs the
 cleanups.  Previously the requesting thread ran them itself, which is what made
@@ -6272,6 +6494,12 @@ became zero after the first reload."
     (test-image-export)
     (test-image-read-tool)
     (test-provider-request-ownership)
+    (test-sse-progress-grading)
+    (test-request-stall-watchdog)
+    (test-stall-clocks)
+    (test-retry-is-visible)
+    (test-retry-is-journaled)
+    (test-activity-line)
     (test-abort-is-a-message)
     (test-session-quiescence)
     (test-tui-task-ownership)

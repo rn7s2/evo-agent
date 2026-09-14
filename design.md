@@ -143,6 +143,7 @@ Project scope shadows global scope wherever both exist.
 :session-info         session name etc.
 :goal                 goal created/updated: objective, status, budget, usage
 :load                 userspace source file loaded (path + reason)
+:provider-retry       an attempt was re-sent: attempt/max, delay, reason
 ```
 
 Three of these carry architectural weight:
@@ -239,6 +240,17 @@ errors signal, and preflight catches them.
   poison a transcript that contains one. `evo.media` owns the read path —
   clipboard readers per platform, size cap, downscaling — and nothing above it
   knows where the bytes came from.
+- **Only the last few images are re-sent** (`*max-request-images*`, with
+  `*max-request-image-data-chars*` as the byte backstop). By value means *by
+  value every turn*: a session that keeps screenshotting otherwise re-uploads
+  its whole album on every request, forever — one measured session sent 8.9 MB
+  of base64 in each of 305 requests, 1.2 GB in under an hour, and a link
+  hiccup during any one of those uploads is indistinguishable from a hang.
+  Older images become named placeholders that say how to get the picture back:
+  read the file again. The walk is newest-first, so the evicted image is always
+  the oldest and the placeholder swap moves *forward* through the transcript —
+  a new screenshot invalidates the cached prefix from the image it evicts, not
+  from further back. Request copy only; the journal keeps the pixels.
 - **The agent looks at images too, not just the user**: an `:image` block is a
   legal tool result, so `read` on a png/jpeg/gif/webp returns the picture
   instead of line noise, and the agent can open a screenshot on its own
@@ -273,7 +285,24 @@ errors signal, and preflight catches them.
   with exponential backoff and jitter, refusing silently-long server delays;
   error normalization; and turn-level retry on finished error messages.
   Classification is on HTTP status plus typed error codes, not regexes over
-  message strings.
+  message strings. **A retry announces itself**: it emits `:provider-retry`
+  (attempt, max, delay, reason) and journals an entry the fold ignores.
+  Silently re-sending megabytes behind a spinner that looks exactly like
+  progress is how a twelve-attempt worst case becomes "evo hung", and the
+  session file kept no trace that it ever happened.
+- **Deadlines are measured in progress, not wall clock.** The socket
+  `:read-timeout` is `SO_RCVTIMEO` — per read — so it cannot see a request
+  that is never answered at all (no send timeout exists either), and a stream
+  that only carries keepalives resets it forever. Two watchdog clocks fix
+  both, fed by the shared SSE framing loop, which grades every line as
+  liveness and every non-`ping` event as content: `*request-stall-timeout*`
+  (no bytes at all — covers connect, body upload, prefill, first frame) and
+  `*request-idle-timeout*` (bytes but no content — the ping-only zombie). The
+  watchdog runs in the caller, because the owner is the thread that is stuck;
+  it cancels through the same one-interrupt path as an abort, and the caller
+  rewrites its own return value into a retryable error, never the `:aborted`
+  that only the user means. No wall-clock deadline: a model that legitimately
+  streams for twenty minutes must not be killed for taking twenty minutes.
 - **Caching**: `cache_control` breakpoints (system prompt, last tool
   definition, last user message).
   Protecting the cache prefix is a constraint the whole prompt design honors
@@ -705,6 +734,10 @@ public API and not disableable.
 - Rendering goes into normal terminal scrollback — no alternate screen,
   because scrollback history is part of the UX — plus a managed bottom region
   (editor, status line, goal and budget indicators) repainted differentially.
+- The **activity line** is one row and always present, settling to idle rather
+  than disappearing. While a task runs it carries a clock and, when the
+  transport is re-sending, the attempt and the reason — a spinner alone says
+  only that the loop is alive, which is exactly what a hang looks like too.
 - Resize is SIGWINCH through `evo.port`, re-querying `TIOCGWINSZ` and
   reflowing the managed region. Long content wraps; wide content truncates
   with indicators.
