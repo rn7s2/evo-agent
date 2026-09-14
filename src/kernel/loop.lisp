@@ -431,6 +431,22 @@ JSON can validate yet be incomplete.  Each gets an error result."
                                        :content (list (list :type :text :text
                                                             "Your response hit the output-token limit, so this tool call was not executed. Re-issue it.")))))))
 
+(defun handle-provider-event (agent event)
+  "Forward a provider event to the frontend, and journal the one kind that a
+postmortem needs: a retry.  An attempt that is re-sent leaves no message
+behind — the successful attempt's message is the only one journaled — so
+without this entry a request that took ten minutes and four tries is
+indistinguishable in the session file from one that took ten minutes.  The
+fold ignores the entry, so it costs the transcript nothing."
+  (when (eq (pget event :type) :provider-retry)
+    (append-entry (agent-journal agent)
+                  (list :type :provider-retry
+                        :attempt (pget event :attempt)
+                        :max (pget event :max)
+                        :delay (pget event :delay)
+                        :reason (truncate-string (or (pget event :reason) "") 500))))
+  (apply #'emit-event agent event))
+
 (defun run (agent)
   "One run: turns until the model stops with no pending steering.
 Returns :stop :length :error :aborted."
@@ -465,7 +481,7 @@ Returns :stop :length :error :aborted."
                       :abort-flag (lambda () (agent-abort-flag agent))
                       :abort-cleanup (lambda (cleanup)
                                        (add-abort-cleanup agent cleanup))
-                      :on-event (lambda (ev) (apply #'emit-event agent ev)))))
+                      :on-event (lambda (ev) (handle-provider-event agent ev)))))
               (append-entry (agent-journal agent) (list :type :message :message assistant))
               (emit-event agent :type :message-end
                                 :stop-reason (message-stop-reason assistant)

@@ -11,8 +11,10 @@
 (defstruct (tui-task (:conc-name tui-task-))
   "One worker task published by the TUI thread.  KIND is :RUN or :COMPACT;
 ID lets completion events prove which task they finish, so an old event can
-never clear a newer task.  THREAD is joined before the task is forgotten."
-  id kind thread)
+never clear a newer task.  THREAD is joined before the task is forgotten.
+STARTED is what the activity line's clock counts from — the task is the run
+state, so the run's age belongs on it and dies with it."
+  id kind thread (started (get-universal-time)))
 
 (defstruct (tui (:conc-name tui-))
   agent
@@ -31,6 +33,11 @@ never clear a newer task.  THREAD is joined before the task is forgotten."
   ;; owned like every other slot by the TUI thread, which sets it while
   ;; draining events and clears it whenever a task starts or ends.
   (auto-compacting nil)
+  ;; Display-only echo of the provider's :provider-retry event: the attempt
+  ;; the transport is on and why the last one failed, shown on the activity
+  ;; line until the retried attempt starts talking.  Same ownership and
+  ;; lifetime as AUTO-COMPACTING above.
+  (retry nil)
   (partial "")
   (md (make-md))        ; markdown fence state for the streaming text
   (thinking-tail "")
@@ -186,7 +193,9 @@ and /reload are how the registry gets fixed."
         (scroll tui (dim "input stays queued — it runs once the model resolves")))
       (return-from start-worker))
     (reset-agent-run-control (tui-agent tui))
-    (setf (tui-auto-compacting tui) nil)   ; display echo never outlives a task
+    ;; Display echoes never outlive a task.
+    (setf (tui-auto-compacting tui) nil
+          (tui-retry tui) nil)
     (let* ((id (gen-id))
            (task (make-tui-task :id id :kind :run)))
       ;; Publish the task before its thread starts.  From here until the matching
@@ -430,8 +439,36 @@ the model just wrote is worse than no display."
 
 ;;; Agent event handling (events arrive from the worker thread via the queue).
 
+(defun first-line (text &optional (limit 60))
+  "The first line of TEXT, clipped — provider errors arrive as paragraphs and
+the activity line has one row."
+  (let* ((line (or (first (uiop:split-string (or text "") :separator '(#\Newline))) ""))
+         (line (string-trim " " line)))
+    (if (> (length line) limit)
+        (concatenate 'string (subseq line 0 (1- limit)) "…")
+        line)))
+
 (defun handle-agent-event (tui event)
   (case (pget event :type)
+    (:message-start
+     ;; The attempt is talking, so whatever the last one failed with is history.
+     (when (tui-retry tui)
+       (setf (tui-retry tui) nil
+             (tui-dirty tui) t)))
+    (:provider-retry
+     ;; The dead attempt's partial text is about to be streamed again from the
+     ;; top: drop what has not been committed to the scrollback yet, and say
+     ;; why the repetition is happening.
+     (setf (tui-partial tui) ""
+           (tui-md tui) (make-md)
+           (tui-thinking-tail tui) "")
+     (setf (tui-retry tui) (list :attempt (pget event :attempt)
+                                 :max (pget event :max)
+                                 :reason (pget event :reason)))
+     (scroll tui (dim (format nil "⟲ retry ~d/~d · ~a"
+                              (pget event :attempt) (pget event :max)
+                              (first-line (pget event :reason) 100))))
+     (setf (tui-dirty tui) t))
     (:text-delta
      (setf (tui-partial tui)
            (concatenate 'string (tui-partial tui) (pget event :text)))
@@ -535,6 +572,7 @@ the model just wrote is worse than no display."
          (reset-agent-run-control (tui-agent tui))
          (setf (tui-task tui) nil
                (tui-auto-compacting tui) nil
+               (tui-retry tui) nil
                (tui-thinking-tail tui) "")
          (flush-partial tui)
          (setf (tui-md tui) (make-md))
@@ -759,23 +797,48 @@ inner right of the status line (order 200, inward of the model-load cell)."
   "Pulsing star while the model is thinking.")
 (defparameter *idle-char* #\○)
 
+(defun run-clock (tui)
+  "How long the current task has been running, as a compact string.
+
+A spinner says only that the loop is alive.  The clock is what tells a slow
+turn from a wedged one — the whole difference between waiting and wondering."
+  (let ((task (tui-task tui)))
+    (and task
+         (short-duration (max 0 (- (get-universal-time) (tui-task-started task)))))))
+
+(defun retry-label (tui)
+  "The activity line while the transport is retrying: which attempt, and what
+went wrong with the last one."
+  (let ((retry (tui-retry tui)))
+    (when retry
+      (format nil "retry ~d/~d · ~a"
+              (pget retry :attempt) (pget retry :max)
+              (first-line (pget retry :reason) (max 12 (- *cols* 40)))))))
+
 (defun activity-line (tui)
   "The permanent activity indicator.  Always one line — settling to idle
 instead of disappearing, so the region height does not oscillate."
   (cond
     ((and (tui-running tui) (or (tui-compacting tui) (tui-auto-compacting tui)))
-     (dim (format nil "~c compacting...  esc interrupt"
+     (dim (format nil "~c compacting... · ~a  esc interrupt"
                   (char *working-frames*
-                        (mod (tui-spinner tui) (length *working-frames*))))))
+                        (mod (tui-spinner tui) (length *working-frames*)))
+                  (run-clock tui))))
+    ((and (tui-running tui) (retry-label tui))
+     (dim (format nil "~c ~a  esc interrupt"
+                  (char *working-frames*
+                        (mod (tui-spinner tui) (length *working-frames*)))
+                  (retry-label tui))))
     ((and (tui-running tui) (plusp (length (tui-thinking-tail tui))))
      (dim (format nil "~c thinking · ~a  esc interrupt "
                   (char *thinking-frames*
                         (mod (tui-spinner tui) (length *thinking-frames*)))
                   (tui-thinking-tail tui))))
     ((tui-running tui)
-     (dim (format nil "~c working  esc interrupt"
+     (dim (format nil "~c working · ~a  esc interrupt"
                   (char *working-frames*
-                        (mod (tui-spinner tui) (length *working-frames*))))))
+                        (mod (tui-spinner tui) (length *working-frames*)))
+                  (run-clock tui))))
     (t (dim (format nil "~c idle" *idle-char*)))))
 
 (defun separator-line ()
