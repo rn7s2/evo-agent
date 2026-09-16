@@ -6058,6 +6058,160 @@ says the loop is alive; the clock and the retry notice say what is happening."
                (and (null (evo.tui::tui-retry tui))
                     (search "working" (evo.tui::activity-line tui))))))))
 
+(defun test-step-clock ()
+  "The activity clock measures the CURRENT STEP, not the task.  One task can
+span many turns — steering drained at a boundary, a followup, a goal driving
+the run on for an hour — and counting from the task start turns the clock into
+\"time since the user last spoke\", which cannot tell a slow step from a wedged
+one.  Every step boundary the worker announces must restart it."
+  (let* ((dir (uiop:ensure-directory-pathname
+               (format nil "~a/evo-stepclock-~a/" (tmp-dir) (gen-id))))
+         (journal (progn (ensure-directories-exist dir) (make-session-journal dir)))
+         (agent (make-agent :journal journal))
+         (tui (evo.tui::make-tui :agent agent))
+         (hour-ago (- (get-universal-time) 3600)))
+    ;; No task: no clock, and a stray boundary event must not explode.
+    (check "no task means no clock" (null (evo.tui::step-clock tui)))
+    (check "a boundary event with no task is harmless"
+           (progn (evo.tui::handle-agent-event tui '(:type :turn-start)) t))
+    ;; Before the first turn opens, the clock falls back to the task's own
+    ;; start, so the wait for the worker to get going is still counted.
+    (setf (evo.tui::tui-task tui)
+          (evo.tui::make-tui-task :id "step" :kind :run :started (- (get-universal-time) 135)))
+    (check "before step one the clock counts from the task"
+           (equal "2m" (evo.tui::step-clock tui)))
+    (with-output-to-string (fake-tty)
+      (let ((evo.tui::*tty-out* fake-tty)
+            (evo.tui::*region-height* 0)
+            (evo.tui::*region-cursor-row* 0))
+        ;; An hour-old task whose turn just opened reads as seconds, not hours.
+        (setf (evo.tui::tui-task-started (evo.tui::tui-task tui)) hour-ago)
+        (evo.tui::handle-agent-event tui '(:type :turn-start))
+        (check "a turn restarts the clock" (equal "0s" (evo.tui::step-clock tui)))
+        (check "the working line shows the step, not the task"
+               (let ((line (evo.tui::activity-line tui)))
+                 (and (search "working · 0s" line) (not (search "1h" line)))))
+        (check "the task's own age is still there, untouched"
+               (= hour-ago (evo.tui::tui-task-started (evo.tui::tui-task tui))))
+        ;; Mid-task steering / followups / goal continuation all re-enter the
+        ;; loop through :turn-start, so each of them gets a fresh clock.
+        (setf (evo.tui::tui-task-step-started (evo.tui::tui-task tui)) hour-ago)
+        (check "a stale step really would read as an hour"
+               (equal "1h0m" (evo.tui::step-clock tui)))
+        (evo.tui::handle-agent-event tui '(:type :turn-start))
+        (check "the next turn restarts it again" (equal "0s" (evo.tui::step-clock tui)))
+        (check "a boundary marks the region dirty" (evo.tui::tui-dirty tui))
+        ;; A compaction is a step of its own, and hands a fresh clock back.
+        (setf (evo.tui::tui-task-step-started (evo.tui::tui-task tui)) hour-ago)
+        (evo.tui::handle-agent-event tui '(:type :compaction-start))
+        (check "compaction is timed as its own step"
+               (let ((line (evo.tui::activity-line tui)))
+                 (and (search "compacting... · 0s" line) (not (search "1h" line)))))
+        (setf (evo.tui::tui-task-step-started (evo.tui::tui-task tui)) hour-ago)
+        (evo.tui::handle-agent-event tui '(:type :compaction-end))
+        (check "the turn gets a fresh clock after compacting"
+               (let ((line (evo.tui::activity-line tui)))
+                 (and (search "working · 0s" line) (not (search "1h" line)))))
+        ;; A new task starts a new step: nothing carries over.
+        (evo.tui::handle-agent-event tui '(:type :worker-done :task-id "step"
+                                           :outcome :stop))
+        (check "the task is gone and so is its clock"
+               (and (not (evo.tui::tui-running tui))
+                    (null (evo.tui::step-clock tui))))))))
+
+;;; A two-turn run, end to end: turn one answers with a tool call, turn two
+;;; stops.  One task, two steps — the shape the step clock exists for.
+
+(defclass step-fixture-api (provider-api) ())
+(defvar *step-fixture-calls* 0)
+
+(defmethod endpoint-path ((api step-fixture-api))
+  (declare (ignore api)) "/fixture/step")
+
+(defmethod auth-headers ((api step-fixture-api) config)
+  (declare (ignore api config)) nil)
+
+(defmethod build-request ((api step-fixture-api)
+                          &key model system messages tools thinking-level)
+  (declare (ignore api model system messages tools thinking-level))
+  "{}")
+
+(defmethod perform-request ((api step-fixture-api) url headers body
+                            &key on-event abort-flag abort-cleanup
+                            &allow-other-keys)
+  (declare (ignore api url headers body on-event abort-flag abort-cleanup))
+  (if (= 1 (incf *step-fixture-calls*))
+      ;; Turn one: a tool call, so the loop must come back for turn two.
+      (list :content '((:type :tool-call :id "c1" :name "no-such-tool"
+                        :arguments (:x 1)))
+            :stopped-p t :stop-reason :tool-use
+            :usage '(:input 10 :output 2 :cache-read 0 :cache-write 0))
+      (list :content '((:type :text :text "done"))
+            :stopped-p t :stop-reason :stop
+            :usage '(:input 12 :output 2 :cache-read 0 :cache-write 0))))
+
+(defun test-step-clock-end-to-end ()
+  "The step boundary has to survive the whole seam, not just the handler: the
+kernel emits :turn-start, the worker's events-cb queues it, the TUI loop drains
+it.  Backdate the clock in front of every delivered :turn-start and watch the
+real run put it back — twice, inside ONE task whose own age never moves."
+  (register-api :step-fixture (make-instance 'step-fixture-api))
+  (register-provider* :step-fixture :base-url "https://fixture.invalid")
+  (register-model* "step-fixture-model" :provider :step-fixture
+                   :api :step-fixture :context-window 100000 :max-output 100)
+  (let* ((dir (uiop:ensure-directory-pathname
+               (format nil "~a/evo-step-e2e-~a/" (tmp-dir) (gen-id))))
+         (journal (progn (ensure-directories-exist dir) (make-session-journal dir)))
+         (agent (make-agent :journal journal))
+         (tui (evo.tui::make-tui :agent agent))
+         (hour-ago (- (get-universal-time) 3600))
+         (turn-starts 0) (resets 0) (task-started nil) (ages nil) (task-ids nil))
+    (setf *step-fixture-calls* 0)
+    (append-entry journal '(:type :model-change :model "step-fixture-model"))
+    (append-entry journal '(:type :message
+                            :message (:role :user
+                                      :content ((:type :text :text "go")))))
+    (setf (agent-events-cb agent) (lambda (event) (evo.tui::push-event tui event)))
+    (with-output-to-string (fake-tty)
+      (let ((evo.tui::*tty-out* fake-tty)
+            (evo.tui::*region-height* 0)
+            (evo.tui::*region-cursor-row* 0))
+        (evo.tui::start-worker tui)
+        (setf task-started (evo.tui::tui-task-started (evo.tui::tui-task tui)))
+        (loop with deadline = (+ (get-internal-real-time)
+                                 (* 5 internal-time-units-per-second))
+              while (and (evo.tui::tui-running tui)
+                         (< (get-internal-real-time) deadline))
+              do (dolist (event (evo.tui::drain-events tui))
+                   (let ((task (evo.tui::tui-task tui))
+                         (turn-p (eq (pget event :type) :turn-start)))
+                     (when (and task turn-p)
+                       (incf turn-starts)
+                       (setf (evo.tui::tui-task-step-started task) hour-ago))
+                     (evo.tui::handle-agent-event tui event)
+                     (let ((task (evo.tui::tui-task tui)))
+                       (when (and task turn-p)
+                         (push (evo.tui::step-clock tui) ages)
+                         (push (list (evo.tui::tui-task-id task)
+                                     (evo.tui::tui-task-started task))
+                               task-ids)
+                         (unless (eql hour-ago
+                                      (evo.tui::tui-task-step-started task))
+                           (incf resets))))))
+                 (sleep 0.01))
+        (dolist (event (evo.tui::drain-events tui))
+          (evo.tui::handle-agent-event tui event))))
+    (check "the fixture run really took two turns" (= 2 *step-fixture-calls*))
+    (check "every turn arrives at the TUI as a step boundary" (= 2 turn-starts))
+    (check "every delivered turn restarts the clock" (= 2 resets))
+    (check "and each one reads as a fresh step, not an hour"
+           (equal '("0s" "0s") ages))
+    (check "both steps belong to ONE task whose own age never moved"
+           (and (= 2 (length task-ids))
+                (equal (first task-ids) (second task-ids))
+                (eql task-started (second (first task-ids)))))
+    (check "the run settled" (not (evo.tui::tui-running tui)))))
+
 (defun test-abort-is-a-message ()
   "REQUEST-ABORT must only post a message; the worker latches it and runs the
 cleanups.  Previously the requesting thread ran them itself, which is what made
@@ -6500,6 +6654,8 @@ became zero after the first reload."
     (test-retry-is-visible)
     (test-retry-is-journaled)
     (test-activity-line)
+    (test-step-clock)
+    (test-step-clock-end-to-end)
     (test-abort-is-a-message)
     (test-session-quiescence)
     (test-tui-task-ownership)
