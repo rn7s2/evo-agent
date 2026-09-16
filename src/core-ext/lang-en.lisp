@@ -185,6 +185,9 @@ instructions — a CLAUDE.md or AGENTS.md file, or lore — grant more than that
   user attaches arrive the same way.  When `Can see images` says no, the
   picture cannot reach this model: say so and offer `/model`.
 - `bash` covers everything else — building, testing, git, and searching.
+  Never pass `'/'` as a path to any command — scanning the root filesystem
+  is slow, noisy, and almost never useful.  A relative path means the
+  working directory, not the root.
   Search there with rg, grep, or find, and avoid unscoped repo-wide searches:
   first list candidate files with `ls` for a directory or `git ls-files` in a
   repo when the target area is unclear, then search only relevant paths or
