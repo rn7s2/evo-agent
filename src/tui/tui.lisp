@@ -12,9 +12,20 @@
   "One worker task published by the TUI thread.  KIND is :RUN or :COMPACT;
 ID lets completion events prove which task they finish, so an old event can
 never clear a newer task.  THREAD is joined before the task is forgotten.
-STARTED is what the activity line's clock counts from — the task is the run
-state, so the run's age belongs on it and dies with it."
-  id kind thread (started (get-universal-time)))
+STARTED is the task's own age — the task is the run state, so the run's age
+belongs on it and dies with it.
+
+STEP-STARTED is what the activity line's clock counts from: the age of the
+CURRENT step (one turn of the loop, or one compaction), not of the whole
+task.  A task is not a step.  One task can span many turns — steering drained
+at a turn boundary, a followup, a goal that keeps going after the model
+settles — so counting from STARTED answers \"how long since you last spoke to
+it\", which is exactly the question the clock is not there to answer: it is
+there to tell a slow step from a wedged one, and a wedge is invisible behind a
+number that has been climbing since breakfast.  NIL until the first step
+begins, when the clock falls back to STARTED so the wait before turn one
+(model gate, thread start) is still counted."
+  id kind thread (started (get-universal-time)) (step-started nil))
 
 (defstruct (tui (:conc-name tui-))
   agent
@@ -81,6 +92,16 @@ state, so the run's age belongs on it and dies with it."
   "True when TUI's one task is a manual compaction."
   (let ((task (tui-task tui)))
     (and task (eq (tui-task-kind task) :compact))))
+
+(defun begin-step (tui)
+  "Restart the activity clock: a new step of the loop starts now.  Called from
+the TUI thread when a worker event marks a step boundary (a turn opening, a
+compaction starting, a compaction handing the turn back).  Harmless with no
+task — a boundary event that outlives its task has no clock to reset."
+  (let ((task (tui-task tui)))
+    (when task
+      (setf (tui-task-step-started task) (get-universal-time)
+            (tui-dirty tui) t))))
 
 (defun push-event (tui event)
   (bt:with-lock-held ((tui-events-lock tui))
@@ -450,6 +471,13 @@ the activity line has one row."
 
 (defun handle-agent-event (tui event)
   (case (pget event :type)
+    (:turn-start
+     ;; A turn is the loop's step, and the step is what the activity clock
+     ;; measures.  Every way a task outlives the user's submission — steering
+     ;; drained at the boundary, a followup, a goal driving the run on — comes
+     ;; back through here, so the clock restarts instead of reporting the age
+     ;; of the conversation.
+     (begin-step tui))
     (:message-start
      ;; The attempt is talking, so whatever the last one failed with is history.
      (when (tui-retry tui)
@@ -546,9 +574,15 @@ the activity line has one row."
      ;; Automatic compaction is part of a :RUN task — the task stays the only
      ;; run state.  This slot is a display echo so the activity line can say
      ;; what the worker is doing; it dies with the task.
+     ;; A compaction is its own step: "compacting... · 3s" is the summarizer's
+     ;; age, not the turn's.
+     (begin-step tui)
      (setf (tui-auto-compacting tui) t
            (tui-dirty tui) t))
     (:compaction-end
+     ;; ...and the turn it interrupted gets a fresh clock back, so the minutes
+     ;; spent compacting are not billed to the request that follows.
+     (begin-step tui)
      (setf (tui-auto-compacting tui) nil)
      (refresh-goal tui :reset-goal-run-tokens nil)
      (setf (tui-dirty tui) t))
@@ -797,14 +831,20 @@ inner right of the status line (order 200, inward of the model-load cell)."
   "Pulsing star while the model is thinking.")
 (defparameter *idle-char* #\○)
 
-(defun run-clock (tui)
-  "How long the current task has been running, as a compact string.
+(defun step-clock (tui)
+  "How long the CURRENT STEP has been running, as a compact string.
 
 A spinner says only that the loop is alive.  The clock is what tells a slow
-turn from a wedged one — the whole difference between waiting and wondering."
+step from a wedged one — the whole difference between waiting and wondering.
+That is why it counts the step and not the task: the task's age is time since
+the user last spoke, and after a steer, a followup or an hour of goal-driven
+turns that number says nothing about whether the thing in front of it is
+stuck."
   (let ((task (tui-task tui)))
     (and task
-         (short-duration (max 0 (- (get-universal-time) (tui-task-started task)))))))
+         (short-duration (max 0 (- (get-universal-time)
+                                   (or (tui-task-step-started task)
+                                       (tui-task-started task))))))))
 
 (defun retry-label (tui)
   "The activity line while the transport is retrying: which attempt, and what
@@ -823,7 +863,7 @@ instead of disappearing, so the region height does not oscillate."
      (dim (format nil "~c compacting... · ~a  esc interrupt"
                   (char *working-frames*
                         (mod (tui-spinner tui) (length *working-frames*)))
-                  (run-clock tui))))
+                  (step-clock tui))))
     ((and (tui-running tui) (retry-label tui))
      (dim (format nil "~c ~a  esc interrupt"
                   (char *working-frames*
@@ -838,7 +878,7 @@ instead of disappearing, so the region height does not oscillate."
      (dim (format nil "~c working · ~a  esc interrupt"
                   (char *working-frames*
                         (mod (tui-spinner tui) (length *working-frames*)))
-                  (run-clock tui))))
+                  (step-clock tui))))
     (t (dim (format nil "~c idle" *idle-char*)))))
 
 (defun separator-line ()

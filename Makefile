@@ -59,11 +59,12 @@ integration: build
 
 # Expect-driven TUI tests against a freshly built binary: the general smoke
 # test, the same-id/multi-provider model routing test, image paste through a
-# real vision model (EVO_TEST_VISION_MODEL), then five that need no backend at
+# real vision model (EVO_TEST_VISION_MODEL), then six that need no backend at
 # all — pasting in every shape a terminal sends it, the IDE bridge (which
 # drives the state file the editor plugin writes), background jobs on the
-# status line, switching the system prompt's language, and the MCP client
-# against a stub server (tests/mcp-server.py, needs python3).
+# status line, the activity clock restarting on every step, switching the
+# system prompt's language, and the MCP client against a stub server
+# (tests/mcp-server.py, needs python3).
 tui-test: build
 	tests/tui.exp
 	tests/interrupt.exp
@@ -72,6 +73,7 @@ tui-test: build
 	tests/paste.exp
 	tests/ide-context.exp
 	tests/jobs.exp
+	tests/step-clock.exp
 	tests/lang.exp
 	tests/mcp.exp
 
@@ -83,6 +85,7 @@ tui-test-offline: build
 	tests/paste.exp
 	tests/ide-context.exp
 	tests/jobs.exp
+	tests/step-clock.exp
 	tests/lang.exp
 	tests/mcp.exp
 

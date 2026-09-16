@@ -1,0 +1,114 @@
+#!/usr/bin/expect -f
+# step-clock.exp — the activity clock counts THE CURRENT STEP, through a real pty.
+#
+# No backend: nothing here calls a model.  The clock normally restarts when the
+# kernel emits :turn-start, which needs a live run; here we publish that same
+# event straight onto the TUI's event queue with /eval (a REPL into the live
+# image) and watch the running TUI drain it and repaint.  What this proves that
+# the unit tests cannot: the whole seam is live — queue, drain, handler,
+# repaint — on a real terminal.
+#
+# The shape of the bug: one task can span many steps (steering drained at a
+# turn boundary, a followup, a goal driving the run on for an hour), and the
+# clock used to count from the task — i.e. from when the user last spoke.  So
+# we arm an hour-old task with an hour-old step, see the hour, then send one
+# step boundary and require the hour to be gone.
+#
+# Patterns are ASCII-anchored: the activity line's spinner and its "·"
+# separator are multibyte and what expect sees on a pty depends on the channel
+# encoding.  "1h0m" and "<digit>s" are pure ASCII, and neither appears in the
+# text we type — so a hit can only be the repainted activity line.
+set timeout 15
+
+set repo [file dirname [file dirname [file normalize $argv0]]]
+set scratch [exec mktemp -d /tmp/evo-stepclock.XXXXXX]
+set env(EVO_HOME) "$scratch/home"
+file mkdir $env(EVO_HOME)
+foreach v {EVO_SUPERVISED_CHILD EVO_HEARTBEAT_FILE} {
+    if {[info exists env($v)]} { unset env($v) }
+}
+# A model must be registered for the TUI to start; it is never called.
+set f [open "$env(EVO_HOME)/init.lisp" w]
+puts $f {(evo:register-model "stepclock-test" :provider :none :api :anthropic-messages :context-window 100000 :max-output 4000)}
+puts $f {(evo:set-setting :model "stepclock-test")}
+puts $f {(evo:register-provider :none :base-url "http://127.0.0.1:1/unused" :api-key "unused")}
+close $f
+
+set workdir "$scratch/work"
+file mkdir $workdir
+cd $workdir
+
+set pass 0
+set failures {}
+proc check {name} {
+    global pass
+    incr pass
+    puts "\nPASS: $name"
+}
+proc fail {name} {
+    global failures
+    lappend failures $name
+    puts "\nFAIL: $name"
+}
+
+set stty_init "rows 24 cols 100"
+spawn "$repo/build/evo"
+
+expect {
+    -re {ctx \d+k/\d+k} { check "startup status line" }
+    timeout { fail "startup status line"; exit 1 }
+}
+
+# Arm: a task that started an hour ago, in a step that started an hour ago.
+send "/eval (setf (evo.tui::tui-task evo.tui::*tui*) (evo.tui::make-tui-task :id \"probe\" :kind :run :started (- (get-universal-time) 3600) :step-started (- (get-universal-time) 3600)))\r"
+expect {
+    -re {1h0m} { check "an hour-old step reads as an hour" }
+    timeout { fail "an hour-old step reads as an hour" }
+}
+
+# One step boundary, published exactly the way the kernel publishes it.
+send "/eval (evo.tui::push-event evo.tui::*tui* (list :type :turn-start))\r"
+expect {
+    -re {working[^\n]*[0-9]s} { check "a turn restarts the clock in the live TUI" }
+    timeout { fail "a turn restarts the clock in the live TUI" }
+}
+
+# A compaction is its own step too: back-date the step, then start compacting.
+send "/eval (progn (setf (evo.tui::tui-task-step-started (evo.tui::tui-task evo.tui::*tui*)) (- (get-universal-time) 3600)) (evo.tui::push-event evo.tui::*tui* (list :type :compaction-start)))\r"
+expect {
+    -re {compacting[^\n]*[0-9]s} { check "compacting is timed as its own step" }
+    timeout { fail "compacting is timed as its own step" }
+}
+
+# ...and hands a fresh clock back to the turn it interrupted.
+send "/eval (progn (setf (evo.tui::tui-task-step-started (evo.tui::tui-task evo.tui::*tui*)) (- (get-universal-time) 3600)) (evo.tui::push-event evo.tui::*tui* (list :type :compaction-end)))\r"
+expect {
+    -re {working[^\n]*[0-9]s} { check "the turn gets a fresh clock after compacting" }
+    timeout { fail "the turn gets a fresh clock after compacting" }
+}
+
+# The task's own age was never touched — it is still the hour-old task.
+# 1h0m can only come from the activity line, and only if the step is stale
+# again while the task start still reads an hour back.
+send "/eval (setf (evo.tui::tui-task-step-started (evo.tui::tui-task evo.tui::*tui*)) (evo.tui::tui-task-started (evo.tui::tui-task evo.tui::*tui*)))\r"
+expect {
+    -re {1h0m} { check "the task's own age survived every step" }
+    timeout { fail "the task's own age survived every step" }
+}
+
+# Put the TUI back to idle before quitting: the fake task has no thread.
+send "/eval (setf (evo.tui::tui-task evo.tui::*tui*) nil)\r"
+expect {
+    -re {idle} { check "back to idle" }
+    timeout { fail "back to idle" }
+}
+
+send "/quit\r"
+expect {
+    eof {}
+    timeout {}
+}
+
+puts "\n$pass passed, [llength $failures] failed"
+if {[llength $failures] > 0} { exit 1 }
+exit 0

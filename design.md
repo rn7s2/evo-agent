@@ -738,6 +738,13 @@ public API and not disableable.
   than disappearing. While a task runs it carries a clock and, when the
   transport is re-sending, the attempt and the reason — a spinner alone says
   only that the loop is alive, which is exactly what a hang looks like too.
+  The clock times the **current step** — one turn of the loop, or one
+  compaction — not the task. A task is not a step: steering drained at a turn
+  boundary, a followup, and a goal that keeps going after the model settles all
+  extend one task across many turns, so a task-wide clock reports time since
+  the user last spoke. That number hides a wedge behind an hour of honest work,
+  and telling a slow step from a wedged one is the only reason the clock is
+  there.
 - Resize is SIGWINCH through `evo.port`, re-querying `TIOCGWINSZ` and
   reflowing the managed region. Long content wraps; wide content truncates
   with indicators.
