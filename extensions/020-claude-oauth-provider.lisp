@@ -600,20 +600,24 @@ request arrives or 120 seconds elapse."
                        :base-url "https://api.anthropic.com"
                        :api-key-env "CLAUDE_OAUTH_ACCESS_TOKEN")
 
-;;; Static, and no network: evo supports the Anthropic models, and
-;;; their metadata is documented — 1M context, 128K output, the full effort
-;;; ladder, adaptive thinking, vision.  All register whether or not a
-;;; token is present: a missing or expired token is a clear error at request
-;;; time, not a model that silently vanishes from the picker.  init.lisp runs
-;;; before extensions, so it can still pick one of these as :model — settings
-;;; are read after the whole boot.
+(defun claude-oauth--has-key-p ()
+  "True if a Claude OAuth token is available: env var, init.lisp :api-key,
+or stored token file."
+  (or (claude-oauth--env "CLAUDE_OAUTH_ACCESS_TOKEN")
+      (let ((entry (cdr (assoc :anthropic-oauth evo.provider::*providers*))))
+        (claude-oauth--trim (evo.util:pget entry :api-key)))
+      (getf (claude-oauth--read-tokens) :access-token)))
 
-(dolist (id '("claude-sonnet-5" "claude-opus-5" "claude-fable-5" "claude-fable-5-1"))
-  (evo:register-model id
-                      :provider :anthropic-oauth
-                      :api :anthropic-oauth-messages
-                      :context-window 1000000 :max-output 128000
-                      :effort t :thinking-mode :adaptive :vision t))
+(when (claude-oauth--has-key-p)
+  ;; Static, and no network: evo supports the Anthropic models, and their
+  ;; metadata is documented — 1M context, 128K output, the full effort ladder,
+  ;; adaptive thinking, vision.
+  (dolist (id '("claude-sonnet-5" "claude-opus-5" "claude-fable-5" "claude-fable-5-1"))
+    (evo:register-model id
+                        :provider :anthropic-oauth
+                        :api :anthropic-oauth-messages
+                        :context-window 1000000 :max-output 128000
+                        :effort t :thinking-mode :adaptive :vision t)))
 
 ;;; ---------------------------------------------------------------------------
 ;;; Slash commands
