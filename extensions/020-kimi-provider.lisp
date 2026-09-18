@@ -101,16 +101,19 @@ the stock endpoint."
 
 (kimi--register-endpoint)
 
-;;; Static, and no network: this is documented model metadata, so both models
-;;; register whether or not a key is present.  A missing key is a clear error
-;;; at request time, not a model that silently vanishes from the picker.
+(defun kimi--has-key-p ()
+  "True if a Kimi Code API key is configured: env var or init.lisp :api-key."
+  (or (kimi--trim (uiop:getenv *kimi-api-key-env*))
+      (let ((entry (cdr (assoc *kimi-provider-key* evo.provider::*providers*))))
+        (kimi--trim (evo.util:pget entry :api-key)))))
 
-(evo:register-model "k3"
-  :provider *kimi-provider-key* :api :anthropic-messages
-  :context-window 1048576 :max-output *kimi-max-output*
-  :thinking-mode :effort-only :effort '(:low :high :max) :vision t)
+(when (kimi--has-key-p)
+  (evo:register-model "k3"
+    :provider *kimi-provider-key* :api :anthropic-messages
+    :context-window 1048576 :max-output *kimi-max-output*
+    :thinking-mode :effort-only :effort '(:low :high :max) :vision t)
 
-(evo:register-model "k3-256k"
-  :provider *kimi-provider-key* :api :anthropic-messages
-  :context-window 262144 :max-output *kimi-max-output*
-  :thinking-mode :effort-only :effort '(:low :high :max) :vision t)
+  (evo:register-model "k3-256k"
+    :provider *kimi-provider-key* :api :anthropic-messages
+    :context-window 262144 :max-output *kimi-max-output*
+    :thinking-mode :effort-only :effort '(:low :high :max) :vision t))
