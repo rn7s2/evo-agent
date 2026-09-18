@@ -177,12 +177,13 @@ point.
   `:budget-limited` and the next steering is a wrap-up template. A
   session-level budget exists too.
 - **Verified completion**: when an objective is mechanically checkable, the
-  agent writes a named zero-argument predicate into a userspace file, journals
-  it via `:load`, and references it by name on the `:goal` entry (at creation
-  or attached later with `update_goal done_when`). On `update_goal :complete`,
-  the kernel runs the predicate — failure returns an error and the goal stays
-  active. The model's completion claim becomes a checked assertion it wrote
-  against itself.
+  agent attaches a `done_when` verifier (at creation, or later with
+  `update_goal done_when`). It is always the check itself — an inline Lisp
+  form, journaled as text on the `:goal` entry, never a function name or a
+  file, so nowhere else for the model to hide what is actually being checked.
+  On `update_goal :complete`, the kernel evaluates the form — failure returns
+  an error and the goal stays active. The model's completion claim becomes a
+  checked assertion it wrote against itself.
 - **Supervisor**: the `evo` binary invoked plainly *is* the supervisor parent.
   It re-spawns itself as the session child, monitors process exit and a
   heartbeat file, restarts with `--resume`, and on repeated boot failures

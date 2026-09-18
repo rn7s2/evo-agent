@@ -445,7 +445,7 @@ A goal is journal state; the current goal is a fold over `:goal` entries.
 ```lisp
 (:goal-id "g-01" :objective "..." :status :active
  :token-budget 500000 :tokens-used 123456
- :done-when nil)          ; name of an agent-authored userspace predicate (D15)
+ :done-when nil)          ; source text of the check itself (D15)
 ```
 
 Statuses are `:active`, `:paused`, `:blocked`, `:budget-limited`, `:complete`.
@@ -499,22 +499,26 @@ audit language carried in the tool description itself.
 
 `:done-when` is designed for the **agent** to fill, not the user (D15). Users
 state objectives in prose; when an objective is mechanically checkable the
-agent formalizes it — writing a *named* zero-argument predicate into a
-userspace file, journaled via `:load` so it survives restart (closures do not
-round-trip through sexprs) — and references it by name on the `:goal` entry.
-The continuation prompt steers the agent to derive the predicate up front, at
-goal start, not at completion time, and nags only while none is attached. A
-predicate can be attached at creation (`create_goal done_when`) or added to a
-live goal later (`update_goal done_when`) — the latter matters because a goal
-the user set with `/goal` has no predicate until the agent writes one.
+agent formalizes it, and the verifier *is* the formalization: a Lisp form,
+journaled as source text on the `:goal` entry and evaluated in `EVO.USER` when
+completion is claimed. There is deliberately no way to name a function defined
+elsewhere — a verifier that lived in a file the agent wrote and loaded would
+put the real check out of the journal's sight, where neither the human reading
+it nor a later session's audit can see what was actually checked. The
+continuation prompt steers the agent to derive the verifier up front, at goal
+start, not at completion time, and nags only while none is attached. It can be
+attached at creation (`create_goal done_when`) or added to a live goal later
+(`update_goal done_when`) — the latter matters because a goal the user set
+with `/goal` has no verifier until the agent supplies one.
 
-`update_goal :complete` is then not taken at its word: the kernel runs the
-predicate. Failure returns an error carrying the predicate's output and the
-goal stays `:active`. The model's completion claim becomes a checked assertion
-it wrote against itself. A lazy `(defun goal-done-p () t)` remains possible;
-the mitigation is that the predicate is a journaled, user-visible artifact
-written before the work, when there is no victory to declare yet. The feature
-is optional — `/goal` works without it — and closes the premature-victory hole
+`update_goal :complete` is then not taken at its word: the kernel evaluates
+the form (in `EVO.USER`, with anything it prints carried into the report).
+Failure returns an error carrying the verifier's output and the goal stays
+`:active`. The model's completion claim becomes a checked assertion it wrote
+against itself. A lazy `(lambda () t)` remains possible; the mitigation is
+that the verifier is a journaled, user-visible artifact written before the
+work, when there is no victory to declare yet. The feature is optional —
+`/goal` works without it — and closes the premature-victory hole
 in about twenty lines of kernel code.
 
 ## 10. Lore system (`/lore`)
@@ -933,7 +937,7 @@ a refactor.
 | D12 | The TUI editor is a **plain multi-line text editor**: Enter sends, Shift+Enter inserts a newline, pastes over three lines collapse to a placeholder that re-pasting expands. No completions or highlighting. | Multi-line editing is crucial UX; editor sophistication is not where the novelty is. |
 | D13 | **Slim core: everything outside the core loop ships as a core extension** — bundled, on the same API, with the same control as user extensions; essential ones cannot be disabled. | Dogfooding proves the API's depth and keeps the kernel small and honest. See §13. |
 | D14 | **Todo checklists ship**, as a core extension. | Long-running goal work needs user-visible progress. The one deliberate deviation from the minimal omit-list. |
-| D15 | `:done-when` predicates are **agent-authored, not user-written**: named userspace functions journaled via `:load` and referenced by name on the `:goal` entry. | Users state objectives in prose; the agent formalizes them. Named, journaled functions survive restart; closures do not round-trip through sexprs. |
+| D15 | `:done-when` verifiers are **the check itself**: a Lisp form, journaled as source text on the `:goal` entry and evaluated on each completion claim. Never a function name — there is no second place for the check to live. | Users state objectives in prose; the agent formalizes them, and the formalization stays where the human can read it. Source text is data: it survives restart with no load step, and a closure could not round-trip through the journal anyway. |
 | D16 | **No sub-agents.** | The journal-tree model extends naturally to them (a child session is a forked journal) whenever they are wanted, so nothing is lost by waiting. |
 | D17 | **One binary total.** No shell launcher and no separate supervisor executable: `evo` invoked plainly *is* the supervisor parent, re-spawning itself as the session child. On SBCL the heap is baked in at build time, refining D10. `--no-supervisor` runs in-process. | A wrapper script is one more artifact to install, breaks TTY inheritance under POSIX background rules, and buys nothing the binary cannot do itself. |
 
