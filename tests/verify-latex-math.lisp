@@ -3,8 +3,9 @@
 ;;;; Loads evo + the bundled extension from the on-disk source and asserts the
 ;;;; whole pipeline: grammar, placement into scrollback, source fallback, and
 ;;;; REAL rasterization to a valid iTerm2/sixel escape whose payload is a PNG.
-;;;; Exits 0 on success, 1 on any failure — the shape the done_when predicate
-;;;; (latex-math-render-done-p) checks.
+;;;; Exits 0 on success, 1 on any failure — the shape a done_when form
+;;;; such as (zerop (nth-value 2 (uiop:run-program (list "sbcl" ...)
+;;;; :ignore-error-status t))) checks.
 
 (require :asdf)
 (push (uiop:getcwd) asdf:*central-registry*)

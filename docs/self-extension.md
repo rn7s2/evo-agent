@@ -50,23 +50,37 @@ Hooks run in registration order, so the rank orders those too.
 Then `eval` `(evo:load-extension ".evo/extensions/300-http-head.lisp")`, and
 `http_head` exists.
 
-## Goal predicates (`done-when`)
+## Goal verifiers (`done-when`)
 
-When you create a goal whose objective is mechanically checkable, formalize
-it FIRST — before doing the work:
+When you create a goal whose objective is mechanically checkable, attach the
+verifier FIRST — before doing the work. It is always the check itself, as an
+inline Lisp form; the source text lives on the `:goal` journal entry, so
+nothing is written to disk and nothing is loaded to make it run:
 
 ```lisp
-;; file: .evo/extensions/300-goal-predicates.lisp
-(in-package :evo.user)
-(defun tests-pass-p ()
-  (zerop (nth-value 2 (uiop:run-program "./test.sh"
-                                        :ignore-error-status t))))
+create_goal(objective: "...", done_when: "(zerop (nth-value 2 (uiop:run-program \"make test\" :ignore-error-status t)))")
 ```
 
-Load it, then `create_goal` with `done_when: "tests-pass-p"`. The kernel
-runs the predicate when you claim completion and rejects the claim if it
-fails — your completion claim becomes a checked assertion you wrote against
-yourself, at a moment when you had no victory to declare.
+The form is read (with `*read-eval*` off) and evaluated in `EVO.USER` when
+you claim completion; the value must be true for the claim to pass, so test
+an exit code rather than relying on `run-program`'s return value. If the form
+evaluates to a function, the function is called, so `"(lambda () ...)"` works
+too, and anything the form prints comes back in the failure report.
+`update_goal` with `done_when` attaches or replaces the verifier on a live
+goal; a malformed form is refused at attach time rather than when you claim
+victory, and a bare name is refused outright — the check has to be in the
+journal, where it can be read.
+
+A long check is a form that runs a script and tests its exit code:
+
+```lisp
+done_when: "(zerop (nth-value 2 (uiop:run-program (list \"./test.sh\") :ignore-error-status t)))"
+```
+
+Either way the kernel evaluates the verifier when you claim completion and
+rejects the claim if it fails — your completion claim becomes a checked
+assertion you wrote against yourself, at a moment when you had no victory to
+declare.
 
 ## Debugging the live image
 
