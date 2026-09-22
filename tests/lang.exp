@@ -6,15 +6,19 @@
 # image with /eval rather than looking at the screen chrome — evo's own
 # interface is not translated and must not change.
 #
-# The zh-CN pack ships in extensions/, which this test installs into a scratch
-# EVO_HOME the way `make install-home` does.
+# A minimal language pack is written into a scratch EVO_HOME/extensions the
+# way a user would install one.  This tests the register-prompt-language
+# interface and /lang command without bundling a full translation.
 set timeout 15
 
 set repo [file dirname [file dirname [file normalize $argv0]]]
 set scratch [exec mktemp -d /tmp/evo-lang.XXXXXX]
 set env(EVO_HOME) "$scratch/home"
 file mkdir "$env(EVO_HOME)/extensions"
-file copy "$repo/extensions/100-lang-zh-cn.lisp" "$env(EVO_HOME)/extensions/"
+set f [open "$env(EVO_HOME)/extensions/100-lang-test.lisp" w]
+puts $f {(in-package :evo.user)}
+puts $f {(evo:register-prompt-language "test" :name "Testish" :native "Testish" :response-language "Testish" :sections (list :base "PROMPT IN TESTISH" :guidelines "GUIDELINES IN TESTISH"))}
+close $f
 foreach v {EVO_SUPERVISED_CHILD EVO_HEARTBEAT_FILE} {
     if {[info exists env($v)]} { unset env($v) }
 }
@@ -62,11 +66,11 @@ expect {
     timeout { fail "startup status line"; exit 1 }
 }
 
-# The zh-CN extension loaded from EVO_HOME/extensions registers a pack.
+# The test extension loaded from EVO_HOME/extensions registers a pack.
 send "/eval (if (= 2 (length (evo.kernel:all-prompt-languages))) :two-packs :other)\r"
 expect {
-    -re {:two-packs} { check "en plus the zh-CN extension pack are registered" }
-    timeout { fail "en plus the zh-CN extension pack are registered" }
+    -re {:two-packs} { check "en plus the test extension pack are registered" }
+    timeout { fail "en plus the test extension pack are registered" }
 }
 
 send "[prompt-language-probe]\r"
@@ -76,7 +80,7 @@ expect {
 }
 
 # /lang with a code switches without the picker.
-send "/lang zh-CN\r"
+send "/lang test\r"
 expect {
     -re {language ->|language →} { check "/lang <code> confirms the switch" }
     timeout { fail "/lang <code> confirms the switch" }
@@ -84,14 +88,14 @@ expect {
 
 send "[prompt-language-probe]\r"
 expect {
-    -re {\("zh-cn" t\)} { check "the system prompt is now assembled in Chinese" }
-    timeout { fail "the system prompt is now assembled in Chinese" }
+    -re {\("test" t\)} { check "the system prompt is now assembled in the test pack" }
+    timeout { fail "the system prompt is now assembled in the test pack" }
 }
 
 # The switch is journalled, so it is state, not a screen effect.
 send "/eval (evo.kernel:language-request (evo.journal:fold-state (evo.kernel:agent-journal evo:*agent*)))\r"
 expect {
-    -re {"zh-CN"} { check "the choice is journalled, not just displayed" }
+    -re {"test"} { check "the choice is journalled, not just displayed" }
     timeout { fail "the choice is journalled, not just displayed" }
 }
 
@@ -120,7 +124,7 @@ expect {
 
 send "[prompt-language-probe]\r"
 expect {
-    -re {\("zh-cn" t\)} { check "a cancelled pick leaves the language alone" }
+    -re {\("test" t\)} { check "a cancelled pick leaves the language alone" }
     timeout { fail "a cancelled pick leaves the language alone" }
 }
 

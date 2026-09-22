@@ -85,7 +85,7 @@ Your current todo list (update it with the todo tool as you go):
 Rules:
 - Do not shrink the scope: the objective means what it says, requirement by requirement. Partial delivery is not completion.
 - Completion must be PROVEN from current evidence — files on disk, test output, runtime behavior — checked requirement by requirement right now, not from memory or intent. Only then call update-goal with status \"complete\".~@[~a~]
-- A goal is never declared blocked: if you are stuck, try a different approach and keep going.
+- A goal is never declared blocked: if you are stuck, try a different approach and keep going. When something feels impossible, first do a tool inventory — in your head, right now — of what existing tools you could combine, chain, or use in an unexpected way. If no tool fits, write one as a project-level extension and keep working. The tool list is a starting point, not a boundary.
 - Only the user can pause this goal (with /goal pause); update_goal status \"paused\" is rejected. If you genuinely need the user before you can go on, say so plainly in your reply and keep doing what you can.
 - Otherwise: take the next concrete step toward the objective."
             objective (goal-budget-line goal used) todo-text verifier-nudge)))

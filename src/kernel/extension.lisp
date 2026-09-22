@@ -408,8 +408,8 @@ language the model answers in:
    :native \"简体中文\" :response-language \"简体中文\"
    :sections (list :base \"...\" :guidelines \"...\"))
 Sections left out fall back to English, so a pack may translate as much or
-as little as it likes.  See extensions/100-lang-zh-cn.lisp for a full one.
-Re-registration replaces the pack, so reloading is idempotent."
+as little as it likes.  Re-registration replaces the pack, so reloading is
+idempotent."
   (apply #'evo.kernel:register-prompt-language code args))
 
 (defun set-language (code &optional agent)
