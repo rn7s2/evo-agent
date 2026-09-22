@@ -15,7 +15,8 @@
   /thinking [level]    low·medium·high·xhigh·max (changing it mid-session
                        drops the provider prompt cache)
   /lang [code]         pick the language of the system prompt and replies
-                       (\"en\", \"zh-CN\"; no code: a list)
+                       (\"en\" only by default; install a pack for more;
+                       no code: a list)
   /compact [hint]      compact the context now
   /image [path ...]    attach an image to the message being typed
                        (no path: the system clipboard, same as ctrl+v)
