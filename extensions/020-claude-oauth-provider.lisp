@@ -4,9 +4,10 @@
 ;;;; `make install` (via install-home).  Loaded automatically at evo startup.
 ;;;;
 ;;;; Registers an Anthropic Messages provider that authenticates with a
-;;;; Claude/Anthropic OAuth access token and injects Claude Code billing-header
-;;;; attribution into every OAuth request.  Includes OAuth login (PKCE +
-;;;; local callback server) and token refresh.
+;;;; Claude/Anthropic OAuth access token and makes every request look like
+;;;; Claude Code's: the billing-header attribution line in the system prompt,
+;;;; plus the x-app / User-Agent / session-id client headers.  Includes OAuth
+;;;; login (PKCE + local callback server) and token refresh.
 ;;;;
 ;;;; What this registers
 ;;;;   provider :anthropic-oauth — https://api.anthropic.com, Bearer auth
@@ -351,6 +352,28 @@ token itself is expired."
   (declare (ignore api))
   (evo:endpoint-path (claude-oauth--delegate-api)))
 
+(defun claude-oauth--session-id ()
+  "The live session's id, for X-Claude-Code-Session-Id, or NIL when no session
+is running (a bare provider call outside an agent)."
+  (let ((agent evo:*agent*))
+    (when agent
+      (let ((journal (evo.kernel:agent-journal agent)))
+        (when journal
+          (evo.util:pget (evo.journal:journal-header journal) :id))))))
+
+(defun claude-oauth--client-headers ()
+  "The headers Claude Code puts on every first-party request to say who is
+calling: x-app, User-Agent, and the session id it correlates one session's
+requests by.  evo has one session kind, so x-app is always `cli` (Claude Code
+says `cli-bg` for its background sessions), and the entrypoint is the one the
+billing header claims, so the two never disagree about what kind of client
+this is."
+  (let ((session (claude-oauth--session-id)))
+    `(("x-app" . "cli")
+      ("User-Agent" . ,(format nil "claude-cli/~a (external, ~a)"
+                               *claude-code-version* *claude-code-entrypoint*))
+      ,@(when session `(("X-Claude-Code-Session-Id" . ,session))))))
+
 (defmethod evo:auth-headers ((api claude-oauth-messages-api) config)
   (declare (ignore api))
   (let ((token (or (claude-oauth--trim (getf config :api-key))
@@ -362,8 +385,9 @@ token itself is expired."
                  (string= "sk-ant-oat" token :end2 10))
       (error 'evo:provider-error
              :message "Token does not look like a Claude/Anthropic OAuth access token (expected sk-ant-oat prefix)."))
-    `(("Authorization" . ,(format nil "Bearer ~a" token))
-      ("anthropic-version" . "2023-06-01"))))
+    (append `(("Authorization" . ,(format nil "Bearer ~a" token))
+              ("anthropic-version" . "2023-06-01"))
+            (claude-oauth--client-headers))))
 
 (defmethod evo:build-request ((api claude-oauth-messages-api)
                               &key model system messages tools thinking-level)
