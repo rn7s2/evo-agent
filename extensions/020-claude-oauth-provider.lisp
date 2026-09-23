@@ -431,13 +431,36 @@ or NIL."
          (string err)
          (t (gethash "error_description" j)))))))
 
+(defun claude-oauth--oauth-error-code (body)
+  "Return the OAuth error code named by a token-endpoint error BODY, or NIL.
+BODY may be a JSON string or an already-parsed hash-table.  The code is
+`error` when it is a string (OAuth shape: {\"error\": \"invalid_scope\"}) and
+`error.type` when it is an object (Anthropic shape) — the same two shapes
+Claude Code's own error reader picks apart."
+  (when body
+    (ignore-errors
+     (let* ((j (etypecase body
+                (string (com.inuoe.jzon:parse body))
+                (hash-table body)))
+            (err (gethash "error" j)))
+       (typecase err
+         (string err)
+         (hash-table (gethash "type" err)))))))
+
 ;;; ---------------------------------------------------------------------------
 ;;; OAuth PKCE login flow
 ;;; ---------------------------------------------------------------------------
 
 (defparameter *claude-oauth-authorize-url* "https://claude.com/cai/oauth/authorize")
 (defparameter *claude-oauth-token-url* "https://platform.claude.com/v1/oauth/token")
-(defparameter *claude-oauth-scope* "org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload")
+
+;; Scopes, as Claude Code 2.1.280 asks for them.  The two sets differ: login
+;; also requests the console scope org:create_api_key, which exists only to
+;; mint an API key, while a refresh re-requests the inference set alone.
+(defparameter *claude-oauth-scope*
+  "org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload user:plugins")
+(defparameter *claude-oauth-refresh-scope*
+  "user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload user:plugins")
 
 (defun claude-oauth--client-id ()
   (or (claude-oauth--env "CLAUDE_OAUTH_CLIENT_ID")
@@ -557,27 +580,52 @@ request arrives or 120 seconds elapse."
                                           (+ (claude-oauth--now-ms) (* rt-expires-in 1000))
                                           (+ (claude-oauth--now-ms) 2592000000))))))
 
+(define-condition claude-oauth--invalid-scope (error) ()
+  (:documentation "The token endpoint refused the scope list a refresh asked
+for (HTTP 400, OAuth code invalid_scope).  Signalled so the caller can retry
+without requesting any scope, which leaves the grant as it was."))
+
+(defun claude-oauth--post-refresh (refresh-token scope)
+  "POST a refresh_token grant to the token endpoint and return the response
+body.  SCOPE, when non-NIL, is the scope list to request; NIL sends no scope
+parameter at all.  Signals CLAUDE-OAUTH--INVALID-SCOPE when the endpoint
+refuses the requested scope."
+  (let ((body (claude-oauth--json-string
+                (append (list :grant_type "refresh_token"
+                              :refresh_token refresh-token
+                              :client_id (claude-oauth--client-id))
+                        (when scope (list :scope scope))))))
+    (handler-case
+        (evo:with-proxy (proxy *claude-oauth-token-url*)
+          (apply #'dex:post *claude-oauth-token-url*
+                 :headers `(("Content-Type" . "application/json"))
+                 :content body
+                 (when proxy (list :proxy proxy))))
+      (dexador.error:http-request-failed (e)
+        (let ((resp-body (ignore-errors (dexador.error:response-body e)))
+              (status (dexador.error:response-status e)))
+          (when (and (eql status 400)
+                     (equal "invalid_scope" (claude-oauth--oauth-error-code resp-body)))
+            (error 'claude-oauth--invalid-scope))
+          (format *error-output* "~&[claude-oauth] Token refresh request: url=~a body=~a~%"
+                  *claude-oauth-token-url* body)
+          (error "Token refresh failed: HTTP ~a~@[: ~a~]"
+                 status (claude-oauth--extract-error resp-body)))))))
+
 (defun claude-oauth--refresh-token (refresh-token)
   "POST to the token endpoint, refresh the token.  Returns plist
-(:access-token s :refresh-token s :expires-at i :refresh-token-expires-at i)."
-  (let* ((body (claude-oauth--json-string
-                 (list :grant_type "refresh_token"
-                       :refresh_token refresh-token
-                       :client_id (claude-oauth--client-id))))
-         (response
+(:access-token s :refresh-token s :expires-at i :refresh-token-expires-at i).
+
+Requests *CLAUDE-OAUTH-REFRESH-SCOPE* explicitly, as Claude Code does — a
+refresh is also how a token picks up a scope the client started asking for
+after the token was issued.  If the endpoint refuses that list, retry once
+without a scope parameter, leaving the grant as it was."
+  (let* ((response
            (handler-case
-               (evo:with-proxy (proxy *claude-oauth-token-url*)
-                 (apply #'dex:post *claude-oauth-token-url*
-                        :headers `(("Content-Type" . "application/json"))
-                        :content body
-                        (when proxy (list :proxy proxy))))
-             (dexador.error:http-request-failed (e)
-               (let ((resp-body (ignore-errors (dexador.error:response-body e))))
-                 (format *error-output* "~&[claude-oauth] Token refresh request: url=~a body=~a~%"
-                         *claude-oauth-token-url* body)
-                 (error "Token refresh failed: HTTP ~a~@[: ~a~]"
-                        (dexador.error:response-status e)
-                        (claude-oauth--extract-error resp-body))))))
+               (claude-oauth--post-refresh refresh-token *claude-oauth-refresh-scope*)
+             (claude-oauth--invalid-scope ()
+               (format *error-output* "~&[claude-oauth] Token endpoint refused the refresh scope; retrying without one.~%")
+               (claude-oauth--post-refresh refresh-token nil))))
          (json (com.inuoe.jzon:parse response)))
     (let ((access (gethash "access_token" json))
           (refresh (gethash "refresh_token" json))
