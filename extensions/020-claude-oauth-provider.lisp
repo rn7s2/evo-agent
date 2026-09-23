@@ -11,8 +11,8 @@
 ;;;; What this registers
 ;;;;   provider :anthropic-oauth — https://api.anthropic.com, Bearer auth
 ;;;;   models   claude-sonnet-5 · claude-opus-5 · claude-fable-5 ·
-;;;;            claude-fable-5-1 — the supported Anthropic models, statically
-;;;;            (no /v1/models fetch):
+;;;;            claude-fable-5-1 · claude-opus-5-5 — the supported Anthropic
+;;;;            models, statically (no /v1/models fetch):
 ;;;;            1M context, 128K output, full effort ladder, adaptive
 ;;;;            thinking, vision.
 ;;;;
@@ -29,7 +29,7 @@
 ;;; Billing-header constants (must match the current Claude Code release)
 ;;; ---------------------------------------------------------------------------
 
-(defparameter *claude-code-version* "2.1.258")
+(defparameter *claude-code-version* "2.1.280")
 (defparameter *billing-header-salt* "59cf53e54c78")
 (defparameter *billing-header-positions* #(4 7 20))
 (defparameter *claude-code-entrypoint* "sdk-cli")
@@ -127,10 +127,12 @@
 
 (defun build-billing-header-value (messages)
   "Build the x-anthropic-billing-header value from MESSAGES, or NIL.
-Matches Claude Code 2.1.258's e4t/Mct construction: cc_version is
+Matches Claude Code 2.1.280's hHn/_Se construction: cc_version is
 VERSION.suffix, cc_entrypoint is the entrypoint, and cch is always the
 literal 00000 for firstParty (direct api.anthropic.com, no custom base
-URL) — no longer a hash of the first user message."
+URL) — no longer a hash of the first user message.  The suffix is still
+sha256(salt + chars at positions 4/7/20 of the first user message +
+VERSION), first 3 hex chars."
   (let ((text (first-user-text messages)))
     (unless text (return-from build-billing-header-value nil))
     (let* ((sampled (with-output-to-string (s)
@@ -612,7 +614,8 @@ or stored token file."
   ;; Static, and no network: evo supports the Anthropic models, and their
   ;; metadata is documented — 1M context, 128K output, the full effort ladder,
   ;; adaptive thinking, vision.
-  (dolist (id '("claude-sonnet-5" "claude-opus-5" "claude-fable-5" "claude-fable-5-1"))
+  (dolist (id '("claude-sonnet-5" "claude-opus-5" "claude-fable-5" "claude-fable-5-1"
+                "claude-opus-5-5"))
     (evo:register-model id
                         :provider :anthropic-oauth
                         :api :anthropic-oauth-messages

@@ -68,6 +68,11 @@
   :context-window 1000000 :max-output 128000
   :effort t :thinking-mode :adaptive)
 
+(evo:register-model "claude-opus-5-5"
+  :provider :anthropic
+  :context-window 1000000 :max-output 128000
+  :effort t :thinking-mode :adaptive)
+
 ;; A third-party endpoint speaking the same Messages API: DeepSeek v4.
 ;; Thinking is steered by effort alone, so the default :effort-only mode is
 ;; right.  The official rungs are low/high/max (default high; the API
