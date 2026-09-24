@@ -2573,8 +2573,6 @@ but it takes DELAY, which is what makes the asynchrony observable."
                                                 (mcp-servers))))
            (check "/mcp says so while it is in flight"
                   (search "connecting" (evo.user::mcp-status-report)))
-           (check "the status line says so too"
-                  (search "1 connecting" (evo.user::mcp-status-label)))
            ;; --- the tool arrives, with no turn in between --------------------
            (check "the tool appears when the server answers"
                   (mcp-wait-for (lambda () (evo.kernel:find-tool "notes__ping"))))
@@ -2626,9 +2624,7 @@ but it takes DELAY, which is what makes the asynchrony observable."
              (check "/mcp says the connection was stopped, not that it is pending"
                     (let ((report (evo.user::mcp-status-report)))
                       (and (search "stopped by /reload" report)
-                           (not (search "connecting" report)))))
-             (check "and the status line counts it as cancelled"
-                    (search "1 cancelled" (or (evo.user::mcp-status-label) ""))))
+                           (not (search "connecting" report))))))
            ;; --- a stop after the handshake interrupts nothing ----------------
            ;; The interrupt is asynchronous.  Were it allowed to land anywhere,
            ;; a stop during registration would unwind REGISTER-TOOL halfway
@@ -2701,8 +2697,6 @@ but it takes DELAY, which is what makes the asynchrony observable."
                                                  (mcp-servers))))))
            (check "/mcp carries the reason"
                   (search "stub transport failure" (evo.user::mcp-status-report)))
-           (check "and the status line counts it"
-                  (search "1 failed" (evo.user::mcp-status-label)))
            ;; Run on this thread, where a warning can be caught: on the task's
            ;; own thread nothing muffles it, and it is printed over the TUI.
            (check "a failing server is recorded without a warning"
@@ -2721,9 +2715,7 @@ but it takes DELAY, which is what makes the asynchrony observable."
            (evo.user::mcp-boot)
            (check "no servers configured renders the setup hint"
                   (search "evo:set-setting :mcp-servers"
-                          (evo.user::mcp-status-report)))
-           (check "and claims no status-line space"
-                  (null (evo.user::mcp-status-label))))
+                          (evo.user::mcp-status-report))))
       ;; Cleanup: stop the tasks, drop what the extension registered, and put
       ;; the transport back.  The tools are removed by hand because
       ;; RESTORE-EXTENSION-REGISTRIES only prunes against a snapshot taken by

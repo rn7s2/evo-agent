@@ -642,42 +642,8 @@ outside it, so a long report never holds the lock the boot task needs."
                            (evo.util:pget server :error))))))
           (format out "~%/reload re-reads the config and reconnects.")))))
 
-(defun mcp-status-label (&optional tui)
-  "The status line's MCP segment: nothing when no server is configured, else a
-one-line summary.  Runs on the TUI thread on every repaint, so it only reads
-what the boot task published — no I/O, and the lock is held for the read and
-nothing else."
-  (declare (ignore tui))
-  (let ((summary
-          (bt:with-lock-held (*mcp-lock*)
-            (when *mcp-servers*
-              (let ((connecting 0) (connected 0) (failed 0) (cancelled 0) (tools 0))
-                (dolist (server *mcp-servers*)
-                  (case (mcp-server-status server)
-                    (:connected (incf connected)
-                                (incf tools (length (mcp-server-tools server))))
-                    (:error (incf failed))
-                    (:cancelled (incf cancelled))
-                    (t (incf connecting))))
-                (evo.util:string-join
-                 " · "
-                 (remove nil
-                         (list (when (plusp connecting)
-                                 (format nil "~d connecting" connecting))
-                               (when (plusp connected)
-                                 (format nil "~d up, ~d tool~:p" connected tools))
-                               (when (plusp failed)
-                                 (format nil "~d failed" failed))
-                               (when (plusp cancelled)
-                                 (format nil "~d cancelled" cancelled))))))))))
-    (when summary (evo.tui::dim (format nil "mcp ~a" summary)))))
-
 (evo:register-command "mcp"
   (lambda (ctx) (declare (ignore ctx)) (mcp-status-report))
   :description "MCP servers: what connected, and the tools it registered")
-
-;; Order 400 keeps this inboard of the core segments on the right.
-(evo.tui:add-status-segment :mcp #'mcp-status-label :side :right :order 400)
-(evo:on-unload (lambda () (evo.tui:remove-status-segment :mcp)))
 
 (mcp-boot)
