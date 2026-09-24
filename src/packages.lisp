@@ -31,8 +31,8 @@
            #:ensure-winhttp-proxy #:iso8601-now #:iso8601-utc
            #:format-local-timestamp #:local-timezone-name
            #:gen-id #:reseed-ids #:pget #:pput #:plist-merge
-           #:evo-home #:project-evo-dir #:encode-cwd #:ensure-directory
-           #:write-sexpr-line #:read-sexpr #:read-sexpr-stream #:validate-journal-value
+           #:evo-home #:project-evo-dir #:encode-cwd
+           #:write-sexpr-line #:read-sexpr-stream #:validate-journal-value
            #:setting #:set-setting #:reset-settings #:*settings*
            #:capture-settings #:restore-settings
            #:cat #:normalize-newlines #:crlf-newlines #:crlf-p
@@ -127,7 +127,7 @@
            #:register-goal-tools #:create-goal-entry #:goal-tokens-used
            #:update-goal-entry
            ;; lore + compaction
-           #:add-lore #:add-session-lore #:all-lore #:all-lore-entries
+           #:add-lore #:add-session-lore #:all-lore-entries
            #:edit-lore #:remove-lore #:find-lore-scope
            #:compact-now #:compaction-needed-p #:estimate-context-tokens
            #:overflow-error-p #:select-cut

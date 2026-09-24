@@ -295,13 +295,6 @@ Returns TEXT itself when there is nothing to change."
 
 ;;; Files & directories
 
-(defun ensure-directory (pathname)
-  (ensure-directories-exist
-   (if (pathname-name pathname)
-       pathname
-       (merge-pathnames "x" pathname)))
-  pathname)
-
 (defun read-file-string (path)
   (with-open-file (in path :direction :input :external-format :utf-8
                            :if-does-not-exist :error)
@@ -436,15 +429,6 @@ NTFS at all (it names an alternate data stream)."
     (vector (progn (map nil #'validate-journal-value value) t))
     (t (error 'malformed-sexpr
               :text (format nil "unsupported object of type ~s" (type-of value))))))
-
-(defun read-sexpr (line)
-  "Read one journal form from LINE, safely.  Returns the validated form."
-  (with-standard-io-syntax
-    (let ((*read-eval* nil)
-          (*package* (find-package :evo.sexpr-sandbox)))
-      (let ((form (read-from-string line)))
-        (validate-journal-value form)
-        form))))
 
 (defun read-sexpr-stream (stream)
   "Read the next journal form from STREAM, safely.  Returns :eof at end.

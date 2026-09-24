@@ -34,6 +34,25 @@ Windows when C:\\tmp happened to exist — a fresh box has no /tmp there, and
 every fixture write would fail.)"
   (string-right-trim "/\\" (namestring (uiop:temporary-directory))))
 
+(defun ensure-directory (pathname)
+  "Create the directory PATHNAME names (a directory pathname, or a file in
+it) and return PATHNAME."
+  (ensure-directories-exist
+   (if (pathname-name pathname)
+       pathname
+       (merge-pathnames "x" pathname)))
+  pathname)
+
+(defun read-sexpr (text)
+  "One journal form read from TEXT through the journal's own safe reader."
+  (with-input-from-string (in text)
+    (read-sexpr-stream in)))
+
+(defun all-lore (&key state (cwd (uiop:getcwd)))
+  "Every lore entry's text, in scope order — the guidance strings alone."
+  (mapcar (lambda (e) (getf e :text))
+          (all-lore-entries :state state :cwd cwd)))
+
 (defun stub-emit-program (line)
   "A runnable stub program that prints LINE to stdout and exits 0, ignoring
 its arguments.  Stands in for an external tool whose contract is \"argv in,

@@ -7,8 +7,6 @@
 
 (in-package :evo.todo)
 
-(defparameter *statuses* '(:pending :in-progress :done))
-
 (defun current-todos (agent)
   "Current checklist for AGENT: vector of (:text s :status kw), or nil."
   (custom-state (fold-state (agent-journal agent)) "todo"))
