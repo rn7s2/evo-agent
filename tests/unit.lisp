@@ -2633,17 +2633,23 @@ but it takes DELAY, which is what makes the asynchrony observable."
            ;; The interrupt is asynchronous.  Were it allowed to land anywhere,
            ;; a stop during registration would unwind REGISTER-TOOL halfway
            ;; through its hash-table write.  Registration is slowed down here
-           ;; so the stop is sure to arrive in the middle of it.
+           ;; so the stop is sure to arrive in the middle of it.  The kernel's
+           ;; REGISTER-TOOL* is the function wrapped, not the extension's own
+           ;; MCP-REGISTER-TOOLS: ECL compiles a call between two functions of
+           ;; one file as a direct call, which a new SYMBOL-FUNCTION never
+           ;; reaches.
            (mcp-install-stub)
-           (let* ((saved-register (symbol-function 'evo.user::mcp-register-tools))
+           (let* ((saved-register (symbol-function 'evo.kernel:register-tool*))
                   (entered nil)
                   (finished nil))
-             (setf (symbol-function 'evo.user::mcp-register-tools)
-                   (lambda (server tools)
-                     (setf entered t)
-                     (sleep 0.5)
-                     (funcall saved-register server tools)
-                     (setf finished t)))
+             (setf (symbol-function 'evo.kernel:register-tool*)
+                   (lambda (&rest args &key name &allow-other-keys)
+                     (if (equal name "late__ping")
+                         (progn (setf entered t)
+                                (sleep 0.5)
+                                (prog1 (apply saved-register args)
+                                  (setf finished t)))
+                         (apply saved-register args))))
              (unwind-protect
                   (progn
                     (evo.util:set-setting :mcp-servers
@@ -2655,14 +2661,14 @@ but it takes DELAY, which is what makes the asynchrony observable."
                            (thread (getf task :thread)))
                       (evo.kernel::stop-extension-task task)
                       (check "a stop during registration lets it finish"
-                             finished)
+                             (and finished (evo.kernel:find-tool "late__ping")))
                       (check "the task still exits within the stop window"
                              (not (bt:thread-alive-p thread)))
                       (check "and what it finished is published"
                              (equal '(:connected)
                                     (mapcar #'evo.user::mcp-server-status
                                             (mcp-servers))))))
-               (setf (symbol-function 'evo.user::mcp-register-tools) saved-register)))
+               (setf (symbol-function 'evo.kernel:register-tool*) saved-register)))
            ;; --- a stop before the handshake is caught by the flag ------------
            (let ((boot (evo.user::make-mcp-boot))
                  (server (evo.user::mcp-server-from-spec
