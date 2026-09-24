@@ -1,8 +1,9 @@
-;;;; cli.lisp — the evo CLI (non-TUI modes).
+;;;; cli.lisp — the evo CLI: argument parsing, session bring-up, and the
+;;;; entry point that composes the core with its frontends.
 ;;;;
-;;;; The MVP ships the two scriptable frontends the design wants from day
-;;;; one: print mode (`evo -p "prompt"`) and event-stream mode (`--events`,
-;;;; line-delimited sexprs on stdout).  The TUI is the interactive frontend.
+;;;; Two frontends are scriptable and live here: print mode (`evo -p
+;;;; "prompt"`) and event-stream mode (`--events`, line-delimited sexprs on
+;;;; stdout).  The TUI is the interactive frontend.
 ;;;;
 ;;;; stdout carries assistant text (print mode) or event sexprs (event mode);
 ;;;; the tool/turn trace goes to stderr.
@@ -240,24 +241,18 @@ where /model and /reload can fix the registry in place."
                  :model-override (getf opts :model)
                  :thinking-override (getf opts :thinking))))
     (setf evo:*agent* agent)
-    (evo.kernel:lock-kernel-packages)
+    ;; The core locks its own packages; these two are the frontends this
+    ;; binary composes it with.
+    (lock-kernel-packages :evo.cli :evo.tui)
     ;; Userspace: init files (config), extension dirs, then replay the
     ;; session's :load entries.
-    (if (getf opts :no-userspace)
-        (progn                        ; kernel registries still need seeding
-          (evo.util:reset-settings)
-          (evo.provider:reset-user-registries))
-        (let ((evo.kernel::*current-journal* journal))
-          (evo.kernel:boot-userspace :journal (and (not resumed-p) journal))
-          (when resumed-p
-            (replay-loads (fold-state journal)))))
-    (run-hooks :session-start (list :agent agent :resumed resumed-p))
+    (boot-session agent :resumed-p resumed-p
+                        :no-userspace (getf opts :no-userspace))
     ;; Journal explicit model/thinking choices so resume preserves them.
     (when (getf opts :model)
-      (append-entry journal (list :type :model-change :model (getf opts :model))))
+      (set-session-model agent (getf opts :model)))
     (when (getf opts :thinking)
-      (append-entry journal (list :type :thinking-change
-                                  :thinking (getf opts :thinking))))
+      (set-session-thinking agent (getf opts :thinking)))
     (when (getf opts :goal)
       (evo.kernel:create-goal-entry agent (getf opts :goal)))
     (values agent resumed-p)))

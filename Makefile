@@ -47,8 +47,11 @@ install: build install-home
 	  sudo install -m 755 build/evo $(PREFIX)/bin/evo; \
 	fi
 
-# Run the unit-test suite.
+# Run the unit-test suite — after proving the core loads on its own, without
+# the TUI or the CLI (tests/core-only.lisp): the frontends build on the core,
+# never the other way round.
 test:
+	$(RUN_SCRIPT) tests/core-only.lisp $(STDIN_GUARD)
 	$(RUN_SCRIPT) tests/run-unit.lisp $(STDIN_GUARD)
 
 # End-to-end integration tests against a freshly built binary.  The backend is

@@ -195,10 +195,8 @@ the config error and the recovery path — the TUI must stay up, /model
 and /reload are how the registry gets fixed."
   (let ((agent (tui-agent tui)))
     (handler-case
-        (let* ((state (fold-state (agent-journal agent)))
-               (id (evo.kernel:effective-model-id state agent)))
-          (find-model id (evo.kernel:effective-model-provider state id))
-          t)
+        (progn (effective-model (fold-state (agent-journal agent)) agent)
+               t)
       (error (e)
         (scroll tui (red (format nil "✗ ~a" e)))
         (scroll tui (dim "recover with /model (pick a registered model) or /reload (after fixing init.lisp)"))
@@ -344,9 +342,8 @@ was actually sent, and the model saw more than the words."
 (a broken registry, a model gate not yet satisfied) count as capable: the
 warning is a courtesy, and a false alarm is worse than none."
   (handler-case
-      (let* ((state (fold-state (agent-journal (tui-agent tui))))
-             (id (evo.kernel:effective-model-id state (tui-agent tui))))
-        (model-vision-p (find-model id (evo.kernel:effective-model-provider state id))))
+      (model-vision-p (effective-model (fold-state (agent-journal (tui-agent tui)))
+                                       (tui-agent tui)))
     (error () t)))
 
 (defun attach-image-path (tui path)
@@ -944,7 +941,7 @@ wrapped between two rules, and the model status line under the editbox."
         ;; push order equals display order: emit items top-down (ascending).
         (loop for i from start below (+ start shown)
               do (push (dim (format nil " ~a ~a"
-                                    (evo.todo::status-glyph
+                                    (evo.todo:status-glyph
                                      (pget (aref todos i) :status))
                                     (pget (aref todos i) :text)))
                        lines))
@@ -1103,7 +1100,7 @@ wrapped between two rules, and the model status line under the editbox."
     ("exit" . "same as /quit")))
 
 (defun template-names ()
-  (loop for dir in (evo.kernel::template-directories)
+  (loop for dir in (template-directories)
         append (mapcar #'pathname-name
                        (ignore-errors (directory (merge-pathnames "*.md" dir))))))
 
@@ -1111,8 +1108,7 @@ wrapped between two rules, and the model status line under the editbox."
   "Completion candidates as (name . description), mirroring dispatch order:
 extension commands, builtins, skills, prompt templates (first wins)."
   (sort (remove-duplicates
-         (append (loop for name being the hash-keys of evo::*commands*
-                         using (hash-value cmd)
+         (append (loop for (name . cmd) in (registered-commands)
                        collect (cons name (or (pget cmd :description)
                                               "extension command")))
                  (copy-alist *builtin-commands*)
@@ -1513,8 +1509,8 @@ first rather than left to reappear later."
          (args (string-trim " " (if space (subseq text (1+ space)) ""))))
     (cond
       ;; 1. extension commands
-      ((gethash name evo::*commands*)
-       (let ((fn (pget (gethash name evo::*commands*) :fn)))
+      ((find-command name)
+       (let ((fn (pget (find-command name) :fn)))
          (handler-case
              (let ((result (funcall fn (list :agent (tui-agent tui) :args args :tui tui))))
                (when (stringp result) (scroll tui result))

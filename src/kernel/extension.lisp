@@ -159,6 +159,27 @@ fasl litter next to config, and ECL evaluates it without the compiler."
           (format *error-output* "~&evo: error in init file ~a: ~a~%" path e)))))
   path)
 
+;;; Slash commands.  The registry is the kernel's, like the tool registry;
+;;; resolving what the user typed against it is a frontend's job.
+;;; Boot-thread only, like models and providers.
+
+(defvar *commands* (make-hash-table :test #'equal)
+  "Slash commands by name -> plist (:fn :description).  Registered through
+EVO:REGISTER-COMMAND.")
+
+(defun register-command* (name fn &key description)
+  (setf (gethash name *commands*) (list :fn fn :description description))
+  name)
+
+(defun find-command (name)
+  "The command registered as NAME — a plist (:fn :description) — or NIL."
+  (gethash name *commands*))
+
+(defun registered-commands ()
+  "Every registered command as (NAME . (:fn :description)), in no order."
+  (loop for name being the hash-keys of *commands* using (hash-value command)
+        collect (cons name command)))
+
 ;;; Snapshot/restore for extension registries so /reload is idempotent.
 ;;; reset-user-registries clears models and providers; we also need to clear
 ;;; extension-sourced commands, tools, and APIs so that removing a registration
@@ -172,7 +193,7 @@ from source are cleaned up.")
 (defun snapshot-extension-registries ()
   "Save the current registry state; called before boot-extensions."
   (setf *pre-extension-registries*
-        (list :commands (loop for k being the hash-keys of evo::*commands* collect k)
+        (list :commands (loop for k being the hash-keys of *commands* collect k)
               :apis (mapcar #'car evo.provider::*apis*)
               :tools (bt:with-lock-held (*registry-lock*) (%all-tool-names)))))
 
@@ -181,9 +202,9 @@ from source are cleaned up.")
   (when *pre-extension-registries*
     ;; Commands: remove entries not in the pre-extension set.
     (let ((keep (pget *pre-extension-registries* :commands)))
-      (loop for k being the hash-keys of evo::*commands*
+      (loop for k being the hash-keys of *commands*
             unless (member k keep :test #'equal)
-            do (remhash k evo::*commands*)))
+            do (remhash k *commands*)))
     ;; APIs: keep only entries whose key was in the pre-extension set.
     (let ((keep (pget *pre-extension-registries* :apis)))
       (setf evo.provider::*apis*
@@ -218,7 +239,7 @@ able to put this exact runtime back."
               (maphash (lambda (k v) (setf (gethash k copy) v)) *tool-registry*)
               copy))
    :commands (let ((copy (make-hash-table :test #'equal)))
-               (maphash (lambda (k v) (setf (gethash k copy) v)) evo::*commands*)
+               (maphash (lambda (k v) (setf (gethash k copy) v)) *commands*)
                copy)
    :settings (evo.util:capture-settings)
    :prompt-notes (prompt-notes-snapshot)))
@@ -236,8 +257,8 @@ able to put this exact runtime back."
              (runtime-catalog-tools catalog))
     (setf *prompt-notes* (copy-list (runtime-catalog-prompt-notes catalog)))
     (incf *registry-generation*))
-  (clrhash evo::*commands*)
-  (maphash (lambda (k v) (setf (gethash k evo::*commands*) v))
+  (clrhash *commands*)
+  (maphash (lambda (k v) (setf (gethash k *commands*) v))
            (runtime-catalog-commands catalog))
   (evo.util:restore-settings (runtime-catalog-settings catalog))
   catalog)
@@ -316,12 +337,16 @@ fatal — a corrupted runtime is repaired by fixing/removing a source file."
 
 (defparameter *kernel-packages*
   '(:evo.port :evo.util :evo.media :evo.journal :evo.provider :evo.kernel
-    :evo.cli :evo :evo.todo :evo.memory :evo.eval :evo.tui))
+    :evo :evo.todo :evo.memory :evo.eval)
+  "The core's packages that LOCK-KERNEL-PACKAGES locks.  Frontends are not
+named here; they pass their own.")
 
-(defun lock-kernel-packages ()
+(defun lock-kernel-packages (&rest frontend-packages)
   "Package locks: permissive but not suicidal — touching the kernel
-requires an explicit, auditable evo.port:unlock-package."
-  (dolist (name *kernel-packages*)
+requires an explicit, auditable evo.port:unlock-package.  The core names only
+its own packages; the frontend that brings a session up passes its own
+FRONTEND-PACKAGES to be locked with them."
+  (dolist (name (append *kernel-packages* frontend-packages))
     (let ((pkg (find-package name)))
       (when pkg (evo.port:lock-package pkg)))))
 
@@ -329,8 +354,8 @@ requires an explicit, auditable evo.port:unlock-package."
 
 (in-package :evo)
 
-(defvar *agent* nil
-  "The live agent, bound by the CLI for the duration of a session.")
+;; *AGENT* is defined in loop.lisp, beside the agent itself, so that every
+;; kernel file after that one (lore, goal) reads a variable already declared.
 
 (defmacro register-tool (name &key description schema execute (arguments :plist))
   "Register a tool.  NAME is a string; SCHEMA is a sexpr schema
@@ -360,17 +385,15 @@ providers, APIs, commands) are boot-thread only."
                               :arguments ,arguments
                               :source :extension))
 
-(defvar *commands* (make-hash-table :test #'equal)
-  "Slash commands.  The MVP has no TUI; commands registered here are
-resolved by the CLI's --command flag and by future frontends.")
-
 (defun register-command (name fn &key description)
-  (setf (gethash name *commands*) (list :fn fn :description description))
-  name)
+  "Register the slash command /NAME.  FN is called with a plist — :agent,
+:args (the text after the command word), and whatever the frontend adds — and
+may return a string to show the user.  Re-registering NAME replaces it."
+  (evo.kernel:register-command* name fn :description description))
 
 (defun on (event fn &key name)
   "Subscribe FN to a kernel event: :session-start :session-end :turn-end
-:tool-call :transform-context :todo-changed ...
+:tool-call :transform-context :todo-changed :goal-plan ...
 A :tool-call hook may return (:block t :reason ...) or (:arguments ...).
 
 Pass NAME from any file a reload can re-run: a named hook REPLACES the previous

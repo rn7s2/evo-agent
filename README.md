@@ -534,12 +534,18 @@ Requirements and caveats:
 
 ## Layout
 
-Every directory under `src/` is one component owning exactly one package;
-`evo.asd` lists them in load order, foundations first.
+Every directory under `src/` is one component owning exactly one package.
+`evo.asd` defines two systems and lists their components in load order,
+foundations first: `evo/core` is the agent itself — foundations, kernel and
+the core extensions — and loads with no frontend at all; `evo` adds the TUI
+and the CLI on top of it. `make test` loads `evo/core` on its own before the
+unit suite runs (`tests/core-only.lisp`), so the dependency only ever points
+from the frontends to the core.
 
 ```text
-src/packages.lisp        the whole package graph (kernel locked; EVO.USER open;
-                         EVO = public API) — the one file shared by all components
+src/packages.lisp        the core's package graph (kernel locked; EVO.USER open;
+                         EVO = public API) — shared by every core component;
+                         each frontend defines its own package beside its code
 
 src/port/                EVO.PORT — implementation AND platform portability
   port.lisp              layer, the only code allowed to touch sb-* / ext: /
@@ -564,7 +570,11 @@ src/kernel/              EVO.KERNEL — the core loop and nothing else
   loop.lisp              agent, turn loop, run-until-settled, hooks, heartbeat
   lore.lisp              lore stores
   compact.lisp           compaction
-  extension.lisp         load-extension, boot/replay, locks, EVO public API
+  extension.lisp         load-extension, boot/replay, locks, command registry,
+                         EVO public API
+  session.lisp           session operations a frontend asks for: bring-up,
+                         switching journals, model and thinking choices
+  jobs.lisp              background jobs + the `wait` tool
   builtin-tools.lisp     read / write / edit / bash
   goal.lisp              goal driver, audited tools, done-when
 
@@ -574,16 +584,19 @@ src/core-ext/            core extensions: bundled, but built on the same public
   memory.lisp            EVO.MEMORY: global/project memory stores
   eval.lisp              EVO.EVAL: /eval, the `eval` tool, completion source
 
-src/tui/                 EVO.TUI — also a core extension, essential so
-  term.lisp              it cannot be disabled
+src/tui/                 EVO.TUI — the interactive frontend (system `evo`);
+  package.lisp           a core extension too, essential so it cannot be
+  term.lisp              disabled
   input.lisp
   editor.lisp
   render.lisp
+  math.lisp
   markdown.lisp
   tui.lisp
   commands.lisp
 
-src/cli/                 EVO.CLI
+src/cli/                 EVO.CLI (system `evo`)
+  package.lisp
   cli.lisp               arg parsing, print/event modes, session bring-up
   supervisor.lisp        in-binary supervision
 

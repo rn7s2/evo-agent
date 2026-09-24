@@ -114,7 +114,7 @@ Called by bash when a command reaches its yield ceiling."
   (bt:with-lock-held (*jobs-lock*) (setf *jobs* nil)))
 
 (defun running-jobs-summary ()
-  "For the TUI status segment.  NIL when no jobs run, else a plist
+  "For a frontend's status display.  NIL when no jobs run, else a plist
 (:count N :command STRING :since UNIVERSAL-TIME) describing the oldest job."
   (bt:with-lock-held (*jobs-lock*)
     (when *jobs*

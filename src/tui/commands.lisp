@@ -90,10 +90,7 @@ goal is resumed from here too."
                                 "no goal to resume")))))
       ((and goal (eq (pget goal :status) :active))
        ;; Refine: new :goal entry, same id; steer if a run is active.
-       (append-entry (agent-journal agent)
-                     (list* :type :goal (evo.util:pput
-                                         (evo.util:pput goal :objective args)
-                                         :goal-id (pget goal :goal-id))))
+       (set-goal-objective agent goal args)
        (scroll tui (yellow (format nil "◆ goal objective updated: ~a" args)))
        (when (tui-running tui)
          (queue-steering agent
@@ -122,13 +119,7 @@ ctrl+v."
 (defun switch-journal (tui journal &key note)
   (unless (session-quiescent-p tui)
     (error "Cannot switch journals while the current session owns pending work"))
-  (let ((agent (tui-agent tui)))
-    (setf (agent-journal agent) journal)
-    (reset-agent-session-state agent))
-  (replay-loads (fold-state journal))
-  (run-hooks :session-start
-             (list :agent (tui-agent tui)
-                   :resumed (journal-started-p journal)))
+  (switch-session (tui-agent tui) journal)
   (refresh-goal tui)
   (setf (tui-partial tui) "")
   (when note (scroll tui (dim note))))
@@ -280,9 +271,8 @@ top for the session you touched most recently, and read the date to place it."
                     (error (e)
                       (scroll tui (dim (format nil "~a" e)))
                       (return-from set-model)))))
-    (append-entry (agent-journal (tui-agent tui))
-                  (list :type :model-change :model (pget resolved :id)
-                        :provider (pget resolved :provider)))
+    (set-session-model (tui-agent tui) (pget resolved :id)
+                       (pget resolved :provider))
     (refresh-goal tui)
     (scroll tui (dim (format nil "model → ~a~@[ (~(~a~))~] (next turn)"
                              (pget resolved :id)
@@ -319,9 +309,7 @@ The selection value is the full model plist: the same id under different
 providers are distinct entries, and the journaled choice must say which."
   (let* ((agent (tui-agent tui))
          (state (fold-state (agent-journal agent)))
-         (current (handler-case
-                      (let ((id (evo.kernel:effective-model-id state agent)))
-                        (find-model id (evo.kernel:effective-model-provider state id)))
+         (current (handler-case (effective-model state agent)
                     (error () nil)))
          (models (all-models))
          (provider-width
@@ -501,8 +489,7 @@ already-painted scrollback keeps its colours."
         ((cmd "thinking")
          (let ((level (intern (string-upcase args) :keyword)))
            (cond ((member level +effort-levels+)
-                  (append-entry (agent-journal agent)
-                                (list :type :thinking-change :thinking level))
+                  (set-session-thinking agent level)
                   (refresh-goal tui)
                   (scroll tui (dim (format nil "thinking → ~(~a~)" level))))
                  (t (scroll tui (dim "levels: low medium high xhigh max")))))
@@ -579,7 +566,7 @@ already-painted scrollback keeps its colours."
   (incf (tui-tick tui))
   ;; Keep the supervisor's hang detector fed even while idle at the editor
   ;; (throttled internally to 1/sec).
-  (evo.kernel::heartbeat-touch)
+  (heartbeat-touch)
   ;; Live resize.  Signal-driven where there is a signal for it, polled
   ;; where there is not (Windows) — both land in *RESIZED*.
   (poll-terminal-resize)

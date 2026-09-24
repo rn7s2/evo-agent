@@ -6,15 +6,14 @@
 
 (defun executing-model-sees-images-p ()
   "Whether the model this tool call is running under accepts image input.
-Unknown counts as capable — the same optimism the TUI applies when it warns
+Unknown counts as capable — the same optimism a frontend applies when it warns
 about an attachment: a false alarm is worse than none."
   (let ((agent *executing-agent*))
     (handler-case
         (if (null agent)
             t
-            (let* ((state (fold-state (agent-journal agent)))
-                   (id (effective-model-id state agent)))
-              (model-vision-p (find-model id (effective-model-provider state id)))))
+            (model-vision-p (effective-model (fold-state (agent-journal agent))
+                                             agent)))
       (error () t))))
 
 (defun read-image-file (path)
@@ -155,7 +154,7 @@ console spells its line breaks with."
   "Poll PROCESS until it exits (returns :DONE) or TIMEOUT seconds pass (returns
 :TIMEOUT).  On user abort, kill the process and signal — the same, whether or
 not there is an executing AGENT.  The worker that launched PROCESS stays its
-sole owner: the TUI thread only sets the abort flag, and a cross-thread
+sole owner: the frontend's thread only sets the abort flag, and a cross-thread
 kill/wait on the handle can race this poll and crash the runtime."
   (loop with deadline = (+ (get-internal-real-time)
                            (* timeout internal-time-units-per-second))

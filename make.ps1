@@ -165,6 +165,9 @@ function Invoke-Install {
 # console paths have their own live tests (console-test) that need a real
 # console and so run here, not in CI.  The .exp suites still need a pty.
 function Invoke-Test {
+    # The core first, alone: it must load without the TUI or the CLI.
+    Write-Step 'checking the core loads without a frontend'
+    Invoke-LispScript -Script (Join-Path $RepoRoot 'tests\core-only.lisp')
     Write-Step 'running unit tests'
     Invoke-LispScript -Script (Join-Path $RepoRoot 'tests\run-unit.lisp')
 }
