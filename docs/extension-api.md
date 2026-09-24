@@ -182,7 +182,19 @@ thread sitting in a socket read, and the kernel abandons a task that has not
 returned after ~5s. Interrupt the thread with a private condition instead, and
 make sure nothing on the way out converts that condition into an ordinary
 error — a cancellation laundered into a failure is worse than no cancellation
-at all. `extensions/500-mcp.lisp` is the worked example.
+at all.
+
+Let the interrupt unwind only the I/O. It is asynchronous, so it lands wherever
+the thread happens to be: halfway through a `register-tool`, whose hash-table
+write an unwind can leave corrupt, or past your last handler, where it escapes
+the thread. Have the interrupt function check, on the task's own thread,
+whether the task is still waiting on I/O and do nothing if it is not, and have
+the task check the stop flag once the I/O is done. `extensions/500-mcp.lisp` is
+the worked example.
+
+Don't `warn` from a task either. It runs on its own thread, where no load is
+muffling warnings, so the message is printed straight over the TUI. Record the
+failure somewhere a command or the status line can show it.
 
 ## Lifecycle: background work and undoing yourself
 

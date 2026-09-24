@@ -57,9 +57,17 @@
 ;;; Two variables, two owners.  *MCP-SERVERS* is read by other threads (/mcp
 ;;; and the status line render on the TUI thread), so it and the slots those
 ;;; readers can observe — STATUS, ERROR, TOOLS — are guarded by *MCP-LOCK*.
-;;; SESSION-ID is written and read only by the thread making the request, and
-;;; INSTRUCTIONS only by the one registering them, so neither needs the lock.
 ;;; The lock is never held across a request.
+;;;
+;;; SESSION-ID and INSTRUCTIONS are not guarded, and are shared all the same.
+;;; The boot task writes both during the handshake; a worker running one of
+;;; the server's tools then reads SESSION-ID on every call, and rewrites both
+;;; when it re-shakes hands on an expired session (MCP-CALL-TOOL).  The first
+;;; write reaches the worker through *REGISTRY-LOCK*: the handshake finishes
+;;; before the server's tools are registered, and a worker finds a tool only
+;;; under that lock.  What stays open is two workers re-shaking hands with one
+;;; server at once — each ends up with a working session id, and the last
+;;; write wins.
 
 (defvar *mcp-lock* (bt:make-lock "mcp"))
 
@@ -449,6 +457,23 @@ JSON rather than dropped."
 ;;;     is closed by its owner.  Nothing may convert that condition into an
 ;;;     ordinary error on the way out (MCP-HTTP-POST is careful about this) or
 ;;;     the cancellation would be recorded as a server failure instead.
+;;;   * The interrupt may unwind the HANDSHAKE and nothing else.  It is
+;;;     asynchronous: sent unconditionally, it lands wherever the task happens
+;;;     to be — halfway through REGISTER-TOOL's write to the registry's hash
+;;;     table, which an unwind can leave corrupt, or past the task's last
+;;;     handler, where the condition escapes the thread altogether.  So the
+;;;     interrupt function checks, on the task's own thread, whether the task
+;;;     is still inside MCP-BOOT-HANDSHAKE, and does nothing if it is not.  A
+;;;     task stopped after its handshake sees the flag instead and registers
+;;;     nothing; one stopped mid-registration finishes it, which costs
+;;;     nothing, because the kernel sweeps the registry after joining it.
+;;;   * A stopped server is published as :CANCELLED.  After a /reload that
+;;;     succeeds nobody sees it, because the list is replaced; after one that
+;;;     fails, the rollback restores the registries but cannot restart the
+;;;     tasks it stopped, and "connecting…" for ever would be a lie.
+;;;   * Nothing here WARNs.  A task runs on its own thread, where a warning is
+;;;     printed straight over the TUI; a failure is recorded on the server, and
+;;;     /mcp and the status line are where it is read.
 ;;;   * /reload stops and joins every task before the next generation loads, so
 ;;;     two boots never overlap and a stale task cannot publish into a live
 ;;;     registry.
@@ -458,69 +483,90 @@ JSON rather than dropped."
                    :url (getf spec :url)
                    :headers (mcp-normalize-headers (getf spec :headers))))
 
-(defun mcp-publish-server (server status &key error tools)
-  "Publish what another thread may observe about SERVER: STATUS, ERROR, and on
-success TOOLS.  Repaint is requested AFTER the lock is released — it takes the
-TUI's own lock, and there is no reason to order the two."
+(defun mcp-publish-server (server status &key error (tools nil tools-p))
+  "Publish what another thread may observe about SERVER: STATUS, ERROR, and
+TOOLS when given — an empty list included, so a server that reconnects with no
+tools stops listing the ones it had.  Repaint is requested AFTER the lock is
+released — it takes the TUI's own lock, and there is no reason to order the
+two."
   (bt:with-lock-held (*mcp-lock*)
     (setf (mcp-server-status server) status
           (mcp-server-error server) error)
-    (when tools (setf (mcp-server-tools server) tools)))
+    (when tools-p (setf (mcp-server-tools server) tools)))
   (evo.tui:request-repaint))
 
 (defstruct (mcp-boot (:conc-name mcp-boot-))
   (lock (bt:make-lock "mcp-boot"))
   thread                                ; published by the task itself
-  (cancelled nil))
+  (cancelled nil)
+  ;; True while the task is inside MCP-BOOT-HANDSHAKE, the one span :stop may
+  ;; interrupt.  Written by the task and read by the interrupt function, which
+  ;; runs on the task's own thread — so it needs no lock.
+  (interruptible nil))
 
 (defun mcp-boot-cancelled-p (boot)
   (bt:with-lock-held ((mcp-boot-lock boot)) (mcp-boot-cancelled boot)))
 
 (defun mcp-boot-cancel (boot)
-  "Stop the connecting task, flag and interrupt together.  Called from the
-thread doing the disposal, which then joins the task's thread."
+  "Stop the connecting task: raise the flag, then interrupt the thread in case
+it is inside the handshake, where no flag can reach it.  Called from the thread
+doing the disposal, which then joins the task's thread."
   (let (thread)
     (bt:with-lock-held ((mcp-boot-lock boot))
       (setf (mcp-boot-cancelled boot) t
             thread (mcp-boot-thread boot)))
     (when (and thread (bt:thread-alive-p thread))
       (ignore-errors
-        (bt:interrupt-thread thread (lambda () (error 'mcp-boot-cancelled)))))
+        (bt:interrupt-thread thread
+                             (lambda ()
+                               ;; Runs on the task's thread, wherever it is.
+                               ;; Outside the handshake it does nothing: the
+                               ;; task reads the flag instead.
+                               (when (mcp-boot-interruptible boot)
+                                 (error 'mcp-boot-cancelled))))))
     t))
 
-(defun mcp-connect-server (server)
-  "Connect to SERVER and register what it offers.  A failure is recorded on
-the server, not signalled: one unreachable server must not cost the session
-the others, nor its startup."
-  (handler-case
-      (progn
-        (unless (mcp-nonempty (mcp-server-url server))
-          (error 'mcp-error :text "no :url in the server spec"))
-        (let ((tools (mcp-connect server)))
-          (mcp-register-tools server tools)
-          (mcp-register-instructions server)
-          ;; Last, so the status line never promises tools the agent cannot
-          ;; call yet.
-          (mcp-publish-server server :connected :tools tools)))
-    (mcp-boot-cancelled () nil)         ; being torn down: record nothing
-    (error (e)
-      (mcp-publish-server server :error :error (format nil "~a" e))
-      (warn "MCP server ~a: ~a" (mcp-server-name server) e))))
+(defun mcp-boot-handshake (boot server)
+  "Shake hands with SERVER and return its tools.  The only span of the task
+that :stop may interrupt: it is request and response and nothing else, so an
+unwind here costs the request and leaves no shared state half-written."
+  (unwind-protect
+       (progn
+         (setf (mcp-boot-interruptible boot) t)
+         ;; Checked after raising INTERRUPTIBLE, not before.  A stop that came
+         ;; earlier found nothing to interrupt, and this is what catches it;
+         ;; a stop from here on is an interrupt that lands.
+         (when (mcp-boot-cancelled-p boot)
+           (error 'mcp-boot-cancelled))
+         (unless (mcp-nonempty (mcp-server-url server))
+           (error 'mcp-error :text "no :url in the server spec"))
+         (mcp-connect server))
+    (setf (mcp-boot-interruptible boot) nil)))
 
 (defun mcp-boot-run (boot server)
   "The connecting task's body: one server, from handshake to registration.
-One task per server, so a server that hangs delays only its own tools."
+One task per server, so a server that hangs delays only its own tools.  A
+failure is recorded on the server, not signalled: one unreachable server must
+not cost the session the others, nor its startup."
   ;; Publish our own thread handle as the first act: the kernel may call :stop
   ;; before this thread's first form runs, and a stop with no thread to
   ;; interrupt would leave the task uncancellable for the length of a request.
   (bt:with-lock-held ((mcp-boot-lock boot))
     (setf (mcp-boot-thread boot) (bt:current-thread)))
   (handler-case
-      (unless (mcp-boot-cancelled-p boot)
-        (mcp-connect-server server))
-    (mcp-boot-cancelled () nil)
-    (error (e) (warn "MCP boot task for ~a failed: ~a" (mcp-server-name server) e)))
-  (evo.tui:request-repaint))
+      (let ((tools (mcp-boot-handshake boot server)))
+        ;; A stop that came after the handshake interrupted nothing; it is
+        ;; honoured here.
+        (if (mcp-boot-cancelled-p boot)
+            (mcp-publish-server server :cancelled)
+            (progn
+              (mcp-register-tools server tools)
+              (mcp-register-instructions server)
+              ;; Last, so the status line never promises tools the agent
+              ;; cannot call yet.
+              (mcp-publish-server server :connected :tools tools))))
+    (mcp-boot-cancelled () (mcp-publish-server server :cancelled))
+    (error (e) (mcp-publish-server server :error :error (format nil "~a" e)))))
 
 (defun mcp-boot ()
   "Read the config and start connecting — without waiting for it.
@@ -590,6 +636,8 @@ outside it, so a long report never holds the lock the boot task needs."
                  (format out "  connecting…~@[ · headers: ~a~]~%"
                          (and headers
                               (evo.util:string-join ", " (mapcar #'car headers)))))
+                (:cancelled
+                 (format out "  not connected: stopped by /reload before it answered~%"))
                 (t (format out "  not connected: ~a~%"
                            (evo.util:pget server :error))))))
           (format out "~%/reload re-reads the config and reconnects.")))))
@@ -603,12 +651,13 @@ nothing else."
   (let ((summary
           (bt:with-lock-held (*mcp-lock*)
             (when *mcp-servers*
-              (let ((connecting 0) (connected 0) (failed 0) (tools 0))
+              (let ((connecting 0) (connected 0) (failed 0) (cancelled 0) (tools 0))
                 (dolist (server *mcp-servers*)
                   (case (mcp-server-status server)
                     (:connected (incf connected)
                                 (incf tools (length (mcp-server-tools server))))
                     (:error (incf failed))
+                    (:cancelled (incf cancelled))
                     (t (incf connecting))))
                 (evo.util:string-join
                  " · "
@@ -618,7 +667,9 @@ nothing else."
                                (when (plusp connected)
                                  (format nil "~d up, ~d tool~:p" connected tools))
                                (when (plusp failed)
-                                 (format nil "~d failed" failed))))))))))
+                                 (format nil "~d failed" failed))
+                               (when (plusp cancelled)
+                                 (format nil "~d cancelled" cancelled))))))))))
     (when summary (evo.tui::dim (format nil "mcp ~a" summary)))))
 
 (evo:register-command "mcp"
