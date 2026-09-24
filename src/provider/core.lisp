@@ -31,6 +31,9 @@
   (substitute #\_ #\- (string-downcase (symbol-name keyword))))
 
 (defun json->sexpr (value)
+  "VALUE, parsed JSON (jzon's values), as sexprs: an object becomes a keyword
+plist whose keys are upcased with `_` read as `-` (\"line_count\" ->
+:LINE-COUNT), an array stays a vector, true is T, false and null are NIL."
   (typecase value
     (hash-table (loop for k being the hash-keys of value using (hash-value v)
                       append (list (key->keyword k) (json->sexpr v))))

@@ -6,7 +6,8 @@
 # must grow a selection segment, drop it live when the selection clears
 # (proving the poller marks the TUI dirty), and every submitted prompt must be
 # preceded in the journal by an :ide-context custom message.  No model backend
-# is needed — injection happens at submit, before any provider call.
+# is needed — injection happens as the prompt is journaled (the :user-message
+# event, at the start of the turn), before any provider call.
 set timeout 60
 
 set repo [file dirname [file dirname [file normalize $argv0]]]
@@ -28,7 +29,7 @@ file copy "$repo/extensions/900-ide-context.lisp" "$env(EVO_HOME)/extensions/900
 set f [open "$env(EVO_HOME)/extensions/500-right-segment.lisp" w]
 puts $f {(in-package :evo.user)}
 puts $f {(evo.tui:add-status-segment :test-right}
-puts $f {  (lambda (tui) (declare (ignore tui)) (evo.tui::dim "load 42"))}
+puts $f {  (lambda (tui) (declare (ignore tui)) (evo.tui:dim "load 42"))}
 puts $f {  :side :right :order 100)}
 close $f
 

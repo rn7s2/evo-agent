@@ -135,13 +135,19 @@ input) calls it from its own loop too."
       (funcall cb (append event (list :run-id (agent-run-id agent)
                                       :turn (agent-turn-index agent)))))))
 
-(defun queue-steering (agent text &key images)
+(defun queue-steering (agent text &key images from-user)
   "Queue a user turn for the next turn boundary.  IMAGES is a list of :image
 content blocks (evo.media builds them); they ride the same queue as the text
-so that a message and its screenshots can never be split across turns."
+so that a message and its screenshots can never be split across turns.
+
+FROM-USER marks TEXT as what the user said — typed at a frontend, or given on
+the command line — rather than a turn evo or an extension steers with (a goal
+continuation, a command's hand-off).  Only such a turn is announced as
+:user-message when it is journaled."
   (bt:with-lock-held ((agent-lock agent))
     (setf (agent-steering agent)
-          (append (agent-steering agent) (list (list :text text :images images))))))
+          (append (agent-steering agent)
+                  (list (list :text text :images images :from-user from-user))))))
 
 (defun queue-followup (agent text)
   (bt:with-lock-held ((agent-lock agent))
@@ -185,7 +191,12 @@ stacks read an image better when the text that asks about it follows it."
             (list (list :type :text :text text)))))
 
 (defun drain-steering (agent)
-  "Append queued steering turns as user message entries.  Returns count."
+  "Append queued steering turns as user message entries.  Returns count.
+
+A turn the user said (QUEUE-STEERING :FROM-USER) is announced first, as
+:user-message (:agent :text :images), on this — the run's — thread and at a
+turn boundary: whatever a hook journals (EVO:INJECT-CONTEXT, typically) lands
+immediately before the user's message, never inside a turn in flight."
   (let ((queued (bt:with-lock-held ((agent-lock agent))
                   (prog1 (agent-steering agent)
                     (setf (agent-steering agent) nil))))
@@ -198,6 +209,9 @@ stacks read an image better when the text that asks about it follows it."
         ;; be counted either: the count is what tells the run there is new
         ;; input to answer.
         (when content
+          (when (pget item :from-user)
+            (run-hooks :user-message
+                       (list :agent agent :text text :images images)))
           (append-entry (agent-journal agent)
                         (list :type :message
                               :message (list :role :user :content content)))
@@ -532,7 +546,20 @@ Returns :stop :length :error :aborted."
 
 (defun run-until-settled (agent)
   "Outer driver: run -> post-run check (retryable error? queued
-messages? active goal?) -> continue.  Returns the final outcome."
+messages? active goal?) -> continue.  Returns the final outcome.
+
+The drive is announced: :busy (:agent) as it starts, and :idle (:agent
+:outcome) when it returns — whatever the outcome, :error and :aborted
+included.  Everything that keeps the agent at work (a retry, steering queued
+mid-run, a goal re-steering itself) happens between the two, so :idle is the
+moment the agent is waiting for the human."
+  (run-hooks :busy (list :agent agent))
+  (let ((outcome (drive-until-settled agent)))
+    (run-hooks :idle (list :agent agent :outcome outcome))
+    outcome))
+
+(defun drive-until-settled (agent)
+  "RUN-UNTIL-SETTLED's loop, between its announcements."
   (loop
     (let ((outcome (run agent)))
       (cond

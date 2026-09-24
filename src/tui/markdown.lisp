@@ -43,7 +43,16 @@ fire there, or it would only un-bold the letters it did not fixate.")
 
 (defun register-prose-styler (fn)
   "Install FN as *PROSE-STYLER* (NIL removes it) and return it.  The supported
-way for an extension to restyle plain prose words, e.g. bionic reading."
+way for an extension to restyle plain prose words, e.g. bionic reading.
+
+Installed while an extension file loads, the styler belongs to that file's
+generation, as the math renderer does: a reload takes it out again (if it is
+still the one installed) before the file runs."
+  (when (and fn *extension-owner*)
+    (register-extension-disposer
+     (lambda ()
+       (when (eq *prose-styler* fn)
+         (setf *prose-styler* nil)))))
   (setf *prose-styler* fn))
 
 (defun style-prose (text)

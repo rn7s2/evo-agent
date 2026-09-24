@@ -292,7 +292,7 @@ prompt without the image the user asked for is worse than not running."
             (images (headless-images opts))
             (goal (evo.kernel:current-goal agent)))
         (cond
-          (prompt (queue-steering agent prompt :images images))
+          (prompt (queue-steering agent prompt :images images :from-user t))
           ((and goal (eq (pget goal :status) :active))
            (queue-steering agent (evo.kernel:goal-continuation-for agent goal)))
           (t (error 'usage-error :text "Nothing to do headless: give -p \"prompt\", --goal, or --resume a session with an active goal"))))

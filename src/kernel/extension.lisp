@@ -182,8 +182,8 @@ EVO:REGISTER-COMMAND.")
 
 ;;; Snapshot/restore for extension registries so /reload is idempotent.
 ;;; reset-user-registries clears models and providers; we also need to clear
-;;; extension-sourced commands, tools, and APIs so that removing a registration
-;;; from an extension file takes effect on /reload.
+;;; extension-sourced commands, tools, APIs and prompt notes so that removing
+;;; a registration from an extension file takes effect on /reload.
 
 (defvar *pre-extension-registries* nil
   "Saved state of all registries before extension loading.  Restored on
@@ -195,7 +195,8 @@ from source are cleaned up.")
   (setf *pre-extension-registries*
         (list :commands (loop for k being the hash-keys of *commands* collect k)
               :apis (mapcar #'car evo.provider::*apis*)
-              :tools (bt:with-lock-held (*registry-lock*) (%all-tool-names)))))
+              :tools (bt:with-lock-held (*registry-lock*) (%all-tool-names))
+              :prompt-notes (mapcar #'car (prompt-notes-snapshot)))))
 
 (defun restore-extension-registries ()
   "Remove registrations added by extensions (anything not in the pre-extension snapshot)."
@@ -215,7 +216,14 @@ from source are cleaned up.")
       (bt:with-lock-held (*registry-lock*)
         (loop for k being the hash-keys of *tool-registry*
               unless (member k keep :test #'equal)
-              do (remhash k *tool-registry*))))))
+              do (remhash k *tool-registry*))))
+    ;; Prompt notes: the same, so a note goes with the extension that
+    ;; registered it — whether its file registered it or one of its tasks did.
+    (let ((keep (pget *pre-extension-registries* :prompt-notes)))
+      (bt:with-lock-held (*registry-lock*)
+        (setf *prompt-notes*
+              (remove-if-not (lambda (note) (member (car note) keep :test #'equal))
+                             *prompt-notes*))))))
 
 ;;; The runtime catalog: everything a turn resolves against.  Reload builds a
 ;;; new generation and installs it in one step; if the build dies partway, the

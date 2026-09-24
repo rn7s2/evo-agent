@@ -77,7 +77,7 @@ has reported any cache activity, rather than a noise \"0%\"."
           (cr (getf *cache-stats* :cache-read))
           (cw (getf *cache-stats* :cache-write)))
       (when (plusp (+ cr cw))
-        (evo.tui::dim (format nil "~d% cached" (round (* 100 cr) (+ in cr cw))))))))
+        (evo.tui:dim (format nil "~d% cached" (round (* 100 cr) (+ in cr cw))))))))
 
 (evo:on :turn-end #'cache-stats-turn-end :name :cache-stats)
 (evo:on :session-start #'cache-stats-session-start :name :cache-stats)

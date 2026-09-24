@@ -91,7 +91,7 @@ silently undo a base URL or key the user wrote in their own config.
 
 Precedence, strongest first: init.lisp (or post-init.lisp) · the environment ·
 the stock endpoint."
-  (let ((entry (cdr (assoc *kimi-provider-key* evo.provider::*providers*))))
+  (let ((entry (evo:provider-registration *kimi-provider-key*)))
     (apply #'evo:register-provider *kimi-provider-key*
            (append
             (unless (evo.util:pget entry :base-url)
@@ -104,8 +104,8 @@ the stock endpoint."
 (defun kimi--has-key-p ()
   "True if a Kimi Code API key is configured: env var or init.lisp :api-key."
   (or (kimi--trim (uiop:getenv *kimi-api-key-env*))
-      (let ((entry (cdr (assoc *kimi-provider-key* evo.provider::*providers*))))
-        (kimi--trim (evo.util:pget entry :api-key)))))
+      (kimi--trim (evo.util:pget (evo:provider-registration *kimi-provider-key*)
+                                 :api-key))))
 
 (when (kimi--has-key-p)
   (evo:register-model "k3"

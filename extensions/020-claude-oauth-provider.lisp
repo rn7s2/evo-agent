@@ -678,8 +678,8 @@ without a scope parameter, leaving the grant as it was."
   "True if a Claude OAuth token is available: env var, init.lisp :api-key,
 or stored token file."
   (or (claude-oauth--env "CLAUDE_OAUTH_ACCESS_TOKEN")
-      (let ((entry (cdr (assoc :anthropic-oauth evo.provider::*providers*))))
-        (claude-oauth--trim (evo.util:pget entry :api-key)))
+      (claude-oauth--trim
+       (evo.util:pget (evo:provider-registration :anthropic-oauth) :api-key))
       (getf (claude-oauth--read-tokens) :access-token)))
 
 (when (claude-oauth--has-key-p)

@@ -2281,8 +2281,14 @@ the list of replies a run was requested for."
                     (search "macOS" (evo.user::baby-evo-command '(:args "on"))))
              (check "/notify doctor refuses off macOS"
                     (search "macOS" (evo.user::baby-evo-command '(:args "doctor"))))
-             (check "baby-evo installs nothing at session start off macOS"
-                    (null (evo.user::baby-evo-session-start nil))))
+             (check "off macOS, loading baby-evo registers no idle hooks"
+                    (or (uiop:os-macosx-p)  ; provable only off a Mac
+                        (let ((evo.kernel::*event-hooks* (make-hash-table)))
+                          (load (merge-pathnames "extensions/360-baby-evo.lisp"
+                                                 (uiop:getcwd))
+                                :verbose nil :print nil)
+                          (and (null (event-hook-functions :busy))
+                               (null (event-hook-functions :idle)))))))
 
            ;; --- the idle guard: what counts as "idle" -------------------------
            ;; The whole correctness of the feature.  :stop/:error/:length are
@@ -2303,20 +2309,19 @@ the list of replies a run was requested for."
                                ;; drain it so it does not leak into other checks
                                (setf (evo.kernel::agent-steering agent) nil))))))
 
-           ;; --- the idle seam ------------------------------------------------
+           ;; --- the idle seam: the kernel's :busy / :idle hooks -------------
            (evo.user::baby-evo-install)
-           (check "baby-evo wraps evo.kernel:run-until-settled"
-                  (and (evo.user::baby-evo-installed-p)
-                       (eq (symbol-function 'evo.kernel:run-until-settled)
-                           #'evo.user::baby-evo-run-until-settled)))
-           (check "baby-evo install is idempotent — no wrapper on wrapper"
+           (check "baby-evo registers its :busy and :idle hooks"
+                  (evo.user::baby-evo-installed-p))
+           (check "baby-evo install is idempotent — one hook per event"
                   (progn (evo.user::baby-evo-install)
                          (evo.user::baby-evo-install)
-                         (not (eq (symbol-value
-                                   (uiop:find-symbol*
-                                    :*baby-evo-original-run-until-settled*
-                                    :evo.user))
-                                  #'evo.user::baby-evo-run-until-settled))))
+                         (and (= 1 (count 'evo.user::baby-evo-on-busy
+                                          (event-hook-functions :busy)))
+                              (= 1 (count 'evo.user::baby-evo-on-idle-event
+                                          (event-hook-functions :idle))))))
+           (check "nothing is patched: the kernel's driver is its own"
+                  (eq (symbol-function 'evo.kernel:run-until-settled) saved-driver))
            ;; Going idle posts, with the title and the truncated last response.
            (let ((journal (make-session-journal)))
              (append-entry journal
@@ -2327,11 +2332,10 @@ the list of replies a run was requested for."
                                                             :text (format nil "line one~%line two"))))))
              (let ((box (list nil)))
                (progv '(evo.user::*baby-evo-macos-p*
-                        evo.user::*baby-evo-poster*
-                        evo.user::*baby-evo-original-run-until-settled*)
-                   (list t (baby-evo-recorder box)
-                         (lambda (a) (declare (ignore a)) :stop))
-                 (evo.user::baby-evo-run-until-settled (make-agent :journal journal)))
+                        evo.user::*baby-evo-poster*)
+                   (list t (baby-evo-recorder box))
+                 (run-hooks :idle (list :agent (make-agent :journal journal)
+                                        :outcome :stop)))
                (check "going idle posts the required title"
                       (equal (first (car box)) "Baby Evo: I'm done!"))
                ;; The body carries the response; the git prefix is a stub in
@@ -2340,11 +2344,9 @@ the list of replies a run was requested for."
                       (search "line one line two" (second (car box))))))
            (let ((box (list nil)))
              (progv '(evo.user::*baby-evo-macos-p*
-                      evo.user::*baby-evo-poster*
-                      evo.user::*baby-evo-original-run-until-settled*)
-                 (list t (baby-evo-recorder box)
-                       (lambda (a) (declare (ignore a)) :error))
-               (evo.user::baby-evo-run-until-settled (make-agent)))
+                      evo.user::*baby-evo-poster*)
+                 (list t (baby-evo-recorder box))
+               (run-hooks :idle (list :agent (make-agent) :outcome :error)))
              (check "an errored run notifies too — it is idle as well"
                     (car box)))
            (let ((box (list nil)))
@@ -2362,23 +2364,26 @@ the list of replies a run was requested for."
                (evo.user::baby-evo-on-idle (make-agent) :stop))
              (evo.util:set-setting :baby-evo t)
              (check "switched off means silent" (null (car box))))
-           (check "the wrapper returns the driver's outcome unchanged"
-                  (progv '(evo.user::*baby-evo-macos-p*
-                           evo.user::*baby-evo-poster*
-                           evo.user::*baby-evo-original-run-until-settled*)
-                      (list t (baby-evo-recorder (list nil))
-                            (lambda (a) (declare (ignore a)) :length))
-                    (eq :length (evo.user::baby-evo-run-until-settled (make-agent)))))
+           ;; The real driver announces both ends: an interrupted drive still
+           ;; passes :busy and :idle, returns its own outcome, and stays silent.
+           (let ((box (list nil))
+                 (agent (make-agent)))
+             (request-abort agent)
+             (progv '(evo.user::*baby-evo-macos-p*
+                      evo.user::*baby-evo-poster*)
+                 (list t (baby-evo-recorder box))
+               (check "the driver's outcome reaches its caller unchanged"
+                      (eq :aborted (run-until-settled agent))))
+             (check "and the aborted drive posted nothing" (null (car box))))
            (check "a signalling notifier cannot break the run"
                   (progv '(evo.user::*baby-evo-macos-p*
-                           evo.user::*baby-evo-poster*
-                           evo.user::*baby-evo-original-run-until-settled*)
+                           evo.user::*baby-evo-poster*)
                       (list t
                             (lambda (agent title body) (declare (ignore agent title body))
-                              (error "notifier exploded"))
-                            (lambda (a) (declare (ignore a)) :stop))
+                              (error "notifier exploded")))
                     (handler-bind ((warning #'muffle-warning))
-                      (eq :stop (evo.user::baby-evo-run-until-settled (make-agent))))))
+                      (progn (run-hooks :idle (list :agent (make-agent) :outcome :stop))
+                             t))))
 
            ;; --- the alert lifecycle: cancel on new work -------------------------
            ;; A 'done' banner must be dismissed the instant evo works again,
@@ -2467,24 +2472,13 @@ the list of replies a run was requested for."
                (check "doctor's test notification ignores the on/off setting"
                       (and (car box)
                            (equal (first (car box)) "Baby Evo: I'm done!")
-                           (search "probe" (second (car box)))))))
-
-           ;; --- uninstall puts the kernel back --------------------------------
-           (evo.user::baby-evo-uninstall)
-           (check "baby-evo uninstall restores run-until-settled"
-                  (and (not (evo.user::baby-evo-installed-p))
-                       (eq (symbol-function 'evo.kernel:run-until-settled)
-                           saved-driver))))
-      (ignore-errors (evo.user::baby-evo-uninstall))
-      ;; The extension's install/uninstall lock EVO.KERNEL around their patch,
-      ;; which is correct at runtime — but the unit image never locks the
-      ;; kernel packages, and the source-reading lint that runs later reads
-      ;; files whose IN-PACKAGE is EVO.KERNEL: a locked package refuses to
-      ;; intern, failing the lint.  Leave the package the way the suite found
-      ;; it (unlocked), with the original driver restored.
-      (let ((pkg (symbol-package 'evo.kernel:run-until-settled)))
-        (evo.port:unlock-package pkg)
-        (setf (symbol-function 'evo.kernel:run-until-settled) saved-driver))
+                           (search "probe" (second (car box))))))))
+      ;; Registered outside any extension load (owner NIL), so no reload
+      ;; would ever withdraw them: take the hooks back by name, or later
+      ;; tests that run the driver would post real banners on a Mac.
+      (remove-hooks-if (lambda (entry)
+                         (member (evo.kernel::hook-entry-name entry)
+                                 '(:baby-evo-busy :baby-evo-idle :baby-evo-cancel))))
       (if (eq saved-on :unset)
           (remf evo.util:*settings* :baby-evo)
           (evo.util:set-setting :baby-evo saved-on))
@@ -3334,6 +3328,137 @@ just the pack that ships as a core extension, and what the user picked
              (and (= 1 (length seen))
                   (eq agent (pget (first seen) :agent))
                   (null (pget (first seen) :resumed)))))))
+
+;;; The protocols extensions used to patch around.  Each of these was once a
+;;; function patch or a read of a private symbol in a bundled extension; the
+;;; checks pin the public seam that replaced it.
+
+(defun test-extension-protocols ()
+  ;; :busy / :idle — the outer driver announces both ends of a drive
+  ;; (baby-evo used to wrap RUN-UNTIL-SETTLED to see them).
+  (let ((evo.kernel::*event-hooks* (make-hash-table))
+        (seen nil)
+        (agent (make-agent)))
+    (add-hook :busy (lambda (e) (push (list :busy (pget e :agent)) seen)))
+    (add-hook :idle (lambda (e) (push (list :idle (pget e :agent) (pget e :outcome))
+                                      seen)))
+    (request-abort agent)
+    (check "the driver returns its own outcome"
+           (eq :aborted (run-until-settled agent)))
+    (check "and announces :busy, then :idle with that outcome"
+           (equal (reverse seen)
+                  (list (list :busy agent) (list :idle agent :aborted)))))
+  ;; :user-message — what the user said is announced before it is journaled,
+  ;; and only that (ide-context used to wrap the TUI's SUBMIT-TO-AGENT).
+  (let* ((dir (uiop:ensure-directory-pathname
+               (format nil "~a/evo-user-message-~a/" (tmp-dir) (gen-id))))
+         (journal (progn (ensure-directories-exist dir) (make-session-journal dir)))
+         (agent (make-agent :journal journal))
+         (evo.kernel::*event-hooks* (make-hash-table))
+         (seen nil))
+    (add-hook :user-message
+              (lambda (e)
+                (push (pget e :text) seen)
+                (evo:inject-context "context first" :key "probe"
+                                                    :agent (pget e :agent))))
+    (queue-steering agent "a goal continuation")
+    (queue-steering agent "what the user typed" :from-user t)
+    (evo.kernel::drain-steering agent)
+    (check "only the user's own turn is announced as :user-message"
+           (equal seen '("what the user typed")))
+    (check "and what its hook journals lands immediately before it"
+           (equal (mapcar (lambda (m) (pget (first (pget m :content)) :text))
+                          (state-messages (fold-state journal)))
+                  '("a goal continuation" "context first" "what the user typed"))))
+  ;; provider-registration — what was registered, unresolved (the Kimi and
+  ;; OAuth providers used to read EVO.PROVIDER::*PROVIDERS* for it).
+  (let ((evo.provider::*providers* (copy-tree evo.provider::*providers*)))
+    (evo:register-provider :probe-provider :base-url "http://probe.invalid")
+    (evo:register-provider :probe-provider :api-key-env "PROBE_KEY")
+    (let ((registered (evo:provider-registration :probe-provider)))
+      (check "provider-registration merges what was registered"
+             (and (equal "http://probe.invalid" (pget registered :base-url))
+                  (equal "PROBE_KEY" (pget registered :api-key-env))
+                  (null (pget registered :api-key))))
+      (setf (getf registered :base-url) "http://changed.invalid")
+      (check "and hands out a copy: editing it changes nothing"
+             (equal "http://probe.invalid"
+                    (pget (evo:provider-registration :probe-provider) :base-url))))
+    (check "an unregistered provider has no registration"
+           (null (evo:provider-registration :no-such-provider))))
+  ;; json->sexpr — the JSON bridge is public (ide-context used the internal).
+  (check "json->sexpr is the public EVO symbol"
+         (eq 'evo:json->sexpr 'evo.provider:json->sexpr))
+  (check "json->sexpr keywordizes an object's keys"
+         (equal '(:line-count 3)
+                (evo:json->sexpr (com.inuoe.jzon:parse "{\"line_count\": 3}"))))
+  ;; A clipboard reader for a platform evo knows nothing about explains an
+  ;; empty result itself — no need to teach EVO.MEDIA::CLIPBOARD-GAP.
+  (flet ((reason-with (&rest readers)
+           (let ((evo.media:*clipboard-readers*
+                   (loop for reader in readers
+                         for i from 0
+                         collect (cons (format nil "probe ~d" i) reader))))
+             (nth-value 1 (evo.media:clipboard-image)))))
+    (check "a reader that looked and found nothing means an empty clipboard"
+           (equal "no image on the clipboard"
+                  (reason-with (lambda (dir) (declare (ignore dir)) :empty))))
+    (check "a reader that cannot run here says what is missing"
+           (equal "install probe-paste"
+                  (reason-with (lambda (dir) (declare (ignore dir))
+                                 (values nil "install probe-paste")))))
+    (check "one reader that looked outweighs one that could not"
+           (equal "no image on the clipboard"
+                  (reason-with (lambda (dir) (declare (ignore dir))
+                                 (values nil "install probe-paste"))
+                               (lambda (dir) (declare (ignore dir)) :empty)))))
+  ;; The TUI's registries belong to the extension generation that filled
+  ;; them, like its hooks (ide-context used to undo its segment by hand).
+  (let ((evo.kernel::*event-hooks* (make-hash-table))
+        (evo.kernel::*extension-disposers* nil)
+        (evo.kernel::*extension-tasks* nil)
+        (evo.kernel::*extension-generation* 20)
+        (evo.tui::*status-segments* evo.tui::*status-segments*)
+        (evo.tui:*math-renderer* nil)
+        (evo.tui:*math-enabled* nil)
+        (evo.tui:*prose-styler* nil)
+        (renderer (lambda (&rest args) (declare (ignore args)) nil))
+        (styler (lambda (text) text)))
+    (flet ((segment-p (name)
+             (find name (evo.tui:status-segments)
+                   :key #'evo.tui::status-segment-name)))
+      (let ((evo.kernel::*extension-owner*
+              (evo.kernel::%make-extension-owner :path "/x/600-seams.lisp"
+                                                 :generation 20)))
+        (evo.tui:add-status-segment :probe-seam
+                                    (lambda (tui) (declare (ignore tui)) "probe"))
+        (evo.tui:register-math-renderer renderer)
+        (evo.tui:register-prose-styler styler))
+      (check "an extension's TUI seams are installed"
+             (and (segment-p :probe-seam)
+                  (eq renderer evo.tui:*math-renderer*)
+                  (eq styler evo.tui:*prose-styler*)))
+      (incf evo.kernel::*extension-generation*)
+      (evo.kernel:dispose-extension-owners
+       :before evo.kernel::*extension-generation*)
+      (check "a reload withdraws the extension's status segment"
+             (not (segment-p :probe-seam)))
+      (check "and its math renderer"
+             (and (null evo.tui:*math-renderer*) (null evo.tui:*math-enabled*)))
+      (check "and its prose styler"
+             (null evo.tui:*prose-styler*))
+      (check "while the core's own segments stay"
+             (segment-p :model))))
+  ;; Prompt notes go with the extension that registered them, like its tools
+  ;; and commands; what config registered before extensions load stays.
+  (let ((evo.kernel::*prompt-notes* nil)
+        (evo.kernel::*pre-extension-registries* nil))
+    (register-prompt-note "from-config" "kept")
+    (evo.kernel::snapshot-extension-registries)
+    (register-prompt-note "from-extension" "withdrawn")
+    (evo.kernel::restore-extension-registries)
+    (check "a reload withdraws an extension's prompt note, keeping config's"
+           (equal '("from-config") (mapcar #'car evo.kernel::*prompt-notes*)))))
 
 (defvar *test-goal-done* nil
   "Flip switch read by the done-when verifier in test-goal-tools.")
@@ -7117,6 +7242,7 @@ became zero after the first reload."
     (test-prompt-languages)
     (test-goal-budget)
     (test-session-operations)
+    (test-extension-protocols)
     (test-goal-tools)
     (test-goal-verifier-forms)
     (test-templates)
