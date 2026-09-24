@@ -2619,8 +2619,70 @@ but it takes DELAY, which is what makes the asynchrony observable."
              (check "the task's thread is gone"
                     (not (bt:thread-alive-p thread)))
              (check "a cancelled boot is not recorded as a server failure"
-                    (equal '(:connecting) (mapcar #'evo.user::mcp-server-status
-                                                  (mcp-servers)))))
+                    (equal '(:cancelled) (mapcar #'evo.user::mcp-server-status
+                                                 (mcp-servers))))
+             ;; What a failed /reload leaves on screen: the rollback cannot
+             ;; restart the task, so "connecting…" would never end.
+             (check "/mcp says the connection was stopped, not that it is pending"
+                    (let ((report (evo.user::mcp-status-report)))
+                      (and (search "stopped by /reload" report)
+                           (not (search "connecting" report)))))
+             (check "and the status line counts it as cancelled"
+                    (search "1 cancelled" (or (evo.user::mcp-status-label) ""))))
+           ;; --- a stop after the handshake interrupts nothing ----------------
+           ;; The interrupt is asynchronous.  Were it allowed to land anywhere,
+           ;; a stop during registration would unwind REGISTER-TOOL halfway
+           ;; through its hash-table write.  Registration is slowed down here
+           ;; so the stop is sure to arrive in the middle of it.
+           (mcp-install-stub)
+           (let* ((saved-register (symbol-function 'evo.user::mcp-register-tools))
+                  (entered nil)
+                  (finished nil))
+             (setf (symbol-function 'evo.user::mcp-register-tools)
+                   (lambda (server tools)
+                     (setf entered t)
+                     (sleep 0.5)
+                     (funcall saved-register server tools)
+                     (setf finished t)))
+             (unwind-protect
+                  (progn
+                    (evo.util:set-setting :mcp-servers
+                                          '((:name "late" :url "https://late.example/mcp")))
+                    (evo.user::mcp-boot)
+                    (check "the task reaches registration"
+                           (mcp-wait-for (lambda () entered)))
+                    (let* ((task (first (mcp-live-tasks)))
+                           (thread (getf task :thread)))
+                      (evo.kernel::stop-extension-task task)
+                      (check "a stop during registration lets it finish"
+                             finished)
+                      (check "the task still exits within the stop window"
+                             (not (bt:thread-alive-p thread)))
+                      (check "and what it finished is published"
+                             (equal '(:connected)
+                                    (mapcar #'evo.user::mcp-server-status
+                                            (mcp-servers))))))
+               (setf (symbol-function 'evo.user::mcp-register-tools) saved-register)))
+           ;; --- a stop before the handshake is caught by the flag ------------
+           (let ((boot (evo.user::make-mcp-boot))
+                 (server (evo.user::mcp-server-from-spec
+                          '(:name "early" :url "https://early.example/mcp"))))
+             (evo.user::mcp-boot-cancel boot)
+             (evo.user::mcp-boot-run boot server)
+             (check "a stop that found no thread to interrupt still stops the task"
+                    (and (eq :cancelled (evo.user::mcp-server-status server))
+                         (null (evo.kernel:find-tool "early__ping")))))
+           ;; --- a reconnect with no tools stops listing the old ones --------
+           (let ((server (evo.user::mcp-server-from-spec
+                          '(:name "shrunk" :url "https://shrunk.example/mcp"))))
+             (evo.user::mcp-publish-server server :connected
+                                           :tools (list (mcp-stub-object "name" "gone")))
+             (evo.user::mcp-publish-server server :error :error "down")
+             (check "publishing without tools leaves the list alone"
+                    (= 1 (length (evo.user::mcp-server-tools server))))
+             (evo.user::mcp-publish-server server :connected :tools nil)
+             (check "publishing an empty tool list clears the old one"
+                    (null (evo.user::mcp-server-tools server))))
            ;; --- a server that fails is recorded, and costs only itself ------
            (mcp-install-stub :fail t)
            (evo.util:set-setting :mcp-servers
@@ -2635,6 +2697,18 @@ but it takes DELAY, which is what makes the asynchrony observable."
                   (search "stub transport failure" (evo.user::mcp-status-report)))
            (check "and the status line counts it"
                   (search "1 failed" (evo.user::mcp-status-label)))
+           ;; Run on this thread, where a warning can be caught: on the task's
+           ;; own thread nothing muffles it, and it is printed over the TUI.
+           (check "a failing server is recorded without a warning"
+                  (let ((warned nil)
+                        (server (evo.user::mcp-server-from-spec
+                                 '(:name "broken" :url "https://broken.example/mcp"))))
+                    (handler-bind ((warning (lambda (w)
+                                              (setf warned w)
+                                              (muffle-warning w))))
+                      (evo.user::mcp-boot-run (evo.user::make-mcp-boot) server))
+                    (and (eq :error (evo.user::mcp-server-status server))
+                         (null warned))))
            ;; --- nothing configured is not an error --------------------------
            (dolist (task (mcp-live-tasks)) (evo.kernel::stop-extension-task task))
            (evo.util:set-setting :mcp-servers nil)
@@ -2652,7 +2726,8 @@ but it takes DELAY, which is what makes the asynchrony observable."
       (bt:with-lock-held (evo.kernel::*registry-lock*)
         (remhash "notes__ping" evo.kernel::*tool-registry*)
         (remhash "slow__ping" evo.kernel::*tool-registry*)
-        (remhash "broken__ping" evo.kernel::*tool-registry*))
+        (remhash "broken__ping" evo.kernel::*tool-registry*)
+        (remhash "late__ping" evo.kernel::*tool-registry*))
       (setf evo.kernel::*prompt-notes* saved-notes)
       (evo.tui:remove-status-segment :mcp)
       (remhash "mcp" evo::*commands*)
