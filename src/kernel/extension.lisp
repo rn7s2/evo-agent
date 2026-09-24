@@ -174,7 +174,7 @@ from source are cleaned up.")
   (setf *pre-extension-registries*
         (list :commands (loop for k being the hash-keys of evo::*commands* collect k)
               :apis (mapcar #'car evo.provider::*apis*)
-              :tools (loop for k being the hash-keys of *tool-registry* collect k))))
+              :tools (bt:with-lock-held (*registry-lock*) (%all-tool-names)))))
 
 (defun restore-extension-registries ()
   "Remove registrations added by extensions (anything not in the pre-extension snapshot)."
@@ -191,9 +191,10 @@ from source are cleaned up.")
                            evo.provider::*apis*)))
     ;; Tools: remove entries not in the pre-extension set.
     (let ((keep (pget *pre-extension-registries* :tools)))
-      (loop for k being the hash-keys of *tool-registry*
-            unless (member k keep :test #'equal)
-            do (remhash k *tool-registry*)))))
+      (bt:with-lock-held (*registry-lock*)
+        (loop for k being the hash-keys of *tool-registry*
+              unless (member k keep :test #'equal)
+              do (remhash k *tool-registry*))))))
 
 ;;; The runtime catalog: everything a turn resolves against.  Reload builds a
 ;;; new generation and installs it in one step; if the build dies partway, the
@@ -212,29 +213,33 @@ able to put this exact runtime back."
    :providers (mapcar (lambda (e) (cons (car e) (copy-list (cdr e))))
                       evo.provider::*providers*)
    :apis (copy-alist evo.provider::*apis*)
-   :tools (let ((copy (make-hash-table :test #'equal)))
-            (maphash (lambda (k v) (setf (gethash k copy) v)) *tool-registry*)
-            copy)
+   :tools (bt:with-lock-held (*registry-lock*)
+            (let ((copy (make-hash-table :test #'equal)))
+              (maphash (lambda (k v) (setf (gethash k copy) v)) *tool-registry*)
+              copy))
    :commands (let ((copy (make-hash-table :test #'equal)))
                (maphash (lambda (k v) (setf (gethash k copy) v)) evo::*commands*)
                copy)
    :settings (evo.util:capture-settings)
-   :prompt-notes (copy-alist *prompt-notes*)))
+   :prompt-notes (prompt-notes-snapshot)))
 
 (defun install-runtime-catalog (catalog)
   "Make CATALOG the live runtime in one step."
   (setf evo.provider::*models* (runtime-catalog-models catalog)
         evo.provider::*providers* (runtime-catalog-providers catalog)
-        evo.provider::*apis* (runtime-catalog-apis catalog)
-        *prompt-notes* (runtime-catalog-prompt-notes catalog))
-  (clrhash *tool-registry*)
-  (maphash (lambda (k v) (setf (gethash k *tool-registry*) v))
-           (runtime-catalog-tools catalog))
+        evo.provider::*apis* (runtime-catalog-apis catalog))
+  ;; The tool registry is emptied and refilled under one lock: a reader must
+  ;; never observe the instant between the two.
+  (bt:with-lock-held (*registry-lock*)
+    (clrhash *tool-registry*)
+    (maphash (lambda (k v) (setf (gethash k *tool-registry*) v))
+             (runtime-catalog-tools catalog))
+    (setf *prompt-notes* (copy-list (runtime-catalog-prompt-notes catalog)))
+    (incf *registry-generation*))
   (clrhash evo::*commands*)
   (maphash (lambda (k v) (setf (gethash k evo::*commands*) v))
            (runtime-catalog-commands catalog))
   (evo.util:restore-settings (runtime-catalog-settings catalog))
-  (incf *registry-generation*)
   catalog)
 
 (defun boot-userspace (&key journal (cwd (uiop:getcwd)))
@@ -279,7 +284,7 @@ normal repair."
            (load-init-file (merge-pathnames "post-init.lisp" (evo-home)))
            (load-init-file (merge-pathnames "post-init.lisp" (project-evo-dir cwd)))
            (setf installed t)
-           (incf *registry-generation*)
+           (bt:with-lock-held (*registry-lock*) (incf *registry-generation*))
            t)
       (unless installed
         ;; The failed build may itself have registered hooks and started
@@ -344,7 +349,13 @@ server, an OpenAPI operation) rather than in this file:
   ARGUMENTS :json hands EXECUTE the model's arguments exactly as written
   (jzon values: hash-tables, vectors, strings) instead of the keywordized
   plist, whose keys are upcased and de-underscored — fine for a fixed
-  contract, wrong when the keys are data (file paths, knob names)."
+  contract, wrong when the keys are data (file paths, knob names).
+
+Registration is safe from any thread: a background task (EVO:SPAWN-TASK) may
+register what it found the moment it is ready.  Nothing registered mid-turn
+is callable in that turn — the request has already gone out with its tool
+list — but the next turn sees it whole.  The other registries (models,
+providers, APIs, commands) are boot-thread only."
   `(evo.kernel:register-tool* :name ,name :description ,description
                               :schema ,schema :execute ,execute
                               :arguments ,arguments
@@ -360,7 +371,7 @@ resolved by the CLI's --command flag and by future frontends.")
 
 (defun on (event fn &key name)
   "Subscribe FN to a kernel event: :session-start :session-end :turn-end
-:tool-call ...
+:tool-call :transform-context :todo-changed ...
 A :tool-call hook may return (:block t :reason ...) or (:arguments ...).
 
 Pass NAME from any file a reload can re-run: a named hook REPLACES the previous
@@ -398,7 +409,11 @@ agent to write formulas as LaTeX because they now render as images.
 
 TEXT may instead be a function of the active language pack (a plist; its
 :code is the language) returning the snippet, so a note can follow /lang
-the way the prompt's own sections do — see extensions/400-efficiency.lisp."
+the way the prompt's own sections do — see extensions/400-efficiency.lisp.
+
+Safe from any thread, on the same terms as REGISTER-TOOL: a note registered
+by a background task takes effect from the next prompt built, and a note's
+own function runs outside the registry lock."
   (evo.kernel:register-prompt-note name text))
 
 (defun register-prompt-language (code &rest args)

@@ -10,6 +10,12 @@
 ;;;; the model.  The server's `instructions`, if it sends any, become a prompt
 ;;;; note, so its own words about how to use it reach the agent.
 ;;;;
+;;;; Connecting is asynchronous: the config is read at boot and each server is
+;;;; contacted by its own background task.  A server that answers late is not
+;;;; a server whose tools are lost — the tool list is resolved every turn, so
+;;;; they are there from the next turn on.  See "Boot" at the bottom of this
+;;;; file for the threading contract.
+;;;;
 ;;;; Configure it in ~/.evo/init.lisp (or <project>/.evo/init.lisp):
 ;;;;
 ;;;;   (evo:set-setting :mcp-servers
@@ -46,16 +52,31 @@
   "Default per-request read timeout; override with the :mcp-timeout setting.")
 
 (defstruct mcp-server
-  name url headers session-id tools instructions (status :new) error)
+  name url headers session-id tools instructions (status :connecting) error)
+
+;;; Two variables, two owners.  *MCP-SERVERS* is read by other threads (/mcp
+;;; and the status line render on the TUI thread), so it and the slots those
+;;; readers can observe — STATUS, ERROR, TOOLS — are guarded by *MCP-LOCK*.
+;;; SESSION-ID is written and read only by the thread making the request, and
+;;; INSTRUCTIONS only by the one registering them, so neither needs the lock.
+;;; The lock is never held across a request.
+
+(defvar *mcp-lock* (bt:make-lock "mcp"))
 
 (defvar *mcp-servers* nil
-  "Servers from the current generation, in config order.")
+  "Servers from the current generation, in config order.  Guarded by *MCP-LOCK*.")
 
 (defvar *mcp-prompt-notes* nil
   "Prompt notes registered by any generation — cleared before re-registering,
-so a server dropped from the config takes its instructions with it.")
+so a server dropped from the config takes its instructions with it.  Touched
+only by the boot task and by the load that starts it, and a load always joins
+the previous task first, so it needs no lock of its own.")
 
-(defvar *mcp-request-counter* 0)
+(defvar *mcp-request-counter* 0
+  "JSON-RPC id source.  The boot task and the worker running a tool call both
+talk to servers at the same time, and two threads incf-ing a shared counter
+would eventually put the same id on one connection twice — a client that
+matches responses by id would then take the wrong one.")
 
 (define-condition mcp-error (error)
   ((text :initarg :text :reader mcp-error-text))
@@ -65,8 +86,17 @@ so a server dropped from the config takes its instructions with it.")
 ;;; session id).  Recoverable: re-initialize and call again, once.
 (define-condition mcp-session-expired (mcp-error) ())
 
+;;; A boot the kernel is tearing down.  Delivered by interrupt into a
+;;; connecting task's thread, where it unwinds the request in flight.  Nothing
+;;; may convert it into an ordinary error on the way out — see MCP-HTTP-POST.
+(define-condition mcp-boot-cancelled (error) ())
+
 (defun mcp-timeout ()
   (or (evo:setting :mcp-timeout) *mcp-default-timeout*))
+
+(defun mcp-next-request-id ()
+  "A JSON-RPC id, unique across every thread talking to a server."
+  (bt:with-lock-held (*mcp-lock*) (incf *mcp-request-counter*)))
 
 (defun mcp-json (&rest kvs)
   "A JSON object as jzon reads and writes them: string keys, hash-table."
@@ -148,6 +178,12 @@ says what went wrong, and the JSON-RPC layer above reports it."
               (values (dexador.error:response-body e)
                       (dexador.error:response-status e)
                       (dexador.error:response-headers e)))
+            ;; A boot being cancelled arrives here as an interrupt.  It must
+            ;; not be laundered into an MCP-ERROR below: the caller
+            ;; distinguishes "this server failed" from "this boot is over",
+            ;; and getting that wrong records a cancellation as a failure and
+            ;; swallows the unwind.
+            (mcp-boot-cancelled (e) (error e))
             (error (e)
               (error 'mcp-error :text (format nil "~a: ~a" url e))))
         ;; The server may hand out a session id on any response; carry it.
@@ -195,7 +231,7 @@ result/error message of an SSE stream.  NIL for an empty body (a notification's
 (defun mcp-request (server method &key params initialize)
   "One JSON-RPC request/response.  Returns the result object; signals
 MCP-ERROR for a transport, HTTP or JSON-RPC error."
-  (let* ((id (incf *mcp-request-counter*))
+  (let* ((id (mcp-next-request-id))
          (body (com.inuoe.jzon:stringify
                 (mcp-json "jsonrpc" "2.0" "id" id "method" method
                           "params" (or params (mcp-json))))))
@@ -231,7 +267,9 @@ MCP-ERROR for a transport, HTTP or JSON-RPC error."
 ;;; ---------------------------------------------------------------------------
 
 (defun mcp-connect (server)
-  "initialize + notifications/initialized + tools/list."
+  "initialize + notifications/initialized + tools/list.  Returns the server's
+tool list; publishing the new state is the caller's, so a server is never
+reported connected before its tools are registered."
   (setf (mcp-server-session-id server) nil)
   (let ((init (mcp-request server "initialize" :initialize t
                            :params (mcp-json
@@ -241,10 +279,7 @@ MCP-ERROR for a transport, HTTP or JSON-RPC error."
                                                            "version" *mcp-client-version*)))))
     (setf (mcp-server-instructions server) (mcp-nonempty (mcp-jget init "instructions")))
     (mcp-notify server "notifications/initialized")
-    (setf (mcp-server-tools server) (mcp-fetch-tools server)
-          (mcp-server-status server) :connected
-          (mcp-server-error server) nil)
-    server))
+    (mcp-fetch-tools server)))
 
 (defun mcp-fetch-tools (server)
   "Every page of tools/list."
@@ -288,8 +323,8 @@ hash-table straight through, so nothing the DSL cannot express is lost."
         schema
         (mcp-json "type" "object" "properties" (mcp-json)))))
 
-(defun mcp-register-tools (server)
-  (dolist (tool (mcp-server-tools server))
+(defun mcp-register-tools (server tools)
+  (dolist (tool tools)
     (let ((remote-name (mcp-nonempty (mcp-jget tool "name"))))
       (when remote-name
         (evo:register-tool (mcp-tool-name server remote-name)
@@ -375,69 +410,223 @@ JSON rather than dropped."
       (if retry
           ;; The server forgot the session (restart, idle timeout).  Shake
           ;; hands again and call once more; a second expiry is a real error.
-          (progn (mcp-connect server)
+          (progn (mcp-publish-server server :connected :tools (mcp-connect server))
                  (mcp-call-tool server remote-name args :retry nil))
           (error 'mcp-error :text "MCP session expired")))))
 
 ;;; ---------------------------------------------------------------------------
-;;; Boot + /mcp
+;;; Boot
 ;;; ---------------------------------------------------------------------------
+;;;
+;;; Connecting is network I/O with a read timeout measured in minutes, and this
+;;; file loads on the session's own boot path.  Done inline, one unreachable
+;;; server held the whole session hostage — no prompt could be typed until the
+;;; last one timed out, and a reload re-paid the whole cost.  So boot does the
+;;; cheap half (read the config, publish the server list as :connecting) and
+;;; hands the network half to tracked background tasks — ONE PER SERVER, so a
+;;; server that hangs delays nothing but itself — which register each server's
+;;; tools and prompt note the moment that server answers.
+;;;
+;;; What that buys the session, precisely.  The tool list is resolved per turn
+;;; (EVO.KERNEL:ACTIVE-TOOLS, called from PREPARE-NEXT-TURN), so a server that
+;;; answers late is not a server whose tools are lost: they are in the next
+;;; turn's list, and the model discovers them then.  Only a server that FAILS
+;;; loses anything — it is recorded as :error and its tools stay absent until
+;;; /reload reconnects.
+;;;
+;;; Threading, in full:
+;;;
+;;;   * *MCP-LOCK* guards the server list and the slots a reader on another
+;;;     thread can observe (STATUS, ERROR, TOOLS).  It is never held across a
+;;;     request, and REQUEST-REPAINT is called outside it: a lock held while
+;;;     waiting on a socket is a lock that deadlocks a reload.
+;;;   * Each task is tracked by EVO:SPAWN-TASK, and its :stop INTERRUPTS the
+;;;     thread with MCP-BOOT-CANCELLED.  A flag alone would not do — the thread
+;;;     spends its life inside DEX:POST, where no flag can reach it, and the
+;;;     kernel abandons a task that ignores its stop after ~5s, which would let
+;;;     the outgoing generation register tools after the incoming one loaded.
+;;;     The interrupt unwinds Dexador on the task's own thread, so the socket
+;;;     is closed by its owner.  Nothing may convert that condition into an
+;;;     ordinary error on the way out (MCP-HTTP-POST is careful about this) or
+;;;     the cancellation would be recorded as a server failure instead.
+;;;   * /reload stops and joins every task before the next generation loads, so
+;;;     two boots never overlap and a stale task cannot publish into a live
+;;;     registry.
 
 (defun mcp-server-from-spec (spec)
   (make-mcp-server :name (or (mcp-nonempty (getf spec :name)) "mcp")
                    :url (getf spec :url)
                    :headers (mcp-normalize-headers (getf spec :headers))))
 
+(defun mcp-publish-server (server status &key error tools)
+  "Publish what another thread may observe about SERVER: STATUS, ERROR, and on
+success TOOLS.  Repaint is requested AFTER the lock is released — it takes the
+TUI's own lock, and there is no reason to order the two."
+  (bt:with-lock-held (*mcp-lock*)
+    (setf (mcp-server-status server) status
+          (mcp-server-error server) error)
+    (when tools (setf (mcp-server-tools server) tools)))
+  (evo.tui:request-repaint))
+
+(defstruct (mcp-boot (:conc-name mcp-boot-))
+  (lock (bt:make-lock "mcp-boot"))
+  thread                                ; published by the task itself
+  (cancelled nil))
+
+(defun mcp-boot-cancelled-p (boot)
+  (bt:with-lock-held ((mcp-boot-lock boot)) (mcp-boot-cancelled boot)))
+
+(defun mcp-boot-cancel (boot)
+  "Stop the connecting task, flag and interrupt together.  Called from the
+thread doing the disposal, which then joins the task's thread."
+  (let (thread)
+    (bt:with-lock-held ((mcp-boot-lock boot))
+      (setf (mcp-boot-cancelled boot) t
+            thread (mcp-boot-thread boot)))
+    (when (and thread (bt:thread-alive-p thread))
+      (ignore-errors
+        (bt:interrupt-thread thread (lambda () (error 'mcp-boot-cancelled)))))
+    t))
+
+(defun mcp-connect-server (server)
+  "Connect to SERVER and register what it offers.  A failure is recorded on
+the server, not signalled: one unreachable server must not cost the session
+the others, nor its startup."
+  (handler-case
+      (progn
+        (unless (mcp-nonempty (mcp-server-url server))
+          (error 'mcp-error :text "no :url in the server spec"))
+        (let ((tools (mcp-connect server)))
+          (mcp-register-tools server tools)
+          (mcp-register-instructions server)
+          ;; Last, so the status line never promises tools the agent cannot
+          ;; call yet.
+          (mcp-publish-server server :connected :tools tools)))
+    (mcp-boot-cancelled () nil)         ; being torn down: record nothing
+    (error (e)
+      (mcp-publish-server server :error :error (format nil "~a" e))
+      (warn "MCP server ~a: ~a" (mcp-server-name server) e))))
+
+(defun mcp-boot-run (boot server)
+  "The connecting task's body: one server, from handshake to registration.
+One task per server, so a server that hangs delays only its own tools."
+  ;; Publish our own thread handle as the first act: the kernel may call :stop
+  ;; before this thread's first form runs, and a stop with no thread to
+  ;; interrupt would leave the task uncancellable for the length of a request.
+  (bt:with-lock-held ((mcp-boot-lock boot))
+    (setf (mcp-boot-thread boot) (bt:current-thread)))
+  (handler-case
+      (unless (mcp-boot-cancelled-p boot)
+        (mcp-connect-server server))
+    (mcp-boot-cancelled () nil)
+    (error (e) (warn "MCP boot task for ~a failed: ~a" (mcp-server-name server) e)))
+  (evo.tui:request-repaint))
+
 (defun mcp-boot ()
-  "Connect to every configured server and register its tools.  A server that
-fails is recorded and skipped: one unreachable MCP server must not cost the
-session its other tools, nor its startup."
+  "Read the config and start connecting — without waiting for it.
+
+Returns as soon as the tasks are started.  The server list is published up
+front so /mcp and the status line can say what is being contacted."
   (dolist (name *mcp-prompt-notes*) (evo:register-prompt-note name nil))
-  (setf *mcp-prompt-notes* nil
-        *mcp-servers* nil)
-  (dolist (spec (evo:setting :mcp-servers))
-    (let ((server (mcp-server-from-spec spec)))
-      (push server *mcp-servers*)
-      (handler-case
-          (progn
-            (unless (mcp-nonempty (mcp-server-url server))
-              (error 'mcp-error :text "no :url in the server spec"))
-            (mcp-connect server)
-            (mcp-register-tools server)
-            (mcp-register-instructions server))
-        (error (e)
-          (setf (mcp-server-status server) :error
-                (mcp-server-error server) (format nil "~a" e))
-          (warn "MCP server ~a: ~a" (mcp-server-name server) e)))))
-  (setf *mcp-servers* (nreverse *mcp-servers*)))
+  (setf *mcp-prompt-notes* nil)
+  (let ((servers (loop for spec in (evo:setting :mcp-servers)
+                       collect (mcp-server-from-spec spec))))
+    (bt:with-lock-held (*mcp-lock*) (setf *mcp-servers* servers))
+    (dolist (server servers)
+      (let ((boot (make-mcp-boot)))
+        (evo:spawn-task :name (format nil "mcp-connect-~a" (mcp-server-name server))
+                        :run (lambda () (mcp-boot-run boot server))
+                        :stop (lambda () (mcp-boot-cancel boot)))))
+    (evo.tui:request-repaint))
+  nil)
+
+;;; ---------------------------------------------------------------------------
+;;; /mcp and the status line
+;;; ---------------------------------------------------------------------------
 
 (defun mcp-status-report ()
-  (if (null *mcp-servers*)
-      (cat "No MCP servers configured.  In ~/.evo/init.lisp:" #\Newline
-           #\Newline
-           "(evo:set-setting :mcp-servers" #\Newline
-           "  '((:name \"example\"" #\Newline
-           "     :url \"https://example.com/mcp\"" #\Newline
-           "     :headers ((\"Authorization\" . \"Bearer …\")))))" #\Newline
-           #\Newline
-           "Then /reload.")
-      (with-output-to-string (out)
-        (dolist (server *mcp-servers*)
-          (format out "~a  ~a~%" (mcp-server-name server) (mcp-server-url server))
-          (if (eq (mcp-server-status server) :connected)
-              (progn
-                (format out "  connected · ~d tool~:p~@[ · headers: ~a~]~%"
-                        (length (mcp-server-tools server))
-                        (and (mcp-server-headers server)
-                             (evo.util:string-join
-                              ", " (mapcar #'car (mcp-server-headers server)))))
-                (dolist (tool (mcp-server-tools server))
-                  (format out "    ~a~%" (mcp-tool-name server (mcp-jget tool "name")))))
-              (format out "  not connected: ~a~%" (mcp-server-error server))))
-        (format out "~%/reload re-reads the config and reconnects."))))
+  "What /mcp prints.  The state is snapshotted under the lock and formatted
+outside it, so a long report never holds the lock the boot task needs."
+  (let ((servers (bt:with-lock-held (*mcp-lock*)
+                   (loop for server in *mcp-servers*
+                         collect (list :name (mcp-server-name server)
+                                       :url (mcp-server-url server)
+                                       :status (mcp-server-status server)
+                                       :error (mcp-server-error server)
+                                       :headers (mcp-server-headers server)
+                                       :tools (loop for tool in (mcp-server-tools server)
+                                                    for remote = (mcp-nonempty
+                                                                  (mcp-jget tool "name"))
+                                                    when remote
+                                                      collect (mcp-tool-name
+                                                               server remote)))))))
+    (if (null servers)
+        ;; (string #\Newline), not #\Newline: CAT concatenates with
+        ;; CONCATENATE, whose arguments are sequences.  The line breaks stay
+        ;; outside the literals on purpose — see CAT's own docstring.
+        (cat "No MCP servers configured.  In ~/.evo/init.lisp:" (string #\Newline)
+             (string #\Newline)
+             "(evo:set-setting :mcp-servers" (string #\Newline)
+             "  '((:name \"example\"" (string #\Newline)
+             "     :url \"https://example.com/mcp\"" (string #\Newline)
+             "     :headers ((\"Authorization\" . \"Bearer …\")))))" (string #\Newline)
+             (string #\Newline)
+             "Then /reload.")
+        (with-output-to-string (out)
+          (dolist (server servers)
+            (let ((headers (evo.util:pget server :headers)))
+              (format out "~a  ~a~%" (evo.util:pget server :name)
+                      (evo.util:pget server :url))
+              (case (evo.util:pget server :status)
+                (:connected
+                 (let ((tools (evo.util:pget server :tools)))
+                   (format out "  connected · ~d tool~:p~@[ · headers: ~a~]~%"
+                           (length tools)
+                           (and headers
+                                (evo.util:string-join ", " (mapcar #'car headers))))
+                   (dolist (name tools)
+                     (format out "    ~a~%" name))))
+                (:connecting
+                 (format out "  connecting…~@[ · headers: ~a~]~%"
+                         (and headers
+                              (evo.util:string-join ", " (mapcar #'car headers)))))
+                (t (format out "  not connected: ~a~%"
+                           (evo.util:pget server :error))))))
+          (format out "~%/reload re-reads the config and reconnects.")))))
+
+(defun mcp-status-label (&optional tui)
+  "The status line's MCP segment: nothing when no server is configured, else a
+one-line summary.  Runs on the TUI thread on every repaint, so it only reads
+what the boot task published — no I/O, and the lock is held for the read and
+nothing else."
+  (declare (ignore tui))
+  (let ((summary
+          (bt:with-lock-held (*mcp-lock*)
+            (when *mcp-servers*
+              (let ((connecting 0) (connected 0) (failed 0) (tools 0))
+                (dolist (server *mcp-servers*)
+                  (case (mcp-server-status server)
+                    (:connected (incf connected)
+                                (incf tools (length (mcp-server-tools server))))
+                    (:error (incf failed))
+                    (t (incf connecting))))
+                (evo.util:string-join
+                 " · "
+                 (remove nil
+                         (list (when (plusp connecting)
+                                 (format nil "~d connecting" connecting))
+                               (when (plusp connected)
+                                 (format nil "~d up, ~d tool~:p" connected tools))
+                               (when (plusp failed)
+                                 (format nil "~d failed" failed))))))))))
+    (when summary (evo.tui::dim (format nil "mcp ~a" summary)))))
 
 (evo:register-command "mcp"
   (lambda (ctx) (declare (ignore ctx)) (mcp-status-report))
   :description "MCP servers: what connected, and the tools it registered")
+
+;; Order 400 keeps this inboard of the core segments on the right.
+(evo.tui:add-status-segment :mcp #'mcp-status-label :side :right :order 400)
+(evo:on-unload (lambda () (evo.tui:remove-status-segment :mcp)))
 
 (mcp-boot)
