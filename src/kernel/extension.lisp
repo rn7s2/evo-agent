@@ -297,11 +297,10 @@ normal repair."
         (setf *extension-generation* previous-generation)
         (install-runtime-catalog previous)))))
 
-(defun replay-loads (state &key journal)
+(defun replay-loads (state)
   "Replay a resumed session's :load entries against the files on disk.
 Files already loaded this boot are skipped; missing files are reported, not
 fatal — a corrupted runtime is repaired by fixing/removing a source file."
-  (declare (ignore journal))
   (dolist (entry (evo.journal:state-loads state))
     (let ((path (pget entry :path)))
       (unless (member path *loaded-extension-paths* :test #'equal)

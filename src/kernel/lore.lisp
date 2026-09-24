@@ -118,12 +118,6 @@ with :id :text :timestamp :scope."
      (mapcar (lambda (e) (append e (list :scope :session)))
              (read-session-lore state)))))
 
-(defun all-lore (&key state (cwd (uiop:getcwd)))
-  "Every lore entry's text, in scope order.  Retained for callers that only
-want the guidance strings; use ALL-LORE-ENTRIES to keep the ids."
-  (mapcar (lambda (e) (pget e :text))
-          (all-lore-entries :state state :cwd cwd)))
-
 ;;; Edit / remove --------------------------------------------------------
 
 (defun find-lore-scope (id &key state (cwd (uiop:getcwd)))
