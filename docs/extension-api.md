@@ -156,6 +156,34 @@ also how the bundled extensions stay idempotent.
   does.
 - `:todo-changed` — the todo list was replaced.
 
+## Registering from another thread
+
+`evo:register-tool` and `evo:register-prompt-note` are safe to call from any
+thread, and the tool list is resolved fresh on every turn — so a background
+task that discovers a tool late is not a task whose tool is lost. Register it
+when you find it; the next turn's list has it, and the model discovers it then.
+Nothing registered mid-turn is callable in that turn, because that request has
+already gone out with its tool list.
+
+The other registries (models, providers, APIs, commands) are boot-thread only.
+
+```lisp
+;; One server, contacted in the background: boot returns immediately, and the
+;; tools appear when it answers.  See extensions/500-mcp.lisp.
+(evo:spawn-task :name :connect-my-service
+                :run  (lambda ()
+                        (evo:register-tool "svc__ping" ...)
+                        (evo:register-prompt-note "svc:how" "..."))
+                :stop (lambda () (interrupt-the-request-in-flight)))
+```
+
+A task that blocks in I/O needs more than a stop flag: the flag cannot reach a
+thread sitting in a socket read, and the kernel abandons a task that has not
+returned after ~5s. Interrupt the thread with a private condition instead, and
+make sure nothing on the way out converts that condition into an ordinary
+error — a cancellation laundered into a failure is worse than no cancellation
+at all. `extensions/500-mcp.lisp` is the worked example.
+
 ## Lifecycle: background work and undoing yourself
 
 Anything your extension starts or patches belongs to it, and must go away when

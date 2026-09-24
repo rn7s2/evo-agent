@@ -447,15 +447,28 @@ guidelines, in registration order.")
   "Add or replace the system-prompt note NAME (a string) with TEXT, a
 self-contained markdown snippet — or a function of the active language pack
 returning one (NIL from it drops the note for that prompt).  NIL TEXT removes
-the note.  Returns TEXT."
-  (let ((entry (assoc name *prompt-notes* :test #'equal)))
-    (cond ((null text)
-           (setf *prompt-notes* (remove name *prompt-notes*
-                                        :key #'car :test #'equal)))
-          (entry (setf (cdr entry) text))
-          (t (setf *prompt-notes*
-                   (append *prompt-notes* (list (cons name text)))))))
+the note.  Returns TEXT.
+
+Safe from any thread (see *REGISTRY-LOCK*): the alist is rebuilt rather than
+patched in place, so a reader that snapshotted it keeps reading a consistent
+one."
+  (bt:with-lock-held (*registry-lock*)
+    (let ((entry (assoc name *prompt-notes* :test #'equal)))
+      (cond ((null text)
+             (setf *prompt-notes* (remove name *prompt-notes*
+                                          :key #'car :test #'equal)))
+            (entry (setf *prompt-notes*
+                         (substitute (cons name text) entry *prompt-notes*
+                                     :test #'eq)))
+            (t (setf *prompt-notes*
+                     (append *prompt-notes* (list (cons name text))))))))
   text)
+
+(defun prompt-notes-snapshot ()
+  "The notes as they stand, as a private list.  Taken under the lock and
+rendered outside it: a note's own function is user code, and user code must
+never run while a registry lock is held."
+  (bt:with-lock-held (*registry-lock*) (copy-list *prompt-notes*)))
 
 (defun prompt-note-text (note pack)
   "Text NOTE contributes to a prompt in PACK's language.  A note that
@@ -491,8 +504,11 @@ the agent losing one extension's guidance beats the agent losing its prompt."
                                                :separator '(#\Newline)))))
            (format out "~%~a~%" (section :guidelines))
            ;; Extension-contributed guidance (REGISTER-PROMPT-NOTE), each
-           ;; note given the chance to speak the active language.
-           (dolist (note *prompt-notes*)
+           ;; note given the chance to speak the active language.  Snapshot
+           ;; first: notes can be registered from a background task, and a
+           ;; note's own function is user code that must not run under the
+           ;; registry lock.
+           (dolist (note (prompt-notes-snapshot))
              (let ((text (prompt-note-text note pack)))
                (when text (format out "~%~a~%" text))))
            (let ((docs (probe-file (merge-pathnames "docs/" (evo-home)))))

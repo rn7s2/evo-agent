@@ -22,6 +22,20 @@
   (arguments :plist))
 
 (defvar *tool-registry* (make-hash-table :test #'equal))
+
+(defvar *registry-lock* (bt:make-lock "evo-registries")
+  "Guards *TOOL-REGISTRY* and *REGISTRY-GENERATION* — every access to either
+goes through it, and nothing else does.
+
+It exists because registration is not always the boot thread's: EVO:SPAWN-TASK
+is the supported way to discover a tool slowly (an MCP server handshake, a
+credential fetch), and such a task must register what it found the moment it
+is ready.  A hash table read concurrent with a write is not safe, so the
+readers take the lock too.
+
+Never held across I/O or a call into user code: a lock an extension can hold
+while it waits on a socket is a lock that deadlocks a reload.")
+
 (defvar *registry-generation* 0
   "Bumped on every registry mutation; the loop rebuilds the system prompt when it changes.")
 
@@ -31,25 +45,33 @@
   (check-type execute function)
   (assert (member arguments '(:plist :json)) ()
           "Tool ~a: :arguments must be :plist or :json, not ~s" name arguments)
-  (setf (gethash name *tool-registry*)
-        (make-tool :name name :description description :schema schema
-                   :execute-fn execute :source source :arguments arguments))
-  (incf *registry-generation*)
+  (bt:with-lock-held (*registry-lock*)
+    (setf (gethash name *tool-registry*)
+          (make-tool :name name :description description :schema schema
+                     :execute-fn execute :source source :arguments arguments))
+    (incf *registry-generation*))
   name)
 
 (defun find-tool (name)
-  (gethash name *tool-registry*))
+  (bt:with-lock-held (*registry-lock*) (gethash name *tool-registry*)))
+
+(defun %all-tool-names ()
+  "Caller holds *REGISTRY-LOCK*."
+  (sort (loop for k being the hash-keys of *tool-registry* collect k) #'string<))
 
 (defun all-tool-names ()
-  (sort (loop for k being the hash-keys of *tool-registry* collect k) #'string<))
+  (bt:with-lock-held (*registry-lock*) (%all-tool-names)))
 
 (defun active-tools (state)
   "Tools active for STATE (a journal fold): the :tools-change fold if present,
-else every registered tool."
-  (let ((names (or (evo.journal:state-tools state) (all-tool-names))))
-    (loop for name in names
-          for tool = (find-tool name)
-          when tool collect tool)))
+else every registered tool.  Resolved under the registry lock, so a tool
+registered by a background task mid-resolution is either wholly in this turn's
+list or wholly out of it."
+  (let ((names (evo.journal:state-tools state)))
+    (bt:with-lock-held (*registry-lock*)
+      (loop for name in (or names (%all-tool-names))
+            for tool = (gethash name *tool-registry*)
+            when tool collect tool))))
 
 ;;; Sexpr schema -> JSON Schema.
 ;;;

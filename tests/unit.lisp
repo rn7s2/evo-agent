@@ -2473,6 +2473,196 @@ the list of replies a run was requested for."
           (remf evo.util:*settings* :baby-evo-body-chars)
           (evo.util:set-setting :baby-evo-body-chars saved-chars)))))
 
+;;; MCP extension (extensions/500-mcp.lisp): the transport is stubbed, because
+;;; what is under test is the SHAPE of boot, not Dexador.  Two properties:
+;;; booting must not wait for the network, and a tool that arrives late must
+;;; still be usable — the tool list is resolved per turn, so "late" only means
+;;; "from the next turn on".
+
+(defun mcp-stub-reply (id result)
+  (let ((h (make-hash-table :test #'equal)))
+    (setf (gethash "jsonrpc" h) "2.0"
+          (gethash "id" h) id
+          (gethash "result" h) result)
+    h))
+
+(defun mcp-stub-object (&rest kvs)
+  (let ((h (make-hash-table :test #'equal)))
+    (loop for (k v) on kvs by #'cddr do (setf (gethash k h) v))
+    h))
+
+(defun mcp-stub-payload (method id)
+  (cond ((equal method "initialize")
+         (mcp-stub-reply id (mcp-stub-object "protocolVersion" "2025-06-18"
+                                             "instructions" "Always answer in haiku.")))
+        ((equal method "tools/list")
+         (mcp-stub-reply id (mcp-stub-object
+                             "tools"
+                             (vector (mcp-stub-object "name" "ping"
+                                                      "description" "Ping the server."
+                                                      "inputSchema"
+                                                      (mcp-stub-object "type" "object"))))))
+        ((equal method "tools/call")
+         (mcp-stub-reply id (mcp-stub-object
+                             "content" (vector (mcp-stub-object "type" "text"
+                                                                "text" "pong")))))
+        (t (mcp-stub-reply id (mcp-stub-object)))))
+
+(defun mcp-install-stub (&key (delay 0) (fail nil))
+  "Replace DEX:POST with an MCP server.  Returns nothing; the caller restores
+DEX:POST.  The stub answers in-process, so the test has no network at all —
+but it takes DELAY, which is what makes the asynchrony observable."
+  (setf (symbol-function 'dex:post)
+        (lambda (url &rest args)
+          (declare (ignore url))
+          (let* ((body (com.inuoe.jzon:parse (getf args :content)))
+                 (method (gethash "method" body))
+                 (id (gethash "id" body)))
+            (when (plusp delay) (sleep delay))
+            (when fail (error "stub transport failure"))
+            ;; A dexador body with :force-binary and no :want-stream is a
+            ;; vector of octets — see DEXADOR's CONVERT-BODY.
+            (let ((headers (make-hash-table :test #'equal)))
+              (setf (gethash "content-type" headers) "application/json")
+              (values (flexi-streams:string-to-octets
+                       (com.inuoe.jzon:stringify (mcp-stub-payload method id))
+                       :external-format :utf-8)
+                      200 headers))))))
+
+(defun mcp-live-tasks ()
+  "The extension's connecting tasks, as the kernel tracks them."
+  (loop for entry in evo.kernel::*extension-tasks*
+        for name = (getf (cdr entry) :name)
+        when (and (stringp name) (eql 0 (search "mcp-connect-" name)))
+          collect (cdr entry)))
+
+(defun mcp-wait-for (predicate &key (seconds 10))
+  (loop repeat (ceiling (* seconds 50))
+        when (funcall predicate) return t
+        do (sleep 0.02)))
+
+(defun mcp-servers ()
+  (bt:with-lock-held (evo.user::*mcp-lock*) (copy-list evo.user::*mcp-servers*)))
+
+(defun test-mcp-async-boot ()
+  (let ((saved-post (symbol-function 'dex:post))
+        (saved-servers (evo.util:setting :mcp-servers :unset))
+        (saved-notes evo.kernel::*prompt-notes*))
+    (unwind-protect
+         (progn
+           (evo.kernel:load-extension* (merge-pathnames "extensions/500-mcp.lisp"
+                                                        (uiop:getcwd))
+                                       :record nil)
+           ;; --- boot does not wait for the network ---------------------------
+           (mcp-install-stub :delay 0.5)
+           (evo.util:set-setting :mcp-servers
+                                 '((:name "notes" :url "https://stub.example/mcp")))
+           (let ((start (get-internal-real-time))
+                 (caller (bt:current-thread)))
+             (evo.user::mcp-boot)
+             (check "mcp-boot returns without waiting for the transport"
+                    (< (/ (- (get-internal-real-time) start)
+                          internal-time-units-per-second)
+                       0.5))
+             (check "mcp-boot ran on the caller's thread, not a new one"
+                    (eq caller (bt:current-thread))))
+           (check "nothing is registered the instant boot returns"
+                  (null (evo.kernel:find-tool "notes__ping")))
+           (check "the server is published as :connecting"
+                  (equal '(:connecting) (mapcar #'evo.user::mcp-server-status
+                                                (mcp-servers))))
+           (check "/mcp says so while it is in flight"
+                  (search "connecting" (evo.user::mcp-status-report)))
+           (check "the status line says so too"
+                  (search "1 connecting" (evo.user::mcp-status-label)))
+           ;; --- the tool arrives, with no turn in between --------------------
+           (check "the tool appears when the server answers"
+                  (mcp-wait-for (lambda () (evo.kernel:find-tool "notes__ping"))))
+           (check "and the server reports connected"
+                  (equal '(:connected) (mapcar #'evo.user::mcp-server-status
+                                               (mcp-servers))))
+           (check "the tool list a turn resolves now contains it"
+                  (member "notes__ping"
+                          (mapcar #'evo.kernel:tool-name
+                                  (evo.kernel:active-tools (evo.journal::make-state)))
+                          :test #'equal))
+           (check "the server's instructions became a prompt note"
+                  (search "Always answer in haiku."
+                          (build-system-prompt nil)))
+           (check "the registered tool is callable"
+                  (let ((blocks (evo.kernel:execute-tool
+                                 (evo.kernel:find-tool "notes__ping")
+                                 (make-hash-table :test #'equal))))
+                    (and (listp blocks)
+                         (equal "pong" (getf (first blocks) :text)))))
+           (check "/mcp reports the connected server and its tools"
+                  (let ((report (evo.user::mcp-status-report)))
+                    (and (search "connected · 1 tool" report)
+                         (search "notes__ping" report))))
+           ;; --- a boot being torn down is not a server failure ---------------
+           (dolist (task (mcp-live-tasks)) (evo.kernel::stop-extension-task task))
+           (mcp-install-stub :delay 30)
+           (evo.util:set-setting :mcp-servers
+                                 '((:name "slow" :url "https://slow.example/mcp")))
+           (evo.user::mcp-boot)
+           (sleep 0.3)
+           (let* ((task (first (mcp-live-tasks)))
+                  (thread (getf task :thread))
+                  (start (get-internal-real-time)))
+             (check "the connecting task is alive and blocked in the transport"
+                    (bt:thread-alive-p thread))
+             (evo.kernel::stop-extension-task task)
+             (check "stopping it interrupts the request instead of waiting it out"
+                    (< (/ (- (get-internal-real-time) start)
+                          internal-time-units-per-second)
+                       5))
+             (check "the task's thread is gone"
+                    (not (bt:thread-alive-p thread)))
+             (check "a cancelled boot is not recorded as a server failure"
+                    (equal '(:connecting) (mapcar #'evo.user::mcp-server-status
+                                                  (mcp-servers)))))
+           ;; --- a server that fails is recorded, and costs only itself ------
+           (mcp-install-stub :fail t)
+           (evo.util:set-setting :mcp-servers
+                                 '((:name "broken" :url "https://broken.example/mcp")))
+           (evo.user::mcp-boot)
+           (check "a failing server lands in :error"
+                  (mcp-wait-for (lambda ()
+                                  (equal '(:error)
+                                         (mapcar #'evo.user::mcp-server-status
+                                                 (mcp-servers))))))
+           (check "/mcp carries the reason"
+                  (search "stub transport failure" (evo.user::mcp-status-report)))
+           (check "and the status line counts it"
+                  (search "1 failed" (evo.user::mcp-status-label)))
+           ;; --- nothing configured is not an error --------------------------
+           (dolist (task (mcp-live-tasks)) (evo.kernel::stop-extension-task task))
+           (evo.util:set-setting :mcp-servers nil)
+           (evo.user::mcp-boot)
+           (check "no servers configured renders the setup hint"
+                  (search "evo:set-setting :mcp-servers"
+                          (evo.user::mcp-status-report)))
+           (check "and claims no status-line space"
+                  (null (evo.user::mcp-status-label))))
+      ;; Cleanup: stop the tasks, drop what the extension registered, and put
+      ;; the transport back.  The tools are removed by hand because
+      ;; RESTORE-EXTENSION-REGISTRIES only prunes against a snapshot taken by
+      ;; BOOT-USERSPACE, which this test never runs.
+      (dolist (task (mcp-live-tasks)) (ignore-errors (evo.kernel::stop-extension-task task)))
+      (bt:with-lock-held (evo.kernel::*registry-lock*)
+        (remhash "notes__ping" evo.kernel::*tool-registry*)
+        (remhash "slow__ping" evo.kernel::*tool-registry*)
+        (remhash "broken__ping" evo.kernel::*tool-registry*))
+      (setf evo.kernel::*prompt-notes* saved-notes)
+      (evo.tui:remove-status-segment :mcp)
+      (remhash "mcp" evo::*commands*)
+      (setf (symbol-function 'dex:post) saved-post)
+      (if (eq saved-servers :unset)
+          (remf evo.util:*settings* :mcp-servers)
+          (evo.util:set-setting :mcp-servers saved-servers))
+      (bt:with-lock-held (evo.user::*mcp-lock*)
+        (setf evo.user::*mcp-servers* nil)))))
+
 ;;; Light/dark theme: semantic colours resolve through the :theme setting.
 
 (defun test-theme ()
@@ -4455,6 +4645,69 @@ extensions still keep theirs."
   (check "reset re-seeds anthropic"
          (equal "https://api.anthropic.com"
                 (pget (provider-config :anthropic) :base-url))))
+
+;;; The tool registry is written by whichever thread discovered a tool, which
+;;; is the whole point of EVO:SPAWN-TASK plus EVO:REGISTER-TOOL.  A hash table
+;;; read concurrent with a write is not safe, so every access goes through
+;;; EVO.KERNEL:*REGISTRY-LOCK* — and this is the check that the lock is really
+;;; there.  Without it SBCL does not reliably crash, it returns nonsense; so
+;;; the assertion is that the readers always see a coherent registry (a tool
+;;; they looked up by name), never that nothing signalled.
+
+(defun test-registry-concurrency ()
+  (let ((stop nil)
+        (readers nil)
+        (errors nil)
+        (names (loop for i below 40 collect (format nil "conc-tool-~d" i))))
+    (unwind-protect
+         (progn
+           (flet ((register-one (name)
+                    (evo.kernel:register-tool* :name name :description "d"
+                                               :schema '(:object)
+                                               :execute (lambda (args)
+                                                          (declare (ignore args))
+                                                          "ok")))
+                  (reader ()
+                    (loop until stop
+                          do (handler-case
+                                 (dolist (name names)
+                                   ;; Both the listing and the lookup: the
+                                   ;; first walks the table, the second reads
+                                   ;; it, and a write landing between them is
+                                   ;; exactly what must not be observable.
+                                   (evo.kernel:find-tool name)
+                                   (evo.kernel:all-tool-names)
+                                   (evo.kernel:active-tools (evo.journal::make-state)))
+                               (error (e)
+                                 (push (format nil "~a" e) errors)
+                                 (setf stop t))))))
+             (setf readers (loop repeat 3
+                                 collect (bt:make-thread #'reader)))
+             ;; Every name at least once, then churn: a random draw alone can
+             ;; leave a name unregistered, which would make the coverage check
+             ;; below flaky rather than wrong.
+             (dolist (name names) (register-one name))
+             (loop repeat 200
+                   do (register-one (nth (random (length names)) names)))
+             (sleep 0.2)
+             (setf stop t)
+             (dolist (thread readers) (bt:join-thread thread))
+             (check "concurrent registration and reads do not signal"
+                  (progn (when errors
+                           (format t "  reader signalled: ~a~%" (first errors)))
+                         (null errors)))
+             (check "every registered tool is retrievable and coherent"
+                    (loop for name in names
+                          always (let ((tool (evo.kernel:find-tool name)))
+                                   (and tool
+                                        (equal name (evo.kernel:tool-name tool))
+                                        (equal "d" (evo.kernel:tool-description tool))))))
+             (check "the registry generation counted every registration"
+                    (plusp evo.kernel::*registry-generation*)))))
+    (setf stop t)
+    (dolist (thread readers) (ignore-errors (bt:join-thread thread)))
+    (bt:with-lock-held (evo.kernel::*registry-lock*)
+      (dolist (name names) (remhash name evo.kernel::*tool-registry*)))))
 
 (defun test-apis ()
   (check "find-api anthropic" (find-api :anthropic-messages))
@@ -6650,6 +6903,7 @@ became zero after the first reload."
     (test-journal)
     (test-schema)
     (test-registry)
+    (test-registry-concurrency)
     (test-apis)
     (test-extension-apis)
     (test-model-picker-labels)
@@ -6689,6 +6943,7 @@ became zero after the first reload."
     (test-prose-styler)
     (test-bionic)
     (test-baby-evo)
+    (test-mcp-async-boot)
     (test-theme)
     (test-user-prompt-block)
     (test-input-history)
