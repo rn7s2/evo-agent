@@ -509,7 +509,19 @@ question, no path mapping: the answer is already a native path."
         (cons "Windows (powershell.exe)" #'windows-clipboard-image))
   "Ordered (NAME . FUNCTION) clipboard readers, tried in turn.  Rebind or
 push onto this to teach evo a platform it does not ship support for; tests
-inject a fake reader here rather than a real pasteboard.")
+inject a fake reader here rather than a real pasteboard.
+
+FUNCTION is called with a scratch directory and answers with one of:
+  a pathname      the image (written into the directory, or a file the
+                  clipboard points at);
+  :EMPTY          this reader serves the session and looked: no image;
+  (values NIL REASON)
+                  it serves the session but cannot read it here — REASON,
+                  a string, says what is missing (\"install foo-paste\");
+  NIL             not this reader's platform.
+The last two are what let CLIPBOARD-IMAGE tell an imageless clipboard from a
+session nothing can read, for a platform evo knows nothing about.  The bundled
+readers answer NIL either way and are explained by CLIPBOARD-GAP instead.")
 
 ;;; Why nothing came back.
 ;;;
@@ -561,20 +573,27 @@ Returns (values BLOCK NIL) or (values NIL REASON)."
                                (uiop:temporary-directory)))))
     (ensure-directories-exist dir)
     (unwind-protect
-         (loop for (nil . reader) in *clipboard-readers*
-               for path = (ignore-errors (funcall reader dir))
-               when path
-                 return (attach-image-file
-                         path
-                         :name (if (uiop:subpathp path dir)
-                                   (format nil "clipboard.~a"
-                                           (or (pathname-type path) "png"))
-                                   (file-namestring path))
-                         :source "clipboard")
-               finally
-                  (return (values nil (if *clipboard-readers*
-                                          (clipboard-reason)
-                                          "no clipboard reader on this platform"))))
+         (let ((looked nil) (gap nil))
+           (loop for (nil . reader) in *clipboard-readers*
+                 do (multiple-value-bind (path reason)
+                        (ignore-errors (funcall reader dir))
+                      (cond ((eq path :empty) (setf looked t))
+                            (path
+                             (return-from clipboard-image
+                               (attach-image-file
+                                path
+                                :name (if (uiop:subpathp path dir)
+                                          (format nil "clipboard.~a"
+                                                  (or (pathname-type path) "png"))
+                                          (file-namestring path))
+                                :source "clipboard")))
+                            ((and (stringp reason) (null gap))
+                             (setf gap reason)))))
+           (values nil (cond ((null *clipboard-readers*)
+                              "no clipboard reader on this platform")
+                             (looked "no image on the clipboard")
+                             (gap gap)
+                             (t (clipboard-reason)))))
       (ignore-errors (uiop:delete-directory-tree dir :validate t :if-does-not-exist :ignore)))))
 
 ;;; Pasted paths.

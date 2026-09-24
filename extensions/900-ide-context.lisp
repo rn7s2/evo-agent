@@ -4,9 +4,10 @@
 ;;;; editor focus or the text selection changes, and exports its path to the
 ;;;; terminal as EVO_IDE_CONTEXT.  This extension consumes it:
 ;;;;
-;;;;   * on submit, the focused file and any selected text are journaled as a
-;;;;     :custom-message immediately before the user's message, so the model
-;;;;     can resolve "this file" / "the selection" without a tool call;
+;;;;   * whenever something the user said is journaled (the :user-message
+;;;;     event), the focused file and any selected text are journaled as a
+;;;;     :custom-message immediately before it, so the model can resolve "this
+;;;;     file" / "the selection" without a tool call;
 ;;;;   * the status line grows a "⧉ N lines selected" segment while a
 ;;;;     selection exists.
 ;;;;
@@ -15,7 +16,7 @@
 ;;;; token, no reconnect — and a hand-written JSON file is the whole test rig.
 ;;;;
 ;;;; Without EVO_IDE_CONTEXT in the environment nothing is installed: no
-;;;; wrappers, no thread, no behaviour change.
+;;;; hook, no thread, no behaviour change.
 
 (in-package :evo.user)
 
@@ -44,9 +45,6 @@ somebody was looking at yesterday.")
 (defvar *ide-context-last-injected* nil
   "Text of the last injected block; identical state is not injected twice.")
 
-(defvar *ide-context-original-submit* nil
-  "EVO.TUI::SUBMIT-TO-AGENT before this extension wrapped it.")
-
 (defvar *ide-context-poller-stop* nil
   "Set by the tracked task's stop function; the poller loop watches it.")
 
@@ -63,7 +61,7 @@ a half-written or malformed file must never break a turn."
   (ignore-errors
     (let ((parsed (com.inuoe.jzon:parse (evo.util:read-file-string path))))
       (and (hash-table-p parsed)
-           (evo.provider::json->sexpr parsed)))))
+           (evo:json->sexpr parsed)))))
 
 (defun ide-context-fresh-p (mtime)
   (and mtime (<= (- (get-universal-time) mtime) *ide-context-max-age-seconds*)))
@@ -188,7 +186,11 @@ worth saying."
   "Journal the current IDE context as a :custom-message ahead of the user's
 message.  Journaled rather than projected on the fly so history stays
 append-only: the block the model saw for a message never changes, which keeps
-the provider prompt cache intact across a turn's tool calls."
+the provider prompt cache intact across a turn's tool calls.
+
+Called from :user-message, which the kernel announces on the run's own thread
+at the turn boundary, just before it journals what the user said — so the
+block lands immediately ahead of the message, never inside a turn in flight."
   (ignore-errors
     (let ((state (ide-context-state)))
       (when (and state (ide-context-alive-p (evo.util:pget state :pid)))
@@ -197,12 +199,9 @@ the provider prompt cache intact across a turn's tool calls."
             (evo:inject-context text :key "ide-context" :agent agent)
             (setf *ide-context-last-injected* text)))))))
 
-(defun ide-context-submit-wrapper (tui text &rest args)
-  ;; &rest, not a fixed arity: this wraps a kernel function, and a wrapper
-  ;; that pins its signature breaks the moment the kernel grows an argument
-  ;; (submit-to-agent gained attached images).  Pass whatever came in.
-  (ide-context-inject (evo.tui::tui-agent tui))
-  (apply *ide-context-original-submit* tui text args))
+(defun ide-context-user-message (payload)
+  ":user-message — the user said something; put the editor's context first."
+  (ide-context-inject (evo.util:pget payload :agent)))
 
 (defun ide-context-label (&optional tui)
   "Status segment text: shown only while a selection exists.  No separator of
@@ -212,23 +211,14 @@ segments, so a segment that renders nothing leaves no dangling \" · \"."
   (let* ((state (ignore-errors (ide-context-state)))
          (lines (and state (ide-context-selection-lines state))))
     (when (and (integerp lines) (plusp lines))
-      (evo.tui::dim (format nil "⧉ ~a line~:p selected" lines)))))
+      (evo.tui:dim (format nil "⧉ ~a line~:p selected" lines)))))
 
-;;; Installation.  Kernel packages are locked; unlock around the single
-;;; fdefinition change, exactly as any other userspace patch does.
+;;; Installation: a hook and a status segment, both registrations the kernel
+;;; sees — so a reload withdraws them with this file's generation.
 
-(defun ide-context-patch (symbol saved-slot new-function)
-  (let ((pkg (symbol-package symbol)))
-    (unless (symbol-value saved-slot)
-      (setf (symbol-value saved-slot) (symbol-function symbol)))
-    (evo.port:unlock-package pkg)
-    (unwind-protect
-         (setf (symbol-function symbol) new-function)
-      (evo.port:lock-package pkg))))
-
-(defun ide-context-install-wrappers ()
-  (ide-context-patch 'evo.tui::submit-to-agent '*ide-context-original-submit*
-                     #'ide-context-submit-wrapper)
+(defun ide-context-install ()
+  ;; NAMEd: this file is re-loaded on every /reload and on :load replay.
+  (evo:on :user-message #'ide-context-user-message :name :ide-context)
   ;; The status line is a registry, not a function to wrap: several parties
   ;; want a piece of that line and only the renderer can see them all at once.
   ;; Order 600 puts this just inboard of the core segments (100-400).
@@ -260,21 +250,9 @@ else."
                   :run #'ide-context-poller-loop
                   :stop (lambda () (setf *ide-context-poller-stop* t))))
 
-(defun ide-context-uninstall-wrappers ()
-  "Put SUBMIT-TO-AGENT back the way this extension found it."
-  (when *ide-context-original-submit*
-    (let ((pkg (symbol-package 'evo.tui::submit-to-agent)))
-      (evo.port:unlock-package pkg)
-      (unwind-protect
-           (setf (symbol-function 'evo.tui::submit-to-agent)
-                 *ide-context-original-submit*)
-        (evo.port:lock-package pkg)))
-    (setf *ide-context-original-submit* nil))
-  (evo.tui:remove-status-segment :ide-selection))
-
+;; Everything installed here — the hook, the status segment, the poller — is
+;; a registration the kernel tracks, so a reload withdraws all of it with this
+;; file's generation and there is nothing to undo by hand.
 (when (ide-context-path)
-  (ide-context-install-wrappers)
-  (ide-context-start-poller)
-  ;; The kernel cannot see a function patch, so this extension hands back the
-  ;; undo itself; without it a reload would stack wrapper on wrapper.
-  (evo:on-unload #'ide-context-uninstall-wrappers))
+  (ide-context-install)
+  (ide-context-start-poller))

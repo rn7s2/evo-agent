@@ -303,8 +303,10 @@ was actually sent, and the model saw more than the words."
             sep)))
 
 (defun submit-to-agent (tui text &optional images)
+  "Send what the user typed: echo it, queue it as the user's own turn (so
+:user-message hooks see it when it is journaled), and start the worker."
   (scroll tui (user-prompt-block text images))
-  (queue-steering (tui-agent tui) text :images images)
+  (queue-steering (tui-agent tui) text :images images :from-user t)
   (start-worker tui))
 
 ;;; Images in.
@@ -685,7 +687,11 @@ status line down with it.
 
 SIDE is :LEFT or :RIGHT.  ORDER counts inward from that side's edge, so on the
 right a lower ORDER sits closer to the right edge.  Registering an existing
-NAME replaces it, which makes extension reloads idempotent."
+NAME replaces it, which makes extension reloads idempotent.
+
+A segment an extension file registers while it loads belongs to that file's
+generation, like its hooks: a reload withdraws it before the file runs again,
+so a file that stops registering it — or is deleted — takes it off the line."
   (check-type name (or symbol string))
   (unless (member side '(:left :right))
     (error "status segment ~s: SIDE must be :LEFT or :RIGHT, got ~s" name side))
@@ -694,6 +700,8 @@ NAME replaces it, which makes extension reloads idempotent."
                         :key #'status-segment-name :test #'equal)
                 (list (%make-status-segment :name name :function function
                                             :side side :order order))))
+  (when *extension-owner*
+    (register-extension-disposer (lambda () (remove-status-segment name))))
   name)
 
 (defun remove-status-segment (name)

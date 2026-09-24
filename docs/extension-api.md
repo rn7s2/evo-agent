@@ -81,7 +81,7 @@ messages; they never reach in and change its state or free its resources.
 | Agent execution state (turn index, retries, abort latch) | the run worker |
 | A provider request and its socket | its own request thread |
 | A child process from a tool call | the worker that launched it |
-| An extension's hooks, tasks and patches | the extension generation that made them |
+| An extension's hooks, tasks, registrations and patches | the extension generation that made them |
 
 Two consequences you will actually feel:
 
@@ -151,6 +151,21 @@ also how the bundled extensions stay idempotent.
   return a new list (filter/rewrite). Output is never written back to the
   journal.
 - `:turn-end` — after each assistant turn: `(:agent a :message m)`.
+- `:user-message` — `(:agent a :text s :images blocks)`, just before
+  something the user said (typed in the TUI, or given with `-p`) is journaled:
+  on the run's own thread, at a turn boundary. Anything the hook journals —
+  `evo:inject-context` is the usual thing — lands immediately ahead of the
+  user's message. Turns evo or an extension steers with (goal continuations,
+  `evo:steer`) are not announced. `extensions/900-ide-context.lisp` puts the
+  editor's focused file and selection here.
+- `:busy` — `(:agent a)`, as the outer driver (`run-until-settled`) starts a
+  drive: the agent is working.
+- `:idle` — `(:agent a :outcome o)`, when that drive returns, with its
+  outcome (`:stop` `:length` `:error` `:aborted`). Retries, steering typed
+  mid-run and a goal re-steering itself all happen between the two, so
+  `:idle` is the moment the agent is waiting for the human.
+  `extensions/360-baby-evo.lisp` posts its notification here, and dismisses a
+  stale one on `:busy`.
 - `:session-start` — `(:agent a :resumed bool)`. Rebuild any in-memory state
   from `evo:custom-state` here; memory does NOT survive restart, the journal
   does.
@@ -223,10 +238,16 @@ its generation is replaced. Two calls cover that:
 ```
 
 Registrations the kernel *can* see (tools, commands, models, providers, APIs,
-prompt notes, named hooks, status segments) are withdrawn for you.
+prompt notes, hooks, and the TUI's status segments, math renderer and prose
+styler) are withdrawn for you.
 
 `extensions/900-ide-context.lisp` is the worked example: a tracked poller, a
-named status segment, and an `on-unload` that puts back the function it wrapped.
+named `:user-message` hook and a named status segment — all of it withdrawn
+with the file's generation, so it has nothing to undo by hand.
+
+Needing to patch a function is a sign the API is missing a seam, not a
+technique: every bundled extension works without one. If yours needs one,
+the seam it wants is worth asking for.
 
 ## State
 
@@ -265,6 +286,17 @@ idempotent and an override is just a later call.
 `:api` names a registered provider API — `:anthropic-messages` ships bundled
 and is the default, and you can add your own (below). Tools,
 commands, and hooks may be registered from init files too.
+
+An extension that brings a provider should fill in only what the user has
+not already configured — init files run before extensions, and a later
+`register-provider` call wins field by field. `evo:provider-registration`
+answers "what is registered for this key", unresolved:
+
+```lisp
+(let ((registered (evo:provider-registration :my-endpoint)))  ; plist, or NIL
+  (unless (getf registered :base-url)
+    (evo:register-provider :my-endpoint :base-url "https://api.example.com")))
+```
 
 ## Provider APIs (new wire protocols)
 
@@ -318,7 +350,7 @@ place. Claim a piece of it:
 
 ```lisp
 (evo.tui:add-status-segment :ide-selection
-  (lambda (tui) (and (selection-p) (evo.tui::dim "⧉ 3 lines selected")))
+  (lambda (tui) (and (selection-p) (evo.tui:dim "⧉ 3 lines selected")))
   :side :left :order 600)
 
 (evo.tui:remove-status-segment :ide-selection)
@@ -326,8 +358,9 @@ place. Claim a piece of it:
 ```
 
 The function is called with the TUI on **every repaint** and returns a display
-string — already styled, the renderer will not restyle it — or `nil` to show
-nothing this frame. So it must be cheap and must never block: cache in a poller
+string — already styled, the renderer will not restyle it (`evo.tui:dim` is
+the muted style the core's segments wear) — or `nil` to show nothing this
+frame. So it must be cheap and must never block: cache in a poller
 task if the value is expensive, and call `evo.tui:request-repaint` when it
 changes (never set `tui-dirty` from your thread — the TUI owns it). A segment
 that signals is skipped rather than taking the whole line down.
@@ -337,18 +370,22 @@ runs left-to-right; on the right, ascending order runs right-to-left. So the
 sentence is the same on both sides: a lower order sits closer to my edge. The
 core registers `:model` 100, `:thinking` 200, `:context` 300, `:goal` 400 on the
 left, which leaves room to slot in on either side of them. Re-registering an
-existing name replaces it, so reloading an extension is idempotent.
+existing name replaces it, so reloading an extension is idempotent, and a
+segment registered while your file loads belongs to its generation: `/reload`
+withdraws it before the file runs again, so deleting the file takes the
+segment off the line.
 
 When the line does not fit, whole segments are dropped from the middle outward
 (highest order first, ties dropping from the right) until it does; a single
 segment that still cannot fit is truncated. Nothing is ever silently painted
 past the right edge.
 
-Do **not** wrap `evo.tui::status-line` to add a segment. It still works, but two
-wrappers cannot see each other: if the inner one pads to the terminal width to
-right-align itself, everything an outer one appends lands past the right edge
-and is truncated away — computed every frame, discarded every frame. That is
-the bug this registry exists to make unrepresentable.
+The registry replaced wrapping the function that formats the line, and the
+reason is worth knowing: two wrappers cannot see each other. If the inner one
+pads to the terminal width to right-align itself, everything an outer one
+appends lands past the right edge and is truncated away — computed every
+frame, discarded every frame. That is the bug this registry exists to make
+unrepresentable.
 
 ## Math rendering (evo.tui)
 
@@ -383,10 +420,13 @@ clear-cache`. Prerequisites (a kitty-graphics terminal — in VS Code, the
 [evo-vscode](https://github.com/rn7s2/evo-vscode) webview — and a TeX
 installation) and calibration live in [docs/math.md](math.md).
 
-Three rules the seam guarantees, so a renderer stays simple and safe:
+Four rules the seam guarantees, so a renderer stays simple and safe:
 
 - **Off by default.** With no renderer installed (`evo.tui:*math-enabled*` nil)
   the markdown renderer is byte-for-byte what it was — math is left as source.
+- **Owned by your file.** A renderer installed while your file loads is
+  taken out again when `/reload` disposes that generation (if it is still the
+  one installed), so deleting the file switches math off.
 - **Source is the fallback.** A renderer that returns `nil`, signals, or is
   absent yields the literal `$…$` text; a bad formula never takes down the
   render thread.
@@ -409,11 +449,13 @@ markers, outside `code` spans, link URLs, and already-bold text (a heading or
   (lambda (text) (my-restyle text)))
 ```
 
-It is a peer of the math seam, with the same three guarantees:
+It is a peer of the math seam, with the same guarantees:
 
 - **Off by default.** With no styler installed (`*prose-styler*` nil) the
   markdown renderer is byte-for-byte what it was — zero impact until an
   extension opts in.
+- **Owned by your file**, like the math renderer: `/reload` takes it out
+  with the generation that installed it.
 - **Source is the fallback.** A styler that returns `nil` or signals yields
   the original run; it can never take down the render thread.
 - **Only ever plain prose.** Code spans, link URLs and bold text never reach
@@ -517,6 +559,10 @@ evo:*agent*                       ; the live agent
                                   ;   the durable half of self-extension;
                                   ;   what the `eval` tool calls to install
 
+(evo:json->sexpr (com.inuoe.jzon:parse text)) ; parsed JSON -> keyword plists,
+                                  ;   "line_count" -> :LINE-COUNT; the bridge
+                                  ;   tool arguments cross
+
 (evo:cat "long control " "string")  ; constant-folded concatenation
 (evo:normalize-newlines text)       ; CR-LF / lone CR -> LF
 (evo:crlf-newlines text)            ; ... and back
@@ -547,18 +593,22 @@ evo.media:*downscalers*                        ; ordered (PASS PROGRAM ARGS-FN)
 Errors are values here, not conditions: every entry point returns
 `(values BLOCK REASON)` because the callers are keystroke handlers. To support
 a platform evo does not ship a reader for, push onto `*clipboard-readers*` a
-function of one argument (a scratch directory) that returns the pathname of an
-image file it wrote there — or of a file the clipboard merely points at, which
-is what a file-manager copy offers (`«class furl»` on macOS, `text/uri-list` on
-X11/Wayland, `FileDropList` on Windows via the WSL bridge); only files inside
-the scratch directory are deleted afterwards. Return `nil` for "not this
-platform, or no image on the clipboard".
+function of one argument (a scratch directory). It answers with one of:
 
-When every reader returns `nil`, `clipboard-image` explains which of the two
-cases it was — an imageless clipboard, or a session with no way to read one —
-via `evo.media::clipboard-gap`, a pure function of "what is this session" and
-"which tools exist". Shipping a reader for a new platform means teaching that
-function too, or the failure message will blame the clipboard.
+- the pathname of an image file it wrote there — or of a file the clipboard
+  merely points at, which is what a file-manager copy offers (`«class furl»`
+  on macOS, `text/uri-list` on X11/Wayland, `FileDropList` on Windows via the
+  WSL bridge); only files inside the scratch directory are deleted afterwards;
+- `:empty` — this is its platform and it looked: no image on the clipboard;
+- `(values nil "reason")` — this is its platform, but it cannot read the
+  clipboard here, and the string says what is missing (`"install foo-paste"`);
+- `nil` — not its platform.
+
+That is how `clipboard-image` tells the user the right thing when no reader
+produced an image: an imageless clipboard (some reader answered `:empty`), or
+a session nothing can read (the first reason given). The bundled readers
+answer `nil` either way and are explained by evo's own knowledge of the
+platforms it ships for.
 
 ## Ground rules
 

@@ -159,6 +159,14 @@ default would silently blind a correctly-configured session."
         (setf *providers* (append *providers* (list (cons key kvs))))))
   key)
 
+(defun provider-registration (key)
+  "What is registered for provider KEY, as given to REGISTER-PROVIDER — a
+fresh plist of the fields set so far (:base-url :api-key :api-key-env), merged
+across every call — or NIL when KEY is not registered.  Unresolved, so an
+extension can tell what the user already configured (and only fill in the
+rest); PROVIDER-CONFIG is what a request resolves."
+  (copy-list (cdr (assoc key *providers*))))
+
 (defun provider-config (key)
   "Resolved config for provider KEY: (:base-url ... :api-key ...).
 Key resolution: explicit :api-key, else the :api-key-env variable, else

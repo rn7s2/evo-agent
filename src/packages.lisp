@@ -76,6 +76,7 @@
            #:model-effort #:model-thinking-mode #:model-vision-p #:+effort-levels+
            #:normalize-thinking-level
            #:register-model* #:register-provider* #:provider-config
+           #:provider-registration #:json->sexpr
            #:reset-user-registries
            #:call-provider #:provider-error
            #:parse-sse-stream
@@ -158,7 +159,7 @@
                 #:endpoint-path #:auth-headers #:build-request #:parse-stream
                 #:perform-request #:map-sse-events
                 #:default-provider-key #:default-base-url #:default-api-key-env
-                #:provider-error)
+                #:provider-error #:provider-registration #:json->sexpr)
   (:export #:cat #:normalize-newlines #:crlf-newlines #:with-proxy
            #:register-tool #:register-command #:on #:on-unload #:spawn-task
            #:load-extension
@@ -171,7 +172,12 @@
            #:endpoint-path #:auth-headers #:build-request #:parse-stream
            #:perform-request #:map-sse-events
            #:default-provider-key #:default-base-url #:default-api-key-env
-           #:provider-error))
+           #:provider-error
+           ;; what a provider was registered with, unresolved
+           #:provider-registration
+           ;; parsed JSON (jzon values) -> keyword plists, the bridge the
+           ;; provider layer uses for tool arguments
+           #:json->sexpr))
 
 ;; Userspace: all agent-written tools and code live here.  Unlocked.
 (defpackage :evo.user

@@ -390,7 +390,14 @@ messages remain — then polls follow-ups.
 - **Run-until-settled is kernel code**, not application code: an outer driver
   runs, then asks whether the error is retryable, whether compaction is
   needed, whether messages are queued, whether a goal is active — and
-  continues. The goal driver (§9) plugs in here.
+  continues. The goal driver (§9) plugs in here. The drive is announced as
+  `:busy` when it starts and `:idle` (with its outcome, errors included) when
+  it returns — the one honest "the agent is waiting for the human".
+- **What the user said is announced** as `:user-message` when it is drained
+  into the journal, on the run's thread at a turn boundary, so context an
+  extension journals for it (the IDE bridge's focused file) lands right before
+  it. Steering queues mark such a turn; goal continuations and extension
+  steering are not user input and are not announced.
 - Tool interface: name, description, sexpr schema (emitted as JSON Schema),
   `execute` function, and a result split into `:content` (model-visible) and
   `:details` (host-visible). `:content` is a string in the common case, or
@@ -951,6 +958,7 @@ a refactor.
 | D16 | **No sub-agents.** | The journal-tree model extends naturally to them (a child session is a forked journal) whenever they are wanted, so nothing is lost by waiting. |
 | D17 | **One binary total.** No shell launcher and no separate supervisor executable: `evo` invoked plainly *is* the supervisor parent, re-spawning itself as the session child. On SBCL the heap is baked in at build time, refining D10. `--no-supervisor` runs in-process. | A wrapper script is one more artifact to install, breaks TTY inheritance under POSIX background rules, and buys nothing the binary cannot do itself. |
 | D18 | **The core is its own system.** `evo/core` (foundations, kernel, interface-free core extensions) loads without the frontends; the TUI and the CLI build on it in `evo` and define their own packages, and `make test` loads `evo/core` alone before the unit suite. | D13 keeps the kernel small by convention; this makes the direction checkable. A core file that names a frontend does not load, so the question "is the core coupled to the TUI" is answered by the build rather than by reading. |
+| D19 | **No extension patches the core.** Every seam a bundled extension once reached with a function patch or a private symbol is public: `:busy`/`:idle` for the drive, `:user-message` for user input, generation-owned TUI registries, `provider-registration`, a clipboard reader that explains itself. | A patch is a report of a missing protocol. Patches cannot see each other, have to be undone by hand, and break when the patched function's signature grows; a hook or registry has none of those problems, and it belongs to the extension's generation. |
 
 ## Appendix B — provenance
 

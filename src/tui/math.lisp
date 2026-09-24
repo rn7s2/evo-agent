@@ -42,8 +42,17 @@ bytes and counts columns).")
 
 (defun register-math-renderer (fn)
   "Install FN as *MATH-RENDERER* and turn math rendering on (or off when FN
-is NIL).  The supported way for an extension to claim math."
+is NIL).  The supported way for an extension to claim math.
+
+Installed while an extension file loads, the renderer belongs to that file's
+generation: a reload takes it out again (if it is still the one installed)
+before the file runs, so deleting the file switches math off."
   (setf *math-renderer* fn *math-enabled* (and fn t))
+  (when (and fn *extension-owner*)
+    (register-extension-disposer
+     (lambda ()
+       (when (eq *math-renderer* fn)
+         (setf *math-renderer* nil *math-enabled* nil)))))
   fn)
 
 ;;; Grammar.  A small hand scanner rather than a regex: it must skip over

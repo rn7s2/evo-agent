@@ -107,7 +107,9 @@ The earlier palette sat at ~5:1 — legible but visibly soft and grey.")
 
 (defun bold (s) (concatenate 'string (sgr 1) s (sgr 0)))
 (defun reverse-video (s) (concatenate 'string (sgr 7) s (sgr 0)))
-(defun dim (s) (paint-role :muted s))
+(defun dim (s)
+  "S in the theme's muted role — how the core's own status segments are drawn."
+  (paint-role :muted s))
 (defun cyan (s) (paint-role :accent s))
 (defun red (s) (paint-role :error s))
 (defun green (s) (paint-role :success s))

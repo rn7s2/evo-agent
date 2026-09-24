@@ -632,7 +632,7 @@ Installed as EVO.TUI:*MATH-RENDERER*."
        "math rendering on")
       ((string= arg "off")
        (evo:set-setting :math nil)
-       (setf evo.tui:*math-enabled* nil)
+       (evo.tui:register-math-renderer nil)
        (math-sync-prompt-note)
        "math rendering off")
       ((or (string= arg "clear-cache") (string= arg "clear"))

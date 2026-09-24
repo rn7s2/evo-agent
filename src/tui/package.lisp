@@ -9,7 +9,10 @@
   (:export #:start-tui
            ;; Status line composition — the supported way for an extension to
            ;; claim a piece of the bottom line (see docs/extension-api.md).
+           ;; A segment returns styled text; DIM is the muted style the core
+           ;; segments wear.
            #:add-status-segment #:remove-status-segment #:status-segments
+           #:dim
            #:request-repaint #:request-run #:tui-live-p
            ;; Math rendering seam — an extension installs a rasterizer here
            ;; (see extensions/300-latex-math.lisp and docs/extension-api.md).

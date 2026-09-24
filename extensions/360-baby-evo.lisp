@@ -20,14 +20,12 @@
 ;;;; Center); a crash cannot, and the reply timeout is what bounds those.
 ;;;;
 ;;;; WHERE "IDLE" COMES FROM.  The one honest definition of idle is "the outer
-;;;; driver returned": EVO.KERNEL:RUN-UNTIL-SETTLED is what the TUI's run
-;;;; worker calls, and it does not return while a turn is in flight, while
-;;;; steering is queued, or while an active goal keeps re-steering itself.  So
-;;;; this extension wraps that one exported function — the same unlock / patch
-;;;; / ON-UNLOAD dance 900-ide-context.lisp uses on SUBMIT-TO-AGENT.  The
-;;;; obvious alternative, EVO.KERNEL::*SETTLED-HOOKS*, is internal and is NOT
-;;;; consulted when a run ends in :ERROR — and an errored run is exactly the
-;;;; idle you most want told about.  Wrapping catches every exit.
+;;;; driver returned": the kernel's run-until-settled does not return while a
+;;;; turn is in flight, while steering is queued, or while an active goal keeps
+;;;; re-steering itself — and it announces both ends of that drive as events.
+;;;; :idle carries the outcome, :error included (an errored run is exactly the
+;;;; idle you most want told about); :busy is the moment evo is working again,
+;;;; which is when a leftover "done" banner becomes a lie.
 ;;;;
 ;;;; THE ALERT STYLE IS THE ONE THING THE USER MUST SET.  macOS decides from
 ;;;; the app's alert style whether a notification fades and whether it shows a
@@ -41,8 +39,8 @@
 ;;;; :ABORTED is the one outcome deliberately left silent: it means the user
 ;;;; pressed escape, so the user is already at the keyboard.
 ;;;;
-;;;; MACOS ONLY.  On any other OS nothing is patched and nothing is registered
-;;;; except /notify itself, which explains why it is inert.
+;;;; MACOS ONLY.  On any other OS no hook is registered, only /notify itself,
+;;;; which explains why it is inert.
 ;;;;
 ;;;; Settings (override in init.lisp):
 ;;;;   :baby-evo            t       master on/off
@@ -426,7 +424,7 @@ Steering plus a run request is exactly what a typed submission does."
                                         (baby-evo-alert-cancelled-p
                                          *baby-evo-alert*)))))
                    (when (and reply (not cancelled))
-                     (evo.kernel:queue-steering agent reply)
+                     (evo:steer reply agent)
                      (funcall *baby-evo-run-requester* reply)
                      ;; What came back is worth one glance at /notify status.
                      (when *baby-evo-last-result*
@@ -617,13 +615,8 @@ alert style, which it cannot change itself."
           #'string<)))
 
 ;;; ---------------------------------------------------------------------------
-;;; The idle seam: wrap RUN-UNTIL-SETTLED
+;;; The idle seam: the kernel's :busy / :idle events
 ;;; ---------------------------------------------------------------------------
-
-(defvar *baby-evo-original-run-until-settled* nil
-  "The unpatched EVO.KERNEL:RUN-UNTIL-SETTLED.  DEFVAR, not DEFPARAMETER: a
-reload must not overwrite the saved original with NIL, or the restore would
-install the wrapper as if it were the original and stack a second one.")
 
 (defun baby-evo-pending-work-p (agent)
   "True when AGENT still has queued work that has not run yet — steering or
@@ -646,12 +639,12 @@ the human.  This is the whole correctness of the feature, so it is explicit:
              A banner then is pure noise.  DO NOT notify.
 
 What about queued work and ACTIVE goals?  They never reach here with work
-left: run-until-settled only returns after draining steering and follow-ups,
-and an ACTIVE goal's settled-hook re-steers the loop so it keeps running.
-So by the time OUTCOME is in hand there is no pending turn — and the
-defensive BABY-EVO-PENDING-WORK-P check above closes even that door.  An
-active goal therefore does NOT notify (it is still working); a completed one
-DOES (it just finished)."
+left: :idle is announced only once the driver has drained steering and
+follow-ups, and an ACTIVE goal re-steers the loop so it keeps running.  So
+by the time OUTCOME is in hand there is no pending turn — and the defensive
+BABY-EVO-PENDING-WORK-P check above closes even that door.  An active goal
+therefore does NOT notify (it is still working); a completed one DOES (it
+just finished)."
   (and (not (eq outcome :aborted))
        (not (baby-evo-pending-work-p agent))))
 
@@ -662,54 +655,31 @@ see BABY-EVO-IDLE-OUTCOME-P — and the feature is on."
              (baby-evo-idle-outcome-p agent outcome))
     (baby-evo-announce agent)))
 
-(defun baby-evo-run-until-settled (agent)
-  "Wrapper: dismiss any stale 'done' banner the moment a run starts (evo is no
-longer idle), run the real driver, then announce that evo is idle.
-
-Two rules this must never break, because it sits in the call path of every
-run: the original outcome is returned unchanged, and nothing here signals."
-  ;; Entry = a run is starting = evo is working again.  A 'I am done' banner
-  ;; left over from the last idle is now a lie, and its reply field must not
-  ;; steer a turn the user has already moved past by typing directly.
+(defun baby-evo-on-busy (payload)
+  ":busy — a drive is starting, so evo is working again.  A 'I am done'
+banner left over from the last idle is now a lie, and its reply field must
+not steer a turn the user has already moved past by typing directly.  Sits
+at the start of every run, so it never signals."
+  (declare (ignore payload))
   (handler-case (baby-evo-cancel-alert)
     (error (e) (warn "baby-evo: dismissing stale alert failed: ~a" e)))
-  (let ((outcome (funcall *baby-evo-original-run-until-settled* agent)))
-    (handler-case (baby-evo-on-idle agent outcome)
-      (error (e) (warn "baby-evo: notification failed: ~a" e)))
-    outcome))
+  nil)
 
-(defun baby-evo-install ()
-  "Patch RUN-UNTIL-SETTLED.  Idempotent: the original is captured once, so
-loading this file again replaces the wrapper instead of wrapping the wrapper."
-  (let ((pkg (symbol-package 'evo.kernel:run-until-settled)))
-    (unless *baby-evo-original-run-until-settled*
-      (setf *baby-evo-original-run-until-settled*
-            (symbol-function 'evo.kernel:run-until-settled)))
-    (evo.port:unlock-package pkg)
-    (unwind-protect
-         (setf (symbol-function 'evo.kernel:run-until-settled)
-               #'baby-evo-run-until-settled)
-      (evo.port:lock-package pkg))
-    t))
-
-(defun baby-evo-uninstall ()
-  "Put RUN-UNTIL-SETTLED back the way this extension found it and dismiss any
-outstanding banner.  The kernel cannot see a function patch or a background
-watch, so the undo is handed back via ON-UNLOAD."
-  (baby-evo-cancel-alert)
-  (when *baby-evo-original-run-until-settled*
-    (let ((pkg (symbol-package 'evo.kernel:run-until-settled)))
-      (evo.port:unlock-package pkg)
-      (unwind-protect
-           (setf (symbol-function 'evo.kernel:run-until-settled)
-                 *baby-evo-original-run-until-settled*)
-        (evo.port:lock-package pkg)))
-    (setf *baby-evo-original-run-until-settled* nil))
-  t)
+(defun baby-evo-on-idle-event (payload)
+  ":idle — the drive returned with an outcome; tell the human if that means
+evo is waiting for them.  Never signals: a notifier that fails must not
+become the run's failure."
+  (handler-case (baby-evo-on-idle (evo.util:pget payload :agent)
+                                  (evo.util:pget payload :outcome))
+    (error (e) (warn "baby-evo: notification failed: ~a" e)))
+  nil)
 
 (defun baby-evo-installed-p ()
-  "True when the idle seam is currently patched in."
-  (and *baby-evo-original-run-until-settled* t))
+  "True when the idle seam is in place: both hooks registered (see
+BABY-EVO-INSTALL)."
+  (and (member 'baby-evo-on-busy (evo.kernel:event-hook-functions :busy))
+       (member 'baby-evo-on-idle-event (evo.kernel:event-hook-functions :idle))
+       t))
 
 ;;; ---------------------------------------------------------------------------
 ;;; /notify
@@ -777,7 +747,7 @@ STYLE is human-set and a CLI cannot write it."
            "- reply field available: ~:[no~;yes~]~%"
            "- current alert style / report:~%~a~%"
            "- setting :baby-evo: ~:[off~;on~]~%"
-           "- idle seam patched into run-until-settled: ~:[NO~;yes~]~%"
+           "- idle seam (the kernel's :busy/:idle hooks) registered: ~:[NO~;yes~]~%"
            "- last attempt: ~a~%~%"
            "Things you know that the user does not:~%"
            "- The reply field and the non-fading banner BOTH come from one "
@@ -854,18 +824,15 @@ STYLE is human-set and a CLI cannot write it."
        (if (not (baby-evo-supported-p))
            (baby-evo-status-text)
            (progn (evo:set-setting :baby-evo t)
-                  (baby-evo-install)
                   "baby-evo on — a notification when evo goes idle")))
       ((string= arg "off")
        (if (not (baby-evo-supported-p))
            (baby-evo-status-text)
            (progn (evo:set-setting :baby-evo nil)
                   ;; Dismiss any banner already up — the feature is off now.
+                  ;; The hooks stay registered: they are a cheap no-op while
+                  ;; the setting is off, so /notify on takes effect at once.
                   (baby-evo-cancel-alert)
-                  ;; The seam stays patched: it is a cheap no-op while the
-                  ;; setting is off, and leaving it in place means /notify on
-                  ;; takes effect immediately without re-patching a function
-                  ;; some thread may already be inside.
                   "baby-evo off — no more idle notifications")))
       ((string= arg "doctor")
        (if (not *baby-evo-macos-p*)
@@ -886,12 +853,6 @@ STYLE is human-set and a CLI cannot write it."
 ;;; Install
 ;;; ---------------------------------------------------------------------------
 
-(defun baby-evo-session-start (payload)
-  "Re-patch when a session (re)starts.  The journal replays this file's :load,
-but the patch lives in memory, not in the journal."
-  (declare (ignore payload))
-  (when (baby-evo-supported-p) (baby-evo-install)))
-
 (defun baby-evo-session-end (payload)
   "The session is going away: pull any outstanding reply banner down with it.
 A banner that outlives the session still shows its reply field, and whatever
@@ -900,10 +861,20 @@ time.  (A crash cannot run this; the reply timeout bounds those banners.)"
   (declare (ignore payload))
   (baby-evo-cancel-alert))
 
-;; NAMEd: this file is re-loaded on every /reload and on :load replay, and an
-;; anonymous hook would install another copy of itself each time.
-(when (baby-evo-supported-p)
-  (evo:on :session-start #'baby-evo-session-start :name :baby-evo-install)
+(defun baby-evo-install ()
+  "Register the idle seam — the kernel's :busy and :idle events — and the
+:session-end cleanup.  NAMEd hooks, so calling this again (every /reload and
+:load replay loads this file) replaces them instead of adding copies; and
+registered by symbol, so a redefinition takes effect without re-registering
+and BABY-EVO-INSTALLED-P can find them.  Hooks registered while this file
+loads belong to its generation, and a reload withdraws them."
+  (evo:on :busy 'baby-evo-on-busy :name :baby-evo-busy)
+  (evo:on :idle 'baby-evo-on-idle-event :name :baby-evo-idle)
   (evo:on :session-end #'baby-evo-session-end :name :baby-evo-cancel)
+  t)
+
+(when (baby-evo-supported-p)
   (baby-evo-install)
-  (evo:on-unload #'baby-evo-uninstall))
+  ;; A withdrawn generation may leave a banner up; that one is ours to take
+  ;; down.
+  (evo:on-unload #'baby-evo-cancel-alert))
