@@ -80,6 +80,34 @@ expect {
     timeout { fail "startup status line"; catch {exec kill $server}; exit 1 }
 }
 
+# Settle the dead server before asking /mcp anything.
+#
+# Connecting happens in the background now, so "how far along is the dead
+# server" is a race this script must not lose: a connect to a closed port is
+# refused in microseconds on one machine and has its SYN dropped for the full
+# 15s connect timeout on another (which is what the CI runner does). Asking
+# /mcp and hoping is a coin flip — it would either match a state that has not
+# happened yet or wait out a timeout that did not need waiting.
+#
+# So wait for the settled state INSIDE the image, where the state machine
+# lives, and report it.  The marker is assembled by FORMAT, so the typed line
+# cannot match it.  This also means the /mcp checks below see all three
+# servers in their final state, stub connections included.
+#
+# 30s of waiting covers the 15s connect timeout twice over; a machine that
+# hangs the READ instead (a listener that accepts and never answers) would
+# outlast it and fail as "still connecting after 30s", which is the right
+# report for a state that has not settled.
+set timeout 45
+send {/eval (progn (loop repeat 300 until (eq :error (evo.user::mcp-server-status (third evo.user::*mcp-servers*))) do (sleep 0.1)) (format nil "dead~a" (if (eq :error (evo.user::mcp-server-status (third evo.user::*mcp-servers*))) "-reported" "-stuck")))}
+send "\r"
+expect {
+    -re {dead-reported} { check "an unreachable server is reported, not fatal" }
+    -re {dead-stuck} { fail "an unreachable server is reported, not fatal (still connecting after 30s)" }
+    timeout { fail "an unreachable server is reported, not fatal" }
+}
+set timeout 20
+
 # /mcp: what connected, what it registered, and what did not.
 send "/mcp\r"
 expect {
@@ -95,8 +123,8 @@ expect {
     timeout { fail "keyword-plist headers reach the wire as real header names" }
 }
 expect {
-    -re {not connected} { check "an unreachable server is reported, not fatal" }
-    timeout { fail "an unreachable server is reported, not fatal" }
+    -re {not connected} { check "and /mcp carries the dead server's reason" }
+    timeout { fail "and /mcp carries the dead server's reason" }
 }
 
 # The server's own instructions reach the system prompt.  The marker is
