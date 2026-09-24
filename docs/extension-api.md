@@ -155,6 +155,10 @@ also how the bundled extensions stay idempotent.
   from `evo:custom-state` here; memory does NOT survive restart, the journal
   does.
 - `:todo-changed` — the todo list was replaced.
+- `:goal-plan` — `(:agent a :goal g)`, asked each time the goal driver
+  re-steers an active goal. Return the agent's current plan as text and it is
+  embedded in the continuation prompt, under the todo-list heading; the
+  bundled todo extension is what answers it.
 
 ## Registering from another thread
 

@@ -87,7 +87,7 @@ plugs in here.")
   journal
   (steering nil)          ; pending steering texts (FIFO), guarded by LOCK
   (followups nil)         ; pending follow-up texts (FIFO), guarded by LOCK
-  (control nil)           ; TUI -> worker control messages, guarded by LOCK
+  (control nil)           ; frontend -> worker control messages, guarded by LOCK
   (abort-latched nil)     ; worker-owned after it consumes :ABORT from CONTROL
   events-cb               ; fn (event-plist), or nil
   (run-id (gen-id))
@@ -97,10 +97,14 @@ plugs in here.")
   (retry-count 0)
   (compact-retried nil)   ; overflow-recovery guard: compact + retry ONCE
   (abort-cleanups nil)    ; worker-owned fns, run when it consumes :ABORT
-  ;; The TUI sends immutable queue/control messages while the run worker drains
-  ;; them.  LOCK protects only those handoff queues; execution state above is
-  ;; otherwise owned by the one run worker and is never mutated by the TUI.
+  ;; A frontend sends immutable queue/control messages while the run worker
+  ;; drains them.  LOCK protects only those handoff queues; execution state
+  ;; above is otherwise owned by the one run worker and is never mutated by the
+  ;; frontend.
   (lock (bt:make-lock "agent-mailbox")))
+
+(defvar evo:*agent* nil
+  "The live agent, bound by the CLI for the duration of a session.")
 
 ;; Heartbeat: the kernel touches a file on every event so the
 ;; supervisor can distinguish long tool calls from a hung process.
@@ -110,6 +114,9 @@ plugs in here.")
 (defvar *heartbeat-last* 0)
 
 (defun heartbeat-touch ()
+  "Tell the supervisor this process is alive.  Every event does it; a
+frontend that can sit idle for long stretches (an interactive one waiting for
+input) calls it from its own loop too."
   (when (eq *heartbeat-file* :uninitialized)
     (setf *heartbeat-file* (getenv "EVO_HEARTBEAT_FILE")))
   (let ((path *heartbeat-file*)
@@ -232,9 +239,10 @@ REQUEST-ABORT to request a state change."
     abort))
 
 (defun reset-agent-run-control (agent)
-  "Empty AGENT's control mailbox and abort latch.  Called by the TUI thread
-only while no worker exists — before it publishes a new task, and after it has
-joined a finished one (clearing an :abort the finished run never consumed)."
+  "Empty AGENT's control mailbox and abort latch.  Called by the frontend's
+thread only while no worker exists — before it publishes a new task, and after
+it has joined a finished one (clearing an :abort the finished run never
+consumed)."
   (bt:with-lock-held ((agent-lock agent))
     (setf (agent-control agent) nil
           (agent-abort-latched agent) nil
@@ -242,7 +250,7 @@ joined a finished one (clearing an :abort the finished run never consumed)."
 
 (defun add-abort-cleanup (agent cleanup)
   "Register CLEANUP for the active operation.  CLEANUP is always invoked by
-the worker through AGENT-ABORT-FLAG, never by the TUI/requesting thread."
+the worker through AGENT-ABORT-FLAG, never by the frontend/requesting thread."
   (let (run-now)
     (bt:with-lock-held ((agent-lock agent))
       (push cleanup (agent-abort-cleanups agent))
@@ -258,7 +266,8 @@ the worker through AGENT-ABORT-FLAG, never by the TUI/requesting thread."
 (defmacro with-abort-cleanup ((agent cleanup) &body body)
   "Run CLEANUP on the worker thread if AGENT receives an abort while BODY is
 active, and unregister it on every exit.  Cleanup therefore preserves resource
-ownership; it must not be treated as a callback on the requesting TUI thread."
+ownership; it must not be treated as a callback on the requesting frontend
+thread."
   `(let ((unregister (add-abort-cleanup ,agent ,cleanup)))
      (unwind-protect
           (progn ,@body)
@@ -286,6 +295,13 @@ NIL means \"first registration wins\"."
         (and configured
              (member configured (model-providers id))
              configured))))
+
+(defun effective-model (state agent)
+  "The model plist this session's next turn runs on: the effective id,
+resolved against the provider that serves it.  Signals when the id is not
+registered — the model gate a frontend checks before starting a run."
+  (let ((id (effective-model-id state agent)))
+    (find-model id (effective-model-provider state id))))
 
 (defun effective-thinking (state &optional override)
   "The thinking level for this turn: the journaled /thinking choice, then
@@ -458,11 +474,8 @@ Returns :stop :length :error :aborted."
             (drain-steering agent)
             (emit-event agent :type :turn-start)
             ;; Threshold compaction check at the save point.
-            (let* ((state (fold-state (agent-journal agent)))
-                   (id (effective-model-id state agent)))
-              (when (compaction-needed-p state (find-model
-                                                id
-                                                (effective-model-provider state id)))
+            (let ((state (fold-state (agent-journal agent))))
+              (when (compaction-needed-p state (effective-model state agent))
                 (emit-event agent :type :compaction-start)
                 (unwind-protect
                      (handler-case (compact-now agent)

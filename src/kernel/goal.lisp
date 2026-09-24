@@ -38,6 +38,11 @@ brake when the user (or settings :goal-token-budget) sets one explicitly.")
           do (setf (getf updated k) v))
     (append-entry (agent-journal agent) (list* :type :goal updated))))
 
+(defun set-goal-objective (agent goal objective)
+  "The user's rewrite of GOAL's objective: the same goal (same id, status and
+budget), a new :goal entry saying what done now means."
+  (update-goal-entry agent goal :objective objective))
+
 (defun goal-tokens-used (agent goal)
   "Total tokens across assistant messages after this goal was created (path walk)."
   (let* ((journal (agent-journal agent))
@@ -90,14 +95,21 @@ Rules:
 - Otherwise: take the next concrete step toward the objective."
             objective (goal-budget-line goal used) todo-text verifier-nudge)))
 
+(defun goal-plan-text (agent goal)
+  "The agent's current checklist, rendered, for a continuation to embed — or
+NIL when there is none.  The kernel keeps no checklist of its own: whoever
+does answers the :goal-plan event (the todo core extension, bundled), and the
+kernel only places the text."
+  (let ((texts (remove-if-not
+                #'stringp
+                (run-hooks :goal-plan (list :agent agent :goal goal)))))
+    (and texts (format nil "~{~a~}" texts))))
+
 (defun goal-continuation-for (agent goal)
   "Build the continuation steering prompt, embedding the todo snapshot
 so a re-steered run after crash or compaction knows where it was."
-  (let* ((used (goal-tokens-used agent goal))
-         (todos (custom-state (fold-state (agent-journal agent)) "todo"))
-         (todo-text (and todos (plusp (length todos))
-                         (evo.todo:format-todos todos))))
-    (goal-continuation-message goal used :todo-text todo-text)))
+  (goal-continuation-message goal (goal-tokens-used agent goal)
+                             :todo-text (goal-plan-text agent goal)))
 
 (defun goal-wrapup-message (goal used)
   (format nil
@@ -115,7 +127,7 @@ a future session should take. Goal objective: ~a"
         ((eq outcome :error)
          ;; A failed turn no longer blocks the goal: it stays :active.
          ;; Headless exits 1 and the supervisor's --resume restart picks the
-         ;; goal back up; in the TUI the error is shown and the next session
+         ;; goal back up; interactively the error is shown and the next session
          ;; (or a user message) re-steers.
          nil)
         (t
@@ -142,9 +154,9 @@ a future session should take. Goal objective: ~a"
 ;;; The reading and evaluation discipline mirrors the eval core extension
 ;;; (src/core-ext/eval.lisp), which the kernel cannot call: *read-eval* off so
 ;;; #. cannot run code at attach time, every output stream captured so a
-;;; stray write cannot land in the TUI frame, serious-condition caught so a
-;;; blown stack is a failed check rather than a dead session, and the result
-;;; printed bounded.
+;;; stray write cannot land in a frontend's display, serious-condition caught
+;;; so a blown stack is a failed check rather than a dead session, and the
+;;; result printed bounded.
 
 (defparameter *done-when-output-chars* 2000
   "How much of what a verifier printed is carried back in its report.")

@@ -2409,7 +2409,7 @@ the list of replies a run was requested for."
 
            ;; --- /notify ------------------------------------------------------
            (check "/notify is a registered command"
-                  (gethash "notify" evo::*commands*))
+                  (find-command "notify"))
            (progv '(evo.user::*baby-evo-macos-p*) '(t)
              (check "bare /notify shows status"
                     (let ((s (evo.user::baby-evo-command '(:args ""))))
@@ -2747,7 +2747,7 @@ but it takes DELAY, which is what makes the asynchrony observable."
         (remhash "late__ping" evo.kernel::*tool-registry*))
       (setf evo.kernel::*prompt-notes* saved-notes)
       (evo.tui:remove-status-segment :mcp)
-      (remhash "mcp" evo::*commands*)
+      (remhash "mcp" evo.kernel::*commands*)
       (setf (symbol-function 'dex:post) saved-post)
       (if (eq saved-servers :unset)
           (remf evo.util:*settings* :mcp-servers)
@@ -3261,6 +3261,79 @@ just the pack that ships as a core extension, and what the user picked
       (check "continuation stops nudging once done-when set"
              (not (search "No done-when verifier"
                           (goal-continuation-message (pput goal :done-when "p") 10)))))))
+
+;;; Session operations: every journal write a frontend asks for goes through
+;;; the core (src/kernel/session.lisp, goal.lisp).  These pin the entries they
+;;; write, byte for byte, so the TUI and the CLI journal what they always did.
+
+(defun entry-body (entry)
+  "ENTRY without the fields APPEND-ENTRY assigns (id, parent, timestamp)."
+  (loop for (k v) on entry by #'cddr
+        unless (member k '(:id :parent-id :timestamp))
+          append (list k v)))
+
+(defun last-entry-body (journal)
+  (let ((entries (journal-entries journal)))
+    (entry-body (aref entries (1- (length entries))))))
+
+(defun test-session-operations ()
+  (let* ((dir (uiop:ensure-directory-pathname
+               (format nil "~a/evo-session-ops-~a/" (tmp-dir) (gen-id))))
+         (journal (progn (ensure-directories-exist dir) (make-session-journal dir)))
+         (agent (make-agent :journal journal)))
+    (set-session-model agent "m-1")
+    (check "a bare model choice (--model) journals no provider"
+           (equal '(:type :model-change :model "m-1") (last-entry-body journal)))
+    (set-session-model agent "m-2" :proxy)
+    (check "a picked model (/model) journals its provider"
+           (equal '(:type :model-change :model "m-2" :provider :proxy)
+                  (last-entry-body journal)))
+    (let ((state (fold-state journal)))
+      (check "the fold sees the model choice"
+             (and (equal "m-2" (state-model state))
+                  (eq :proxy (state-model-provider state)))))
+    (set-session-thinking agent :high)
+    (check "a thinking choice journals the level"
+           (equal '(:type :thinking-change :thinking :high)
+                  (last-entry-body journal)))
+    ;; The user's /goal <text> on an active goal: same goal, new objective.
+    (create-goal-entry agent "first objective")
+    (let ((goal (current-goal agent)))
+      (set-goal-objective agent goal "second objective")
+      (let ((refined (current-goal agent)))
+        (check "a refined goal keeps its id and status"
+               (and (equal (pget goal :goal-id) (pget refined :goal-id))
+                    (eq :active (pget refined :status))))
+        (check "and carries the new objective"
+               (equal "second objective" (pget refined :objective)))
+        (check "the refinement is the goal minus nothing, objective changed"
+               (equal (last-entry-body journal)
+                      (list* :type :goal (pput goal :objective "second objective"))))))
+    ;; The goal driver embeds the checklist, which the todo core extension
+    ;; supplies through :goal-plan — the kernel never calls it.
+    (let ((goal (current-goal agent)))
+      (check "no todo list, no todo section"
+             (not (search "Your current todo list" (goal-continuation-for agent goal))))
+      (append-entry journal (list :type :custom :key "todo"
+                                  :data (vector (list :text "pin the entries"
+                                                      :status :in-progress))))
+      (let ((message (goal-continuation-for agent goal)))
+        (check "the continuation embeds the todo list"
+               (search (format nil "Your current todo list (update it with the todo tool as you go):~%◐ pin the entries~%")
+                       message))))
+    ;; Switching journals: the agent follows, and :session-start says whether
+    ;; the new session is a resumed one.
+    (let ((evo.kernel::*event-hooks* (make-hash-table))
+          (seen nil)
+          (fresh (make-session-journal dir)))
+      (add-hook :session-start (lambda (event) (push event seen)))
+      (switch-session agent fresh)
+      (check "switch-session re-points the agent"
+             (eq fresh (agent-journal agent)))
+      (check "and announces a fresh session as not resumed"
+             (and (= 1 (length seen))
+                  (eq agent (pget (first seen) :agent))
+                  (null (pget (first seen) :resumed)))))))
 
 (defvar *test-goal-done* nil
   "Flip switch read by the done-when verifier in test-goal-tools.")
@@ -3835,8 +3908,8 @@ is journaled as text and evaluated when completion is claimed."
          (agent (make-agent :journal journal)))
     (check "project memory tool registered" (find-tool "project_memory"))
     (check "global memory tool registered" (find-tool "global_memory"))
-    (check "project memory command registered" (gethash "memory" evo::*commands*))
-    (check "global memory command registered" (gethash "global-memory" evo::*commands*))
+    (check "project memory command registered" (find-command "memory"))
+    (check "global memory command registered" (find-command "global-memory"))
     (check "project memory starts empty"
            (null (evo.memory:read-memories :cwd dir)))
     (evo.memory::perform-project-memory-action
@@ -4558,7 +4631,7 @@ extensions still keep theirs."
   (evo.eval::eval-command (list :args args)))
 
 (defun test-eval ()
-  (check "eval command registered" (gethash "eval" evo::*commands*))
+  (check "eval command registered" (find-command "eval"))
   ;; Arity: exactly one form, checked before anything runs.
   (check "single sexpr evaluates"
          (equal "⇒ 3" (eval-command-output "(+ 1 2)")))
@@ -7043,6 +7116,7 @@ became zero after the first reload."
     (test-prompt-notes)
     (test-prompt-languages)
     (test-goal-budget)
+    (test-session-operations)
     (test-goal-tools)
     (test-goal-verifier-forms)
     (test-templates)

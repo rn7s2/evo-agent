@@ -1,9 +1,13 @@
-;;;; packages.lisp — package definitions for evo.
+;;;; packages.lisp — package definitions for evo's core.
 ;;;;
-;;;; Kernel packages (EVO.UTIL, EVO.JOURNAL, EVO.PROVIDER, EVO.KERNEL, EVO.CLI)
+;;;; The core's packages (EVO.UTIL, EVO.JOURNAL, EVO.PROVIDER, EVO.KERNEL, ...)
 ;;;; are locked at boot.  Userspace (EVO.USER) is unlocked; all
 ;;;; agent-written code lives there.  EVO is the public extension API surface —
 ;;;; both core and user extensions build on it, nothing bypasses it.
+;;;;
+;;;; The frontends are not here: EVO.TUI and EVO.CLI each define their own
+;;;; package (src/tui/package.lisp, src/cli/package.lisp) on top of these,
+;;;; so nothing in the core can name them.
 
 ;; Implementation portability layer: the only package that may touch
 ;; sb-* / ext: / si: symbols.  See src/port/port.lisp.
@@ -42,9 +46,9 @@
            #:read-file-octets #:write-file-octets
            #:octets->base64 #:base64->octets))
 
-;; Images in: clipboard grabs, file attachments, media-type sniffing.  Used
-;; by the frontends (TUI, CLI) to build the :image content blocks the
-;; provider adapters already know how to encode.
+;; Images in: clipboard grabs, file attachments, media-type sniffing.  Builds
+;; the :image content blocks the provider adapters already know how to encode
+;; — for the `read` tool, and for the frontends' attachments.
 (defpackage :evo.media
   (:use :cl :evo.util)
   (:export #:*max-image-bytes* #:*max-image-dimension* #:*clipboard-readers*
@@ -102,6 +106,7 @@
            #:*executing-agent*
            #:queue-steering #:queue-followup #:emit-event #:steering-pending-p
            #:agent-pending-work-p #:reset-agent-session-state
+           #:heartbeat-touch
            ;; prompt, skills, templates
            #:build-system-prompt #:register-prompt-note
            ;; prompt language packs
@@ -110,22 +115,28 @@
            #:*default-language* #:language-code #:language-request
            #:resolve-language #:set-prompt-language
            #:available-skills #:find-skill
-           #:find-template #:expand-template
+           #:template-directories #:find-template #:expand-template
            ;; extension api internals
            #:run-hooks #:add-hook #:event-hook-functions
-           #:remove-hooks-if #:load-extension*
+           #:remove-hooks-if #:load-extension* #:*current-journal*
            #:boot-extensions #:boot-userspace #:load-init-file
            #:replay-loads #:lock-kernel-packages
+           ;; slash-command registry (resolved by a frontend)
+           #:register-command* #:find-command #:registered-commands
            ;; extension ownership + runtime generations
            #:*extension-owner* #:*extension-generation*
            #:register-extension-disposer #:register-extension-task
            #:dispose-extension-owners #:*task-stop-seconds*
            #:capture-runtime-catalog #:install-runtime-catalog
-           #:effective-model-id #:effective-model-provider #:effective-thinking
+           #:effective-model-id #:effective-model-provider #:effective-model
+           #:effective-thinking
+           ;; session operations — the journal writes a frontend asks for
+           #:boot-session #:switch-session
+           #:set-session-model #:set-session-thinking
            ;; goal
            #:current-goal #:goal-continuation-message #:goal-continuation-for
            #:register-goal-tools #:create-goal-entry #:goal-tokens-used
-           #:update-goal-entry
+           #:update-goal-entry #:set-goal-objective
            ;; lore + compaction
            #:add-lore #:add-session-lore #:all-lore-entries
            #:edit-lore #:remove-lore #:find-lore-scope
@@ -169,7 +180,7 @@
 ;; Core extensions: bundled, built on the same extension API.
 (defpackage :evo.todo
   (:use :cl :evo.util :evo.journal :evo.kernel)
-  (:export #:current-todos #:format-todos))
+  (:export #:current-todos #:format-todos #:status-glyph))
 
 (defpackage :evo.lang.en
   (:use :cl))
@@ -186,23 +197,3 @@
            ;; completion source: the image's own answer to "what could this
            ;; half-typed token be?", which frontends render.
            #:token-start #:completions-for #:symbol-kind))
-
-(defpackage :evo.tui
-  (:use :cl :evo.util :evo.journal :evo.provider :evo.kernel)
-  (:export #:start-tui
-           ;; Status line composition — the supported way for an extension to
-           ;; claim a piece of the bottom line (see docs/extension-api.md).
-           #:add-status-segment #:remove-status-segment #:status-segments
-           #:request-repaint #:request-run #:tui-live-p
-           ;; Math rendering seam — an extension installs a rasterizer here
-           ;; (see extensions/300-latex-math.lisp and docs/extension-api.md).
-           #:register-math-renderer #:*math-renderer* #:*math-enabled*
-           #:*math-live-preview* #:md-split-math #:render-math-span
-           ;; Prose-styler seam — an extension restyles plain prose words here
-           ;; (see extensions/350-bionic-reader.lisp and docs/extension-api.md).
-           #:register-prose-styler #:*prose-styler* #:*prose-styling-suppressed*
-           #:style-prose))
-
-(defpackage :evo.cli
-  (:use :cl :evo.util :evo.journal :evo.provider :evo.kernel)
-  (:export #:main #:setup-agent #:toplevel))

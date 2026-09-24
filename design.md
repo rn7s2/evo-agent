@@ -680,6 +680,16 @@ Mechanically, core extensions are compiled into the image at build time — they
 are part of the ship, not runtime loads — but they register through the same
 API. The runtime loader is for user and agent extensions only.
 
+The TUI sits one step further out than the rest (D18). It is a frontend, so it
+and the CLI that composes it live in the `evo` system, on top of `evo/core` —
+foundations, kernel, and the core extensions that have no interface — and each
+defines its own package beside its code. `evo/core` loads without them, and
+`make test` loads it alone first, so the dependency can only point outward: a
+core file that named the TUI would not load. Anything a frontend does to a
+session goes through the core's session operations (`boot-session`,
+`switch-session`, `set-session-model`, …); no frontend builds a journal entry
+by hand.
+
 ### 14.1 Todo lists (D14)
 
 Long-running goal work needs a user-visible checklist. Interactive sessions
@@ -940,6 +950,7 @@ a refactor.
 | D15 | `:done-when` verifiers are **the check itself**: a Lisp form, journaled as source text on the `:goal` entry and evaluated on each completion claim. Never a function name — there is no second place for the check to live. | Users state objectives in prose; the agent formalizes them, and the formalization stays where the human can read it. Source text is data: it survives restart with no load step, and a closure could not round-trip through the journal anyway. |
 | D16 | **No sub-agents.** | The journal-tree model extends naturally to them (a child session is a forked journal) whenever they are wanted, so nothing is lost by waiting. |
 | D17 | **One binary total.** No shell launcher and no separate supervisor executable: `evo` invoked plainly *is* the supervisor parent, re-spawning itself as the session child. On SBCL the heap is baked in at build time, refining D10. `--no-supervisor` runs in-process. | A wrapper script is one more artifact to install, breaks TTY inheritance under POSIX background rules, and buys nothing the binary cannot do itself. |
+| D18 | **The core is its own system.** `evo/core` (foundations, kernel, interface-free core extensions) loads without the frontends; the TUI and the CLI build on it in `evo` and define their own packages, and `make test` loads `evo/core` alone before the unit suite. | D13 keeps the kernel small by convention; this makes the direction checkable. A core file that names a frontend does not load, so the question "is the core coupled to the TUI" is answered by the build rather than by reading. |
 
 ## Appendix B — provenance
 

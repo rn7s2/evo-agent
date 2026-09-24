@@ -4,6 +4,8 @@
 ;;;; State rides :custom entries (invisible to the LLM as entries — the tool
 ;;;; call/result already put it in context when it mattered), so the current
 ;;;; list = fold over the path: it survives restart and compaction untouched.
+;;;; The goal driver embeds it in every continuation (the :goal-plan event),
+;;;; so a run re-steered after a crash or a compaction knows where it was.
 
 (in-package :evo.todo)
 
@@ -60,3 +62,11 @@
                                    :enum ("pending" "in-progress" "done")
                                    :description "Task state")))))
   :execute #'tool-todo)
+
+;; The kernel's goal driver asks for the plan it re-steers with; this list is
+;; the answer.  NAMEd for the same reason as memory's :session-start hook.
+(evo:on :goal-plan
+        (lambda (event)
+          (let ((todos (current-todos (pget event :agent))))
+            (and todos (plusp (length todos)) (format-todos todos))))
+        :name :todo-plan)
