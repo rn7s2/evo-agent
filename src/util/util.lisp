@@ -87,11 +87,19 @@ disappears when they do."
                         (funcall original user-agent))))))))))
 
 (defmacro with-proxy ((var url) &body body)
-  "Bind VAR to the proxy for URL, and make it visible to the WinHTTP shim.
-Every HTTP call evo makes goes through here: passing :proxy to dexador is
-enough on Unix and is ignored on Windows (see ENSURE-WINHTTP-PROXY)."
+  "Bind VAR to the proxy for URL — NIL when there is none, or URL bypasses
+it — and make that THE proxy for every dexador call in BODY, whether or not
+the call passes :PROXY.  Every HTTP call evo makes goes through here.
+
+Three places read it.  :PROXY, when a caller passes it (Unix).  The WinHTTP
+shim, since dexador's Windows backend ignores :PROXY (see
+ENSURE-WINHTTP-PROXY).  And DEX:*DEFAULT-PROXY*, which is what a call that
+omits :PROXY falls back to: dexador fills it from the environment once, when
+it loads — so a binary built behind a proxy carries the builder's proxy, and
+a request that must go direct (loopback, NO_PROXY) would take it anyway."
   `(let* ((,var (env-proxy ,url))
-          (*request-proxy* ,var))
+          (*request-proxy* ,var)
+          (dex:*default-proxy* ,var))
      (ensure-winhttp-proxy)
      ,@body))
 
