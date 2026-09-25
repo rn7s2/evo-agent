@@ -6349,28 +6349,40 @@ selection journals the provider, and every resolution point honours it."
 which is the only way dexador's Windows backend can be made to use one: it
 ignores :proxy and tells WinHTTP explicitly to go direct (see
 ENSURE-WINHTTP-PROXY)."
-  (let ((saved-http (getenv "http_proxy"))
-        (saved-https (getenv "https_proxy"))
-        (saved-no (getenv "no_proxy")))
+  ;; Every variable ENV-PROXY reads is saved and cleared first, uppercase
+  ;; included: HTTPS_PROXY outranks https_proxy, so a machine that exports it
+  ;; (any sandbox or corporate network) would otherwise decide these checks.
+  (let ((saved (mapcar (lambda (v) (cons v (getenv v)))
+                       '("HTTPS_PROXY" "https_proxy" "HTTP_PROXY" "http_proxy"
+                         "NO_PROXY" "no_proxy"))))
     (unwind-protect
          (progn
+           (dolist (pair saved) (evo.port:setenv (car pair) ""))
            (evo.port:setenv "https_proxy" "http://127.0.0.1:10808")
-           (evo.port:setenv "http_proxy" "")
            (evo.port:setenv "no_proxy" "internal.example")
            (with-proxy (proxy "https://api.anthropic.com/v1/messages")
              (check "with-proxy resolves the environment's proxy"
                     (equal proxy "http://127.0.0.1:10808"))
              (check "and publishes it where the shim reads it"
-                    (equal *request-proxy* "http://127.0.0.1:10808")))
-           (with-proxy (proxy "https://internal.example/v1")
-             (check "no_proxy still wins" (null proxy))
-             (check "and nothing is published for it" (null *request-proxy*)))
+                    (equal *request-proxy* "http://127.0.0.1:10808"))
+             (check "and makes it dexador's default for the body"
+                    (equal dex:*default-proxy* "http://127.0.0.1:10808")))
+           ;; dexador reads its default proxy from the environment once, at
+           ;; load, so a binary built behind a proxy carries the builder's.  A
+           ;; request that must go direct has to override that, not inherit it.
+           (let ((dex:*default-proxy* "http://baked-in-at-build:3128"))
+             (with-proxy (proxy "https://internal.example/v1")
+               (check "no_proxy still wins" (null proxy))
+               (check "and nothing is published for it" (null *request-proxy*))
+               (check "and a proxy baked into dexador is not used either"
+                      (null dex:*default-proxy*)))
+             (with-proxy (proxy "http://127.0.0.1:8787/mcp")
+               (check "loopback goes direct past a baked-in proxy too"
+                      (and (null proxy) (null dex:*default-proxy*)))))
            (check "outside the form nothing is left behind" (null *request-proxy*))
            (check "the shim is a no-op off Windows"
                   (or (evo.port:windows-p) (progn (ensure-winhttp-proxy) t))))
-      (evo.port:setenv "https_proxy" (or saved-https ""))
-      (evo.port:setenv "http_proxy" (or saved-http ""))
-      (evo.port:setenv "no_proxy" (or saved-no "")))))
+      (dolist (pair saved) (evo.port:setenv (car pair) (or (cdr pair) ""))))))
 
 (defun test-restart-and-resume ()
   "The supervisor's restart guess, and what a child does when the guess is

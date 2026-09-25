@@ -559,6 +559,10 @@ evo:*agent*                       ; the live agent
                                   ;   the durable half of self-extension;
                                   ;   what the `eval` tool calls to install
 
+(evo:with-proxy (proxy url)       ; every HTTP call an extension makes: the
+  (dex:post url ...))             ;   proxy for URL (NIL for loopback and
+                                  ;   NO_PROXY hosts) is dexador's for the
+                                  ;   body, :proxy passed or not
 (evo:json->sexpr (com.inuoe.jzon:parse text)) ; parsed JSON -> keyword plists,
                                   ;   "line_count" -> :LINE-COUNT; the bridge
                                   ;   tool arguments cross
