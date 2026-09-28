@@ -36,8 +36,8 @@ make install-home         # seeds ~/.evo with docs + example extensions
 
 On Windows, `make.ps1` beside the Makefile takes the build, install and test
 targets, with the variables as parameters (SBCL only — see
-[Windows](#windows); the pty-driven `serve-test` and `swarm-test` are
-POSIX-only):
+[Windows](#windows); the end-to-end `serve-test`, `swarm-test` and
+`swarm-serve-test` are POSIX-only):
 
 ```powershell
 .\make.ps1 build          # requires SBCL + Quicklisp
@@ -71,6 +71,7 @@ evo --image shot.png -p "what broke?"  # attach an image to the prompt
 evo --list-sessions
 evo serve --token-file ~/.evo/serve.token   # headless, controlled over HTTP
 evo-swarm --workers 4                       # a coordinator + 4 worker lanes
+evo-swarm serve --token-file ~/.evo/serve.token  # the same swarm, headless
 ```
 
 Invoked plainly, `evo` is its own supervisor: the parent process re-spawns the
@@ -392,7 +393,13 @@ needs a quiet session and finds a busy one gets `409` — never a race.
 Loopback only unless `--allow-remote`; a bearer token on every request
 (`--token-file`, written 0600, or `EVO_SERVE_TOKEN`); runs under the
 supervisor like any session. `/eval` is remote code execution by design — the
-token is the gate. Full reference: [docs/serve.md](docs/serve.md).
+token is the gate. `GET /health` carries the server's **identity** — name,
+version and features — so a client can tell what it is talking to (`evo serve`
+is `evo` with no features). A program can also run its own session on serve:
+it names itself and adds routes of its own, exact paths or a prefix, behind
+the same token and thread discipline. Those are the only two seams, and they
+name no program; `evo-swarm serve` is the one built on them. Full reference:
+[docs/serve.md](docs/serve.md).
 
 ### evo-swarm
 
@@ -432,6 +439,17 @@ are supervised (a crash restarts and resumes them, and the coordinator is
 told); quitting stops them all; `evo-swarm --resume` restores coordinator and
 lanes from the coordinator's journal. Watch lanes read-only with the status
 line, `/lanes` and `/lane N`.
+
+`evo-swarm serve` runs the same swarm headless, on
+[serve's protocol](docs/serve.md): `/health` names it `evo-swarm` with the
+feature `swarm`; the coordinator is driven exactly as `evo serve` is; and the
+lane panels get their data over HTTP — `GET /lanes` (state, current task, goal
+status, worktree, restarts), a `lane-state` event on the coordinator's
+`/events` whenever one changes, and `GET /lanes/N/transcript` and
+`GET /lanes/N/events` for one lane's messages and live events. Those three are
+read-only, like the TUI's view: lane control stays the coordinator's, and lane
+tokens and URLs are never handed out. `/shutdown` stops every lane and
+`--resume` restores the swarm, as in the TUI.
 
 ### Skills, templates, slash commands
 
@@ -547,9 +565,13 @@ make tui-test       # expect-driven TUI under a pty: image paste
                     #       terminal sends it, model routing, the IDE bridge
 ```
 
+`make swarm-serve-test` drives `evo-swarm serve` end to end over HTTP only, no
+backend and no terminal: serve's protocol for the coordinator, `/lanes` and
+the `lane-state` events, a lane's transcript and live events.
+
 `.\make.ps1 test` runs the unit suites on Windows, and CI runs it there too.
 The integration, TUI, serve and swarm end-to-end suites are POSIX-only (shell
-scripts, expect and Python against a pty) — see below.
+scripts, expect, and Python against a stub endpoint) — see below.
 
 ## Windows
 
@@ -685,7 +707,7 @@ src/serve/               EVO.SERVE — `evo serve`, the HTTP frontend (system
   http.lisp              HTTP/1.1 request parsing, responses, SSE
   events.lisp            the numbered event log streams replay from
   server.lisp            session thread, task, host methods, listener
-  routes.lisp            the endpoints
+  routes.lisp            the endpoints, and the route table a program extends
 
 src/cli/                 EVO.CLI (system `evo`)
   package.lisp
@@ -719,11 +741,11 @@ swarm/                   EVO.SWARM — evo-swarm (system `evo-swarm`; docs/swarm
   main.lisp              arguments, supervision, bring-up
   tests/                 the swarm's unit suite (make test)
 
-tests/                   unit suites (run-unit.lisp, unit.lisp), the core-only and
-                         evo-only load checks, integration.sh, the expect TUI
-                         suites, serve-e2e.py / swarm-e2e.py against the stub
-                         Messages endpoint (stub-messages.py), and the Windows
-                         console proofs
+tests/                   unit suites (run-unit.lisp, unit.lisp), the core-only
+                         and evo-only load checks, integration.sh, the expect
+                         TUI suites, serve-e2e.py / swarm-e2e.py /
+                         swarm-serve-e2e.py against the stub Messages endpoint
+                         (stub-messages.py), and the Windows console proofs
 
 evo.asd                  systems evo/core, evo, evo/tests
 evo-swarm.asd            system evo-swarm
