@@ -14,6 +14,12 @@
 
 (in-package :evo.serve)
 
+(defparameter +utf-8+ (flexi-streams:make-external-format :utf-8 :eol-style :lf)
+  "UTF-8 with #\\Newline as a bare LF, on every platform.  Plain :UTF-8 takes
+flexi-streams' default eol-style, which is CRLF on Windows: every #\\Newline
+would gain a CR there, and the CRLFs this file writes on purpose would become
+CR CR LF — a malformed response.  HTTP framing decides its own line ends.")
+
 (defparameter *max-header-bytes* (* 64 1024)
   "Request line plus headers.  Past this the request is refused (431).")
 
@@ -87,10 +93,10 @@ counts the header bytes still allowed."
                       (vector-push-extend 32 octets) (incf i))
                      (t
                       (loop for b across (flexi-streams:string-to-octets
-                                          (string c) :external-format :utf-8)
+                                          (string c) :external-format +utf-8+)
                             do (vector-push-extend b octets))
                       (incf i)))))
-    (flexi-streams:octets-to-string octets :external-format :utf-8)))
+    (flexi-streams:octets-to-string octets :external-format +utf-8+)))
 
 (defun parse-query (text)
   "\"a=1&b=x%20y\" -> ((\"a\" . \"1\") (\"b\" . \"x y\"))."
@@ -150,7 +156,7 @@ anything malformed, oversized, or using a framing this server does not take."
             (%make-request
              :method method :path path :query query :headers headers
              :body (handler-case (flexi-streams:octets-to-string
-                                  octets :external-format :utf-8)
+                                  octets :external-format +utf-8+)
                      (error () (http-fail 400 "request body is not UTF-8"))))))))))
 
 ;;; Writing.
@@ -167,7 +173,7 @@ anything malformed, oversized, or using a framing this server does not take."
   (or (cdr (assoc status *status-texts*)) "Unknown"))
 
 (defun write-octets (stream string)
-  (write-sequence (flexi-streams:string-to-octets string :external-format :utf-8)
+  (write-sequence (flexi-streams:string-to-octets string :external-format +utf-8+)
                   stream))
 
 (defun write-head (stream status headers)
@@ -181,7 +187,7 @@ anything malformed, oversized, or using a framing this server does not take."
 (defun write-response (stream status body &key (content-type "application/json")
                                                extra-headers)
   "A complete response: STATUS, BODY (a string), closed after."
-  (let ((octets (flexi-streams:string-to-octets body :external-format :utf-8)))
+  (let ((octets (flexi-streams:string-to-octets body :external-format +utf-8+)))
     (write-head stream status
                 (append (list (cons "Content-Type"
                                     (format nil "~a; charset=utf-8" content-type))
