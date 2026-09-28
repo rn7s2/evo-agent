@@ -29,7 +29,8 @@ them.
   supervisor and the journal together make process death a recoverable event
   rather than a lost run.
 - **Minimal.** Core functionality of a real agent and nothing ceremonial. The
-  omit-list — no permission popups, no sub-agents, no MCP *in the kernel* (it
+  omit-list — no permission popups, no sub-agents *inside* an agent (parallel
+  agents are separate processes: evo-swarm, §18), no MCP *in the kernel* (it
   is a userspace extension) — is deliberate and each omission has a stated
   re-entry condition (§17).
 
@@ -68,7 +69,7 @@ in code.
 ## 3. Architecture
 
 ```
-evo (one binary)
+evo (one binary; evo-swarm is a second program on top of it — §18)
 │
 ├─ SUPERVISOR — the same binary, invoked plainly (D17)
 │    re-spawns itself as the session child (EVO_SUPERVISED_CHILD=1,
@@ -992,7 +993,7 @@ would reopen it.
 
 | Absent | Why | What would change it |
 |---|---|---|
-| Sub-agents | The journal tree already models a child session as a forked journal; nothing forces the feature yet (D16) | A workload where context isolation demonstrably beats one transcript |
+| Sub-agents *inside* one agent | Parallel agents shipped as separate processes instead — evo-swarm (§18, D16): a coordinator driving `evo serve` lanes over HTTP. Nothing in the evo binary knows about it | A workload that needs children sharing one image — none foreseen, since a lane is cheaper to reason about than a thread |
 | Parallel tool execution | Sequential execution is where the thread-discipline complexity *isn't* (D9) | Measured wall-clock loss on independent calls, plus a thread discipline for the journal writer |
 | MCP *in the kernel* | It shipped as a userspace extension instead (`extensions/500-mcp.lisp`: Streamable HTTP, tools only, no auth flow beyond configured headers) — `register-tool` plus an HTTP client is the whole client. The kernel gained no protocol, only the two seams any foreign contract needs: a JSON Schema passed through verbatim, and `:arguments :json` so a tool receives the model's exact JSON rather than the lossy plist spelling | A transport that cannot be written in userspace — stdio servers (child process + pipes) are the candidate |
 | Permission prompts | Permissiveness is a defining property; the `:tool-call` hook is the seam, and `permission-gate.lisp` is the worked example | A deployment context where the OS boundary is not the trust boundary |
@@ -1016,6 +1017,57 @@ a refactor.
 
 ---
 
+## 18. evo-swarm: one coordinator, a pool of lanes
+
+evo-swarm (D16) runs parallel agents as a separate program on top of evo: its
+own system (`evo-swarm.asd`, `swarm/`) and binary, depending on `evo`, never
+the other way round (`tests/evo-only.lisp`). The reference is
+`docs/swarm.md`; the decisions:
+
+- **One human-facing agent.** The coordinator is an ordinary evo TUI session
+  (the same `setup-agent`, the same TUI) with the swarm tools and a prompt
+  note. It explores, splits work into lane-sized pieces with checkable done
+  criteria, delegates, integrates, verifies, and reports. Input always goes to
+  it; the human watches lanes read-only (a status-line segment, `/lanes`,
+  `/lane N`).
+- **Lanes, not roles.** A lane is `evo serve --no-userspace` on loopback: its
+  own process, bearer token, port and journal. Default 6; started with the
+  swarm, idle until given work. What a lane *is* for a task is the prompt the
+  coordinator gives it.
+- **Only the public API.** The coordinator reaches lanes through serve's HTTP
+  endpoints and nothing else — prompts, steering, interrupts, slash commands,
+  eval, state — and subscribes to each lane's `/events`. Lanes never talk to
+  each other.
+- **Reports are input.** A lane's `report` tool emits a `:report` event;
+  reports, finished runs, errors, crashes and restarts become the
+  coordinator's input through the frontend protocol (`evo:steer` +
+  `evo:request-run`): queued to its next turn boundary when it works, waking
+  it when idle. The coordinator never polls.
+- **Worker init is a program.** Generators (functions of lane and swarm
+  returning forms) run in each fresh lane — `:baseline` first, then those
+  ~/.evo/swarm.lisp and <project>/.evo/swarm.lisp add — and again on every
+  restart, followed by the code the coordinator evaluated into the lane since.
+  The baseline gives a lane the coordinator's providers and models, its
+  defaults, the report tool and the worker note. **Keys never travel as
+  data**: a provider's key reaches a lane as an environment variable, by
+  name, and a literal key through a swarm-private variable set in the lane's
+  process environment only.
+- **Supervision and ownership.** Lanes run under evo's own supervisor (a crash
+  restarts them with `--resume`, which finds the lane's own session through
+  `EVO_SESSIONS_DIR` — the same variable that keeps lane journals out of the
+  coordinator's `/resume` list). One subscriber thread per lane owns its
+  stream and notices a restart by the new pid, re-initializes the lane and
+  tells the coordinator. Lanes watch the coordinator's pid
+  (`EVO_SERVE_WATCH_PID`) and stop when it dies; quitting the coordinator
+  stops them all (`:session-end`). One lock guards the lane table (§6).
+- **The journal records the swarm.** The coordinator's session carries the
+  swarm as `:custom` state (id, lanes, worktrees, evaluated code), so
+  `evo-swarm --resume` — or the supervisor's restart — restores coordinator
+  and lanes: each resuming its own session in its own directory.
+- **Isolation on demand.** Lanes share the coordinator's directory by default;
+  the coordinator gives a lane a git worktree and branch when a task needs
+  one, and merges the branch itself.
+
 ## Appendix A — decision record
 
 | # | Decision | Rationale |
@@ -1035,8 +1087,8 @@ a refactor.
 | D13 | **Slim core: everything outside the core loop ships as a core extension** — bundled, on the same API, with the same control as user extensions; essential ones cannot be disabled. | Dogfooding proves the API's depth and keeps the kernel small and honest. See §13. |
 | D14 | **Todo checklists ship**, as a core extension. | Long-running goal work needs user-visible progress. The one deliberate deviation from the minimal omit-list. |
 | D15 | `:done-when` verifiers are **the check itself**: a Lisp form, journaled as source text on the `:goal` entry and evaluated on each completion claim. Never a function name — there is no second place for the check to live. | Users state objectives in prose; the agent formalizes them, and the formalization stays where the human can read it. Source text is data: it survives restart with no load step, and a closure could not round-trip through the journal anyway. |
-| D16 | **No sub-agents.** | The journal-tree model extends naturally to them (a child session is a forked journal) whenever they are wanted, so nothing is lost by waiting. |
-| D17 | **One binary total.** No shell launcher and no separate supervisor executable: `evo` invoked plainly *is* the supervisor parent, re-spawning itself as the session child. On SBCL the heap is baked in at build time, refining D10. `--no-supervisor` runs in-process. | A wrapper script is one more artifact to install, breaks TTY inheritance under POSIX background rules, and buys nothing the binary cannot do itself. |
+| D16 | **Parallel agents are a swarm of processes, not sub-agents.** `evo-swarm` (§18) runs one coordinator agent — the only one a human talks to — and a pool of interchangeable worker *lanes*, each a whole `evo serve` process driven only through serve's public HTTP API. Lanes never talk to each other; they report to the coordinator, whose input their reports become. Worker init is a program (generators in swarm.lisp). This replaces "no sub-agents". | Context isolation did demonstrably beat one transcript once goals outgrew one context — the re-entry condition D16 named. Processes rather than in-image children because every guarantee evo has — the journal as truth, supervision, resume, a crash domain of one — then holds per lane for free, and the coordinator exercises serve's API as any client would. Lanes rather than roles because a role is a prompt, which the coordinator can give any lane per task. |
+| D17 | **One binary per program, each its own supervisor.** No shell launcher and no separate supervisor executable: `evo` invoked plainly *is* the supervisor parent, re-spawning itself as the session child; `evo-swarm`, a second program (D16), is built the same way on the same supervisor (`evo.cli:supervise` with its own restart arguments). On SBCL the heap is baked in at build time, refining D10. `--no-supervisor` runs in-process. The evo binary contains no swarm code — `make test` loads the `evo` system alone to prove it (`tests/evo-only.lisp`). | A wrapper script is one more artifact to install, breaks TTY inheritance under POSIX background rules, and buys nothing the binary cannot do itself. A second *program* (evo-swarm) is not a wrapper: it has its own users and its own UI, and keeping it out of evo keeps the agent's binary exactly what one agent needs. |
 | D18 | **The core is its own system.** `evo/core` (foundations, kernel, interface-free core extensions) loads without the frontends; the TUI and the CLI build on it in `evo` and define their own packages, and `make test` loads `evo/core` alone before the unit suite. | D13 keeps the kernel small by convention; this makes the direction checkable. A core file that names a frontend does not load, so the question "is the core coupled to the TUI" is answered by the build rather than by reading. |
 | D19 | **No extension patches the core.** Every seam a bundled extension once reached with a function patch or a private symbol is public: `:busy`/`:idle` for the drive, `:user-message` for user input, generation-owned TUI registries, `provider-registration`, a clipboard reader that explains itself. | A patch is a report of a missing protocol. Patches cannot see each other, have to be undone by hand, and break when the patched function's signature grows; a hook or registry has none of those problems, and it belongs to the extension's generation. |
 | D20 | **One command layer, many frontends; `evo serve` is one of them.** What a slash command does is core code (`src/command/`) behind a small host protocol; the TUI and the HTTP frontend both dispatch through it. `evo serve` is a mode of the one binary with an evo-native HTTP/SSE protocol (§16.2), not MCP or JSON-RPC, and not a second program. Extensions ask the core — `evo:frontend-interactive-p`, `evo:request-run` — never a frontend. | A coordinator must be able to do anything a person can, and the only way to keep two frontends from drifting is to give them one copy of every command. A separate server binary would duplicate the supervisor, the boot and the journal; a foreign protocol would need translating into evo's vocabulary on every call. |
