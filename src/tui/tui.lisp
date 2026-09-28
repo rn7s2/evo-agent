@@ -148,6 +148,15 @@ the request was posted, NIL when no TUI is running."
 (defmethod frontend-request-run ((frontend tui-frontend) &key text)
   (request-run :text text))
 
+(defun post-notice (text &key (style :dim) (tui *tui*))
+  "Show TEXT in the scrollback, from any thread: the line is posted as an
+event and painted by the TUI thread, which owns the screen.  STYLE is :PLAIN,
+:DIM, :NOTICE, :SUCCESS or :ERROR — the command layer's styles.  Returns T
+when posted, NIL when no TUI is running."
+  (when tui
+    (push-event tui (list :type :notice :text text :style style))
+    t))
+
 (defun drain-events (tui)
   (bt:with-lock-held ((tui-events-lock tui))
     (nreverse (shiftf (tui-events tui) nil))))
@@ -517,6 +526,15 @@ the activity line has one row."
     (:repaint
      ;; Somebody off-thread noticed something the status line renders.
      (setf (tui-dirty tui) t))
+    (:notice
+     ;; A line an extension posted from its own thread (POST-NOTICE).
+     (let ((text (or (pget event :text) "")))
+       (scroll tui (case (pget event :style)
+                     (:dim (dim text))
+                     (:notice (yellow text))
+                     (:success (green text))
+                     (:error (red text))
+                     (t text)))))
     (:run-requested
      ;; Off-thread input (a notification reply): it queued steering already;
      ;; echo it like a typed submission and start the worker that consumes it.

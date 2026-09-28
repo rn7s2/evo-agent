@@ -402,6 +402,11 @@ appends lands past the right edge and is truncated away — computed every
 frame, discarded every frame. That is the bug this registry exists to make
 unrepresentable.
 
+`evo.tui:post-notice` puts a line in the scrollback from any thread — a
+background task's news, a watcher's output — painted by the TUI thread, which
+owns the screen: `(evo.tui:post-notice "sync done" :style :dim)`, styles
+`:plain :dim :notice :success :error`.  It returns NIL when no TUI is up.
+
 ## Math rendering (evo.tui)
 
 Agent output that contains LaTeX math — `$…$`, `$$…$$`, `\(…\)`, `\[…\]` — is

@@ -42,6 +42,14 @@ which exits 0. A port it cannot bind is a usage error (exit 64), which the
 supervisor never restarts. `-p`, `--events`, `--image` and `--goal` are
 refused: serve has exactly one driver, and it is HTTP.
 
+## Environment
+
+| Variable | Meaning |
+|---|---|
+| `EVO_SERVE_TOKEN` | The bearer token, instead of a random one. |
+| `EVO_SESSIONS_DIR` | Keep this process's sessions in that directory instead of `~/.evo/sessions/<cwd>/` (evo-swarm lanes do; their `--resume` then finds their own session). |
+| `EVO_SERVE_WATCH_PID` | Shut down cleanly when the process with that pid is gone — how an evo-swarm lane follows its coordinator. |
+
 ## Security
 
 - **Loopback by default.** `--host` must name this machine (`127.x.x.x`,

@@ -2,4 +2,5 @@
 
 (defpackage :evo.cli
   (:use :cl :evo.util :evo.journal :evo.provider :evo.kernel)
-  (:export #:main #:setup-agent #:toplevel))
+  (:export #:main #:setup-agent #:toplevel
+           #:supervise #:supervised-run-p #:usage-error #:resolve-journal))

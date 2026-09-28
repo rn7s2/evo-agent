@@ -83,8 +83,10 @@ Returns (values exit-code hung-p)."
     (multiple-value-bind (status code) (evo.port:process-wait process)
       (values (if (eq status :signaled) :crashed code) hung))))
 
-(defun supervise (argv)
-  "The supervisor loop.  Returns the final exit code."
+(defun supervise (argv &key (restart-argv #'restart-argv))
+  "The supervisor loop.  Returns the final exit code.  RESTART-ARGV maps the
+original ARGV to a restarted child's arguments; another program built on this
+supervisor (evo-swarm) passes its own."
   (let ((hang-timeout (supervisor-setting "EVO_HANG_TIMEOUT" 600))
         (boot-grace (supervisor-setting "EVO_BOOT_GRACE" 20))
         (max-boot-failures (supervisor-setting "EVO_MAX_BOOT_FAILURES" 3))
@@ -96,7 +98,7 @@ Returns (values exit-code hung-p)."
                          (format nil "evo-heartbeat-~a" (gen-id))
                          (uiop:temporary-directory)))
              (start (get-universal-time))
-             (args (append (if first argv (restart-argv argv)) extra)))
+             (args (append (if first argv (funcall restart-argv argv)) extra)))
         (unless first
           ;; Name the actual arguments: "restarting with --resume" while
           ;; quietly restarting without it is how a supervisor lies.
