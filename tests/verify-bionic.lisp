@@ -5,8 +5,7 @@
 ;;;; spans / link URLs / bold / headings, falls back on error), and the bionic
 ;;;; reader itself (English words get their leading letters bolded; any word
 ;;;; carrying a non-ASCII character is left byte-for-byte untouched), plus the
-;;;; /bionic command.  Exits 0 on success, 1 on any failure — the shape the
-;;;; done_when form checks.
+;;;; /bionic command.  Exits 0 on success, 1 on any failure.
 
 (require :asdf)
 (push (uiop:getcwd) asdf:*central-registry*)

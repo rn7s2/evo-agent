@@ -31,7 +31,7 @@ form-by-form, not line-by-line.
 | `:custom-message` | extension-injected content, visible to the LLM (`:key` lets a transform hook remove it later) |
 | `:label` | bookmark (`:target-id` + `:label`) |
 | `:session-info` | session name etc. |
-| `:goal` | goal created/updated: `:goal-id :objective :status :token-budget :tokens-used [:done-when]` (`:token-budget` nil = no limit, the default; `:done-when` is the verifier — the source text of a Lisp form, evaluated on each completion claim) |
+| `:goal` | goal created/updated: `:goal-id :objective :status :token-budget :tokens-used` (`:token-budget` nil = no limit, the default) |
 | `:load` | userspace source file loaded (`:path` + `:reason`) — replayed on boot |
 | `:provider-retry` | a provider request re-sent: `:attempt :max :delay :reason` — for postmortems; the fold ignores it |
 

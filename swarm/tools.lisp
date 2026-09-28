@@ -68,18 +68,14 @@
          (lane (or (lane-arg args :required nil)
                    (first-idle-lane)
                    (error "every lane is busy — wait for one to report, or steer one")))
-         (objective (getf args :objective))
-         (done-when (getf args :done-when)))
+         (objective (getf args :objective)))
     (let ((state (with-swarm-lock () (lane-state lane))))
       (unless (eq state :idle)
         (error "lane ~d is ~(~a~); delegate to an idle lane, or use steer_lane / interrupt_and_steer"
                (lane-n lane) state)))
     (when (and objective (plusp (length objective)))
       (lane-eval lane (forms->code
-                       `((evo.kernel:create-goal-entry
-                          evo:*agent* ,objective
-                          :done-when ,(and done-when (plusp (length done-when))
-                                           `(evo.kernel::normalize-done-when ,done-when)))))))
+                       `((evo.kernel:create-goal-entry evo:*agent* ,objective)))))
     (multiple-value-bind (status reply) (lane-post lane "/prompt" :body (list :text task))
       (lane-ok lane status reply "prompt")
       (set-lane-task lane (or objective task))
@@ -264,12 +260,10 @@ they are its `report` tool calls, so they outlive this process and a resume."
     "List the swarm's lanes: state (idle, working, down...), step clock, current task, worktree, reports."
     (:object) tool-lanes)
   (deftool "delegate"
-    "Give a lane a task. The lane is a separate agent that cannot see this conversation: the task must carry everything it needs, including how to tell it is done. With objective (and ideally done_when, a Lisp form that checks completion), the lane works on it as a goal until done. Picks the first idle lane unless lane is given. Returns at once; the lane reports back as input."
+    "Give a lane a task. The lane is a separate agent that cannot see this conversation: the task must carry everything it needs, including how to tell it is done. With objective, the lane works on it as a goal until done. Picks the first idle lane unless lane is given. Returns at once; the lane reports back as input."
     (:object (:task :type :string :description "The complete instructions for the lane")
              (:lane :type :integer :optional t :description "Lane number; default: the first idle lane")
-             (:objective :type :string :optional t :description "Make it the lane's goal: what done means")
-             (:done-when :type :string :optional t
-              :description "A Lisp form the lane's goal must satisfy to complete, e.g. (zerop (nth-value 2 (uiop:run-program \"make test\" :ignore-error-status t)))"))
+             (:objective :type :string :optional t :description "Make it the lane's goal: what done means"))
     tool-delegate)
   (deftool "steer_lane"
     "Add guidance to a working lane; it sees it at its next turn boundary, without stopping."

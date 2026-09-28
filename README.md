@@ -187,20 +187,12 @@ point.
   completion audit (prove it from current evidence, requirement by
   requirement). Doing nothing is never completion.
 - **The agent owns the objective, the user owns the pause.** `update_goal`
-  lets the model refine the live objective, attach or replace the `done_when`
-  verifier, resume a paused goal, and complete it under audit. Pausing is
-  human-only: `/goal pause` stops the idle loop, `/goal resume` restarts it,
-  and `update_goal` status `paused` is rejected with an explanation.
+  lets the model refine the live objective, resume a paused goal, and
+  complete it under audit. Pausing is human-only: `/goal pause` stops the
+  idle loop, `/goal resume` restarts it, and `update_goal` status `paused` is
+  rejected with an explanation.
 - **Budgets** run every turn over tokens. Exhaustion moves the goal to
   `:budget-limited` and the next steering is a wrap-up template.
-- **Verified completion**: when an objective is mechanically checkable, the
-  agent attaches a `done_when` verifier (at creation, or later with
-  `update_goal done_when`). It is always the check itself — an inline Lisp
-  form, journaled as text on the `:goal` entry, never a function name or a
-  file, so nowhere else for the model to hide what is actually being checked.
-  On `update_goal :complete`, the kernel evaluates the form — failure returns
-  an error and the goal stays active. The model's completion claim becomes a
-  checked assertion it wrote against itself.
 - **Supervisor**: the `evo` binary invoked plainly *is* the supervisor parent.
   It re-spawns itself as the session child, monitors process exit and a
   heartbeat file, restarts with `--resume`, and on repeated boot failures
@@ -410,10 +402,10 @@ pool of worker **lanes**, each a separate `evo serve --no-userspace` process
 with its own context, token and journal (default 6, `--workers N`). The
 coordinator decides for itself — you give it goals, not lane assignments — to
 split the work into lane-sized pieces with clear done criteria,
-`delegate`s them (optionally as goals with `done_when`), steers or
-interrupts lanes, evaluates capabilities into a lane when it asks, gives a
-lane its own git worktree when a task needs isolation, and integrates and
-verifies what comes back. Lanes call a `report` tool after each meaningful
+`delegate`s them (optionally as goals), steers or interrupts lanes,
+evaluates capabilities into a lane when it asks, gives a lane its own git
+worktree when a task needs isolation, and integrates and verifies what comes
+back. Lanes call a `report` tool after each meaningful
 piece of work; reports, finished runs, errors and crashes reach the
 coordinator as input — waking it when idle. Lanes talk only to the
 coordinator, only through serve's HTTP API.
@@ -664,7 +656,7 @@ src/kernel/              EVO.KERNEL — the core loop and nothing else
                          switching journals, model and thinking choices
   jobs.lisp              background jobs + the `wait` tool
   builtin-tools.lisp     read / write / edit / bash
-  goal.lisp              goal driver, audited tools, done-when
+  goal.lisp              goal driver, audited tools
 
 src/core-ext/            core extensions: bundled, but built on the same public
   lang-en.lisp           API as user ones — the English prompt language pack

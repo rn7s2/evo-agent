@@ -473,17 +473,15 @@ A goal is journal state; the current goal is a fold over `:goal` entries.
 
 ```lisp
 (:goal-id "g-01" :objective "..." :status :active
- :token-budget 500000 :tokens-used 123456
- :done-when nil)          ; source text of the check itself (D15)
+ :token-budget 500000 :tokens-used 123456)
 ```
 
 Statuses are `:active`, `:paused`, `:budget-limited`, `:complete`. Through
 `update_goal` the model may transition to `:complete` (under the audit rules
 below), resume a paused goal to `:active`, and **refine** the live goal —
-rewrite its `:objective` or attach/replace its `:done-when` verifier. There is
-no `:blocked`: a goal is never given up on. Pausing is the user's alone
-(`/goal pause`, `/goal resume`); a model that needs the user says so in its
-reply and keeps doing what it can. Budget transitions belong to the system.
+rewrite its `:objective`. There is no `:blocked`: a goal is never given up
+on. Pausing is the user's alone (`/goal pause`, `/goal resume`); a model that
+needs the user says so in its reply and keeps doing what it can. Budget transitions belong to the system.
 
 ### 9.2 Driver
 
@@ -518,34 +516,8 @@ reply and keeps doing what it can. Budget transitions belong to the system.
 `get_goal`; `create_goal`, which is for explicit user requests only and
 refuses while an unfinished goal exists; and `update_goal`, which changes
 status (`complete`, or `active` to resume a paused goal) **and** refines the live goal
-(`objective` text, `done_when` verifier) — at least one field required, the
-audit language carried in the tool description itself.
-
-### 9.4 Verified completion
-
-`:done-when` is designed for the **agent** to fill, not the user (D15). Users
-state objectives in prose; when an objective is mechanically checkable the
-agent formalizes it, and the verifier *is* the formalization: a Lisp form,
-journaled as source text on the `:goal` entry and evaluated in `EVO.USER` when
-completion is claimed. There is deliberately no way to name a function defined
-elsewhere — a verifier that lived in a file the agent wrote and loaded would
-put the real check out of the journal's sight, where neither the human reading
-it nor a later session's audit can see what was actually checked. The
-continuation prompt steers the agent to derive the verifier up front, at goal
-start, not at completion time, and nags only while none is attached. It can be
-attached at creation (`create_goal done_when`) or added to a live goal later
-(`update_goal done_when`) — the latter matters because a goal the user set
-with `/goal` has no verifier until the agent supplies one.
-
-`update_goal :complete` is then not taken at its word: the kernel evaluates
-the form (in `EVO.USER`, with anything it prints carried into the report).
-Failure returns an error carrying the verifier's output and the goal stays
-`:active`. The model's completion claim becomes a checked assertion it wrote
-against itself. A lazy `(lambda () t)` remains possible; the mitigation is
-that the verifier is a journaled, user-visible artifact written before the
-work, when there is no victory to declare yet. The feature is optional —
-`/goal` works without it — and closes the premature-victory hole
-in about twenty lines of kernel code.
+(`objective` text) — at least one field required, the audit language carried
+in the tool description itself.
 
 ## 10. Lore system (`/lore`)
 
@@ -1092,7 +1064,7 @@ the other way round (`tests/evo-only.lisp`). The reference is
 | D4 | **A CLI with an adaptive TUI**, mandatory live console-resize. Not Emacs/Swank-first. | Approachable for newcomers and adapts to the most contexts. The live image stays reachable from inside (`/eval`), not through an editor. |
 | D5 | **A supervisor owns launch, crash detection, restart, and resume.** | Long-running goal pursuit requires surviving self-inflicted death. |
 | D6 | **One adapter ships** (Anthropic Messages) as a CLOS *provider API*; **models and endpoints are user-registered from init.lisp**. A wire protocol is an extension point, not a kernel privilege: `evo:register-api` takes any `provider-api` subclass. One unified message model for all APIs. Anthropic's own models (Sonnet 5, Opus 5, Fable 5) and Messages-compatible third-party endpoints (Kimi Code K3, DeepSeek, proxies) all ride the same adapter; the OpenAI Responses adapter was deleted when it stopped earning its parsing surface. | The API/registry split keeps the bundled protocol curated while models stay configuration, avoiding a 40-provider table. Making the protocol registerable follows D13: if the TUI can be a core extension, a wire protocol can be a user one. |
-| D7 | The goal system follows **codex's design**: persisted goal, idle-continuation steering, explicit audited completion, budgets. Optional Lisp acceptance predicate as a kernel-side verifier. | See §9. |
+| D7 | The goal system follows **codex's design**: persisted goal, idle-continuation steering, explicit audited completion, budgets. | See §9. |
 | D8 | The kernel/userspace split is enforced with **package locks** (SBCL native, ECL `si:package-lock`, both behind `evo.port`). | Permissive but not suicidal: touching the kernel requires an explicit, auditable unlock. |
 | D9 | Tool execution is **sequential**. | Parallelism is where the thread-discipline complexity lives, and nothing yet demands it. |
 | D10 | **SBCL and ECL on Unix, SBCL on Windows**, through a single portability layer (`evo.port` — the only package permitted to touch `sb-*`, `ext:`, or `si:` symbols, and now the only one that may branch on the platform). Two axes, not one: implementation *and* platform. Windows branches read on an `:evo-windows` feature the layer pushes itself, so a new implementation is one form, not fifty. | The implementation-specific surface proved small: env/argv/exit, processes, locks, fd streams, signals. Windows added a second small one — console mode instead of stty, no SIGWINCH (poll), `taskkill` instead of `pgrep`+`kill`, PowerShell instead of `/bin/sh`, PATHEXT — and asking the console for VT input/output means the key parser, the escape sequences and the renderer are untouched by it. ECL on Windows stays unsupported: it would need its own copy of that surface with no user waiting for it. |
@@ -1100,7 +1072,6 @@ the other way round (`tests/evo-only.lisp`). The reference is
 | D12 | The TUI editor is a **plain multi-line text editor**: Enter sends, Shift+Enter inserts a newline, pastes over three lines collapse to a placeholder that re-pasting expands. No highlighting; Tab completes only `/command` names and `/eval` symbols. | Multi-line editing is crucial UX; editor sophistication is not where the novelty is. |
 | D13 | **Slim core: everything outside the core loop ships as a core extension** — bundled, on the same API, with the same control as user extensions; essential ones cannot be disabled. | Dogfooding proves the API's depth and keeps the kernel small and honest. See §14. |
 | D14 | **Todo checklists ship**, as a core extension. | Long-running goal work needs user-visible progress. The one deliberate deviation from the minimal omit-list. |
-| D15 | `:done-when` verifiers are **the check itself**: a Lisp form, journaled as source text on the `:goal` entry and evaluated on each completion claim. Never a function name — there is no second place for the check to live. | Users state objectives in prose; the agent formalizes them, and the formalization stays where the human can read it. Source text is data: it survives restart with no load step, and a closure could not round-trip through the journal anyway. |
 | D16 | **Parallel agents are a swarm of processes, not sub-agents.** `evo-swarm` (§18) runs one coordinator agent — the only one a human talks to — and a pool of interchangeable worker *lanes*, each a whole `evo serve` process driven only through serve's public HTTP API. Lanes never talk to each other; they report to the coordinator, whose input their reports become. Lanes get the coordinator's setup plus code swarm.lisp gives them (`in-lanes`). This replaces "no sub-agents". | Context isolation did demonstrably beat one transcript once goals outgrew one context — the re-entry condition D16 named. Processes rather than in-image children because every guarantee evo has — the journal as truth, supervision, resume, a crash domain of one — then holds per lane for free, and the coordinator exercises serve's API as any client would. Lanes rather than roles because a role is a prompt, which the coordinator can give any lane per task. |
 | D17 | **One binary per program, each its own supervisor.** No shell launcher and no separate supervisor executable: `evo` invoked plainly *is* the supervisor parent, re-spawning itself as the session child; `evo-swarm`, a second program (D16), is built the same way on the same supervisor (`evo.cli:supervise` with its own restart arguments). On SBCL the heap is baked in at build time, refining D10. `--no-supervisor` runs in-process. The evo binary contains no swarm code — `make test` loads the `evo` system alone to prove it (`tests/evo-only.lisp`). | A wrapper script is one more artifact to install, breaks TTY inheritance under POSIX background rules, and buys nothing the binary cannot do itself. A second *program* (evo-swarm) is not a wrapper: it has its own users and its own UI, and keeping it out of evo keeps the agent's binary exactly what one agent needs. |
 | D18 | **The core is its own system.** `evo/core` (foundations, kernel, interface-free core extensions) loads without the frontends; the TUI and the CLI build on it in `evo` and define their own packages, and `make test` loads `evo/core` alone before the unit suite. | D13 keeps the kernel small by convention; this makes the direction checkable. A core file that names a frontend does not load, so the question "is the core coupled to the TUI" is answered by the build rather than by reading. |
