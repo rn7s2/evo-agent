@@ -22,7 +22,7 @@ it is working, starting a run when it is idle — and shown to the human."
   (let ((agent (and *swarm* (swarm-agent *swarm*))))
     (when agent
       (evo:steer text agent)
-      (evo.tui:post-notice text :style style)
+      (swarm-say text :style style)
       (evo:request-run))))
 
 ;;; The journal record: what `evo-swarm --resume` restores.
@@ -129,9 +129,9 @@ ran, so an IN-LANES form can name a package an earlier one loaded."
   (dolist (extra (with-swarm-lock () (copy-list (lane-extra-forms lane))))
     (handler-case (lane-eval lane extra)
       (lane-error (e)
-        (evo.tui:post-notice (format nil "lane ~d: replaying an eval failed: ~a"
-                                     (lane-n lane) (lane-error-text e))
-                             :style :error)))))
+        (swarm-say (format nil "lane ~d: replaying an eval failed: ~a"
+                           (lane-n lane) (lane-error-text e))
+                   :style :error)))))
 
 (defun sync-lane-state (lane)
   "Read LANE's /state into its status."
@@ -171,7 +171,7 @@ Returns T when it came up."
          (with-swarm-lock () (setf (lane-cursor lane) (or (getf now :cursor) 0))))
        (sync-lane-state lane)
        (start-subscriber lane)
-       (evo.tui:request-repaint)
+       (swarm-repaint)
        t))))
 
 ;;; Events.
@@ -212,18 +212,18 @@ settles with its goal still active is not done: it errored or was stopped."
                  (setf all (subseq all (1+ pos))))
         (setf (lane-partial lane) all)))
     (dolist (line (nreverse lines))
-      (evo.tui:post-notice (format nil "  [lane ~d] ~a" (lane-n lane) line)))))
+      (swarm-say (format nil "  [lane ~d] ~a" (lane-n lane) line)))))
 
 (defun flush-watch (lane)
   (let ((rest (with-swarm-lock () (shiftf (lane-partial lane) ""))))
     (when (plusp (length rest))
-      (evo.tui:post-notice (format nil "  [lane ~d] ~a" (lane-n lane) rest)))))
+      (swarm-say (format nil "  [lane ~d] ~a" (lane-n lane) rest)))))
 
 (defun handle-lane-event (lane type event)
   "One event from LANE: keep its status current, and turn what the
 coordinator must hear — reports, finished runs, errors — into its input."
   (when (member type '("task-start" "settled") :test #'string=)
-    (evo.tui:request-repaint))
+    (swarm-repaint))
   (let ((now (get-universal-time))
         (watched (with-swarm-lock () (lane-watched lane))))
     (cond
@@ -253,7 +253,7 @@ coordinator must hear — reports, finished runs, errors — into its input."
        (cond ((string= type "text-delta") (watch-output lane (getf event :text)))
              ((string= type "tool-call-start")
               (flush-watch lane)
-              (evo.tui:post-notice
+              (swarm-say
                (format nil "  [lane ~d] ~a" (lane-n lane)
                        (evo.command:format-tool-call-plain (getf event :name)
                                                            (getf event :arguments)))))
@@ -275,9 +275,9 @@ coordinator must hear — reports, finished runs, errors — into its input."
                   (when (and type (listp event))
                     (handler-case (handle-lane-event lane type event)
                       (error (e)
-                        (evo.tui:post-notice (format nil "lane ~d: event error: ~a"
-                                                     (lane-n lane) e)
-                                             :style :error)))))))
+                        (swarm-say (format nil "lane ~d: event error: ~a"
+                                           (lane-n lane) e)
+                                   :style :error)))))))
           (ignore-errors (close stream))))
     (error () nil)))
 
@@ -386,9 +386,10 @@ session (and the code evaluated into it forgotten).  Picks up a changed cwd
               :worktree worktree :branch branch :task task
               :extra-forms (coerce (or extra-forms #()) 'list)))
 
-(defun make-swarm (&key agent workers evo-binary record)
+(defun make-swarm (&key agent workers evo-binary record view)
   "A swarm for AGENT: from RECORD (a resumed coordinator journal's) when
-given, else a new one of WORKERS lanes."
+given, else a new one of WORKERS lanes.  VIEW is how its coordinator is shown
+and run (view.lisp)."
   (let* ((id (or (getf record :id) (format nil "~a-~a" (session-file-stamp) (gen-id 4))))
          (swarm (%make-swarm :id id
                              :dir (uiop:ensure-directory-pathname
@@ -397,6 +398,7 @@ given, else a new one of WORKERS lanes."
                              :cwd (uiop:getcwd)
                              :workers (if record (length (getf record :lanes)) workers)
                              :evo-binary evo-binary
+                             :view view
                              :agent agent)))
     (setf (swarm-lanes swarm)
           (if record
@@ -424,8 +426,8 @@ wait for them."
                         (handler-case (bring-up-lane lane :resume resume)
                           (error (e)
                             (with-swarm-lock () (setf (lane-state lane) :down))
-                            (evo.tui:post-notice (format nil "lane ~d: ~a" (lane-n lane) e)
-                                                 :style :error))))
+                            (swarm-say (format nil "lane ~d: ~a" (lane-n lane) e)
+                                       :style :error))))
                       :name (format nil "evo-swarm-start-~d" (lane-n lane))))))
 
 (defun stop-swarm (&optional (swarm *swarm*))

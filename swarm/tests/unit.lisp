@@ -37,9 +37,9 @@
     (ensure-directories-exist dir)
     (make-agent :journal (make-session-journal dir))))
 
-(defun test-swarm (&key (workers 3) agent)
+(defun test-swarm (&key (workers 3) agent view)
   (let ((swarm (evo.swarm::%make-swarm
-                :id "unit" :workers workers :agent agent
+                :id "unit" :workers workers :agent agent :view view
                 :dir (uiop:ensure-directory-pathname
                       (format nil "~a/evo-swarm-unit-~a/" (tmp-dir) (gen-id)))
                 :cwd (uiop:getcwd))))
@@ -60,6 +60,31 @@
         ((consp form) (append (symbols-in (car form)) (symbols-in (cdr form))))
         ((and (vectorp form) (not (stringp form)))
          (loop for x across form append (symbols-in x)))))
+
+;;; A view that remembers what it was told, for the tests: the swarm's
+;;; frontend seam (view.lisp) reaches it exactly as it reaches the TUI's or
+;;; serve's.
+
+(defclass recording-view (view)
+  ((said :initform nil) (repaints :initform 0)
+   (events :initform nil) (ran :initform nil)))
+
+(defmethod view-say ((view recording-view) text &key style)
+  (push (list text style) (slot-value view 'said)))
+
+(defmethod view-repaint ((view recording-view))
+  (incf (slot-value view 'repaints)))
+
+(defmethod view-publish ((view recording-view) event)
+  (push event (slot-value view 'events)))
+
+(defmethod view-run ((view recording-view) agent resumed-p)
+  (setf (slot-value view 'ran) (list agent resumed-p))
+  7)
+
+(defun said (view)
+  "What VIEW was told, oldest first."
+  (reverse (slot-value view 'said)))
 
 (defun test-baseline ()
   (with-registries ()
@@ -330,13 +355,16 @@ did not register it; a lane whose default model is missing says why."
 (defun test-events ()
   (let* ((agent (fresh-agent))
          (evo.kernel:*frontend* nil)
-         (*swarm* (test-swarm :agent agent))
+         (recording (make-instance 'recording-view))
+         (*swarm* (test-swarm :agent agent :view recording))
          (lane (first (swarm-lanes *swarm*))))
     (evo.swarm::handle-lane-event lane "task-start" '(:type "task-start" :kind "run"))
     (check "events: a task start makes the lane working"
            (eq :working (lane-state lane)))
     (check "events: ...and starts its step clock"
            (evo.swarm::lane-step-started lane))
+    (check "events: ...and repaints the frontend"
+           (= 1 (slot-value recording 'repaints)))
     (check "events: running is not news for the coordinator"
            (not (steering-pending-p agent)))
     (evo.swarm::handle-lane-event lane "report"
@@ -346,6 +374,10 @@ did not register it; a lane whose default model is missing says why."
              (and queued (search "[lane 1 report] done: built it"
                                  (getf (first queued) :text))
                   (search "evidence: make ok" (getf (first queued) :text)))))
+    (check "events: the report is shown through the swarm's view, not the TUI"
+           (let ((said (slot-value recording 'said)))
+             (and said (search "[lane 1 report] done: built it" (caar said))
+                  (eq :notice (second (first said))))))
     (evo.kernel::drain-steering agent)
     (evo.swarm::handle-lane-event lane "report"
                                   '(:type "report" :done "all of it" :goal "complete"))
@@ -379,6 +411,63 @@ did not register it; a lane whose default model is missing says why."
     (evo.swarm::handle-lane-event lane "text-delta" '(:type "text-delta" :text "hi"))
     (check "events: streamed text is not coordinator input"
            (not (steering-pending-p agent)))))
+
+;;; The frontend seam (view.lisp).  What the swarm calls to be seen or run: a
+;;; notice, a repaint, a machine event, the run itself — each routed to the
+;;; swarm's view, and a no-op when no swarm is up.
+
+(defun test-view ()
+  (let ((*swarm* nil))
+    (check "view: no swarm, no notice" (null (swarm-say "x")))
+    (check "view: no swarm, no repaint" (null (swarm-repaint)))
+    (check "view: no swarm, no event" (null (swarm-publish (list :type :lane-state)))))
+  (let* ((agent (fresh-agent))
+         (recording (make-instance 'recording-view))
+         (*swarm* (test-swarm :agent agent :view recording)))
+    (check "view: the swarm carries its view" (eq recording (swarm-view *swarm*)))
+    (swarm-say "hello" :style :error)
+    (swarm-say "quiet")
+    (check "view: a notice reaches the view, with its style (and :dim by default)"
+           (equal '(("hello" :error) ("quiet" :dim)) (said recording)))
+    (swarm-repaint)
+    (swarm-repaint)
+    (check "view: a repaint reaches the view" (= 2 (slot-value recording 'repaints)))
+    (swarm-publish (list :type :lane-state :lane 2 :state :working))
+    (check "view: a machine event reaches the view as the plist it was given"
+           (equal '((:type :lane-state :lane 2 :state :working))
+                  (reverse (slot-value recording 'events))))
+    (check "view: the run goes to the view, and its exit code comes back"
+           (and (eql 7 (swarm-run agent t))
+                (equal (list agent t) (slot-value recording 'ran)))))
+  ;; The TUI view with no terminal up: nothing painted, nothing published, and
+  ;; — the point of the seam — nothing signalled.
+  (let ((view (make-instance 'tui-view)))
+    (check "view: a TUI notice is dropped when no TUI is running"
+           (null (view-say view "x")))
+    (check "view: a TUI repaint is dropped when no TUI is running"
+           (null (view-repaint view)))
+    (check "view: the TUI has no event stream"
+           (null (view-publish view (list :type :lane-state))))))
+
+(defun test-serve-view ()
+  "A serve view says through the command layer's host protocol and publishes
+through serve's own log: the call site never names the server's internals."
+  (let* ((server (evo.serve:make-server :port 0 :token "t"))
+         (view (make-instance 'serve-view :server server)))
+    (check "serve view: it names its server" (eq server (serve-view-server view)))
+    (view-say view "lane 2 is working" :style :notice)
+    (view-publish view (list :type :lane-state :lane 2 :state :working))
+    (let ((events (evo.serve::events-after (evo.serve::server-log server) 0)))
+      (check "serve view: a notice is one :output event on the server's log"
+             (and (= 2 (length events))
+                  (equal "output" (second (first events)))
+                  (search "\"lane 2 is working\"" (third (first events)))
+                  (search "\"style\":\"notice\"" (third (first events)))))
+      (check "serve view: a published event keeps its own type and fields"
+             (and (equal "lane-state" (second (second events)))
+                  (search "\"lane\":2" (third (second events)))
+                  (search "\"state\":\"working\"" (third (second events))))))
+    (check "serve view: a repaint is nothing to do" (null (view-repaint view)))))
 
 (defun test-record ()
   (let* ((agent (fresh-agent))
@@ -488,6 +577,8 @@ did not register it; a lane whose default model is missing says why."
     (test-notes)
     (test-coordinator-tools)
     (test-events)
+    (test-view)
+    (test-serve-view)
     (test-record)
     (test-launch-environment)
     (test-sessions-dir)

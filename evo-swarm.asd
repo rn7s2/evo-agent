@@ -18,6 +18,7 @@
                 :serial t
                 :components ((:file "package")
                              (:file "state")
+                             (:file "view")
                              (:file "client")
                              (:file "init")
                              (:file "lanes")

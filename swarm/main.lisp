@@ -92,12 +92,13 @@ settings for the swarm, lane count, tool limits, prompt notes, and
                :text "cannot find the evo binary lanes run: put it beside evo-swarm, on PATH, or name it with --evo / EVO_BINARY"))))
 
 (defun install-coordinator ()
-  "What the coordinator has beyond an evo session: the swarm tools, the
-lane commands and status segment, the coordinator note.  Installed before the
-session boots, so /reload keeps them (they are the base, not an extension)."
+  "What the coordinator has beyond an evo session: the swarm tools, the swarm
+commands, the coordinator note.  Installed before the session boots, so
+/reload keeps them (they are the base, not an extension).  The status-line
+segment is the TUI's own and is installed by RUN-SWARM."
   (register-swarm-tools)
   (pushnew 'load-swarm-config *post-init-hooks*)
-  (install-tui-observation)
+  (register-swarm-commands)
   (evo:register-prompt-note "swarm-coordinator"
                             (lambda (pack) (declare (ignore pack)) (coordinator-note))))
 
@@ -107,6 +108,10 @@ session boots, so /reload keeps them (they are the base, not an extension)."
            :text "evo-swarm needs a terminal: the coordinator is a TUI (lanes are driven over HTTP; for a headless single agent use `evo serve`)"))
   (let ((evo-binary (find-evo-binary opts)))
     (install-coordinator)
+    ;; The coordinator's frontend: where its notices go, where its machine
+    ;; events go, and how it runs (view.lisp).  The TUI's own status segment
+    ;; belongs with it — a segment is a screen.
+    (install-tui-observation)
     (multiple-value-bind (agent resumed-p)
         (evo.cli:setup-agent opts :frontend (make-instance 'evo.tui:tui-frontend))
       (apply-coordinator-tools agent)
@@ -115,7 +120,8 @@ session boots, so /reload keeps them (they are the base, not an extension)."
                           (let ((n (setting :swarm-workers))) (and (integerp n) n))
                           6)))
         (setf *swarm* (make-swarm :agent agent :workers workers
-                                  :evo-binary evo-binary :record record))
+                                  :evo-binary evo-binary :record record
+                                  :view (make-instance 'tui-view)))
         (ensure-directories-exist (swarm-dir *swarm*))
         (record-swarm)
         ;; A journal switch (/new, /fork, /resume) takes the swarm along: the
@@ -130,7 +136,7 @@ session boots, so /reload keeps them (they are the base, not an extension)."
         (evo:on :session-end (lambda (event) (declare (ignore event)) (stop-swarm))
                 :name :evo-swarm-stop)
         (start-lanes *swarm* :resume (and record t))
-        (unwind-protect (evo.tui:start-tui agent :resumed-p resumed-p)
+        (unwind-protect (swarm-run agent resumed-p)
           (stop-swarm))))))
 
 (defun main (&optional (argv (evo.port:argv)))
