@@ -50,7 +50,7 @@ The coordinator is an ordinary evo TUI session with every tool, plus:
 | Tool | What it does |
 |---|---|
 | `lanes` | Every lane: idle/working, step clock, current task, worktree, reports. |
-| `delegate` | Give a lane a task — the complete instructions, since the lane cannot see this conversation — and optionally an `objective` with `done_when` (a Lisp form), which becomes the lane's goal. Picks the first idle lane unless one is named. Returns at once. |
+| `delegate` | Give a lane a task — the complete instructions, since the lane cannot see this conversation — and optionally an `objective`, which becomes the lane's goal. Picks the first idle lane unless one is named. Returns at once. |
 | `steer_lane` | Guidance for a working lane, seen at its next turn boundary. |
 | `interrupt_lane` | Stop what a lane is doing. |
 | `interrupt_and_steer` | Stop it and give it new instructions in one step. |

@@ -3255,15 +3255,7 @@ just the pack that ships as a core extension, and what the user picked
              (search "no limit" (goal-continuation-message goal 1234)))
       (check "continuation with budget shows remaining"
              (search "(800 remaining)"
-                     (goal-continuation-message (pput goal :token-budget 2034) 1234))))
-    ;; The continuation nudges toward a done-when verifier only while none is
-    ;; attached — once set, it must stop nagging.
-    (let ((goal (current-goal agent)))
-      (check "continuation nudges when no done-when"
-             (search "No done-when verifier" (goal-continuation-message goal 10)))
-      (check "continuation stops nudging once done-when set"
-             (not (search "No done-when verifier"
-                          (goal-continuation-message (pput goal :done-when "p") 10)))))))
+                     (goal-continuation-message (pput goal :token-budget 2034) 1234))))))
 
 ;;; Session operations: every journal write a frontend asks for goes through
 ;;; the core (src/kernel/session.lisp, goal.lisp).  These pin the entries they
@@ -3469,12 +3461,9 @@ just the pack that ships as a core extension, and what the user picked
     (check "a reload withdraws an extension's prompt note, keeping config's"
            (equal '("from-config") (mapcar #'car evo.kernel::*prompt-notes*)))))
 
-(defvar *test-goal-done* nil
-  "Flip switch read by the done-when verifier in test-goal-tools.")
-
 (defun test-goal-tools ()
-  "update_goal: refine objective/done-when, human-only pause, resume, and
-the guards + completion gating around all of it."
+  "update_goal: refine the objective, human-only pause, resume, complete,
+and the guards around all of it."
   (let* ((dir (uiop:ensure-directory-pathname
                (format nil "~a/evo-goaltools-~a/" (tmp-dir) (gen-id))))
          (journal (progn (ensure-directories-exist dir) (make-session-journal dir)))
@@ -3492,18 +3481,13 @@ the guards + completion gating around all of it."
     ;; Empty update is refused.
     (check-signals "update_goal with no fields errors"
                    (evo.kernel::tool-update-goal '()))
-    ;; Attach a done-when verifier after creation (goal set via /goal has none).
-    (evo.kernel::tool-update-goal '(:done-when "(and evo.tests::*test-goal-done* t)"))
-    (check "done-when attached to live goal"
-           (equal (pget (current-goal agent) :done-when)
-                  "(and evo.tests::*test-goal-done* t)"))
-    ;; Agent may send status="active" along with done_when on an active goal
-    ;; (e.g. "attach verifier + reaffirm active"); must not error as resume.
+    ;; Agent may send status="active" along with an objective on an active
+    ;; goal (e.g. "refine + reaffirm active"); must not error as resume.
     (let ((before (length (evo.journal::journal-entries (agent-journal agent)))))
-      (evo.kernel::tool-update-goal '(:status "active" :done-when "(and evo.tests::*test-goal-done* t)"))
-      (check "status=active+done_when on active goal refines instead of erroring"
+      (evo.kernel::tool-update-goal '(:status "active" :objective "ship the feature, documented"))
+      (check "status=active+objective on active goal refines instead of erroring"
              (equal (pget (current-goal agent) :status) :active))
-      (check "status=active+done_when still appends a journal entry"
+      (check "status=active+objective still appends a journal entry"
              (> (length (evo.journal::journal-entries (agent-journal agent))) before)))
     ;; Pausing is human-only: the tool rejects it with an explicit message
     ;; and the goal is untouched.
@@ -3536,103 +3520,13 @@ the guards + completion gating around all of it."
     (check "settled hook re-steers an active goal"
            (evo.kernel::goal-settled-hook agent :stop))
     (evo.kernel::drain-steering agent)   ; clear the queued continuation
-    ;; Completion is gated by the verifier.
-    (setf *test-goal-done* nil)
-    (check-signals "complete rejected while done-when fails"
-                   (evo.kernel::tool-update-goal '(:status "complete")))
-    (check "goal stays active after a rejected completion"
-           (eq (pget (current-goal agent) :status) :active))
-    (setf *test-goal-done* t)
+    ;; The agent's audited claim completes the goal.
     (evo.kernel::tool-update-goal '(:status "complete"))
-    (check "goal complete once done-when passes"
+    (check "goal complete on the agent's claim"
            (eq (pget (current-goal agent) :status) :complete))
     ;; A finished goal can no longer be refined.
     (check-signals "cannot refine a completed goal"
                    (evo.kernel::tool-update-goal '(:objective "too late")))))
-
-(defun test-goal-verifier-forms ()
-  "done_when needs no file on disk: the check itself, as an inline Lisp form,
-is journaled as text and evaluated when completion is claimed."
-  (let* ((dir (uiop:ensure-directory-pathname
-               (format nil "~a/evo-goalverifier-~a/" (tmp-dir) (gen-id))))
-         (journal (progn (ensure-directories-exist dir) (make-session-journal dir)))
-         (agent (make-agent :journal journal))
-         (evo:*agent* agent))
-    (create-goal-entry agent "publish the release")
-    ;; The check is the value — no predicate file, no load step.
-    (evo.kernel::tool-update-goal '(:done-when "(zerop 1)"))
-    (check "inline form is journaled as text"
-           (equal (pget (current-goal agent) :done-when) "(zerop 1)"))
-    (multiple-value-bind (done output) (evo.kernel::run-done-when "(zerop 1)")
-      (check "a false form is not done" (null done))
-      (check "failure output names the form" (not (null (search "(zerop 1)" output)))))
-    ;; A form that signals is a failed check, not an escape out of the tool.
-    (multiple-value-bind (done output) (evo.kernel::run-done-when "(car 5)")
-      (check "a signaling form counts as not done" (null done))
-      (check "a signaling form reports the condition"
-             (not (null (search "signaled" output)))))
-    ;; A predicate-shaped form is called, rather than passing on the truth of
-    ;; the closure itself.
-    (check "a (lambda () ...) form is called"
-           (null (evo.kernel::run-done-when "(lambda () nil)")))
-    ;; The same discipline as the eval tool: reading cannot run code, every
-    ;; output stream is captured, and the report is bounded.
-    (let ((sentinel (merge-pathnames "read-eval-sentinel" dir)))
-      (check-signals "#. is refused at attach time, before anything runs"
-                     (evo.kernel::tool-update-goal
-                      (list :done-when
-                            (format nil "(progn #.(with-open-file (o ~s :direction :output) (write-line \"x\" o)) t)"
-                                    (namestring sentinel)))))
-      (check "and the read-time side effect did not happen"
-             (null (probe-file sentinel))))
-    (multiple-value-bind (done output)
-        (evo.kernel::run-done-when "(progn (format *error-output* \"to-stderr\") (warn \"careful\") nil)")
-      (check "stderr and warnings are captured, not written to the terminal"
-             (and (null done) (search "to-stderr" output) (search "careful" output))))
-    (multiple-value-bind (done output)
-        (evo.kernel::run-done-when "(make-list 100000 :initial-element :x)")
-      (check "a huge result is reported bounded"
-             (and done (< (length output) 1500))))
-    (check "leading whitespace is not mistaken for a name"
-           (progn (evo.kernel::tool-update-goal '(:done-when "
-   (zerop 1)"))
-                  (equal (pget (current-goal agent) :done-when) "(zerop 1)")))
-    ;; A journal from before verifiers were forms may carry a bare name; the
-    ;; completion report says how to recover instead of just failing.
-    (multiple-value-bind (done output) (evo.kernel::run-done-when "old-predicate-p")
-      (check "a legacy name fails with a recovery hint"
-             (and (null done) (search "update_goal done_when" output))))
-    ;; Bad verifiers are refused at attach time, not at completion time, and
-    ;; the goal is left untouched.
-    (check-signals "unreadable form refused at attach time"
-                   (evo.kernel::tool-update-goal '(:done-when "(zerop 1")))
-    ;; A name is refused outright: the verifier is the check itself, so there
-    ;; is nowhere for a file written and loaded elsewhere to hide the real
-    ;; check from the journal.
-    (check-signals "a bare predicate name is refused"
-                   (evo.kernel::tool-update-goal '(:done-when "some-predicate-p")))
-    (check-signals "two forms refused at attach time"
-                   (evo.kernel::tool-update-goal '(:done-when "(zerop 0) (zerop 1)")))
-    (check-signals "empty done-when refused at attach time"
-                   (evo.kernel::tool-update-goal '(:done-when "")))
-    (check "a refused verifier leaves the old one in place"
-           (equal (pget (current-goal agent) :done-when) "(zerop 1)"))
-    ;; Failing verifier blocks completion; replacing it with a true form on
-    ;; the live goal lets the same claim through.
-    (check-signals "failing inline form blocks completion"
-                   (evo.kernel::tool-update-goal '(:status "complete")))
-    (check "goal stays active after a rejected completion"
-           (eq (pget (current-goal agent) :status) :active))
-    ;; A check that inspects the world (here: a marker file the goal wrote)
-    ;; passes and lets the completion through.
-    (let ((marker (merge-pathnames "done-marker" dir)))
-      (with-open-file (out marker :direction :output :if-exists :supersede)
-        (write-line "ok" out))
-      (evo.kernel::tool-update-goal
-       (list :done-when (format nil "(probe-file ~s)" (namestring marker))))
-      (check "passing inline form completes the goal"
-             (progn (evo.kernel::tool-update-goal '(:status "complete"))
-                    (eq (pget (current-goal agent) :status) :complete))))))
 
 ;;; Templates + skills
 
@@ -7736,7 +7630,6 @@ became zero after the first reload."
     (test-session-operations)
     (test-extension-protocols)
     (test-goal-tools)
-    (test-goal-verifier-forms)
     (test-templates)
     (test-compaction)
     (test-lore)

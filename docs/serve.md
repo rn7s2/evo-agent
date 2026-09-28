@@ -250,7 +250,7 @@ closed, the token file is removed, and the process exits 0.
  "thinking": "high", "language": "en",
  "context_tokens": 48211, "context_window": 1000000,
  "goal": {"goal_id", "objective", "status", "token_budget", "tokens_used",
-          "done_when", "tokens_used_live"} | null,
+          "tokens_used_live"} | null,
  "todos": [{"text", "status"}],
  "jobs": {"count", "since", "command"} | null,
  "session": "/…/sessions/…/2026…_….sexp", "session_id": "…",

@@ -403,18 +403,18 @@ def first_run(term, stub, home, proj):
     check("lane 4 does not", "probe_three" not in lanes[3].tools())
     check("lane 1 does not", "probe_three" not in lanes[0].tools())
 
-    # --- delegation as a goal, with a done-when the lane's kernel checks -----------
+    # --- delegation as a goal ------------------------------------------------------
     t_goal = time.time()
     coordinator_quiet(stub)
     term.type('CALL delegate {"lane":3,"task":"start on the goal","objective":'
-              '"reach the e2e goal FINISH","done_when":"(= 1 1)"}')
+              '"reach the e2e goal FINISH"}')
     done = wait_for(lambda: (lambda st: st[1]["goal"] and st[1]["goal"]["status"] == "complete"
                              and st[1]["status"] == "idle")(lanes[2].get("/state")), 60)
-    check("a delegated goal runs on the lane until its done-when passes", done)
+    check("a delegated goal runs on the lane until it completes", done)
     status, state = lanes[2].get("/state")
-    check("the lane's goal carries the objective and verifier",
-          state["goal"] and state["goal"]["objective"] == "reach the e2e goal FINISH"
-          and state["goal"]["done_when"] == "(= 1 1)", state["goal"])
+    check("the lane's goal carries the objective",
+          state["goal"] and state["goal"]["objective"] == "reach the e2e goal FINISH",
+          state["goal"])
     wait_for(lambda: stub.find("coordinator", "[lane 3] run ended", t_goal), 30)
 
     # --- a worktree lane works in its worktree -------------------------------------
