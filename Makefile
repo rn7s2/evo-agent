@@ -31,7 +31,7 @@ STDIN_GUARD =
 endif
 
 # All targets are actions, not files — declare them phony so they always run.
-.PHONY: build test integration tui-test tui-test-offline serve-test swarm-test clean install install-home
+.PHONY: build test integration tui-test tui-test-offline serve-test swarm-test swarm-serve-test clean install install-home
 
 # Compile both binaries: build/evo, and build/evo-swarm (its own system on
 # top of evo — evo-swarm.asd, docs/swarm.md).
@@ -112,6 +112,13 @@ serve-test: build
 # (tests/swarm-e2e.py; python3 and git).  Runs in CI too.
 swarm-test: build
 	tests/swarm-e2e.py build
+
+# evo-swarm serve end to end, over HTTP only and with no backend: the headless
+# swarm driven through `evo serve`'s protocol plus the swarm feature, the stub
+# scripting both the coordinator and its lanes (tests/swarm-serve-e2e.py;
+# python3).  Needs the evo and evo-swarm binaries.
+swarm-serve-test: build
+	tests/swarm-serve-e2e.py build
 
 # Seed corpus: docs + example extensions into the global evo home.
 # Everything installed under docs/ is reference-only — nothing ships active in
