@@ -6,7 +6,8 @@
 # Configuration variables (override on the command line, e.g. `make LISP=ecl`):
 #   LISP     — Common Lisp implementation used to build and run scripts.
 #   EVO_HOME — Global evo home seeded by `install-home` (docs, examples, ...).
-#   PREFIX   — Install prefix; the binary lands in $(PREFIX)/bin/evo.
+#   PREFIX   — Install prefix; the binaries land in $(PREFIX)/bin/evo and
+#              $(PREFIX)/bin/evo-swarm.
 #   HEAP_MB  — Dynamic heap (MiB) for the SBCL-built binary, baked in via
 #              :save-runtime-options (D10). ECL grows its heap on demand, so
 #              this has no effect there.
@@ -38,15 +39,17 @@ build:
 	$(BUILD_SCRIPT) build.lisp $(STDIN_GUARD)
 	$(BUILD_SCRIPT) build-swarm.lisp $(STDIN_GUARD)
 
-# Out-of-box install: build the binary, seed $(EVO_HOME) (install-home), then
-# drop the binary into $(PREFIX)/bin. Falls back to sudo when the target dir
-# isn't writable.
+# Out-of-box install: build both binaries, seed $(EVO_HOME) (install-home),
+# then drop evo and evo-swarm into $(PREFIX)/bin. Falls back to sudo when the
+# target dir isn't writable.
 install: build install-home
 	@if [ -w $(PREFIX)/bin ] || mkdir -p $(PREFIX)/bin 2>/dev/null && [ -w $(PREFIX)/bin ]; then \
 	  install -m 755 build/evo $(PREFIX)/bin/evo; \
+	  install -m 755 build/evo-swarm $(PREFIX)/bin/evo-swarm; \
 	else \
 	  echo "Need sudo to write to $(PREFIX)/bin"; \
 	  sudo install -m 755 build/evo $(PREFIX)/bin/evo; \
+	  sudo install -m 755 build/evo-swarm $(PREFIX)/bin/evo-swarm; \
 	fi
 
 # Run the unit-test suites — after proving the core loads on its own, without
