@@ -325,8 +325,9 @@ Serve's own replies use `false` where a boolean must read as one (`"ok"`).
 same keys, arrays vectors, `null` and `false` `nil`. What JSON cannot say is
 a keyword *value* (it comes back as its string) and list-versus-vector (it
 comes back a vector); so the round trip is exact at the JSON level — encode,
-decode, encode again gives the same text — and the unit suite checks that for
-every event shape the kernel emits.
+decode, encode again gives the same JSON value (object key order is not
+defined, and differs between SBCL and ECL) — and the unit suite checks that
+for every event shape the kernel emits.
 
 ## What serve is, underneath
 

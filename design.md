@@ -926,7 +926,8 @@ protocol reference is `docs/serve.md`; the shape, and why:
   one SSE stream carries events. What crosses is evo's own vocabulary — the
   `--events` plists and the journal's fold — under one mapping, the inverse
   of `evo:json->sexpr` (keywords ⇄ snake_case keys, keyword values as their
-  lowercase names, `nil` as `null`), so JSON → sexpr → JSON is the identity.
+  lowercase names, `nil` as `null`), so JSON → sexpr → JSON is the identity
+  on JSON values.
   A protocol designed for someone else's tools would have to be translated
   into this one anyway.
 - **Commands are the TUI's.** `/command` dispatches through the command layer

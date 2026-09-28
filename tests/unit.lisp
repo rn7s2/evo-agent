@@ -7507,12 +7507,16 @@ became zero after the first reload."
     (dolist (event samples)
       (let* ((json (evo.serve:event->json event))
              (back (evo:json->sexpr (com.inuoe.jzon:parse json))))
-        (check (format nil "serve json: ~(~a~) re-encodes to the same text" (getf event :type))
-               (equal json (evo.serve:encode-json back)))
+        ;; Object key order is not part of a JSON value, and neither SBCL nor
+        ;; ECL promises one for a hash table: compare values, and key sets.
+        (check (format nil "serve json: ~(~a~) re-encodes to the same JSON value"
+                       (getf event :type))
+               (equalp (com.inuoe.jzon:parse json)
+                       (com.inuoe.jzon:parse (evo.serve:encode-json back))))
         (check (format nil "serve json: ~(~a~) keys come back as the same keywords"
                        (getf event :type))
-               (equal (loop for k in event by #'cddr collect k)
-                      (loop for k in back by #'cddr collect k)))))
+               (null (set-exclusive-or (loop for k in event by #'cddr collect k)
+                                       (loop for k in back by #'cddr collect k))))))
     (let ((obj (com.inuoe.jzon:parse (evo.serve:event->json (second samples)))))
       (check "serve json: keys are snake_case"
              (and (gethash "run_id" obj) (gethash "arguments_json" obj :missing)))
