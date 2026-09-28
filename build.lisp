@@ -17,16 +17,28 @@
 
 (require :asdf)
 (push (uiop:getcwd) asdf:*central-registry*)
-(ql:quickload :evo :silent t)
+
+;; What to build.  evo by default; build-swarm.lisp binds these to build
+;; evo-swarm with the very same steps (one image per binary: SBCL's save
+;; ends the process).
+(defvar cl-user::*build-system* "evo")
+(defvar cl-user::*build-output* "build/evo")
+(defvar cl-user::*build-toplevel* '("EVO.CLI" "TOPLEVEL"))
+
+(ql:quickload cl-user::*build-system* :silent t)
 
 (ensure-directories-exist "build/")
 
+(defun cl-user::build-toplevel ()
+  (destructuring-bind (package name) cl-user::*build-toplevel*
+    (find-symbol name package)))
+
 #+sbcl
-(sb-ext:save-lisp-and-die #+(or win32 windows mswindows) "build/evo.exe"
-                          #-(or win32 windows mswindows) "build/evo"
+(sb-ext:save-lisp-and-die (format nil "~a~:[~;.exe~]" cl-user::*build-output*
+                                  (intersection (quote (:win32 :windows :mswindows)) *features*))
                           :executable t
                           :save-runtime-options t
-                          :toplevel #'evo.cli:toplevel)
+                          :toplevel (symbol-function (cl-user::build-toplevel)))
 
 #+ecl
 (progn
@@ -45,8 +57,8 @@
               do (push (namestring lib) seen)
               and collect lib)))
   (require :cmp)
-  (asdf:operate 'asdf:monolithic-lib-op "evo")
-  (let ((lib (first (asdf:output-files 'asdf:monolithic-lib-op "evo")))
+  (asdf:operate 'asdf:monolithic-lib-op cl-user::*build-system*)
+  (let ((lib (first (asdf:output-files 'asdf:monolithic-lib-op cl-user::*build-system*)))
         (shim-src (merge-pathnames "build/preload-systems.lisp" (uiop:getcwd)))
         (shim-obj (merge-pathnames "build/preload-systems.o" (uiop:getcwd))))
     ;; Dependencies may call (asdf:find-system ...) while initializing —
@@ -61,9 +73,9 @@
           (format s "(uiop:symbol-call :asdf '#:register-preloaded-system ~s~@[ :version ~s~])~%"
                   name version))))
     (compile-file shim-src :output-file shim-obj :system-p t)
-    (c:build-program "build/evo"
+    (c:build-program cl-user::*build-output*
                      :lisp-files (append *contrib-libs* (list shim-obj lib))
-                     :epilogue-code '(evo.cli:toplevel)))
-  (format t "~&; wrote build/evo (linked contribs: ~{~a~^ ~})~%"
-          (mapcar #'pathname-name *contrib-libs*))
+                     :epilogue-code (list (cl-user::build-toplevel))))
+  (format t "~&; wrote ~a (linked contribs: ~{~a~^ ~})~%"
+          cl-user::*build-output* (mapcar #'pathname-name *contrib-libs*))
   (uiop:quit 0))

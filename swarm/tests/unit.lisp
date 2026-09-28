@@ -1,0 +1,318 @@
+;;;; swarm/tests/unit.lisp — unit tests for evo-swarm: worker init (and keeping
+;;;; secrets out of it), generators, tool limits, the journal record, lane
+;;;; events turned into coordinator input, restart arguments.  Nothing here
+;;;; starts a process; tests/swarm-e2e.py does that.
+
+(defpackage :evo.swarm.tests
+  (:use :cl :evo.util :evo.journal :evo.provider :evo.kernel :evo.swarm)
+  (:export #:run-all))
+
+(in-package :evo.swarm.tests)
+
+(defvar *pass* 0)
+(defvar *fail* 0)
+
+(defmacro check (name form)
+  `(handler-case
+       (if ,form
+           (incf *pass*)
+           (progn (incf *fail*) (format t "FAIL ~a: ~s was NIL~%" ,name ',form)))
+     (error (e)
+       (incf *fail*)
+       (format t "FAIL ~a: signaled ~a~%" ,name e))))
+
+(defun tmp-dir ()
+  (string-right-trim "/\\" (namestring (uiop:temporary-directory))))
+
+(defmacro with-registries (() &body body)
+  "BODY with a clean model/provider registry and settings, restored after."
+  `(let ((saved (evo.kernel:capture-runtime-catalog)))
+     (unwind-protect
+          (progn (reset-settings) (reset-user-registries) ,@body)
+       (evo.kernel:install-runtime-catalog saved))))
+
+(defun fresh-agent ()
+  (let ((dir (uiop:ensure-directory-pathname
+              (format nil "~a/evo-swarm-unit-~a/" (tmp-dir) (gen-id)))))
+    (ensure-directories-exist dir)
+    (make-agent :journal (make-session-journal dir))))
+
+(defun test-swarm (&key (workers 3) agent)
+  (let ((swarm (evo.swarm::%make-swarm
+                :id "unit" :workers workers :agent agent
+                :dir (uiop:ensure-directory-pathname
+                      (format nil "~a/evo-swarm-unit-~a/" (tmp-dir) (gen-id)))
+                :cwd (uiop:getcwd))))
+    (setf (evo.swarm::swarm-lanes swarm)
+          (loop for n from 1 to workers
+                collect (evo.swarm::%make-lane :n n :port (+ 20000 n) :token "t"
+                                               :cwd (uiop:getcwd))))
+    swarm))
+
+(defun read-all (code)
+  "Every form in CODE, read as a lane reads it: EVO.USER, no #. evaluation."
+  (let ((*package* (find-package :evo.user)) (*read-eval* nil))
+    (with-input-from-string (in code)
+      (loop for form = (read in nil :eof) until (eq form :eof) collect form))))
+
+(defun symbols-in (form)
+  (cond ((and (symbolp form) form) (list form))
+        ((consp form) (append (symbols-in (car form)) (symbols-in (cdr form))))
+        ((and (vectorp form) (not (stringp form)))
+         (loop for x across form append (symbols-in x)))))
+
+(defun test-baseline ()
+  (with-registries ()
+    (register-provider* :stub :base-url "http://127.0.0.1:1" :api-key "LITERAL-SECRET")
+    (register-provider* :envy :base-url "http://127.0.0.1:2" :api-key-env "ENVY_KEY")
+    (register-model* "m-a" :provider :stub :context-window 1000 :max-output 100
+                           :effort '(:low :medium))
+    (set-setting :model "m-a")
+    (let* ((agent (fresh-agent))
+           (evo:*agent* agent)
+           (*swarm* (test-swarm :agent agent))
+           (lane (first (swarm-lanes *swarm*)))
+           (forms (baseline-forms lane *swarm*))
+           (code (evo.swarm::forms->code forms)))
+      (check "baseline: no literal secret in the forms"
+             (not (search "LITERAL-SECRET" code)))
+      (check "baseline: a literal key becomes a swarm-private variable name"
+             (search ":api-key-env \"EVO_SWARM_STUB_API_KEY\"" code))
+      (check "baseline: an env-var key keeps its variable name"
+             (search ":api-key-env \"ENVY_KEY\"" code))
+      (check "baseline: the secret travels in the lane's environment only"
+             (member "EVO_SWARM_STUB_API_KEY=LITERAL-SECRET"
+                     (evo.swarm::lane-secret-environment) :test #'equal))
+      (check "baseline: a provider without a literal key adds no variable"
+             (notany (lambda (e) (search "ENVY" e)) (evo.swarm::lane-secret-environment)))
+      (check "baseline: the coordinator's model is registered and the default"
+             (and (search "(register-model \"m-a\"" code)
+                  (search "(set-setting :model \"m-a\")" code)))
+      (check "baseline: the effort ladder is quoted, not evaluated"
+             (let ((model (find 'evo:register-model (read-all code) :key #'car)))
+               (equal '(quote (:low :medium)) (getf (cddr model) :effort))))
+      (check "baseline: the report tool and the lane's prompt note"
+             (and (search "(register-tool \"report\"" code)
+                  (search "## Swarm lane 1" code)))
+      (let ((read (read-all code)))
+        (check "baseline: the code reads back in a lane (EVO.USER), form for form"
+               (= (length read) (length forms)))
+        (check "baseline: no swarm symbol reaches a lane that has never heard of the swarm"
+               (notany (lambda (s) (eq (symbol-package s) (find-package :evo.swarm)))
+                       (symbols-in read))))
+      ;; The report tool really is a tool: evaluate its registration here.
+      (let ((events nil))
+        (setf (agent-events-cb agent) (lambda (e) (push e events)))
+        (eval (evo.swarm::report-tool-form))
+        (execute-tool (find-tool "report") '(:done "x" :evidence "y"))
+        (let ((event (find :report events :key (lambda (e) (getf e :type)))))
+          (check "report tool: emits a :report event with its fields"
+                 (and event (equal "x" (getf event :done)) (equal "y" (getf event :evidence)))))))))
+
+(defun test-generators ()
+  (let ((evo.swarm::*worker-inits* (list (cons :baseline (lambda (l s) (declare (ignore l s)) '((a)))))))
+    (add-worker-init :second (lambda (l s) (declare (ignore s)) `((b ,(lane-n l)))))
+    (add-worker-init :third (lambda (l s) (declare (ignore l s)) '((c))))
+    (let* ((*swarm* (test-swarm))
+           (lane (second (swarm-lanes *swarm*))))
+      (check "generators: run in order, every one's forms appended"
+             (equal '((a) (b 2) (c)) (evo.swarm::init-forms lane *swarm*)))
+      (add-worker-init :second (lambda (l s) (declare (ignore l s)) '((b2))))
+      (check "generators: re-adding a name replaces it in place"
+             (equal '((a) (b2) (c)) (evo.swarm::init-forms lane *swarm*)))
+      (remove-worker-init :baseline)
+      (check "generators: the baseline can be removed"
+             (equal '(:second :third) (worker-inits))))))
+
+(defun test-tool-limits ()
+  (let ((evo.swarm::*lane-tools* nil)
+        (*swarm* (test-swarm)))
+    (destructuring-bind (one two three) (swarm-lanes *swarm*)
+      (check "limits: none by default" (null (evo.swarm::lane-tool-limit one)))
+      (set-lane-tools '("read" "bash"))
+      (check "limits: every lane, and report is always kept"
+             (and (equal '("report" "read" "bash") (evo.swarm::lane-tool-limit two))))
+      (set-lane-tools '("read") :lanes '(3))
+      (check "limits: a lane's own entry wins"
+             (equal '("report" "read") (evo.swarm::lane-tool-limit three)))
+      (check "limits: ...and the others keep the swarm-wide one"
+             (equal '("report" "read" "bash") (evo.swarm::lane-tool-limit one)))
+      (let* ((agent (fresh-agent)) (evo:*agent* agent))
+        (declare (ignorable agent))
+        (check "limits: the baseline applies the limit"
+               (equal '(evo:set-active-tools evo:*agent* (quote ("report" "read")))
+                      (find 'evo:set-active-tools
+                            (read-all (evo.swarm::forms->code (baseline-forms three *swarm*)))
+                            :key (lambda (f) (and (consp f) (car f))))))))))
+
+(defun test-notes ()
+  (let* ((*swarm* (test-swarm :workers 5))
+         (lane (fourth (swarm-lanes *swarm*))))
+    (check "notes: a lane knows its number and the lane count"
+           (search "You are lane 4 of 5" (worker-note lane 5)))
+    (check "notes: a shared-directory lane is told to keep to its files"
+           (search "share the working directory" (worker-note lane 5)))
+    (setf (evo.swarm::lane-worktree lane) "/w/lane-4/" (evo.swarm::lane-branch lane) "b4")
+    (check "notes: a worktree lane is told where it works and on what branch"
+           (search "own git worktree /w/lane-4/, on branch b4" (worker-note lane 5)))
+    (check "notes: the coordinator knows the lane count"
+           (search "5 worker lanes" (coordinator-note 5)))
+    (let ((saved evo.swarm::*worker-note*))
+      (unwind-protect
+           (progn (set-worker-note "lane ~d/~d/~d ~a")
+                  (check "notes: swarm.lisp can replace the worker note"
+                         (string-prefix-p "lane 4/4/5 " (worker-note lane 5))))
+        (setf evo.swarm::*worker-note* saved)))))
+
+(defun test-events ()
+  (let* ((agent (fresh-agent))
+         (evo.kernel:*frontend* nil)
+         (*swarm* (test-swarm :agent agent))
+         (lane (first (swarm-lanes *swarm*))))
+    (evo.swarm::handle-lane-event lane "task-start" '(:type "task-start" :kind "run"))
+    (check "events: a task start makes the lane working"
+           (eq :working (lane-state lane)))
+    (check "events: ...and starts its step clock"
+           (evo.swarm::lane-step-started lane))
+    (check "events: running is not news for the coordinator"
+           (not (steering-pending-p agent)))
+    (evo.swarm::handle-lane-event lane "report"
+                                  '(:type "report" :done "built it" :evidence "make ok"))
+    (check "events: a report becomes coordinator input"
+           (let ((queued (evo.kernel::agent-steering agent)))
+             (and queued (search "[lane 1 report] done: built it"
+                                 (getf (first queued) :text))
+                  (search "evidence: make ok" (getf (first queued) :text)))))
+    (evo.kernel::drain-steering agent)
+    (evo.swarm::handle-lane-event lane "settled" '(:type "settled" :outcome "stop"))
+    (check "events: settling makes the lane idle" (eq :idle (lane-state lane)))
+    (check "events: ...and tells the coordinator the run ended"
+           (search "[lane 1] run ended (stop)"
+                   (getf (first (evo.kernel::agent-steering agent)) :text)))
+    (evo.kernel::drain-steering agent)
+    (evo.swarm::handle-lane-event lane "task-end" '(:type "task-end" :error "boom"))
+    (check "events: an error in a lane reaches the coordinator"
+           (search "[lane 1] error: boom"
+                   (getf (first (evo.kernel::agent-steering agent)) :text)))
+    (evo.kernel::drain-steering agent)
+    (evo.swarm::handle-lane-event lane "text-delta" '(:type "text-delta" :text "hi"))
+    (check "events: streamed text is not coordinator input"
+           (not (steering-pending-p agent)))))
+
+(defun test-record ()
+  (let* ((agent (fresh-agent))
+         (*swarm* (test-swarm :agent agent :workers 2)))
+    (destructuring-bind (one two) (swarm-lanes *swarm*)
+      (declare (ignore one))
+      (setf (evo.swarm::lane-worktree two) "/wt/lane-2/"
+            (evo.swarm::lane-branch two) "swarm/unit/lane-2"
+            (evo.swarm::lane-cwd two) #p"/wt/lane-2/"
+            (evo.swarm::lane-task two) "the task"
+            (evo.swarm::lane-extra-forms two) (list "(defun x ())")))
+    (evo.swarm::record-swarm)
+    (let ((record (evo:custom-state "swarm" agent)))
+      (check "record: the swarm is journaled on the coordinator's session"
+             (and record (equal "unit" (getf record :id)) (= 2 (getf record :workers))))
+      (let ((restored (evo.swarm::make-swarm :agent agent :workers 9 :record record
+                                             :evo-binary "/x/evo")))
+        (check "record: a resumed swarm keeps its id, directory and lane count"
+               (and (equal "unit" (swarm-id restored))
+                    (equal (namestring (swarm-dir *swarm*)) (namestring (swarm-dir restored)))
+                    (= 2 (length (swarm-lanes restored)))))
+        (let ((two (second (swarm-lanes restored))))
+          (check "record: a lane's worktree, branch, cwd, task and evals come back"
+                 (and (equal "/wt/lane-2/" (lane-worktree two))
+                      (equal "/wt/lane-2/" (namestring (lane-cwd two)))
+                      (equal "the task" (lane-task two))
+                      (equal '("(defun x ())") (evo.swarm::lane-extra-forms two))))
+          (check "record: a resumed lane gets a fresh token and port"
+                 (and (= 64 (length (evo.swarm::lane-token two)))
+                      (integerp (evo.swarm::lane-port two)))))))))
+
+(defun test-launch-environment ()
+  (let ((saved (getenv "EVO_SUPERVISED_CHILD")))
+    (unwind-protect
+         (let* ((*swarm* (test-swarm))
+                (lane (first (swarm-lanes *swarm*))))
+           (evo.port:setenv "EVO_SUPERVISED_CHILD" "1")
+           (setf (evo.swarm::lane-dir lane) #p"/tmp/lane-1/"
+                 (evo.swarm::lane-token lane) "tok")
+           (let ((env (evo.swarm::lane-environment lane)))
+             (check "launch: the coordinator's supervision is not inherited"
+                    (notany (lambda (e) (string-prefix-p "EVO_SUPERVISED_CHILD=" e)) env))
+             (check "launch: the lane's token, sessions and watched pid are set"
+                    (and (member "EVO_SERVE_TOKEN=tok" env :test #'equal)
+                         (member "EVO_SESSIONS_DIR=/tmp/lane-1/sessions/" env :test #'equal)
+                         (member (format nil "EVO_SERVE_WATCH_PID=~d" (evo.port:getpid))
+                                 env :test #'equal)))))
+      (evo.port:setenv "EVO_SUPERVISED_CHILD" (or saved "")))))
+
+(defun test-sessions-dir ()
+  (let ((saved (getenv "EVO_SESSIONS_DIR")))
+    (unwind-protect
+         (progn
+           (evo.port:setenv "EVO_SESSIONS_DIR" "/tmp/elsewhere/lane-3/sessions")
+           (check "sessions: EVO_SESSIONS_DIR puts a process's sessions elsewhere"
+                  (equal "/tmp/elsewhere/lane-3/sessions/"
+                         (namestring (sessions-directory))))
+           (evo.port:setenv "EVO_SESSIONS_DIR" "")
+           (check "sessions: unset, they live under the cwd's directory as ever"
+                  (search "/sessions/" (namestring (sessions-directory)))))
+      (evo.port:setenv "EVO_SESSIONS_DIR" (or saved "")))))
+
+(defun test-cli ()
+  (check "cli: --workers"
+         (eql 3 (getf (evo.swarm::parse-args '("--workers" "3")) :workers)))
+  (check "cli: a bad worker count is a usage error"
+         (handler-case (progn (evo.swarm::parse-args '("--workers" "0")) nil)
+           (evo.cli:usage-error () t)))
+  (check "cli: an unknown flag is a usage error"
+         (handler-case (progn (evo.swarm::parse-args '("--wat")) nil)
+           (evo.cli:usage-error () t)))
+  (check "cli: a restart keeps the swarm's flags and drops the session's"
+         (equal '("--workers" "4" "--evo" "/x/evo" "--no-userspace")
+                (remove "--resume"
+                        (evo.swarm::restart-argv '("--workers" "4" "--model" "m" "--evo" "/x/evo"
+                                                   "--thinking" "high" "--no-userspace"
+                                                   "--resume" "/old/path"))
+                        :test #'equal))))
+
+(defun test-sse-reader ()
+  (let ((seen nil))
+    (with-input-from-string
+        (in (format nil ": hello~%~%id: 7~%event: report~%data: {\"a\":1}~%~%id: 8~%event: settled~%data: {}~%~%"))
+      (evo.swarm::read-sse-events in (lambda (id type data) (push (list id type data) seen))))
+    (check "sse: ids, types and data, comments skipped"
+           (equal '((7 "report" "{\"a\":1}") (8 "settled" "{}")) (nreverse seen)))))
+
+(defun test-pid-alive ()
+  (check "port: this process is alive" (evo.port:pid-alive-p (evo.port:getpid)))
+  (check "port: an unused pid is not" (not (evo.port:pid-alive-p 999999999))))
+
+(defun test-sample-config ()
+  "docs/examples/swarm.lisp is what people copy: it must load as shipped."
+  (let ((evo.swarm::*worker-inits* (copy-alist evo.swarm::*worker-inits*))
+        (evo.util:*settings* (copy-list evo.util:*settings*)))
+    (let ((*package* (find-package :evo.user)))
+      (load (merge-pathnames "docs/examples/swarm.lisp" (uiop:getcwd))))
+    (check "sample swarm.lisp: adds its generator after the baseline"
+           (equal '(:baseline :project-tools) (worker-inits)))
+    (check "sample swarm.lisp: sets the lane count"
+           (eql 4 (setting :swarm-workers)))))
+
+(defun run-all ()
+  (let ((*pass* 0) (*fail* 0))
+    (test-baseline)
+    (test-generators)
+    (test-tool-limits)
+    (test-notes)
+    (test-events)
+    (test-record)
+    (test-launch-environment)
+    (test-sessions-dir)
+    (test-cli)
+    (test-sse-reader)
+    (test-pid-alive)
+    (test-sample-config)
+    (format t "~%swarm: ~d passed, ~d failed~%" *pass* *fail*)
+    (if (zerop *fail*) 0 1)))

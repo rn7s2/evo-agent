@@ -53,6 +53,7 @@ Set-StrictMode -Version Latest
 $RepoRoot = $PSScriptRoot
 $BuildDir = Join-Path $RepoRoot 'build'
 $Binary = Join-Path $BuildDir 'evo.exe'
+$SwarmBinary = Join-Path $BuildDir 'evo-swarm.exe'
 
 function Write-Step([string]$message) {
     Write-Host "==> $message" -ForegroundColor Cyan
@@ -100,13 +101,18 @@ function Invoke-LispScript {
     }
 }
 
+# Both binaries, as on Unix: evo, and evo-swarm (its own system on top of
+# evo — evo-swarm.asd).  One Lisp process each: saving an image ends it.
 function Invoke-Build {
-    Write-Step "building $Binary (heap ${HeapMb}MiB)"
-    Invoke-LispScript -Script (Join-Path $RepoRoot 'build.lisp') -Build
-    if (-not (Test-Path $Binary)) {
-        throw "build reported success but $Binary is missing"
+    foreach ($pair in @(@('build.lisp', $Binary), @('build-swarm.lisp', $SwarmBinary))) {
+        $script, $output = $pair
+        Write-Step "building $output (heap ${HeapMb}MiB)"
+        Invoke-LispScript -Script (Join-Path $RepoRoot $script) -Build
+        if (-not (Test-Path $output)) {
+            throw "build reported success but $output is missing"
+        }
+        Write-Host "built $output" -ForegroundColor Green
     }
-    Write-Host "built $Binary" -ForegroundColor Green
 }
 
 # Seed corpus: docs + example extensions into the global evo home.
@@ -125,6 +131,7 @@ function Invoke-InstallHome {
     }
     Copy-Item (Join-Path $RepoRoot 'docs\*.md') (Join-Path $EvoHome 'docs') -Force
     Copy-Item (Join-Path $RepoRoot 'docs\examples\init.lisp') (Join-Path $EvoHome 'docs\examples') -Force
+    Copy-Item (Join-Path $RepoRoot 'docs\examples\swarm.lisp') (Join-Path $EvoHome 'docs\examples') -Force
     Copy-Item (Join-Path $RepoRoot 'extensions\examples\*.lisp') (Join-Path $EvoHome 'docs\examples') -Force
     Copy-Item (Join-Path $RepoRoot 'extensions\*.lisp') (Join-Path $EvoHome 'extensions') -Force
     Get-ChildItem -Path (Join-Path $EvoHome 'extensions') -Filter '*.fasl' -ErrorAction SilentlyContinue |
@@ -135,18 +142,20 @@ function Invoke-Install {
     Invoke-Build
     Invoke-InstallHome
     $binDir = Join-Path $Prefix 'bin'
-    $target = Join-Path $binDir 'evo.exe'
-    Write-Step "installing $target"
     New-Item -ItemType Directory -Force -Path $binDir | Out-Null
-    # A running evo holds its own image open; replacing it in place fails
-    # with "being used by another process", and the fix is to say so rather
-    # than leave half an install behind.
-    try {
-        Copy-Item $Binary $target -Force
-    } catch {
-        throw "cannot replace $target — close any running evo first ($($_.Exception.Message))"
+    foreach ($source in @($Binary, $SwarmBinary)) {
+        $target = Join-Path $binDir (Split-Path -Leaf $source)
+        Write-Step "installing $target"
+        # A running evo holds its own image open; replacing it in place fails
+        # with "being used by another process", and the fix is to say so
+        # rather than leave half an install behind.
+        try {
+            Copy-Item $source $target -Force
+        } catch {
+            throw "cannot replace $target — close any running evo first ($($_.Exception.Message))"
+        }
+        Write-Host "installed $target" -ForegroundColor Green
     }
-    Write-Host "installed $target" -ForegroundColor Green
 
     $onPath = ($env:PATH -split ';') -contains $binDir
     if (-not $onPath) {
@@ -168,8 +177,13 @@ function Invoke-Test {
     # The core first, alone: it must load without the TUI or the CLI.
     Write-Step 'checking the core loads without a frontend'
     Invoke-LispScript -Script (Join-Path $RepoRoot 'tests\core-only.lisp')
+    # ...and evo without the swarm: the swarm is its own program on top.
+    Write-Step 'checking evo loads without the swarm'
+    Invoke-LispScript -Script (Join-Path $RepoRoot 'tests\evo-only.lisp')
     Write-Step 'running unit tests'
     Invoke-LispScript -Script (Join-Path $RepoRoot 'tests\run-unit.lisp')
+    Write-Step 'running swarm unit tests'
+    Invoke-LispScript -Script (Join-Path $RepoRoot 'swarm\tests\run-unit.lisp')
 }
 
 # Live console tests: drive the real console (CONIN$/CONOUT$) to prove the
