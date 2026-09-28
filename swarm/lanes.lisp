@@ -177,11 +177,29 @@ Returns T when it came up."
 ;;; Events.
 
 (defun report-text (lane event)
-  (format nil "[lane ~d report] done: ~a~@[~%evidence: ~a~]~@[~%next: ~a~]~@[~%blocked: ~a~]~@[~%requests: ~a~]"
+  (format nil "[lane ~d report] done: ~a~@[~%evidence: ~a~]~@[~%next: ~a~]~@[~%blocked: ~a~]~@[~%requests: ~a~]~@[~%goal: ~a~]"
           (lane-n lane)
           (or (getf event :done) "")
           (getf event :evidence) (getf event :next)
-          (getf event :blocked) (getf event :requests)))
+          (getf event :blocked) (getf event :requests)
+          (getf event :goal)))
+
+(defun goal-disposition (status)
+  "What a settled lane's goal STATUS tells the coordinator, or NIL for no
+goal.  A lane's goal re-steers it for as long as it is active, so a lane that
+settles with its goal still active is not done: it errored or was stopped."
+  (cond ((null status) nil)
+        ((equal status "active") "active, but the lane is idle until steered")
+        ((equal status "budget-limited") "budget-limited (out of tokens)")
+        (t status)))
+
+(defun run-ended-text (lane event)
+  (format nil "[lane ~d] run ended (~a)~@[ — goal: ~a~]~@[ — task: ~a~]"
+          (lane-n lane) (getf event :outcome)
+          (goal-disposition (getf event :goal))
+          (with-swarm-lock ()
+            (and (lane-task lane)
+                 (truncate-string (lane-task lane) 80 "…")))))
 
 (defun watch-output (lane text)
   "Show TEXT from a watched lane in the scrollback, whole lines only."
@@ -227,11 +245,7 @@ coordinator must hear — reports, finished runs, errors — into its input."
       ((string= type "settled")
        (with-swarm-lock () (setf (lane-state lane) :idle))
        (when watched (flush-watch lane))
-       (tell-coordinator (format nil "[lane ~d] run ended (~a)~@[ — task: ~a~]"
-                                 (lane-n lane) (getf event :outcome)
-                                 (with-swarm-lock ()
-                                   (and (lane-task lane)
-                                        (truncate-string (lane-task lane) 80 "…"))))))
+       (tell-coordinator (run-ended-text lane event)))
       ((and (string= type "output") (equal (getf event :style) "error"))
        (tell-coordinator (format nil "[lane ~d] ~a" (lane-n lane) (getf event :text))
                          :style :error))

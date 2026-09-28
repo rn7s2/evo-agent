@@ -52,8 +52,7 @@ The coordinator is an ordinary evo TUI session with every tool, plus:
 | `lanes` | Every lane: idle/working, step clock, current task, worktree, reports. |
 | `delegate` | Give a lane a task — the complete instructions, since the lane cannot see this conversation — and optionally an `objective`, which becomes the lane's goal. Picks the first idle lane unless one is named. Returns at once. |
 | `steer_lane` | Guidance for a working lane, seen at its next turn boundary. |
-| `interrupt_lane` | Stop what a lane is doing. |
-| `interrupt_and_steer` | Stop it and give it new instructions in one step. |
+| `interrupt_lane` | Stop what a lane is doing. With a `text`, then give it that text as new instructions, in the same step. |
 | `lane_command` | Any slash command in a lane (`/goal`, `/model`, `/compact`, `/lore`, …), exactly as typed in its TUI. |
 | `lane_eval` | Evaluate Lisp in a lane — to install a tool, an MCP server, a capability it asked for. Kept and replayed if the lane restarts (unless `keep` is false). |
 | `lane_transcript` | The last messages of a lane's context. |
@@ -71,13 +70,32 @@ a message you type: queued to its next turn boundary when it is working, and
 starting a run — waking it — when it is idle. You see each one in the
 scrollback too.
 
-- `[lane N report] done: … evidence: … next: … blocked: … requests: …` — a
-  lane called its `report` tool;
-- `[lane N] run ended (stop|error|aborted) — task: …` — a lane went idle;
+- `[lane N report] done: … evidence: … next: … blocked: … requests: … goal: …` — a
+  lane called its `report` tool (`goal:` is the lane's goal status, when it has one);
+- `[lane N] run ended (stop|error|aborted) — goal: … — task: …` — a lane went
+  idle. `goal: complete` means it is done; `goal: active, but the lane is idle
+  until steered` means it errored or was stopped short of its goal — a lane's
+  active goal keeps it working, so it never settles with one otherwise;
 - `[lane N] error: …` — a lane's task failed;
 - `[lane N] crashed and was restarted …` / `[lane N] is down …`.
 
 So the coordinator never polls: it delegates, ends its turn, and is woken.
+A message from you still comes first: the coordinator's note tells it to
+answer you before it turns to lane messages that arrived meanwhile.
+
+### A lane closes its own goal
+
+A lane given an `objective` works on it as a goal: whenever it goes idle with
+the goal still active, it is sent back to work. The `report` tool takes an
+optional `goal` — `"active"` (the default) or `"complete"`. The report that
+delivers the objective passes `"complete"`, and the goal is closed in that
+same run, through the path `update_goal status="complete"` takes — so the lane
+settles once, instead of being sent back to re-verify and close a goal whose
+work it has already delivered. It is a claim, as `update_goal` is: the
+coordinator checks the report's evidence, and delegates a fresh goal if the
+claim is wrong. Completing an already complete goal is a no-op; a goal that
+cannot be completed (the user paused it) stays as it is, and the report is
+delivered all the same.
 
 ## Watching the lanes
 
@@ -242,7 +260,8 @@ Files: `~/.evo/swarm/<swarm-id>/` holds each lane's `lane-N/` directory
   drives the coordinator's TUI through a pseudo-terminal, against the stub
   Messages endpoint scripting coordinator and lanes: lanes start and
   authenticate, each runs both swarm.lisp files' `in-lanes` forms and gets its
-  baseline with no secret in any journal, delegation, a report waking the idle coordinator, interrupt and re-steer, an
+  baseline with no secret in any journal, delegation, a report waking the idle coordinator, interrupt and re-steer, a
+  bare interrupt, a goal closed by the report that delivers it, an
   eval reaching one lane only, a worktree lane writing in its worktree, a
   killed lane restarting with the coordinator told, quit stopping every lane,
   and `--resume` restoring it all.

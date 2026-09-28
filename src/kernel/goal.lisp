@@ -137,6 +137,29 @@ a future session should take. Goal objective: ~a"
 
 (pushnew 'goal-settled-hook *settled-hooks*)
 
+;;; Completion — the one commit point.
+
+(defun commit-goal-completion (agent goal &rest changes)
+  "Mark GOAL complete, with CHANGES applied too.  Every completion goes
+through here: update_goal status \"complete\" and whatever else lets an
+agent close its own goal (the swarm's report tool, via COMPLETE-GOAL).
+Completion is a claim, not a verified fact; a verifier, if one ever returns,
+belongs here."
+  (let ((cur (pget goal :status)))
+    (unless (member cur '(:active :budget-limited))
+      (error "Goal is ~(~a~); resume it before completing." cur)))
+  (apply #'update-goal-entry agent goal
+         :status :complete :tokens-used (goal-tokens-used agent goal) changes))
+
+(defun complete-goal (agent)
+  "Complete AGENT's current goal; idempotent.  Returns the completed goal
+entry, or NIL when there is nothing to complete: no goal, or one already
+complete.  A goal that cannot be completed (paused by the user, say) is an
+error, as it is for update_goal."
+  (let ((goal (current-goal agent)))
+    (when (and goal (not (eq (pget goal :status) :complete)))
+      (commit-goal-completion agent goal))))
+
 ;;; Model-facing tools.
 
 (defun tool-get-goal (args)
@@ -198,9 +221,7 @@ given up on."
            (format nil "Goal refined~@[ (status unchanged: ~(~a~))~].~@[ New objective: ~a.~]"
                    (when status cur) objective))
           ((equal status "complete")
-           (unless (member cur '(:active :budget-limited))
-             (error "Goal is ~(~a~); resume it before completing." cur))
-           (commit :status :complete :tokens-used (goal-tokens-used agent goal))
+           (apply #'commit-goal-completion agent goal refine)
            "Goal marked complete. Well done.")
           ((equal status "paused")
            (error "Pausing a goal is human-only: the user pauses it with /goal pause. You cannot pause — if you need the user before you can go on, say so plainly in your reply and keep doing what you can."))

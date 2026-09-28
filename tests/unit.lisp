@@ -3526,7 +3526,35 @@ and the guards around all of it."
            (eq (pget (current-goal agent) :status) :complete))
     ;; A finished goal can no longer be refined.
     (check-signals "cannot refine a completed goal"
-                   (evo.kernel::tool-update-goal '(:objective "too late")))))
+                   (evo.kernel::tool-update-goal '(:objective "too late"))))
+  ;; COMPLETE-GOAL: the same commit point, for whoever else closes a goal
+  ;; (the swarm's report tool) — idempotent, and nothing without a goal.
+  (let* ((dir (uiop:ensure-directory-pathname
+               (format nil "~a/evo-goalcomplete-~a/" (tmp-dir) (gen-id))))
+         (agent (make-agent :journal (progn (ensure-directories-exist dir)
+                                            (make-session-journal dir)))))
+    (check "complete-goal: nothing to complete without a goal"
+           (null (complete-goal agent)))
+    (create-goal-entry agent "deliver the report")
+    (let ((id (pget (current-goal agent) :goal-id))
+          (done (complete-goal agent)))
+      (check "complete-goal: completes the active goal, same id"
+             (and done (eq (pget (current-goal agent) :status) :complete)
+                  (equal id (pget (current-goal agent) :goal-id))))
+      (check "complete-goal: records the tokens used"
+             (integerp (pget (current-goal agent) :tokens-used))))
+    (let ((before (length (evo.journal::journal-entries (agent-journal agent)))))
+      (check "complete-goal: a second completion is a no-op"
+             (and (null (complete-goal agent))
+                  (= before (length (evo.journal::journal-entries (agent-journal agent)))))))
+    (check "complete-goal: a completed goal no longer re-steers"
+           (null (evo.kernel::goal-settled-hook agent :stop)))
+    (create-goal-entry agent "a paused one")
+    (evo.kernel:update-goal-entry agent (current-goal agent) :status :paused)
+    (check-signals "complete-goal: a paused goal is not completed"
+                   (complete-goal agent))
+    (check "complete-goal: ...and stays paused"
+           (eq (pget (current-goal agent) :status) :paused))))
 
 ;;; Templates + skills
 

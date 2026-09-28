@@ -71,7 +71,7 @@
          (objective (getf args :objective)))
     (let ((state (with-swarm-lock () (lane-state lane))))
       (unless (eq state :idle)
-        (error "lane ~d is ~(~a~); delegate to an idle lane, or use steer_lane / interrupt_and_steer"
+        (error "lane ~d is ~(~a~); delegate to an idle lane, or use steer_lane / interrupt_lane with a text"
                (lane-n lane) state)))
     (when (and objective (plusp (length objective)))
       (lane-eval lane (forms->code
@@ -100,22 +100,22 @@
       (values interrupted (wait-until-idle lane)))))
 
 (defun tool-interrupt-lane (args)
-  (let ((lane (lane-arg args)))
+  "Stop LANE now; with a text, then give it that text as its new instructions."
+  (let ((lane (lane-arg args))
+        (text (let ((text (getf args :text))) (and text (plusp (length text)) text))))
     (multiple-value-bind (interrupted idle) (interrupt lane)
-      (cond ((not interrupted) (format nil "Lane ~d was not running anything." (lane-n lane)))
-            (idle (format nil "Lane ~d interrupted; it is idle." (lane-n lane)))
-            (t (format nil "Lane ~d was told to stop but is not idle yet." (lane-n lane)))))))
-
-(defun tool-interrupt-and-steer (args)
-  (let ((lane (lane-arg args)) (text (text-arg args :text)))
-    (multiple-value-bind (interrupted idle) (interrupt lane)
-      (declare (ignore interrupted))
-      (unless idle
-        (error "lane ~d did not stop within 30s; try again or restart_lane" (lane-n lane)))
-      (multiple-value-bind (status reply) (lane-post lane "/prompt" :body (list :text text))
-        (lane-ok lane status reply "prompt")
-        (set-lane-task lane text)
-        (format nil "Lane ~d interrupted and redirected." (lane-n lane))))))
+      (cond
+        (text
+         (unless idle
+           (error "lane ~d did not stop within 30s; try again or restart_lane" (lane-n lane)))
+         (multiple-value-bind (status reply) (lane-post lane "/prompt" :body (list :text text))
+           (lane-ok lane status reply "prompt")
+           (set-lane-task lane text)
+           (format nil "~:[Lane ~d was not running; it has the new instructions~;Lane ~d interrupted and redirected~]."
+                   interrupted (lane-n lane))))
+        ((not interrupted) (format nil "Lane ~d was not running anything." (lane-n lane)))
+        (idle (format nil "Lane ~d interrupted; it is idle." (lane-n lane)))
+        (t (format nil "Lane ~d was told to stop but is not idle yet." (lane-n lane)))))))
 
 (defun tool-lane-command (args)
   (let* ((lane (lane-arg args))
@@ -251,9 +251,8 @@ they are its `report` tool calls, so they outlive this process and a resume."
   `(evo:register-tool ,name :description ,description :schema ',schema :execute #',function))
 
 (defparameter *swarm-tool-names*
-  '("lanes" "delegate" "steer_lane" "interrupt_lane" "interrupt_and_steer"
-    "lane_command" "lane_eval" "lane_transcript" "lane_reports" "restart_lane"
-    "lane_worktree"))
+  '("lanes" "delegate" "steer_lane" "interrupt_lane" "lane_command" "lane_eval"
+    "lane_transcript" "lane_reports" "restart_lane" "lane_worktree"))
 
 (defun register-swarm-tools ()
   (deftool "lanes"
@@ -268,11 +267,12 @@ they are its `report` tool calls, so they outlive this process and a resume."
   (deftool "steer_lane"
     "Add guidance to a working lane; it sees it at its next turn boundary, without stopping."
     (:object (:lane :type :integer) (:text :type :string)) tool-steer-lane)
-  (deftool "interrupt_lane" "Stop what a lane is doing now; it goes idle."
-    (:object (:lane :type :integer)) tool-interrupt-lane)
-  (deftool "interrupt_and_steer"
-    "Stop a lane now and give it new instructions in the same step."
-    (:object (:lane :type :integer) (:text :type :string)) tool-interrupt-and-steer)
+  (deftool "interrupt_lane"
+    "Stop what a lane is doing now; it goes idle. With text, it is then given that text as its new instructions, in the same step."
+    (:object (:lane :type :integer)
+             (:text :type :string :optional t
+              :description "New instructions to give the lane once it has stopped; omit to only stop it"))
+    tool-interrupt-lane)
   (deftool "lane_command"
     "Run a slash command in a lane, exactly as typed in its TUI: /goal, /model <id>, /compact, /lore ..., /thinking, /tree, /new ..."
     (:object (:lane :type :integer) (:command :type :string)) tool-lane-command)

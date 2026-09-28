@@ -140,7 +140,7 @@
            ;; goal
            #:current-goal #:goal-continuation-message #:goal-continuation-for
            #:register-goal-tools #:create-goal-entry #:goal-tokens-used
-           #:update-goal-entry #:set-goal-objective
+           #:update-goal-entry #:set-goal-objective #:complete-goal
            ;; lore + compaction
            #:add-lore #:add-session-lore #:all-lore-entries
            #:edit-lore #:remove-lore #:find-lore-scope
