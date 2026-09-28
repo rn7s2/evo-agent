@@ -94,9 +94,14 @@ evo (one binary)
    │                          size cap + downscale, :image blocks
    ├─ CORE EXTENSIONS  (bundled, hand-written, compiled into the image;
    │                    same API and privileges as user extensions)
-   │    tui        adaptive renderer, multi-line editor (image attachments
-   │               as editable tokens), slash commands
    │    todo       checklist tool + :custom state, rendered by the tui
+   │    command    the command layer: what each slash command does, for
+   │               every frontend (host protocol)
+   ├─ FRONTENDS  (system "evo", on top of "evo/core"; one per session)
+   │    tui        adaptive renderer, multi-line editor (image attachments
+   │               as editable tokens)
+   │    serve      headless: the session controlled over HTTP (§16.2)
+   │    print/events  -p and --events, in the CLI
    ├─ USERSPACE  (unlocked: EVO.USER)
    │    agent-written tools and code — source files plus journal :load
    │    entries; rebuilt from source on every boot
@@ -325,7 +330,9 @@ Few threads, and every mutable object has exactly one owner. Threads exchange
 resources. Locks appear only at those handoff points, and there are no atomics
 or lock-free tricks anywhere — the model is meant to be checkable by reading.
 
-**Owners.** The TUI loop owns TUI state. One run worker owns agent execution
+**Owners.** The TUI loop owns TUI state; under `evo serve` the session
+thread owns the task and runs every command, and HTTP connection threads own
+only their sockets. One run worker owns agent execution
 state. A provider request owns its socket. A tool call owns any child process it
 launched. An extension generation owns its hooks, tasks and patches.
 
@@ -336,9 +343,15 @@ launched. An extension generation owns its hooks, tasks and patches.
   runs cleanups there, on the thread that owns what is being torn down.
 - *worker/poller → TUI*: the event queue. `request-repaint` is the only way
   another thread asks for a frame; `tui-dirty` is set by the TUI thread alone.
+- *connection → serve session thread*: the inbox. A request's work is a
+  closure the session thread runs in arrival order and answers through a
+  promise; the worker's completion arrives the same way. The event log — a
+  lock-guarded ring, encoded once at publish — is the one thing connection
+  threads read directly.
 
 **One task, not a set of flags.** A run or a manual compaction is a single
-`tui-task` (id, kind, thread). "Running" and "compacting" are questions asked of
+task (id, kind, thread) — `tui-task` in the TUI, serve's `task` under
+`evo serve`. "Running" and "compacting" are questions asked of
 it, not booleans kept in sync, and a completion event names the task it
 finishes, so a late `:worker-done` cannot clear a newer task. A task is only
 forgotten after its thread is joined — including at shutdown.
@@ -349,7 +362,12 @@ mailbox. Queued-but-unrun input counts: the model gate deliberately leaves a
 submit queued, and carrying it into a different journal would answer it in the
 wrong session. Rebuilding userspace (`/reload`) requires only that no task is
 running — a queued submit stays welcome there, because a submit gated on broken
-model config is *why* the user reloads, and the reload releases it.
+model config is *why* the user reloads, and the reload releases it. These
+rules live once, in the command layer (`require-session-quiescent`,
+`require-idle`), and a command that finds them unmet is *refused*
+(`command-refused`): the TUI shows the reason dimmed, serve answers `409`.
+Nothing is ever raced — every command runs on the one thread that owns the
+task.
 
 **Runtime generations.** `boot-userspace` builds a generation and installs its
 registries all-or-nothing: a build that fails anywhere restores the captured
@@ -602,9 +620,20 @@ something to say.
   standard is external.
 - **Prompt templates**: `.md` files whose filename is the command, with
   `$1`..`$9` and `$@` substitution. Purely textual expansion.
-- **Slash command resolution**: extension commands → input hook → skills →
+- **Slash command resolution**: extension commands → builtins → skills →
   templates → send to the agent. Built-ins are `/goal /lore /global-lore
-  /compact /tree /fork /resume /model /reload /export /help /quit /exit`.
+  /compact /tree /rewind /fork /new /resume /model /thinking /lang /reload
+  /export`, plus the TUI's presentational `/help /todo /theme /image /quit
+  /exit`.
+- **One command layer.** What a command *does* is core code
+  (`src/command/`, D20), dispatched by every frontend. A frontend is its
+  *host*: it answers a small protocol — is a task running, start a run for
+  the steering just queued, start a compaction, show this line in this style,
+  offer these choices, hand this text back for editing — and decides only how
+  things look. The TUI turns a choice into a picker; serve returns it as data
+  and takes the choice as the command's argument (`/model <id>`,
+  `/resume <n>`, `/tree <id>`). So a command typed in the TUI and the same
+  command sent over HTTP cannot differ in effect: there is one copy of it.
 - **One mode.** There is no mode switch and no mode indicator: the agent is
   fully permissive, always, and that is the whole design (D2). What a mode
   would have been built from stays public API, so a userspace extension can
@@ -694,8 +723,18 @@ defines its own package beside its code. `evo/core` loads without them, and
 `make test` loads it alone first, so the dependency can only point outward: a
 core file that named the TUI would not load. Anything a frontend does to a
 session goes through the core's session operations (`boot-session`,
-`switch-session`, `set-session-model`, …); no frontend builds a journal entry
-by hand.
+`switch-session`, `set-session-model`, `end-session`, …) and its command
+layer; no frontend builds a journal entry by hand.
+
+Two questions about the frontend are the core's to answer for extensions,
+because extensions must not name a frontend: *is a person at a terminal?*
+(`evo:frontend-interactive-p`) and *will somebody start a run for input
+queued off-thread?* (`evo:request-run`). The CLI binds the answering object
+(`evo.kernel:*frontend*`) before the session boots, so load-time decisions see
+it: the LaTeX renderer's prompt note and the IDE bridge's status-line poller
+exist only under an interactive frontend, and a notification reply steers the
+TUI and a served session alike. Every frontend announces `:session-end` on its
+way out, before its task stops.
 
 ### 14.1 Todo lists (D14)
 
@@ -876,6 +915,46 @@ over ssh with no display, or a missing `wl-clipboard`/`xclip`, is not the
 user's clipboard being empty, and saying so sends them looking in the wrong
 place.
 
+### 16.2 `evo serve`: the session over HTTP
+
+`evo serve` is the headless frontend (D20): the same binary, kernel, journal,
+extensions and supervisor, with HTTP where the TUI would be — the base a
+coordinator (`evo-swarm`) drives worker evos through, and nothing else. The
+protocol reference is `docs/serve.md`; the shape, and why:
+
+- **evo-native, not MCP or JSON-RPC.** POSTs are commands, GETs read state,
+  one SSE stream carries events. What crosses is evo's own vocabulary — the
+  `--events` plists and the journal's fold — under one mapping, the inverse
+  of `evo:json->sexpr` (keywords ⇄ snake_case keys, keyword values as their
+  lowercase names, `nil` as `null`), so JSON → sexpr → JSON is the identity.
+  A protocol designed for someone else's tools would have to be translated
+  into this one anyway.
+- **Commands are the TUI's.** `/command` dispatches through the command layer
+  (§12) in the TUI's order; `/prompt` is the editor's send, `/steer` and
+  `/follow-up` the kernel's two queues, `/interrupt` the esc key, `/eval` both
+  the `/eval` command (one form) and the `eval` tool (a body). Anything a
+  person can do in the TUI a program can do here; the presentational
+  commands have no meaning without a screen.
+- **Replies are what happened, not a promise.** A command runs to completion
+  on the session thread and answers with what it said, its structured data,
+  the task it left running, and a cursor into the event log. Asked to stream,
+  it answers with SSE instead: the reply, then every event it caused until the
+  session settles — the one honest "done" for a run, which is not the HTTP
+  request that started it.
+- **Events are numbered once.** The log assigns consecutive ids and keeps a
+  bounded ring, so `Last-Event-ID` resumes exactly, and a cursor that fell out
+  of the ring is told what it missed (`gap`) rather than handed a hole. A
+  restarted process is a new log, announced by `hello`.
+- **Security is a token and a bind.** Loopback unless `--allow-remote`; a
+  bearer token on every request, random per launch and minted by the
+  supervisor parent so restarts keep it, delivered through a 0600 file or
+  `EVO_SERVE_TOKEN`. `/eval` is remote code execution by design — evo is
+  permissive (§1) and says so; the token is the gate.
+- **Small and portable.** HTTP/1.1 is ~200 lines over `usocket` octet
+  streams (already in the image through dexador), one request per
+  connection, `Content-Length` bodies only. No new dependency, the same code
+  on SBCL, ECL and SBCL on Windows, and testable with in-memory streams.
+
 ## 17. How evo evolves
 
 Self-extension is a runtime capability (§13); this section is the policy that
@@ -959,6 +1038,7 @@ a refactor.
 | D17 | **One binary total.** No shell launcher and no separate supervisor executable: `evo` invoked plainly *is* the supervisor parent, re-spawning itself as the session child. On SBCL the heap is baked in at build time, refining D10. `--no-supervisor` runs in-process. | A wrapper script is one more artifact to install, breaks TTY inheritance under POSIX background rules, and buys nothing the binary cannot do itself. |
 | D18 | **The core is its own system.** `evo/core` (foundations, kernel, interface-free core extensions) loads without the frontends; the TUI and the CLI build on it in `evo` and define their own packages, and `make test` loads `evo/core` alone before the unit suite. | D13 keeps the kernel small by convention; this makes the direction checkable. A core file that names a frontend does not load, so the question "is the core coupled to the TUI" is answered by the build rather than by reading. |
 | D19 | **No extension patches the core.** Every seam a bundled extension once reached with a function patch or a private symbol is public: `:busy`/`:idle` for the drive, `:user-message` for user input, generation-owned TUI registries, `provider-registration`, a clipboard reader that explains itself. | A patch is a report of a missing protocol. Patches cannot see each other, have to be undone by hand, and break when the patched function's signature grows; a hook or registry has none of those problems, and it belongs to the extension's generation. |
+| D20 | **One command layer, many frontends; `evo serve` is one of them.** What a slash command does is core code (`src/command/`) behind a small host protocol; the TUI and the HTTP frontend both dispatch through it. `evo serve` is a mode of the one binary with an evo-native HTTP/SSE protocol (§16.2), not MCP or JSON-RPC, and not a second program. Extensions ask the core — `evo:frontend-interactive-p`, `evo:request-run` — never a frontend. | A coordinator must be able to do anything a person can, and the only way to keep two frontends from drifting is to give them one copy of every command. A separate server binary would duplicate the supervisor, the boot and the journal; a foreign protocol would need translating into evo's vocabulary on every call. |
 
 ## Appendix B — provenance
 

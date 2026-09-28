@@ -123,6 +123,16 @@ jobs:
           tests/lang.exp
           tests/mcp.exp
 
+      # `evo serve` driven end to end over HTTP against a stub Messages
+      # endpoint (python3, stdlib only): auth, eval registration, a streamed
+      # prompt, interrupt, steer, /compact, the goal controls, model and
+      # thinking switches, a tool registered mid-session, fork/new/resume,
+      # state and transcript, clean shutdown under the supervisor.  The
+      # binary is already built, so the script runs directly.
+      - name: serve end-to-end test
+        if: matrix.lisp == 'sbcl'
+        run: tests/serve-e2e.py build/evo
+
   # Windows is SBCL-only (src/port/port.lisp: the ECL branches are Unix
   # facilities with no Windows twin).  It builds, runs the portable unit suite
   # and smoke-tests the artifact — the same guard the Unix job gives, now that

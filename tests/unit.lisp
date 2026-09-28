@@ -1896,11 +1896,20 @@ that is how a human's next keystroke differs from a paste's last chunk."
              (check "EVO_MATH_DEFAULT opts latex-math in"
                     (funcall math-on-p))
              (evo.util:set-setting :math t)
-             (funcall sync)
-             (check "latex-math prompt note follows explicit opt-in"
-                    (or (not (evo.user::latex-toolchain-ready-p))
-                        (cdr (assoc "latex-math" evo.kernel::*prompt-notes*
-                                    :test #'equal))))))
+             (let ((evo.kernel:*frontend* (make-instance 'evo.tui:tui-frontend)))
+               (funcall sync)
+               (check "latex-math prompt note follows explicit opt-in"
+                      (or (not (evo.user::latex-toolchain-ready-p))
+                          (cdr (assoc "latex-math" evo.kernel::*prompt-notes*
+                                      :test #'equal)))))
+             ;; Nothing renders the images without a person at a terminal, so
+             ;; a headless session (print mode, evo serve) is never told they
+             ;; will — whatever the toolchain.
+             (let ((evo.kernel:*frontend* nil))
+               (funcall sync)
+               (check "latex-math prompt note is withheld without an interactive frontend"
+                      (null (cdr (assoc "latex-math" evo.kernel::*prompt-notes*
+                                        :test #'equal)))))))
       (setf evo.tui:*math-renderer* saved-renderer
             evo.tui:*math-enabled* saved-enabled
             evo.kernel::*prompt-notes* saved-notes)
@@ -7199,6 +7208,461 @@ became zero after the first reload."
       (reset-settings)
       (register-fixture-models))))
 
+;;; The command layer (src/command/) — what a slash command does, once, for
+;;; every frontend.  Driven through a fake host that records what the layer
+;;; asks of it, so the effects are checked without a TUI or a socket.
+
+(defstruct fake-host
+  agent (running nil) (said nil) (choices nil) (drafts nil)
+  (runs 0) (compacts nil) (data nil) (switched 0))
+
+(defmethod evo.command:host-agent ((h fake-host)) (fake-host-agent h))
+(defmethod evo.command:host-running-p ((h fake-host)) (fake-host-running h))
+(defmethod evo.command:host-start-run ((h fake-host)) (incf (fake-host-runs h)))
+(defmethod evo.command:host-start-compact ((h fake-host) hint)
+  (push hint (fake-host-compacts h)))
+(defmethod evo.command:host-say ((h fake-host) text &optional (style :plain))
+  (push (cons style text) (fake-host-said h)))
+(defmethod evo.command:host-choose ((h fake-host) title items action &key (index 0))
+  (setf (fake-host-choices h) (list title items action index)))
+(defmethod evo.command:host-set-draft ((h fake-host) text)
+  (push text (fake-host-drafts h)))
+(defmethod evo.command:host-session-switched ((h fake-host))
+  (incf (fake-host-switched h)))
+(defmethod evo.command:host-data ((h fake-host) key value)
+  (setf (getf (fake-host-data h) key) value))
+
+(defun said-p (host needle &optional style)
+  (find-if (lambda (line)
+             (and (search needle (cdr line))
+                  (or (null style) (eq style (car line)))))
+           (fake-host-said host)))
+
+(defun refusal-kind (thunk)
+  "The kind of COMMAND-REFUSED THUNK signals, or NIL when it runs through."
+  (handler-case (progn (funcall thunk) nil)
+    (evo.command:command-refused (c) (evo.command:command-refused-kind c))))
+
+(defun fresh-command-host ()
+  (let* ((dir (uiop:ensure-directory-pathname
+               (format nil "~a/evo-cmd-~a/" (tmp-dir) (gen-id))))
+         (journal (progn (ensure-directories-exist dir) (make-session-journal dir))))
+    (make-fake-host :agent (make-agent :journal journal))))
+
+(defun test-command-layer ()
+  (register-fixture-models)
+  (let* ((host (fresh-command-host))
+         (agent (fake-host-agent host)))
+    ;; /goal: create, refine, pause, resume — and the refusals between.
+    (evo.command:goal-command host "")
+    (check "cmd: /goal with no goal says how to set one"
+           (said-p host "no goal" :dim))
+    (evo.command:goal-command host "ship the thing")
+    (check "cmd: /goal <text> creates an active goal"
+           (eq :active (pget (current-goal agent) :status)))
+    (check "cmd: creating a goal steers and asks for a run"
+           (and (steering-pending-p agent) (= 1 (fake-host-runs host))))
+    (check "cmd: the goal is reported as data"
+           (equal "ship the thing" (pget (getf (fake-host-data host) :goal) :objective)))
+    (evo.kernel::drain-steering agent)
+    (evo.command:goal-command host "ship it better")
+    (check "cmd: /goal <text> on an active goal refines it, same id"
+           (equal "ship it better" (pget (current-goal agent) :objective)))
+    (check "cmd: refining while idle steers nothing"
+           (not (steering-pending-p agent)))
+    (setf (fake-host-running host) t)
+    (evo.command:goal-command host "ship it best")
+    (check "cmd: refining mid-run steers the run"
+           (steering-pending-p agent))
+    (evo.kernel::drain-steering agent)
+    (evo.command:goal-command host "pause")
+    (check "cmd: /goal pause pauses" (eq :paused (pget (current-goal agent) :status)))
+    (check "cmd: pausing mid-run says the run finishes first"
+           (said-p host "the run in flight finishes first" :notice))
+    (setf (fake-host-running host) nil)
+    (check "cmd: pausing a paused goal is a conflict"
+           (eq :conflict (refusal-kind (lambda () (evo.command:goal-command host "pause")))))
+    (evo.command:goal-command host "resume")
+    (check "cmd: /goal resume re-activates and drives"
+           (and (eq :active (pget (current-goal agent) :status))
+                (steering-pending-p agent)))
+    (check "cmd: resuming an active goal is a conflict"
+           (eq :conflict (refusal-kind (lambda () (evo.command:goal-command host "resume")))))
+    (evo.kernel::drain-steering agent)
+    ;; /model, /thinking, /lang
+    (evo.command:set-model host "claude-opus-5")
+    (check "cmd: /model <id> journals the model"
+           (equal "claude-opus-5" (state-model (fold-state (agent-journal agent)))))
+    (check "cmd: /model reports (id provider)"
+           (equal '(:id "claude-opus-5" :provider :anthropic)
+                  (getf (fake-host-data host) :model)))
+    (check "cmd: /model with an unknown id is invalid"
+           (eq :invalid (refusal-kind (lambda () (evo.command:set-model host "nope-9")))))
+    (evo.command:model-select host)
+    (destructuring-bind (title items action index) (fake-host-choices host)
+      (declare (ignore action))
+      (check "cmd: /model with no id offers the registry"
+             (and (equal "model:" title)
+                  (= (length items) (length (all-models)))
+                  (search "current" (third (nth index items))))))
+    (funcall (third (fake-host-choices host)) (first (all-models)))
+    (check "cmd: choosing from the list sets that model"
+           (equal (pget (first (all-models)) :id)
+                  (state-model (fold-state (agent-journal agent)))))
+    (evo.command:thinking-command host "high")
+    (check "cmd: /thinking journals the level"
+           (eq :high (state-thinking (fold-state (agent-journal agent)))))
+    (check "cmd: /thinking with a bad level is invalid"
+           (eq :invalid (refusal-kind (lambda () (evo.command:thinking-command host "hot")))))
+    (evo.command:set-language host "en")
+    (check "cmd: /lang journals the language"
+           (equal "en" (language-request (fold-state (agent-journal agent)))))
+    ;; Quiescence: a busy or queued session refuses structural change.
+    (setf (fake-host-running host) t)
+    (dolist (probe (list (lambda () (evo.command:new-command host))
+                         (lambda () (evo.command:fork-command host))
+                         (lambda () (evo.command:tree-command host ""))
+                         (lambda () (evo.command:rewind-command host))
+                         (lambda () (evo.command:resume-command host ""))
+                         (lambda () (evo.command:compact-command host ""))
+                         (lambda () (evo.command:reload-command host))))
+      (check "cmd: a busy session refuses (conflict)"
+             (eq :conflict (refusal-kind probe))))
+    (setf (fake-host-running host) nil)
+    (queue-steering agent "typed against this session")
+    (check "cmd: queued input blocks a journal switch"
+           (eq :conflict (refusal-kind (lambda () (evo.command:new-command host)))))
+    (check "cmd: queued input does not block /compact (needs only idle)"
+           (null (refusal-kind (lambda () (evo.command:compact-command host "focus")))))
+    (check "cmd: /compact hands the hint to the host's task"
+           (equal '("focus") (fake-host-compacts host)))
+    (evo.kernel::drain-steering agent)
+    ;; Tree and rewind hand a user message back for editing.
+    (let ((journal (agent-journal agent)))
+      (append-entry journal (list :type :message
+                                  :message (list :role :user
+                                                 :content (list (list :type :text :text "try this")))))
+      (let ((user-entry (journal-leaf-id journal)))
+        (append-entry journal (list :type :message
+                                    :message (list :role :assistant :stop-reason :stop
+                                                   :content (list (list :type :text :text "done")))))
+        (evo.command:rewind-command host)
+        (check "cmd: rewind moves the leaf above the last user message"
+               (equal (journal-leaf-id journal)
+                      (pget (find-entry journal user-entry) :parent-id)))
+        (check "cmd: rewind hands the text back"
+               (equal "try this" (first (fake-host-drafts host))))
+        (evo.command:tree-command host "")
+        (check "cmd: /tree offers the path"
+               (equal "move leaf to:" (first (fake-host-choices host))))
+        (evo.command:move-leaf host user-entry)
+        (check "cmd: /tree <user message id> branches above it"
+               (and (equal (journal-leaf-id journal)
+                           (pget (find-entry journal user-entry) :parent-id))
+                    (= 2 (count "try this" (fake-host-drafts host) :test #'equal))))
+        (check "cmd: /tree <unknown id> is not-found"
+               (eq :not-found (refusal-kind (lambda () (evo.command:move-leaf host "zzzz")))))))
+    ;; Journal switches.
+    (let ((before (agent-journal agent)))
+      (evo.command:new-command host)
+      (check "cmd: /new switches to a fresh journal"
+             (and (not (eq before (agent-journal agent)))
+                  (not (journal-started-p (agent-journal agent)))
+                  (= 1 (fake-host-switched host))))
+      (check "cmd: a switch reports the session path"
+             (getf (fake-host-data host) :session))
+      (check "cmd: /resume <n> past the list is not-found"
+             (eq :not-found (refusal-kind (lambda () (evo.command:resume-command host "999")))))))
+  ;; Dispatch order: extension commands, frontend builtins, core builtins,
+  ;; skills, templates.
+  (let ((host (fresh-command-host))
+        (saved (evo.kernel::capture-runtime-catalog)))
+    (unwind-protect
+         (progn
+           (register-fixture-models)
+           (evo:register-command "goal" (lambda (ctx) (declare (ignore ctx)) "extension goal"))
+           (evo.command:dispatch-command host "/goal whatever")
+           (check "cmd: an extension command shadows a builtin"
+                  (said-p host "extension goal"))
+           (evo:register-command "ctx-probe"
+                                 (lambda (ctx)
+                                   (evo:steer "from a command" (getf ctx :agent))
+                                   (format nil "host=~a args=~a"
+                                           (and (getf ctx :host) t) (getf ctx :args))))
+           (evo.command:dispatch-command host "/ctx-probe  a b ")
+           (check "cmd: an extension command gets :agent :host and trimmed :args"
+                  (said-p host "host=T args=a b"))
+           (check "cmd: steering a command queued gets its run"
+                  (= 1 (fake-host-runs host)))
+           (evo:register-command "boom" (lambda (ctx) (declare (ignore ctx)) (error "kaboom")))
+           (evo.command:dispatch-command host "/boom")
+           (check "cmd: a failing extension command is reported, not raised"
+                  (said-p host "✗ /boom: kaboom" :error))
+           (check "cmd: the frontend's builtins come before the core's"
+                  (evo.command:dispatch-command
+                   host "/thinking high"
+                   :frontend-builtin (lambda (name args)
+                                       (declare (ignore args))
+                                       (string= name "thinking"))))
+           (check "cmd: ...so the core's /thinking did not run"
+                  (not (eq :high (state-thinking (fold-state (agent-journal (fake-host-agent host)))))))
+           (check "cmd: an unknown command is NIL"
+                  (null (evo.command:dispatch-command host "/no-such-thing")))
+           (check "cmd: parse-command splits name and trimmed args"
+                  (equal '("goal" "a b")
+                         (multiple-value-list (evo.command:parse-command "/goal  a b  "))))
+           (let ((catalog (evo.command:command-catalog '(("help" . "h")))))
+             (check "cmd: the catalog has the core builtins, the frontend's, and extensions"
+                    (and (assoc "compact" catalog :test #'string=)
+                         (assoc "rewind" catalog :test #'string=)
+                         (assoc "help" catalog :test #'string=)
+                         (assoc "ctx-probe" catalog :test #'string=)
+                         (assoc "eval" catalog :test #'string=)))))
+      (evo.kernel:install-runtime-catalog saved)))
+  ;; Derived state for a status line or a remote controller.
+  (let* ((host (fresh-command-host))
+         (summary (evo.command:session-summary (fake-host-agent host))))
+    (check "cmd: session-summary is total without a model"
+           (and (null (getf summary :model-ready)) (getf summary :session)
+                (vectorp (getf summary :todos))))))
+
+;;; The frontend protocol, :session-end, and todo events.
+
+(defun test-frontend-protocol ()
+  (let ((evo.kernel:*frontend* nil))
+    (check "frontend: none attached is not interactive"
+           (not (evo:frontend-interactive-p)))
+    (check "frontend: none attached cannot start runs"
+           (not (evo:request-run :text "x"))))
+  (let ((evo.kernel:*frontend* (make-instance 'evo.tui:tui-frontend))
+        (evo.tui::*tui* nil))
+    (check "frontend: the TUI is interactive" (evo:frontend-interactive-p))
+    (check "frontend: the TUI with no live loop accepts no run"
+           (not (evo:request-run :text "x")))
+    (let ((tui (evo.tui::make-tui)))
+      (let ((evo.tui::*tui* tui))
+        (check "frontend: the live TUI takes a run request as an event"
+               (and (evo:request-run :text "hi")
+                    (equal '((:type :run-requested :text "hi"))
+                           (evo.tui::drain-events tui)))))))
+  (let ((server (evo.serve:make-server :token "t")))
+    (let ((evo.kernel:*frontend* server))
+      (check "frontend: serve is not interactive" (not (evo:frontend-interactive-p)))
+      (check "frontend: serve takes a run request into its inbox"
+             (and (evo:request-run :text "hello")
+                  (equal '((:run-requested "hello"))
+                         (evo.serve::drain-inbox server))))))
+  (with-temp-hooks
+    (let ((ended nil)
+          (agent (make-agent)))
+      (evo:on :session-end (lambda (payload) (push (getf payload :agent) ended)))
+      (end-session agent)
+      (check "end-session announces :session-end with the agent"
+             (equal (list agent) ended))))
+  ;; The todo tool's change reaches the frontends as an event.
+  (let* ((dir (uiop:ensure-directory-pathname
+               (format nil "~a/evo-todo-ev-~a/" (tmp-dir) (gen-id))))
+         (journal (progn (ensure-directories-exist dir) (make-session-journal dir)))
+         (events nil)
+         (agent (make-agent :journal journal
+                            :events-cb (lambda (e) (push e events))))
+         (evo:*agent* agent))
+    (execute-tool (find-tool "todo")
+                  (list :items (vector (list :text "one" :status "pending"))))
+    (let ((event (find :todo-changed events :key (lambda (e) (getf e :type)))))
+      (check "todo: a change is emitted as a :todo-changed event"
+             (and event (equalp (getf event :todos)
+                                (vector (list :text "one" :status :pending))))))))
+
+;;; evo serve: the event mapping, HTTP parsing and routing, the event log.
+
+(defun octets-of (string)
+  (flexi-streams:string-to-octets string :external-format :utf-8))
+
+(defun request-from (text)
+  (evo.serve:read-request (flexi-streams:make-in-memory-input-stream (octets-of text))))
+
+(defun crlf (&rest lines)
+  (format nil "~{~a~c~c~}" (loop for l in lines append (list l #\Return #\Newline))))
+
+(defun http-status-of (thunk)
+  (handler-case (progn (funcall thunk) nil)
+    (evo.serve::http-error (e) (evo.serve::http-error-status e))))
+
+(defun test-serve-event-encoding ()
+  (let ((samples
+          (list '(:type :text-delta :text "hé \"quoted\"" :run-id "r1" :turn 0)
+                '(:type :tool-call-start :name "edit" :id "tc_1"
+                  :arguments (:path "a.lisp" :old-string "x" :count 3)
+                  :arguments-json nil :run-id "r1" :turn 2)
+                '(:type :tool-result :name "bash" :is-error t :content-chars 12
+                  :content "ok" :run-id "r1" :turn 2)
+                '(:type :message-end :stop-reason :tool-use
+                  :usage (:input 10 :output 5 :cache-read 0 :cache-write 0)
+                  :error nil)
+                (list :type :todo-changed
+                      :todos (vector '(:text "a" :status :done) '(:text "b" :status :pending)))
+                '(:type :provider-retry :attempt 1 :max 4 :delay 1/2 :reason "503")
+                '(:type :run-end :outcome :aborted))))
+    (dolist (event samples)
+      (let* ((json (evo.serve:event->json event))
+             (back (evo:json->sexpr (com.inuoe.jzon:parse json))))
+        (check (format nil "serve json: ~(~a~) re-encodes to the same text" (getf event :type))
+               (equal json (evo.serve:encode-json back)))
+        (check (format nil "serve json: ~(~a~) keys come back as the same keywords"
+                       (getf event :type))
+               (equal (loop for k in event by #'cddr collect k)
+                      (loop for k in back by #'cddr collect k)))))
+    (let ((obj (com.inuoe.jzon:parse (evo.serve:event->json (second samples)))))
+      (check "serve json: keys are snake_case"
+             (and (gethash "run_id" obj) (gethash "arguments_json" obj :missing)))
+      (check "serve json: a nested plist is an object"
+             (equal "x" (gethash "old_string" (gethash "arguments" obj))))
+      (check "serve json: a keyword value is its lowercase name"
+             (equal "tool-call-start" (gethash "type" obj)))
+      (check "serve json: nil is null" (eq 'null (gethash "arguments_json" obj))))
+    (check "serve json: t is true, a ratio a number"
+           (search "\"delay\":0.5" (evo.serve:event->json (sixth samples))))
+    (check "serve json: 'false is false"
+           (equal "{\"ok\":false}" (evo.serve:encode-json (list :ok 'evo.serve::false))))
+    (check "serve json: an unencodable event degrades, never kills the stream"
+           (search "unprintable-event"
+                   (evo.serve:event->json (list :type :odd :value (cons 1 2)))))))
+
+(defun test-serve-http ()
+  (let ((req (request-from (crlf "POST /command?x=1&name=a%20b+c HTTP/1.1"
+                                 "Host: localhost"
+                                 "Authorization: Bearer tok"
+                                 "Content-Length: 17"
+                                 ""
+                                 "{\"text\":\"/goal\"}X"))))
+    (check "http: method and decoded path"
+           (and (equal "POST" (evo.serve:request-method req))
+                (equal "/command" (evo.serve:request-path req))))
+    (check "http: query parameters decoded (%20 and +)"
+           (equal '(("x" . "1") ("name" . "a b c")) (evo.serve:request-query req)))
+    (check "http: headers are case-insensitive"
+           (equal "Bearer tok" (evo.serve:request-header req "AUTHORIZATION")))
+    (check "http: the body is exactly Content-Length bytes"
+           (equal "{\"text\":\"/goal\"}X" (evo.serve:request-body req))))
+  (let ((req (request-from (format nil "GET /events HTTP/1.1~%Last-Event-ID: 7~%~%"))))
+    (check "http: bare LF line endings are accepted"
+           (and (equal "/events" (evo.serve:request-path req))
+                (equal "7" (evo.serve:request-header req "last-event-id"))
+                (equal "" (evo.serve:request-body req)))))
+  (let ((body "{\"text\":\"héllo ✓\"}"))
+    (check "http: a UTF-8 body is decoded by bytes, not chars"
+           (equal body (evo.serve:request-body
+                        (request-from (format nil "POST /prompt HTTP/1.1~%Content-Length: ~d~%~%~a"
+                                              (length (octets-of body)) body))))))
+  (check "http: an empty connection is NIL, not an error" (null (request-from "")))
+  (check "http: a garbled request line is 400"
+         (eql 400 (http-status-of (lambda () (request-from (crlf "NONSENSE" ""))))))
+  (check "http: a relative target is 400"
+         (eql 400 (http-status-of (lambda () (request-from (crlf "GET events HTTP/1.1" ""))))))
+  (check "http: HTTP/2 is 505"
+         (eql 505 (http-status-of (lambda () (request-from (crlf "GET / HTTP/2" ""))))))
+  (check "http: a header line without a colon is 400"
+         (eql 400 (http-status-of (lambda () (request-from (crlf "GET / HTTP/1.1" "bad" ""))))))
+  (check "http: a chunked body is 411"
+         (eql 411 (http-status-of
+                   (lambda () (request-from (crlf "POST / HTTP/1.1"
+                                                  "Transfer-Encoding: chunked" ""))))))
+  (check "http: a body shorter than its length is 400"
+         (eql 400 (http-status-of
+                   (lambda () (request-from (crlf "POST / HTTP/1.1" "Content-Length: 50" "" "{}"))))))
+  (let ((evo.serve::*max-body-bytes* 10))
+    (check "http: an oversized body is 413"
+           (eql 413 (http-status-of
+                     (lambda () (request-from (crlf "POST / HTTP/1.1" "Content-Length: 11" "")))))))
+  (let ((evo.serve::*max-header-bytes* 64))
+    (check "http: oversized headers are 431"
+           (eql 431 (http-status-of
+                     (lambda () (request-from
+                                 (crlf "GET / HTTP/1.1"
+                                       (format nil "X-Big: ~a" (make-string 100 :initial-element #\a))
+                                       "")))))))
+  ;; Responses.
+  (let* ((out (flexi-streams:make-in-memory-output-stream))
+         (_ (evo.serve:write-response out 409 "{\"ok\":false}"))
+         (text (flexi-streams:octets-to-string (flexi-streams:get-output-stream-sequence out)
+                                               :external-format :utf-8)))
+    (declare (ignore _))
+    (check "http: status line" (string-prefix-p (format nil "HTTP/1.1 409 Conflict~c~%" #\Return) text))
+    (check "http: length and close headers"
+           (and (search "Content-Length: 12" text) (search "Connection: close" text)))
+    (check "http: the body follows a blank line"
+           (search (format nil "~c~%~c~%{\"ok\":false}" #\Return #\Return) text)))
+  (let* ((out (flexi-streams:make-in-memory-output-stream)))
+    (evo.serve::write-sse-event out "text-delta" "{\"a\":1}" :id 42)
+    (check "http: an SSE event is id, event, data, blank line"
+           (equal (format nil "id: 42~%event: text-delta~%data: {\"a\":1}~%~%")
+                  (flexi-streams:octets-to-string (flexi-streams:get-output-stream-sequence out)
+                                                  :external-format :utf-8))))
+  ;; Routing and auth.
+  (check "route: GET /state"
+         (eq 'evo.serve::handle-state (evo.serve:route-request "GET" "/state")))
+  (check "route: a trailing slash is the same path"
+         (eq 'evo.serve::handle-prompt (evo.serve:route-request "POST" "/prompt/")))
+  (check "route: every documented endpoint routes"
+         (every (lambda (route) (evo.serve:route-request (string (second route)) (first route)))
+                evo.serve::*routes*))
+  (check "route: an unknown path is 404"
+         (eql 404 (nth-value 1 (evo.serve:route-request "GET" "/nope"))))
+  (check "route: the wrong method is 405"
+         (eql 405 (nth-value 1 (evo.serve:route-request "GET" "/prompt"))))
+  (let ((server (evo.serve:make-server :token "sekrit")))
+    (flet ((auth (header)
+             (evo.serve::authorized-p
+              server (request-from (if header
+                                       (crlf "GET / HTTP/1.1" (format nil "Authorization: ~a" header) "")
+                                       (crlf "GET / HTTP/1.1" ""))))))
+      (check "auth: the right bearer token passes" (auth "Bearer sekrit"))
+      (check "auth: no header fails" (not (auth nil)))
+      (check "auth: a wrong token fails" (not (auth "Bearer sekrit2")))
+      (check "auth: a prefix of the token fails" (not (auth "Bearer sekr")))
+      (check "auth: another scheme fails" (not (auth "Basic sekrit")))))
+  (check "auth: a generated token is 64 hex chars"
+         (let ((evo-token (let ((saved (getenv "EVO_SERVE_TOKEN")))
+                            (evo.port:setenv "EVO_SERVE_TOKEN" "")
+                            (prog1 (evo.serve:resolve-token)
+                              (evo.port:setenv "EVO_SERVE_TOKEN" (or saved ""))))))
+           (and (= 64 (length evo-token)) (every (lambda (c) (digit-char-p c 16)) evo-token))))
+  (check "bind: loopback addresses" (every #'evo.serve:loopback-host-p
+                                           '("127.0.0.1" "localhost" "::1" "127.1.2.3")))
+  (check "bind: others are not" (notany #'evo.serve:loopback-host-p
+                                        '("0.0.0.0" "192.168.1.2" "example.com")))
+  ;; The CLI: serve flags, and what a supervisor restart keeps.
+  (let ((opts (evo.cli::parse-args '("serve" "--port" "0" "--token-file" "/t" "--model" "m"))))
+    (check "cli: serve parses its flags"
+           (and (getf opts :serve) (eql 0 (getf opts :port))
+                (equal "/t" (getf opts :token-file)) (equal "m" (getf opts :model)))))
+  (check "cli: serve has a default port"
+         (eql 8421 (getf (evo.cli::parse-args '("serve")) :port)))
+  (check-signals "cli: --port outside serve is unknown" (evo.cli::parse-args '("--port" "1")))
+  (check-signals "cli: serve refuses -p" (evo.cli::parse-args '("serve" "-p" "hi")))
+  (check-signals "cli: serve refuses a bad port" (evo.cli::parse-args '("serve" "--port" "x")))
+  (check "cli: a serve restart keeps the server flags, not the session's"
+         (equal '("--port" "9" "--token-file" "/t" "--allow-remote")
+                (evo.cli::serve-restart-flags
+                 '("--port" "9" "--model" "m" "--token-file" "/t" "--resume" "--allow-remote")))))
+
+(defun test-serve-event-log ()
+  (let ((log (evo.serve::make-event-log :capacity 4)))
+    (check "log: ids start at 1"
+           (= 1 (evo.serve::publish log '(:type :a))))
+    (evo.serve::publish log '(:type :b))
+    (check "log: events after a cursor, oldest first"
+           (equal '(2) (mapcar #'first (evo.serve::events-after log 1))))
+    (check "log: each event is stored encoded, with its type"
+           (equal '(1 "a" "{\"type\":\"a\"}") (first (evo.serve::events-after log 0))))
+    (dotimes (i 5) (evo.serve::publish log '(:type :c)))
+    (multiple-value-bind (events missed) (evo.serve::events-after log 1)
+      (check "log: a cursor older than the ring reports the gap"
+             (and (eql 2 missed) (= 4 (length events)) (= 4 (first (first events))))))
+    (check "log: an up-to-date cursor gets nothing"
+           (null (evo.serve::events-after log (evo.serve::last-event-id log))))))
+
 (defun run-all ()
   (let ((*pass* 0) (*fail* 0))
     (test-sexpr-io)
@@ -7304,5 +7768,10 @@ became zero after the first reload."
     (test-extension-ownership)
     (test-runtime-catalog-atomicity)
     (test-reload-generation-ordering)
+    (test-command-layer)
+    (test-frontend-protocol)
+    (test-serve-event-encoding)
+    (test-serve-http)
+    (test-serve-event-log)
     (format t "~%~d passed, ~d failed~%" *pass* *fail*)
     (if (zerop *fail*) 0 1)))
