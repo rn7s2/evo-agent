@@ -287,7 +287,12 @@ next run if input queued up meanwhile — or announce the session settled."
       (when (and (steering-pending-p agent) (not (server-quit server)))
         (start-run server))
       (unless (server-task server)
-        (publish (server-log server) (list :type :settled :outcome outcome))))))
+        ;; The goal's status rides along: a settled lane whose goal is still
+        ;; :active is not done — it errored or was stopped, and stays idle.
+        (let ((goal (current-goal agent)))
+          (publish (server-log server)
+                   (list :type :settled :outcome outcome
+                         :goal (and goal (pget goal :status)))))))))
 
 ;;; The session thread.
 

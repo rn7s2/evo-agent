@@ -45,6 +45,6 @@
 ;;; The coordinator itself: its tools and its prompt note (a FORMAT control
 ;;; taking the lane count).
 ;; (evo.swarm:set-coordinator-tools '("read" "bash" "lanes" "delegate" "steer_lane"
-;;                                    "interrupt_lane" "interrupt_and_steer" "lane_command"
-;;                                    "lane_eval" "lane_transcript" "lane_reports"
-;;                                    "restart_lane" "lane_worktree"))
+;;                                    "interrupt_lane" "lane_command" "lane_eval"
+;;                                    "lane_transcript" "lane_reports" "restart_lane"
+;;                                    "lane_worktree"))

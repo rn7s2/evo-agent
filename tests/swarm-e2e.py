@@ -15,7 +15,8 @@ every lane runs the global and the project swarm.lisp's in-lanes forms (one
 at a time, *load-truename*, the lane variables, a package an earlier form
 loaded, overriding the coordinator's defaults); each got its
 baseline and no secret is in any journal; delegation runs on a lane; a report wakes the idle coordinator;
-interrupt and re-steer of a busy lane; an eval adds a tool to one lane only; a
+interrupt and re-steer of a busy lane, and a bare interrupt; a report with goal
+complete closes the lane's goal in the same run, with no continuation; an eval adds a tool to one lane only; a
 worktree lane works in its worktree; a killed lane restarts and the
 coordinator is told; quitting stops every lane; `evo-swarm --resume` restores
 coordinator and lanes.
@@ -379,7 +380,7 @@ def first_run(term, stub, home, proj):
     status, state = lanes[1].get("/state")
     check("lane 2 is busy", state["status"] == "running", state["status"])
     coordinator_quiet(stub)
-    term.type('CALL interrupt_and_steer {"lane":2,"text":"resteered now"}')
+    term.type('CALL interrupt_lane {"lane":2,"text":"resteered now"}')
     check("lane 2 gets the new instructions",
           wait_for(lambda: stub.find("lane 2", "resteered now", t1), 30))
     check("lane 2 answers them",
@@ -393,6 +394,23 @@ def first_run(term, stub, home, proj):
     check("the slow run was cut short (the 6s stream did not finish first)",
           slow and steer and steer["time"] - slow["time"] < 5.5,
           slow and steer and steer["time"] - slow["time"])
+
+    # --- interrupt a busy lane without new instructions -----------------------------
+    t_int = time.time()
+    coordinator_quiet(stub)
+    term.type('CALL delegate {"lane":2,"task":"SLOW more long work"}')
+    check("lane 2 starts another slow task",
+          wait_for(lambda: stub.find("lane 2", "SLOW more long work", t_int), 30))
+    time.sleep(1)
+    coordinator_quiet(stub)
+    term.type('CALL interrupt_lane {"lane":2}')
+    stopped = wait_for(lambda: stub.find("coordinator", "[lane 2] run ended (aborted)", t_int), 30)
+    check("interrupt_lane alone stops the lane", stopped)
+    status, state = lanes[1].get("/state")
+    check("...and leaves it idle, given nothing new", state["status"] == "idle", state["status"])
+    check("...and sends it no new prompt",
+          not any(r["role"] == "lane 2" and r["time"] > (stopped or {}).get("time", t_int)
+                  for r in stub.requests()))
 
     # --- an eval adds a tool to one lane only ------------------------------------
     coordinator_quiet(stub)
@@ -415,7 +433,31 @@ def first_run(term, stub, home, proj):
     check("the lane's goal carries the objective",
           state["goal"] and state["goal"]["objective"] == "reach the e2e goal FINISH",
           state["goal"])
-    wait_for(lambda: stub.find("coordinator", "[lane 3] run ended", t_goal), 30)
+    ended = wait_for(lambda: stub.find("coordinator", "[lane 3] run ended", t_goal), 30)
+    check("the run end tells the coordinator the goal is complete",
+          ended and "[lane 3] run ended (stop) — goal: complete" in ended["last_user"],
+          ended and ended["last_user"][-300:])
+
+    # --- a report that delivers the objective closes the goal ----------------------
+    t_rep = time.time()
+    coordinator_quiet(stub)
+    term.type('CALL delegate {"lane":3,"task":"CALL report {\\"done\\":\\"objective delivered\\",'
+              '\\"goal\\":\\"complete\\"}","objective":"deliver it by report"}')
+    done = wait_for(lambda: (lambda st: st[1]["goal"]
+                             and st[1]["goal"]["objective"] == "deliver it by report"
+                             and st[1]["goal"]["status"] == "complete"
+                             and st[1]["status"] == "idle")(lanes[2].get("/state")), 60)
+    check("a report with goal complete closes the lane's goal", done)
+    rep = wait_for(lambda: stub.find("coordinator", "[lane 3 report] done: objective delivered", t_rep), 30)
+    check("the report tells the coordinator the goal is complete",
+          rep and "goal: complete" in rep["last_user"], rep and rep["last_user"][-300:])
+    ended = wait_for(lambda: stub.find("coordinator", "[lane 3] run ended", t_rep), 30)
+    check("the lane settles once, its goal complete",
+          ended and "goal: complete" in ended["last_user"], ended and ended["last_user"][-300:])
+    check("no continuation sent the lane back to work it had delivered",
+          not any(r["role"] == "lane 3" and r["time"] >= t_rep
+                  and "You are idle but your goal is still active" in r["last_user"]
+                  for r in stub.requests()))
 
     # --- a worktree lane works in its worktree -------------------------------------
     old_pid = lanes[3].pid()

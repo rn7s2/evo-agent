@@ -52,9 +52,19 @@
    "- Lanes report with messages that arrive here as `[lane N ...]`: reports, "
    "finished runs, errors, restarts.  You do not need to poll; end your turn "
    "and you are woken when something arrives.  Use `lanes` for status, "
-   "`lane_transcript` and `lane_reports` for detail.~%"
+   "`lane_transcript` and `lane_reports` for detail.  A lane with a goal "
+   "closes it itself; its reports and its `run ended` messages say the goal's "
+   "status.  `goal: complete` means the lane claims its objective delivered "
+   "and is done: check the evidence, and delegate a fresh goal if the claim is "
+   "wrong.  A run that ends with its goal still active means the lane errored "
+   "or was stopped; it stays idle until steered.~%"
+   "- The user comes first.  While a message from the user is unanswered, "
+   "answer it before anything else: `[lane N ...]` messages that arrive "
+   "meanwhile wait until you have replied, and never take the place of that "
+   "reply.~%"
    "- Redirect a lane with `steer_lane` (next turn boundary) or "
-   "`interrupt_and_steer` (now).  A lane that asks for a capability can be "
+   "`interrupt_lane` with a text (now); `interrupt_lane` alone only stops it.  "
+   "A lane that asks for a capability can be "
    "given one with `lane_eval` if you agree.~%"
    "- Integrate and verify the lanes' work yourself — run the tests, read the "
    "diffs — before telling the user it is done.  Relay what one lane needs "
@@ -74,6 +84,10 @@
    "next or what blocks you, and any request (a tool, a decision, something "
    "from another lane).  Report when you finish, and when you are stuck — "
    "never go quiet.~%"
+   "- If you were given a goal, the report that delivers its objective passes "
+   "goal \"complete\": that closes the goal, so you are not sent back to "
+   "work that is done.  Only when the evidence proves it, requirement by "
+   "requirement.~%"
    "- If you need a capability you lack, ask for it in a report's requests; "
    "the coordinator may install it into you.~%")
   "A lane's prompt note: its number, its number again, the lane count, and a
@@ -219,20 +233,38 @@ API."
             (:next :type :string :optional t :description \"What you will do next\")
             (:blocked :type :string :optional t :description \"What stops you, if anything\")
             (:requests :type :string :optional t
-             :description \"What you need from the coordinator: a tool, a decision, another lane's result\"))
+             :description \"What you need from the coordinator: a tool, a decision, another lane's result\")
+            (:goal :type :string :optional t :enum (\"active\" \"complete\")
+             :description \"Your goal, if you have one: complete when this report delivers its objective, proven by the evidence — the goal is then closed, as update_goal status complete does; active (the default) while work remains\"))
   :execute (lambda (args)
-             (evo.kernel:emit-event (or evo.kernel:*executing-agent* evo:*agent*)
-                                    :type :report
-                                    :done (getf args :done)
-                                    :evidence (getf args :evidence)
-                                    :next (getf args :next)
-                                    :blocked (getf args :blocked)
-                                    :requests (getf args :requests))
-             \"Delivered to the coordinator.\"))"
+             (let* ((agent (or evo.kernel:*executing-agent* evo:*agent*))
+                    (completed (and (equal (getf args :goal) \"complete\")
+                                    (handler-case (evo.kernel:complete-goal agent)
+                                      (error (e) (princ-to-string e)))))
+                    (goal (evo:current-goal agent)))
+               (evo.kernel:emit-event agent
+                                      :type :report
+                                      :done (getf args :done)
+                                      :evidence (getf args :evidence)
+                                      :next (getf args :next)
+                                      :blocked (getf args :blocked)
+                                      :requests (getf args :requests)
+                                      :goal (and goal (string-downcase (getf goal :status))))
+               (format nil \"Delivered to the coordinator.~@[ ~a~]\"
+                       (cond ((stringp completed)
+                              (format nil \"Your goal was not closed: ~a\" completed))
+                             (completed \"Your goal is complete.\")
+                             ((not (equal (getf args :goal) \"complete\")) nil)
+                             (goal \"Your goal was already complete.\")
+                             (t \"You have no goal to complete.\"))))))"
   "The report tool, as registered in every lane: it emits a :report event,
-which the coordinator's subscription to the lane turns into input.  Kept as
-source and read in EVO.USER, the package a lane evaluates in: a form built
-here would carry this package's symbols, which a lane has never heard of.")
+which the coordinator's subscription to the lane turns into input.  With goal
+\"complete\" it first closes the lane's goal (EVO.KERNEL:COMPLETE-GOAL, the
+path update_goal takes), so a lane that delivers its objective settles once,
+not after a continuation that exists only to close the goal; the event
+carries the goal's status either way.  Kept as source and read in EVO.USER,
+the package a lane evaluates in: a form built here would carry this package's
+symbols, which a lane has never heard of.")
 
 (defun report-tool-form ()
   (let ((*package* (find-package :evo.user))

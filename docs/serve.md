@@ -306,7 +306,7 @@ The events are the kernel's `--events` plists, unchanged, plus serve's own:
 | `run-start` `turn-start` `message-start` `text-delta` `thinking-delta` `tool-call-start` `tool-result` `message-end` `run-end` `steering` `compaction-start` `compaction-end` `provider-retry` | as in `--events`; each carries `run_id` and `turn` | the kernel |
 | `todo-changed` | `todos` | the todo tool |
 | `task-start` / `task-end` | `task_id`, `kind`, (`outcome`, `error`) | serve: a run or compaction began / its thread was reaped |
-| `settled` | `outcome` | serve: the task ended and nothing else started — the session is idle |
+| `settled` | `outcome`, `goal` | serve: the task ended and nothing else started — the session is idle; `goal` is the session goal's status (`active`, `complete`, `paused`, `budget-limited`), `null` with no goal |
 | `output` | `style`, `text` | what a command (or a finishing task) said, the TUI's scrollback |
 | `user-input` | `text` | input an extension queued off-thread (`evo:request-run`) |
 | `session-switched` | `session` | `/new`, `/fork`, `/resume` |

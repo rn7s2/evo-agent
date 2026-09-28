@@ -496,7 +496,9 @@ needs the user says so in its reply and keeps doing what it can. Budget transiti
   requirement by requirement, never from memory or intent).
 - Doing nothing is not completion. An idle active goal is always re-steered.
   Termination is explicit: the model calls `update_goal` (complete), a budget
-  trips, or the user pauses the goal.
+  trips, or the user pauses the goal.  A swarm lane may close its goal in the
+  report that delivers it (`report` with `goal: "complete"`); that goes
+  through the same commit point, `complete-goal`, so it settles once.
 - **Pause/resume**: `/goal pause` stops the idle-continuation loop — the
   settled hook only re-steers an `:active` goal, so a paused goal settles and
   waits. It does not auto-resume on session restart either (resumption keys

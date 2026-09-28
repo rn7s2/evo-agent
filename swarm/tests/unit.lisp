@@ -107,7 +107,37 @@
         (execute-tool (find-tool "report") '(:done "x" :evidence "y"))
         (let ((event (find :report events :key (lambda (e) (getf e :type)))))
           (check "report tool: emits a :report event with its fields"
-                 (and event (equal "x" (getf event :done)) (equal "y" (getf event :evidence)))))))))
+                 (and event (equal "x" (getf event :done)) (equal "y" (getf event :evidence))))
+          (check "report tool: no goal, none in the event" (null (getf event :goal))))
+        ;; goal "complete" closes the lane's goal in the same run.
+        (evo.kernel:create-goal-entry agent "deliver x")
+        (setf events nil)
+        (execute-tool (find-tool "report") '(:done "x" :goal "active"))
+        (check "report tool: goal active leaves the goal active, and says so"
+               (and (eq :active (getf (evo:current-goal agent) :status))
+                    (equal "active" (getf (find :report events :key (lambda (e) (getf e :type))) :goal))))
+        (setf events nil)
+        (let ((result (execute-tool (find-tool "report") '(:done "all of x" :goal "complete"))))
+          (check "report tool: goal complete closes the goal"
+                 (eq :complete (getf (evo:current-goal agent) :status)))
+          (check "report tool: ...the event carries it"
+                 (equal "complete" (getf (find :report events :key (lambda (e) (getf e :type)))
+                                         :goal)))
+          (check "report tool: ...and the lane is told"
+                 (search "goal is complete" result)))
+        (check "report tool: a completed goal no longer re-steers the lane"
+               (null (evo.kernel::goal-settled-hook agent :stop)))
+        (let ((result (execute-tool (find-tool "report") '(:done "again" :goal "complete"))))
+          (check "report tool: completing twice is a no-op, not an error"
+                 (search "already complete" result)))
+        (evo.kernel:create-goal-entry agent "paused one")
+        (evo.kernel:update-goal-entry agent (evo:current-goal agent) :status :paused)
+        (setf events nil)
+        (let ((result (execute-tool (find-tool "report") '(:done "y" :goal "complete"))))
+          (check "report tool: a goal that cannot close still delivers the report"
+                 (and (find :report events :key (lambda (e) (getf e :type)))
+                      (eq :paused (getf (evo:current-goal agent) :status))
+                      (search "not closed" result))))))))
 
 (defun test-in-lanes ()
   (with-registries ()
@@ -317,10 +347,28 @@ did not register it; a lane whose default model is missing says why."
                                  (getf (first queued) :text))
                   (search "evidence: make ok" (getf (first queued) :text)))))
     (evo.kernel::drain-steering agent)
+    (evo.swarm::handle-lane-event lane "report"
+                                  '(:type "report" :done "all of it" :goal "complete"))
+    (check "events: a report says the lane's goal status"
+           (search "goal: complete" (getf (first (evo.kernel::agent-steering agent)) :text)))
+    (evo.kernel::drain-steering agent)
     (evo.swarm::handle-lane-event lane "settled" '(:type "settled" :outcome "stop"))
     (check "events: settling makes the lane idle" (eq :idle (lane-state lane)))
     (check "events: ...and tells the coordinator the run ended"
-           (search "[lane 1] run ended (stop)"
+           (let ((text (getf (first (evo.kernel::agent-steering agent)) :text)))
+             (and (search "[lane 1] run ended (stop)" text)
+                  (not (search "goal:" text)))))
+    (evo.kernel::drain-steering agent)
+    (evo.swarm::handle-lane-event lane "settled"
+                                  '(:type "settled" :outcome "stop" :goal "complete"))
+    (check "events: a run end says a lane's goal is complete"
+           (search "[lane 1] run ended (stop) — goal: complete"
+                   (getf (first (evo.kernel::agent-steering agent)) :text)))
+    (evo.kernel::drain-steering agent)
+    (evo.swarm::handle-lane-event lane "settled"
+                                  '(:type "settled" :outcome "aborted" :goal "active"))
+    (check "events: ...and that a stopped lane with an active goal waits to be steered"
+           (search "goal: active, but the lane is idle until steered"
                    (getf (first (evo.kernel::agent-steering agent)) :text)))
     (evo.kernel::drain-steering agent)
     (evo.swarm::handle-lane-event lane "task-end" '(:type "task-end" :error "boom"))
