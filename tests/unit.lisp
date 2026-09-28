@@ -7407,6 +7407,16 @@ became zero after the first reload."
 (defun crlf (&rest lines)
   (format nil "~{~a~c~c~}" (loop for l in lines append (list l #\Return #\Newline))))
 
+(defun response-text (out)
+  "The whole HTTP response an in-memory stream holds after WRITE-RESPONSE."
+  (flexi-streams:octets-to-string (flexi-streams:get-output-stream-sequence out)
+                                  :external-format evo.serve::+utf-8+))
+
+(defun response-body (text)
+  "The body of a response TEXT: what follows the head's blank line."
+  (let ((blank (format nil "~c~c~c~c" #\Return #\Newline #\Return #\Newline)))
+    (subseq text (+ (length blank) (search blank text)))))
+
 (defun http-status-of (thunk)
   (handler-case (progn (funcall thunk) nil)
     (evo.serve::http-error (e) (evo.serve::http-error-status e))))
@@ -7543,12 +7553,125 @@ became zero after the first reload."
   (check "route: a trailing slash is the same path"
          (eq 'evo.serve::handle-prompt (evo.serve:route-request "POST" "/prompt/")))
   (check "route: every documented endpoint routes"
-         (every (lambda (route) (evo.serve:route-request (string (second route)) (first route)))
+         (every (lambda (route)
+                  (evo.serve:route-request (string (evo.serve:route-method route))
+                                           (evo.serve:route-path route)))
                 evo.serve::*routes*))
   (check "route: an unknown path is 404"
          (eql 404 (nth-value 1 (evo.serve:route-request "GET" "/nope"))))
   (check "route: the wrong method is 405"
          (eql 405 (nth-value 1 (evo.serve:route-request "GET" "/prompt"))))
+  ;; A program's own routes, in front of the default table: exact routes beat
+  ;; prefix routes, prefix routes go longest-first, and the rest of the path
+  ;; reaches the handler as *route-tail*.
+  (let ((evo.serve::*routes* evo.serve::*routes*))
+    (evo.serve:add-route "/widgets/" :get 'widget-get :prefix t)
+    (evo.serve:add-route "/widgets/" :post 'widget-post :prefix t)
+    (evo.serve:add-route "/widgets/long/" :get 'widget-long :prefix t)
+    (multiple-value-bind (handler status tail)
+        (evo.serve:route-request "GET" "/widgets/3/state")
+      (check "route: a prefix route takes every path under it"
+             (and (eq 'widget-get handler) (null status) (equal "3/state" tail))))
+    (multiple-value-bind (handler status tail)
+        (evo.serve:route-request "POST" "/widgets/3")
+      (check "route: a prefix route matches per method"
+             (and (eq 'widget-post handler) (null status) (equal "3" tail))))
+    (multiple-value-bind (handler status tail)
+        (evo.serve:route-request "GET" "/widgets/long/7")
+      (check "route: the longest prefix wins"
+             (and (eq 'widget-long handler) (null status) (equal "7" tail))))
+    (check "route: an exact route beats a prefix route"
+           (eq 'evo.serve::handle-health (evo.serve:route-request "GET" "/health")))
+    (check "route: a prefix route's own path matches with a nil tail"
+           (multiple-value-bind (handler status tail)
+               (evo.serve:route-request "GET" "/widgets/")
+             (and (eq 'widget-get handler) (null status) (null tail))))
+    (check "route: ...as does the path without the trailing slash"
+           (multiple-value-bind (handler status tail)
+               (evo.serve:route-request "GET" "/widgets")
+             (and (eq 'widget-get handler) (null status) (null tail))))
+    (check "route: a prefix route with the wrong method is 405"
+           (eql 405 (nth-value 1 (evo.serve:route-request "DELETE" "/widgets/3/state"))))
+    (check "route: a prefix does not match a longer word"
+           (eql 404 (nth-value 1 (evo.serve:route-request "GET" "/widgetsx"))))
+    (check "route: re-adding a path and method replaces the route"
+           (progn (evo.serve:add-route "/widgets/" :get 'widget-get-again :prefix t)
+                  (eq 'widget-get-again (evo.serve:route-request "GET" "/widgets/3"))))
+    (check "route: a server takes its own route table"
+           (let* ((table (list (evo.serve:make-route "/own" :get 'own-handler)))
+                  (server (evo.serve:make-server :token "t" :routes table)))
+             (and (eq 'own-handler
+                      (evo.serve:route-request "GET" "/own" (evo.serve:server-routes server)))
+                  (eql 404 (nth-value 1
+                            (evo.serve:route-request "GET" "/widgets/3"
+                                                     (evo.serve:server-routes server)))))))
+    (check "route: a server built before a route still sees it added later"
+           (let ((server (evo.serve:make-server :token "t")))
+             (evo.serve:add-route "/added-later/" :get 'later-handler :prefix t)
+             (eq 'later-handler
+                 (evo.serve:route-request "GET" "/added-later/x"
+                                          (evo.serve:server-routes server))))))
+  ;; A handler a program writes, against the exported seams only: it reads the
+  ;; unmatched tail, answers JSON, and publishes into the same numbered log
+  ;; /events streams read — so the cursor it hands back resumes exactly there.
+  (let ((evo.serve::*routes* evo.serve::*routes*))
+    (let* ((server (evo.serve:make-server :token "t"))
+           (handler (lambda (srv request body stream)
+                      (declare (ignore request body))
+                      (evo.serve:server-publish
+                       srv (list :type :program-event :tail evo.serve:*route-tail*))
+                      (evo.serve:write-json stream 200
+                                            (list :ok t
+                                                  :tail evo.serve:*route-tail*
+                                                  :cursor (evo.serve:server-cursor srv))))))
+      (evo.serve:add-route "/program/" :get handler :prefix t)
+      (let ((out (flexi-streams:make-in-memory-output-stream)))
+        (evo.serve::respond
+         server
+         (request-from (crlf "GET /program/7/thing HTTP/1.1"
+                             "Authorization: Bearer t" ""))
+         out)
+        (let* ((text (response-text out))
+               (reply (evo.serve:decode-json (response-body text))))
+          (check "route: dispatch hands a prefix handler the unmatched tail"
+                 (equal "7/thing" (getf reply :tail)))
+          (check "route: a handler's write-json reply goes out with its status"
+                 (string-prefix-p "HTTP/1.1 200 OK" text))
+          (check "route: the event a handler published is in the same log, resumable"
+                 (let ((events (evo.serve::events-after (evo.serve::server-log server)
+                                                        (1- (getf reply :cursor)))))
+                   (and (= 1 (length events))
+                        (equal "program-event" (second (first events)))
+                        (search "\"tail\":\"7/thing\"" (third (first events))))))))))
+  ;; Identity: what a program says it is, and what /health answers.
+  (check "identity: a server defaults to the program's identity"
+         (equal '(:name "evo" :version "0.1.0" :features nil)
+                (evo.serve:server-identity (evo.serve:make-server :token "t"))))
+  (check "identity: a server takes the identity it is given"
+         (equal '(:name "widget-host" :version "2.0" :features ("widgets"))
+                (evo.serve:server-identity
+                 (evo.serve:make-server :token "t"
+                                        :identity (list :name "widget-host" :version "2.0"
+                                                        :features '("widgets"))))))
+  (let ((out (flexi-streams:make-in-memory-output-stream)))
+    (evo.serve::handle-health
+     (evo.serve:make-server :token "t"
+                            :identity (list :name "widget-host" :version "2.0"
+                                            :features '("widgets" "proxy")))
+     nil nil out)
+    (let ((health (evo.serve:decode-json (response-body (response-text out)))))
+      (check "identity: /health reports name, version and features"
+             (and (equal "widget-host" (getf health :name))
+                  (equal "2.0" (getf health :version))
+                  (equalp #("widgets" "proxy") (getf health :features))))
+      (check "identity: /health still reports ok, pid and cursor"
+             (and (getf health :ok)
+                  (integerp (getf health :pid))
+                  (integerp (getf health :cursor))))))
+  (let ((out (flexi-streams:make-in-memory-output-stream)))
+    (evo.serve::handle-health (evo.serve:make-server :token "t") nil nil out)
+    (check "identity: the default features are an empty array"
+           (equalp #() (getf (evo.serve:decode-json (response-body (response-text out))) :features))))
   (let ((server (evo.serve:make-server :token "sekrit")))
     (flet ((auth (header)
              (evo.serve::authorized-p

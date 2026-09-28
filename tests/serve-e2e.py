@@ -191,13 +191,21 @@ def main():
         token = open(token_file).read().strip()
         evo = Evo(port, token)
         # The listener may come up a moment after the file.
+        health, status = None, None
         for _ in range(100):
             try:
-                if evo.get("/health")[0] == 200:
+                status, health = evo.get("/health")
+                if status == 200:
                     break
             except OSError:
                 pass
             time.sleep(0.1)
+        check("health: the program's identity, ok, pid and cursor",
+              status == 200 and isinstance(health, dict) and health.get("ok")
+              and isinstance(health.get("pid"), int)
+              and isinstance(health.get("cursor"), int)
+              and health.get("name") == "evo" and health.get("version")
+              and health.get("features") == [], health)
 
         run_all(evo, stub_port, work, ended_file)
 
