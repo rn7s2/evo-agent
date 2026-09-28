@@ -478,7 +478,8 @@ def main():
                 check("a lane's session was resumed", bool(body),
                       json.dumps(second.client.get("/lanes/1/transcript")[1])[-400:])
                 path = second.client.get("/journal")[1]["path"]
-                check("the coordinator resumed its own session", path == session_before,
+                check("the coordinator resumed its own session",
+                      os.path.realpath(path) == os.path.realpath(session_before),
                       (path, session_before))
                 dirs = lane_dirs(home)
                 check("the resumed swarm stops its lanes too",
@@ -535,8 +536,8 @@ def run_first(swarm, stub, home, work):
     status, journal = c.get("/journal")
     check("GET /journal works", status == 200 and journal.get("entries") is not None, journal)
     status, sessions = c.get("/sessions")
-    check("GET /sessions lists the coordinator's session",
-          status == 200 and sessions.get("sessions"), sessions)
+    check("GET /sessions names the pending coordinator session",
+          status == 200 and sessions.get("current", "").endswith(".sexp"), sessions)
     status, registry = c.get("/registry")
     check("GET /registry lists the model", status == 200
           and "stub-a" in json.dumps(registry), registry)

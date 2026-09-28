@@ -62,10 +62,10 @@ default names this program; a program built on this server sets it — or passes
 
 (defstruct (server (:constructor %make-server))
   host port token token-file
-  ;; Who serves this session, and the routes it serves.  NIL means the
-  ;; program-wide defaults — *IDENTITY* and *ROUTES* — so a program that sets
-  ;; either after the server is built (a boot extension, say) is still heard;
-  ;; MAKE-SERVER :IDENTITY / :ROUTES pin one server to its own instead.
+  ;; Who serves this session, and the extra routes it serves.  NIL means only
+  ;; the program-wide defaults — *IDENTITY* and *ROUTES*.  Extra routes are
+  ;; considered before the defaults, so one server can extend (or deliberately
+  ;; override) the protocol without losing its built-ins.
   identity-override routes-override
   agent
   (log (make-event-log))
@@ -84,11 +84,14 @@ default names this program; a program built on this server sets it — or passes
 ;; after this file; SERVER-ROUTES reads it at dispatch time.
 (declaim (special *routes*))
 
+(defvar *routes-lock* (bt:make-lock "serve-routes")
+  "Guards replacement and snapshots of the program-wide route table.")
+
 (defun make-server (&key (host "127.0.0.1") (port 8421) token token-file
                          identity routes)
-  "A server.  IDENTITY says who this program is (see *IDENTITY*); ROUTES gives
-one server its own table (see *ROUTES*, ADD-ROUTE).  Without them the server
-follows the program-wide defaults, including changes made after it is built."
+  "A server.  IDENTITY says who this program is (see *IDENTITY*); ROUTES are
+additional routes considered before the built-ins (see *ROUTES*, ADD-ROUTE).
+Program-wide routes added later are still seen."
   (%make-server :host host :port port :token (or token (resolve-token))
                 :identity-override identity
                 :routes-override routes
@@ -100,9 +103,13 @@ or the program-wide *IDENTITY*."
   (or (server-identity-override server) *identity*))
 
 (defun server-routes (server)
-  "The route table this server dispatches through: its own, or the
-program-wide *ROUTES* — so ADD-ROUTE reaches a server already built."
-  (or (server-routes-override server) *routes*))
+  "A snapshot of the server's additional routes followed by the program-wide
+defaults.  A same path/method in the server's routes overrides the default."
+  (bt:with-lock-held (*routes-lock*)
+    (let ((extra (server-routes-override server)))
+      (if extra
+          (append (copy-list extra) (copy-list *routes*))
+          (copy-list *routes*)))))
 
 (defun stopping-p (server)
   (bt:with-lock-held ((server-inbox-lock server))

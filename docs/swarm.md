@@ -136,8 +136,8 @@ seam](serve.md#the-two-seams-a-program-adds); the endpoints below are the
 The swarm feature adds three read-only endpoints to the coordinator:
 
 - **`GET /lanes`** — every lane: state (`starting`, `idle`, `working`,
-  `compacting`, `down`), current task, goal status, worktree and branch,
-  restarts. Enough to draw the lane panels.
+  `compacting`, `down`, or `stopped` during shutdown), current task, goal status,
+  worktree and branch, restarts. Enough to draw the lane panels.
 - **`GET /lanes/N/transcript[?limit=N]`** — lane N's messages, as
   `/transcript` is the coordinator's.
 - **`GET /lanes/N/events`** — lane N's live event stream: a lane's events,
