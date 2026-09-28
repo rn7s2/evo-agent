@@ -106,6 +106,7 @@ session when it has one."
             (lane-state lane) :starting
             (lane-pid lane) nil
             (lane-cursor lane) 0))
+    (maybe-publish-lane-state lane)
     process))
 
 (defun wait-for-health (lane &key (seconds *lane-boot-seconds*))
@@ -133,8 +134,11 @@ ran, so an IN-LANES form can name a package an earlier one loaded."
                            (lane-n lane) (lane-error-text e))
                    :style :error)))))
 
-(defun sync-lane-state (lane)
-  "Read LANE's /state into its status."
+(defun sync-lane-state (lane &key (announce t))
+  "Read LANE's /state into its status, and cache its goal.  ANNOUNCE NIL
+refreshes without publishing a `lane-state` event: what bringing a lane up
+does, so the machine-readable stream tells a lane's work cycle (starting,
+working, idle) rather than an idle event for a lane never given work."
   (multiple-value-bind (status state) (ignore-errors (lane-get lane "/state"))
     (when (eql status 200)
       (with-swarm-lock ()
@@ -142,7 +146,10 @@ ran, so an IN-LANES form can name a package an earlier one loaded."
               (let ((s (getf state :status)))
                 (cond ((equal s "running") :working)
                       ((equal s "compacting") :compacting)
-                      (t :idle))))))))
+                      (t :idle)))))
+      (note-lane-goal lane (let ((goal (getf state :goal)))
+                             (and (listp goal) goal)))
+      (when announce (maybe-publish-lane-state lane)))))
 
 (defun bring-up-lane (lane &key resume)
   "Launch LANE, wait for it, initialize it, and start reading its events.
@@ -152,6 +159,7 @@ Returns T when it came up."
     (cond
       ((null health)
        (with-swarm-lock () (setf (lane-state lane) :down))
+       (maybe-publish-lane-state lane)
        (tell-coordinator (format nil "[lane ~d] failed to start — see ~a"
                                  (lane-n lane)
                                  (namestring (merge-pathnames "lane.log" (lane-dir lane))))
@@ -169,7 +177,7 @@ Returns T when it came up."
        ;; is not news for the coordinator.
        (let ((now (lane-health lane)))
          (with-swarm-lock () (setf (lane-cursor lane) (or (getf now :cursor) 0))))
-       (sync-lane-state lane)
+       (sync-lane-state lane :announce nil)
        (start-subscriber lane)
        (swarm-repaint)
        t))))
@@ -231,11 +239,14 @@ coordinator must hear — reports, finished runs, errors — into its input."
        (with-swarm-lock ()
          (setf (lane-state lane) (if (equal (getf event :kind) "compact") :compacting :working)
                (lane-task-started lane) now
-               (lane-step-started lane) now)))
+               (lane-step-started lane) now))
+       (maybe-publish-lane-state lane))
       ((member type '("turn-start" "compaction-start" "compaction-end") :test #'string=)
        (with-swarm-lock () (setf (lane-step-started lane) now)))
       ((string= type "report")
        (with-swarm-lock () (push event (lane-reports lane)))
+       (note-lane-goal-status lane (getf event :goal))
+       (maybe-publish-lane-state lane)
        (tell-coordinator (report-text lane event)))
       ((string= type "task-end")
        (let ((error (getf event :error)))
@@ -244,6 +255,8 @@ coordinator must hear — reports, finished runs, errors — into its input."
                              :style :error))))
       ((string= type "settled")
        (with-swarm-lock () (setf (lane-state lane) :idle))
+       (note-lane-goal-status lane (getf event :goal))
+       (maybe-publish-lane-state lane)
        (when watched (flush-watch lane))
        (tell-coordinator (run-ended-text lane event)))
       ((and (string= type "output") (equal (getf event :style) "error"))
@@ -288,6 +301,7 @@ supervisor already restarted, and that lane has lost what was evaluated into
 it — re-initialize it and tell the coordinator.  A lane whose supervisor
 itself exited is down.  Returns NIL when the lane is gone for good."
   (with-swarm-lock () (setf (lane-state lane) :down))
+  (maybe-publish-lane-state lane)
   (loop
     (when (lane-stopping-p lane) (return nil))
     (let ((process (lane-process lane)))
@@ -352,7 +366,8 @@ after SECONDS — and let its subscriber see the stream end."
         (ignore-errors (bt:destroy-thread thread)))))
   (with-swarm-lock ()
     (setf (lane-state lane) :stopped
-          (lane-subscriber lane) nil)))
+          (lane-subscriber lane) nil))
+  (maybe-publish-lane-state lane))
 
 (defun restart-lane (lane &key fresh)
   "Stop LANE and bring it up again: its session resumed, or with FRESH a new
@@ -426,6 +441,7 @@ wait for them."
                         (handler-case (bring-up-lane lane :resume resume)
                           (error (e)
                             (with-swarm-lock () (setf (lane-state lane) :down))
+                            (maybe-publish-lane-state lane)
                             (swarm-say (format nil "lane ~d: ~a" (lane-n lane) e)
                                        :style :error))))
                       :name (format nil "evo-swarm-start-~d" (lane-n lane))))))

@@ -52,6 +52,7 @@
           (lane-state lane) :working
           (lane-task-started lane) (get-universal-time)
           (lane-step-started lane) (get-universal-time)))
+  (maybe-publish-lane-state lane)
   (record-swarm))
 
 ;;; The tools.

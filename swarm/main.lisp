@@ -159,12 +159,16 @@ when asked for a headless swarm (:serve)."
       (let ((host (or (getf opts :host) "127.0.0.1")))
         (evo.cli:check-serve-token opts)
         (check-serve-host host opts)
-        (make-instance 'serve-view
-                       :server (evo.serve:make-server
-                                :host host
-                                :port (getf opts :port)
-                                :token (evo.serve:resolve-token)
-                                :token-file (getf opts :token-file))))
+        (let ((server (evo.serve:make-server
+                       :host host
+                       :port (getf opts :port)
+                       :token (evo.serve:resolve-token)
+                       :token-file (getf opts :token-file)
+                       :identity *swarm-identity*)))
+          ;; The swarm's own read-only API, on the same server: GET /lanes and
+          ;; a lane's transcript and events.  Never on a lane's serve.
+          (register-swarm-routes)
+          (make-instance 'serve-view :server server)))
       (progn
         (unless (evo.port:tty-p)
           (error 'evo.cli:usage-error

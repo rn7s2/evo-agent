@@ -69,9 +69,14 @@ would.  Returns the reply; a failed evaluation signals LANE-ERROR."
 
 ;;; The event stream.
 
-(defun open-event-stream (lane)
-  "GET /events after the lane's cursor, as a character stream."
-  (let ((url (lane-url lane (format nil "/events?since=~d" (lane-cursor lane)))))
+(defun open-event-stream (lane &key since)
+  "GET /events from LANE, as a character stream.  SINCE is the cursor to
+replay after; :LIVE tails from the lane's next event; NIL (the default) is
+what the coordinator's subscription does — resume after LANE's cursor."
+  (let* ((query (cond ((eq since :live) "")
+                      ((integerp since) (format nil "?since=~d" since))
+                      (t (format nil "?since=~d" (lane-cursor lane)))))
+         (url (lane-url lane (format nil "/events~a" query))))
     (with-proxy (proxy url)
       (flexi-streams:make-flexi-stream
        (apply #'dex:get url :headers (lane-headers lane)
