@@ -101,7 +101,8 @@ evo (one binary; evo-swarm is a second program on top of it — §18)
    ├─ FRONTENDS  (system "evo", on top of "evo/core"; one per session)
    │    tui        adaptive renderer, multi-line editor (image attachments
    │               as editable tokens)
-   │    serve      headless: the session controlled over HTTP (§16.2)
+   │    serve      headless: the session controlled over HTTP (§16.2);
+   │               a program runs its own session on it (§18)
    │    print/events  -p and --events, in the CLI
    ├─ USERSPACE  (unlocked: EVO.USER)
    │    agent-written tools and code — source files plus journal :load
@@ -895,8 +896,9 @@ place.
 
 `evo serve` is the headless frontend (D20): the same binary, kernel, journal,
 extensions and supervisor, with HTTP where the TUI would be — the base a
-coordinator (`evo-swarm`) drives worker evos through, and nothing else. The
-protocol reference is `docs/serve.md`; the shape, and why:
+coordinator (`evo-swarm`) drives worker evos through, and the server a
+program can run its own session on (D21). The protocol reference is
+`docs/serve.md`; the shape, and why:
 
 - **evo-native, not MCP or JSON-RPC.** POSTs are commands, GETs read state,
   one SSE stream carries events. What crosses is evo's own vocabulary — the
@@ -931,6 +933,14 @@ protocol reference is `docs/serve.md`; the shape, and why:
   streams (already in the image through dexador), one request per
   connection, `Content-Length` bodies only. No new dependency, the same code
   on SBCL, ECL and SBCL on Windows, and testable with in-memory streams.
+- **A program adds two things, and only two.** serve's protocol is one
+  frontend's; a program that runs its own session on it supplies an
+  *identity* — name, version, features, reported by `/health` — and *routes*
+  of its own: exact paths, or prefixes like `/lanes/N/…`, matched by exact
+  path first and then longest prefix, behind the same token, the same size
+  limits and the same single session thread. Neither seam names a program, so
+  `evo` stays free of the swarm while `evo-swarm serve` adds its endpoints
+  (D21, §18).
 
 ## 17. How evo evolves
 
@@ -999,14 +1009,15 @@ own system (`evo-swarm.asd`, `swarm/`) and binary, depending on `evo`, never
 the other way round (`tests/evo-only.lisp`). The reference is
 `docs/swarm.md`; the decisions:
 
-- **One human-facing agent.** The coordinator is an ordinary evo TUI session
-  (the same `setup-agent`, the same TUI) with the swarm tools and a prompt
-  note. Delegation is its own decision, not the user's instruction: it
+- **One human-facing agent.** The coordinator is an ordinary evo session
+  (the same `setup-agent`, the same TUI or serve frontend) with the swarm
+  tools and a prompt note. Delegation is its own decision, not the user's
+  instruction: it
   explores, splits anything non-trivial into lane-sized pieces with checkable
   done criteria, delegates, keeps lanes busy, integrates, verifies, and
   reports. Input always goes to
   it; the human watches lanes read-only (a status-line segment, `/lanes`,
-  `/lane N`).
+  `/lane N` in the TUI; `GET /lanes` and its siblings when served).
 - **Lanes, not roles.** A lane is `evo serve --no-userspace` on loopback: its
   own process, bearer token, port and journal. Default 6; started with the
   swarm, idle until given work. What a lane *is* for a task is the prompt the
@@ -1015,6 +1026,16 @@ the other way round (`tests/evo-only.lisp`). The reference is
   endpoints and nothing else — prompts, steering, interrupts, slash commands,
   eval, state — and subscribes to each lane's `/events`. Lanes never talk to
   each other.
+- **Served as well as typed.** `evo-swarm serve` runs the same coordinator and
+  lanes under serve's frontend, headless: `/health` names it `evo-swarm` with
+  the feature `swarm`, the coordinator is driven through the unchanged
+  protocol, and the read-only view of the lanes becomes three endpoints —
+  `GET /lanes`, a `lane-state` event on the coordinator's `/events` when a
+  lane changes, and a lane's `GET /lanes/N/transcript` and
+  `GET /lanes/N/events`. Read-only as in the TUI: lane control stays the
+  coordinator's, and a lane's token and URL are never handed out. The swarm's
+  notices and repaints go to whichever frontend it runs under (D21), so one
+  swarm implementation serves both.
 - **Reports are input.** A lane's `report` tool emits a `:report` event;
   reports, finished runs, errors, crashes and restarts become the
   coordinator's input through the frontend protocol (`evo:steer` +
@@ -1079,6 +1100,8 @@ the other way round (`tests/evo-only.lisp`). The reference is
 | D18 | **The core is its own system.** `evo/core` (foundations, kernel, interface-free core extensions) loads without the frontends; the TUI and the CLI build on it in `evo` and define their own packages, and `make test` loads `evo/core` alone before the unit suite. | D13 keeps the kernel small by convention; this makes the direction checkable. A core file that names a frontend does not load, so the question "is the core coupled to the TUI" is answered by the build rather than by reading. |
 | D19 | **No extension patches the core.** Every seam a bundled extension once reached with a function patch or a private symbol is public: `:busy`/`:idle` for the drive, `:user-message` for user input, generation-owned TUI registries, `provider-registration`, a clipboard reader that explains itself. | A patch is a report of a missing protocol. Patches cannot see each other, have to be undone by hand, and break when the patched function's signature grows; a hook or registry has none of those problems, and it belongs to the extension's generation. |
 | D20 | **One command layer, many frontends; `evo serve` is one of them.** What a slash command does is core code (`src/command/`) behind a small host protocol; the TUI and the HTTP frontend both dispatch through it. `evo serve` is a mode of the one binary with an evo-native HTTP/SSE protocol (§16.2), not MCP or JSON-RPC, and not a second program. Extensions ask the core — `evo:frontend-interactive-p`, `evo:request-run` — never a frontend. | A coordinator must be able to do anything a person can, and the only way to keep two frontends from drifting is to give them one copy of every command. A separate server binary would duplicate the supervisor, the boot and the journal; a foreign protocol would need translating into evo's vocabulary on every call. |
+
+| D21 | **One protocol for both programs: serve's program seam is an identity plus routes, and `evo-swarm serve` runs the swarm headless on it.** `/health` reports the server's *identity* — name, version, features; `evo serve` is `evo` with none — and a program adds *routes*, exact paths or prefixes like `/lanes/N/…`, matched by exact path first and then longest prefix, behind the same token, size limits and single session thread. `evo-swarm serve` is `evo-swarm` with the feature `swarm`: `GET /lanes`, a `lane-state` event on the coordinator's `/events` when a lane changes, and a lane's read-only `GET /lanes/N/transcript` and `GET /lanes/N/events`. The swarm's notices and repaints go through the frontend it runs under, so the TUI and serve run the same swarm code. | A GUI drives both binaries with one client and one layout, so it must be able to tell which server it is talking to, and the swarm half must not need a second protocol. Identity and routes are the general form of "this program adds a feature", which keeps both the core and serve free of the swarm's name — `make test` still loads `evo` alone. The lane endpoints are read-only because lane control belongs to the coordinator, the one agent a human talks to (§18), and lane tokens and URLs stay private, so a served swarm keeps the TUI's trust boundary: the client reads lanes, it never talks to them. |
 
 ## Appendix B — provenance
 

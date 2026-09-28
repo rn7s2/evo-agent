@@ -6,6 +6,12 @@ request. It exists to be driven — a coordinator process
 ([`evo-swarm`](swarm.md)) starts worker evos this way and talks to them
 through nothing else — but curl works just as well.
 
+It is also the frontend a program can run its own session on: the program
+sets what the server *is* and adds its own routes, and everything below
+stays serve's ([the two seams](#the-two-seams-a-program-adds)). `evo-swarm
+serve` is that program, and it is documented in
+[`docs/swarm.md`](swarm.md#serving-the-swarm).
+
 ```sh
 evo serve --token-file ~/.evo/serve.token          # 127.0.0.1:8421
 TOKEN=$(cat ~/.evo/serve.token)
@@ -238,7 +244,12 @@ closed, the token file is removed, and the process exits 0.
 
 ### State
 
-**`GET /health`** — `{"ok": true, "pid", "cursor"}`.
+**`GET /health`** — `{"ok": true, "pid", "cursor", "name", "version",
+"features"}`. The last three say what this server is: `evo serve` names itself
+`evo`, with the binary's version and no features, and a program that runs its
+own session on serve names itself and lists what it adds
+([below](#the-two-seams-a-program-adds)). A client that ignores them sees the
+`/health` it always saw.
 
 **`GET /state`** — everything a status line shows, and then some:
 
@@ -299,7 +310,11 @@ data: {"type":"text-delta","text":"Looking at the","run_id":"c4112f4b","turn":0}
 - A comment line (`: keepalive`) every 15 s of silence.
 - The stream ends when the server shuts down, after the last event.
 
-The events are the kernel's `--events` plists, unchanged, plus serve's own:
+The events are the kernel's `--events` plists, unchanged, plus the ones in the
+table — serve's own. A program that runs its own session on serve publishes
+its events into the same stream, with the same ids, resume and
+[mapping](#the-mapping); `lane-state` is `evo-swarm`'s
+([docs/swarm.md](swarm.md#serving-the-swarm)).
 
 | Event | Payload | From |
 |---|---|---|
@@ -338,6 +353,66 @@ comes back a vector); so the round trip is exact at the JSON level — encode,
 decode, encode again gives the same JSON value (object key order is not
 defined, and differs between SBCL and ECL) — and the unit suite checks that
 for every event shape the kernel emits.
+
+## The two seams a program adds
+
+serve is evo's headless frontend, and it is also a *host*: a program runs its
+own session on the same server, speaking the same protocol, and adds exactly
+two general things to it. Neither seam knows what the program is — a name, a
+version, a feature list and some routes are the whole surface — which is why
+nothing in the core names `evo-swarm`.
+
+**Identity.** The server says what it is, in `/health`:
+
+```json
+{"ok": true, "pid": 51234, "cursor": 118,
+ "name": "evo", "version": "0.1.0", "features": []}
+```
+
+`name` is the program (`evo` or `evo-swarm`), `version` its version, and
+`features` the capability names it serves beyond the protocol above — always
+an array, empty when the program adds nothing. `evo serve` is `evo` with none;
+`evo-swarm serve` is `evo-swarm` with `["swarm"]`, whose meaning is
+[`GET /lanes` and its siblings](swarm.md#serving-the-swarm). A client reads
+them to learn what it is talking to — and what it may ask for — before it asks
+for anything. They are additive: a client that ignores them sees the
+`/health` it always saw.
+
+The program states it once for every server it builds (`evo.serve:*identity*`)
+or for one server (`evo.serve:make-server :identity`); a route handler reads
+it back with `evo.serve:server-identity`.
+
+**Routes.** The program brings its own endpoints, and serve serves them from
+the same listener, under the same bearer token and the same session thread as
+the ones above. `evo.serve:add-route` adds one — or `make-server :routes`
+gives a server its own table; a server with no table of its own follows the
+program-wide one, so a route added after it was built still reaches it. A
+route is an **exact path** (`/lanes`) or a **prefix**, with `:prefix t` and a
+pattern like `/lanes/`, so one route can answer a family of paths: what
+followed the pattern arrives in `evo.serve:*route-tail*` (`/lanes/3/transcript`
+through `/lanes/` is `3/transcript`), and the handler works the rest out. A
+handler takes the same arguments the built-in ones do — the server, the
+request, the parsed JSON body and the stream — and answers with serve's
+helpers (`evo.serve:write-json`, `write-response`, `write-error`, the
+`write-sse-*` family) and the [mapping](#the-mapping) above, so its JSON is
+snake_case evo sexprs like everything else. Re-adding the same path and method
+replaces the route, so reloading a file of routes does not stack copies.
+
+Matching is deterministic: exact routes in table order first, then prefix
+routes with the longest pattern first; a path nothing matches is `404`, and a
+path that matches with another method is `405`. And a program cannot loosen
+what serve already guarantees — the token check, the body and header limits
+and the concurrency rules happen before any handler, built-in or not.
+
+A program's events join the same stream: `evo.serve:server-publish` appends an
+event to this server's log — numbered once, in order, seen by every `/events`
+client and by anyone reconnecting with `Last-Event-ID` — exactly as a session
+event is. `evo.serve:server-cursor` is the id to resume from.
+
+On the Lisp side that is all of it: the program building the server sets an
+identity (`*identity*`, or `make-server :identity`) and adds routes
+(`add-route`, or `make-server :routes`), and publishes its own events
+(`server-publish`). Nothing else about a program enters serve.
 
 ## What serve is, underneath
 

@@ -1,6 +1,7 @@
 # evo-swarm — one coordinator, a pool of worker lanes
 
-`evo-swarm` runs one **coordinator** agent in your terminal and a pool of
+`evo-swarm` runs one **coordinator** agent in your terminal — or headless,
+with [`evo-swarm serve`](#serving-the-swarm) — and a pool of
 **lanes**: worker agents, each a separate `evo serve` process with its own
 context, working in parallel. You talk only to the coordinator and give it
 goals; you do not need to tell it to use lanes. It decides for itself how to
@@ -11,6 +12,7 @@ integrates and verifies what comes back, and reports to you.
 evo-swarm                 # 6 lanes, coordinator TUI here
 evo-swarm --workers 3
 evo-swarm --resume        # the last swarm here: coordinator and lanes
+evo-swarm serve --token-file ~/.evo/serve.token   # headless, over HTTP
 ```
 
 It is a separate program on top of evo: its own system (`evo-swarm.asd`,
@@ -107,6 +109,51 @@ Input always goes to the coordinator; lanes are only watched.
   current task, worktree, reports, pid.
 - `/lane N` follows lane N's transcript live in the scrollback (its text and
   tool calls, prefixed `[lane N]`); `/lane off` stops.
+
+## Serving the swarm
+
+`evo-swarm serve` runs the same swarm headless: the coordinator with no
+terminal, driven over HTTP through [serve's protocol](serve.md) — the same
+`/prompt`, `/steer`, `/follow-up`, `/interrupt`, `/command`, `/eval`, `/state`,
+`/transcript`, `/journal`, `/events` and `/shutdown` — plus the panel data a
+GUI needs. It takes evo serve's flags (`--host`, `--port`, `--token-file`,
+`--allow-remote`) and evo-swarm's (`--workers`, `--evo`, `--resume`, …). The
+swarm code is the same code either way; only the frontend differs.
+
+`GET /health` says which server it is — its `name`, its `version`, and the
+`features` it serves:
+
+```json
+{"ok": true, "pid": 51234, "cursor": 118,
+ "name": "evo-swarm", "version": "0.1.0", "features": ["swarm"]}
+```
+
+so a client can tell it from `evo serve` (name `evo`, no features) before it
+asks for anything. Those fields are the [identity
+seam](serve.md#the-two-seams-a-program-adds); the endpoints below are the
+[route seam](serve.md#the-two-seams-a-program-adds).
+
+The swarm feature adds three read-only endpoints to the coordinator:
+
+- **`GET /lanes`** — every lane: state (`starting`, `idle`, `working`,
+  `compacting`, `down`), current task, goal status, worktree and branch,
+  restarts. Enough to draw the lane panels.
+- **`GET /lanes/N/transcript[?limit=N]`** — lane N's messages, as
+  `/transcript` is the coordinator's.
+- **`GET /lanes/N/events`** — lane N's live event stream: a lane's events,
+  relayed while a client watches, resumable with `?since=` / `Last-Event-ID`
+  exactly as [`/events`](serve.md#events) is.
+
+Lane state is also pushed: whenever a lane's state, task or goal status
+changes, `lane-state` arrives on the coordinator's own `/events` stream,
+naming the lane, so a client holding that connection keeps its panels current
+without polling.
+
+**Nothing here acts on a lane.** Lane control stays the coordinator's, and the
+human works through the coordinator — the same rule as the TUI. A lane's token
+and URL are never handed out; a client reads lanes, it does not talk to them.
+`/shutdown` stops every lane, and `--resume` restores the swarm — coordinator
+and lanes — from the coordinator's journal, as it does for the TUI.
 
 ## swarm.lisp
 
@@ -231,11 +278,16 @@ crashes is restarted by evo-swarm's supervisor the same way.
 ```text
 evo-swarm [--workers N] [--resume [path]] [--model id] [--thinking level]
           [--evo path] [--no-userspace] [--no-supervisor]
+
+evo-swarm serve [--host addr] [--port n] [--token-file path] [--allow-remote]
+                [--workers N] [--resume [path]] [--model id] [--thinking level]
+                [--evo path] [--no-userspace] [--no-supervisor]
 ```
 
 `--evo` names the evo binary lanes run; without it, `EVO_BINARY`, then the
-one beside `evo-swarm`, then `evo` on `PATH`. evo-swarm needs a
-terminal — for a headless single agent, use `evo serve`.
+one beside `evo-swarm`, then `evo` on `PATH`. The TUI form needs a terminal;
+`evo-swarm serve` does not — see [Serving the swarm](#serving-the-swarm). For
+a headless single agent, `evo serve` is still the smaller answer.
 
 Files: `~/.evo/swarm/<swarm-id>/` holds each lane's `lane-N/` directory
 (`sessions/`, `token` (0600), `url`, `lane.log`) and `worktrees/lane-N/`.
@@ -264,4 +316,10 @@ Files: `~/.evo/swarm/<swarm-id>/` holds each lane's `lane-N/` directory
   bare interrupt, a goal closed by the report that delivers it, an
   eval reaching one lane only, a worktree lane writing in its worktree, a
   killed lane restarting with the coordinator told, quit stopping every lane,
-  and `--resume` restoring it all.
+  and `--resume` restoring it all. `make swarm-serve-test`
+  (`tests/swarm-serve-e2e.py`) drives `evo-swarm serve` over HTTP only: the
+  coordinator answering serve's unchanged protocol, a prompt delegated to a
+  lane, `/lanes` and the `lane-state` events tracking that lane working and
+  then idle, a lane's transcript and live events read and resumed, no lane
+  token or URL over HTTP, `/shutdown` stopping every lane, and `--resume`
+  restoring the swarm.
