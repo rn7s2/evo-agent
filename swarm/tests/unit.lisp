@@ -89,7 +89,7 @@
              (and (search "(register-model \"m-a\"" code)
                   (search "(set-setting :model \"m-a\")" code)))
       (check "baseline: the effort ladder is quoted, not evaluated"
-             (let ((model (third (find 'unless (read-all code) :key #'car))))
+             (let ((model (third (first (fill-in-forms (read-all code))))))
                (equal '(quote (:low :medium)) (getf (cddr model) :effort))))
       (check "baseline: the report tool and the lane's prompt note"
              (and (search "(register-tool \"report\"" code)
@@ -164,7 +164,7 @@
                (check "in-lanes: before the coordinator's models (filled in if missing) and the report tool"
                       (let ((last-code (position (car (last code)) forms :test #'equal)))
                         (and last-code
-                             (< last-code (position 'unless heads))
+                             (< last-code (position (first (fill-in-forms forms)) forms))
                              (< last-code (position 'evo:register-tool heads)))))
                (check "in-lanes: the forms read back in a lane"
                       (= (length forms) (length (baseline-forms lane *swarm*)))))
@@ -181,21 +181,54 @@
 (defun lane-code-forms* (lane)
   (evo.swarm::lane-code-forms lane *swarm*))
 
+(defun fill-in-forms (forms)
+  "The baseline's coordinator-model forms: (when (and ...) (register-model ...))."
+  (remove-if-not (lambda (f)
+                   (and (consp f) (eq (car f) 'when)
+                        (consp (third f)) (eq (car (third f)) 'evo:register-model)))
+                 forms))
+
 (defun test-model-fill-in ()
-  "A coordinator model is registered in the lane only if in-lanes did not."
+  "A coordinator model reaches a lane only if the lane has its API and in-lanes
+did not register it; a lane whose default model is missing says why."
   (with-registries ()
     (register-provider* :stub :base-url "http://127.0.0.1:1" :api-key-env "STUB_KEY")
+    (register-api :unit-ext-api (make-instance 'provider-api))
     (register-model* "m-a" :provider :stub :context-window 1000 :max-output 100)
+    (register-model* "m-ext" :provider :stub :api :unit-ext-api
+                             :context-window 1000 :max-output 100)
     (let* ((agent (fresh-agent))
            (evo:*agent* agent)
            (*swarm* (test-swarm :agent agent))
-           (fill (find 'unless (baseline-forms (first (swarm-lanes *swarm*)) *swarm*)
-                       :key (lambda (f) (and (consp f) (car f))))))
-      ;; in-lanes registered m-a its own way: the fill-in leaves it alone.
-      (register-model* "m-a" :provider :stub :context-window 5 :max-output 5)
-      (eval fill)
-      (check "fill-in: a model in-lanes registered is kept as it is"
-             (eql 5 (getf (find-model "m-a" :stub) :context-window))))))
+           (lane (first (swarm-lanes *swarm*)))
+           (fills (fill-in-forms (baseline-forms lane *swarm*)))
+           (check-form (evo.swarm::lane-model-check-form lane)))
+      (check "fill-in: one form per coordinator model" (= 2 (length fills)))
+      ;; A lane: no user models, and no extension API.
+      (let ((evo.provider::*apis* (remove :unit-ext-api evo.provider::*apis* :key #'car)))
+        (reset-user-registries)
+        (register-provider* :stub :base-url "http://127.0.0.1:1" :api-key-env "STUB_KEY")
+        (check "fill-in: a model whose API the lane lacks is skipped, not an error"
+               (handler-case (progn (mapc #'eval fills) t) (error () nil)))
+        (check "fill-in: ...and the lane has the others"
+               (and (ignore-errors (find-model "m-a" :stub))
+                    (not (ignore-errors (find-model "m-ext" :stub)))))
+        (set-setting :model "m-a")
+        (check "model check: a default model the lane has passes"
+               (handler-case (progn (eval check-form) t) (error () nil)))
+        (set-setting :model "m-ext")
+        (let ((message (handler-case (progn (eval check-form) nil)
+                         (error (e) (princ-to-string e)))))
+          (check "model check: a default model on a missing API is an error that says why"
+                 (and message
+                      (search "lane 1 cannot use its model m-ext" message)
+                      (search ":UNIT-EXT-API" message)
+                      (search "in-lanes" message))))
+        ;; in-lanes registered m-a its own way: the fill-in leaves it alone.
+        (register-model* "m-a" :provider :stub :context-window 5 :max-output 5)
+        (mapc #'eval fills)
+        (check "fill-in: a model in-lanes registered is kept as it is"
+               (eql 5 (getf (find-model "m-a" :stub) :context-window)))))))
 
 (defun test-tool-limits ()
   (let ((evo.swarm::*lane-tools* nil)

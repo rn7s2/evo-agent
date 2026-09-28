@@ -157,11 +157,15 @@ The coordinator evaluates this in the lane (`POST /eval`, a form at a time):
 1. the coordinator's **providers** (keys by variable name only, below), and
    its **model** and **thinking level** as the lane's defaults;
 2. the `in-lanes` forms, which override anything from step 1;
-3. the coordinator's **models** the `in-lanes` forms did not register. They
-   come after them because a model's API may be defined by an extension that
-   `in-lanes` loads: Claude OAuth's `:anthropic-oauth-messages`, for one.
-   Without that extension the lane cannot register such a model, and its
-   initialization fails;
+3. the coordinator's **models** the `in-lanes` forms did not register — those
+   whose API the lane has. They come after the forms because a model's API
+   may be defined by an extension that `in-lanes` loads: Claude OAuth's
+   `:anthropic-oauth-messages`, for one. A model whose API the lane lacks is
+   skipped, so an extension you have installed but do not use in the swarm
+   costs the lanes nothing. Then the lane checks that its **default model**
+   is registered; if the default is one it skipped, initialization fails
+   with a message naming the missing API and saying to load its extension
+   with `in-lanes`;
 4. the swarm's own, last, so `in-lanes` cannot lose them: the **`report`
    tool**, the lane's **prompt note**, its **tool limit**;
 5. a run for any goal continuation a resumed lane had queued.
