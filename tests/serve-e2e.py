@@ -447,8 +447,12 @@ def run_all(evo, stub_port, work, ended_file):
     status, tr = evo.get("/transcript")
     check("a new session has an empty transcript", tr["messages"] == [], tr)
     status, sessions = evo.get("/sessions")
-    paths = [s["path"] for s in sessions["sessions"]]
-    check("GET /sessions lists the sessions on disk", original in paths and forked in paths, paths)
+    # The list resolves each path (truename) while a command reply keeps the
+    # journal path as spelled — on macOS /var is a symlink to /private/var, so
+    # compare what the filesystem says the two names are.
+    paths = [os.path.realpath(s["path"]) for s in sessions["sessions"]]
+    check("GET /sessions lists the sessions on disk",
+          os.path.realpath(original) in paths and os.path.realpath(forked) in paths, paths)
     status, reply = evo.command(f"/resume {original}")
     check("/resume <path> switches back", status == 200
           and reply["data"].get("session") == original, reply)
