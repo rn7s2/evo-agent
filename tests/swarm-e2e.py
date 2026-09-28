@@ -9,7 +9,8 @@ with who made it (the coordinator or lane N, read from the swarm prompt
 notes).  Lanes are checked through their own HTTP API (their url and token
 files are in the swarm directory), exactly as the coordinator reaches them.
 
-Proves: N lanes start and pass auth; swarm.lisp sets the coordinator's model;
+Proves: N lanes start and pass auth, skipping a coordinator model whose API
+they lack; swarm.lisp sets the coordinator's model;
 every lane runs the global and the project swarm.lisp's in-lanes forms (one
 at a time, *load-truename*, the lane variables, a package an earlier form
 loaded, overriding the coordinator's defaults); each got its
@@ -251,6 +252,12 @@ def main():
         f.write('(evo:register-model "stub-swarm" :provider :stub :context-window 200000 '
                 ':max-output 8000 :effort t)\n'
                 '(evo:set-setting :model "stub-swarm")\n'
+                # An API only the coordinator has — as an extension the lanes
+                # never load would define — with a model on it.  The lanes
+                # must come up without that model rather than fail.
+                "(evo:register-api :e2e-ext-api (make-instance 'evo:provider-api))\n"
+                '(evo:register-model "stub-ext" :provider :stub :api :e2e-ext-api '
+                ':context-window 200000 :max-output 8000)\n'
                 '(evo.swarm:in-lanes ()\n'
                 '  (evo:register-tool "e2e_global_lane_tool" :description "from ~/.evo/swarm.lisp"\n'
                 "    :schema '(:object) :execute (lambda (a) (declare (ignore a)) \"ok\")))\n")
@@ -318,6 +325,8 @@ def first_run(term, stub, home, proj):
         check(f"lane {lane.n} baseline: the coordinator's provider, key by env var",
               stub_provider and stub_provider[0]["has_api_key"] is True
               and stub_provider[0]["api_key_env"] == "EVO_SWARM_STUB_API_KEY", stub_provider)
+        check(f"lane {lane.n} baseline: a coordinator model on an API the lane lacks is skipped",
+              "stub-ext" not in [m["id"] for m in reg["models"]], reg["models"])
         check(f"lane {lane.n} baseline: the coordinator's models, and its default from swarm.lisp",
               [m["id"] for m in reg["models"]] == ["stub-a", "stub-swarm"]
               and reg["settings"].get("model") == "stub-swarm", (reg["models"], reg["settings"]))

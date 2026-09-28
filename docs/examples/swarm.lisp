@@ -20,9 +20,11 @@
 ;;; Code every lane evaluates — not here, in each lane — before it gets any
 ;;; work and whenever it restarts.  LANE is bound to the lane's number
 ;;; (1..LANES), LANES to the lane count; name only what you use, or () for
-;;; neither.  Needed whenever the coordinator's models or tools come from an
-;;; extension: with Claude OAuth, for one, the extension defines the API its
-;;; models use, and a lane without it cannot register them.  Keys: use
+;;; neither.  Needed when the lanes should use models or tools an extension
+;;; brings: with Claude OAuth, for one, the extension defines the API its
+;;; models use.  Without it the lanes skip those models, and if the
+;;; coordinator's default is one of them, a lane fails with a message saying
+;;; to load the extension here.  Keys: use
 ;;; :api-key-env, never a literal :api-key — these forms run in the lane as
 ;;; written.
 ;; (evo.swarm:in-lanes (lane lanes)

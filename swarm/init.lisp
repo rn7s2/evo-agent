@@ -173,6 +173,35 @@ the only place a key crosses into a lane is its process environment."
                                unless (eq k :id)
                                  append (list k (if (consp v) `(quote ,v) v)))))
 
+(defun model-fill-in-form (model)
+  "MODEL (a coordinator registry plist) registered in a lane — unless the lane
+has it already (IN-LANES registered it its own way), or lacks its API: an API
+an extension defines exists in a lane only if IN-LANES loaded that extension,
+and a model the lane cannot register is one it cannot use, not an error."
+  `(when (and (member ,(getf model :api) (evo:api-keys))
+              (not (ignore-errors (evo.provider:find-model ,(getf model :id)
+                                                           ,(getf model :provider)))))
+     ,(model-registration-form model)))
+
+(defun lane-model-check-form (lane)
+  "A form checking, in the lane, that its default model is registered: the
+one failure a skipped model can cause.  Its error names the missing API and
+what to do about it, so it reaches the coordinator as that, not as an unknown
+API."
+  (let ((apis (mapcar (lambda (model) (cons (getf model :id) (getf model :api)))
+                      (all-models))))
+    `(when (and (evo:setting :model)
+                (not (ignore-errors (evo.provider:find-model (evo:setting :model)
+                                                             (evo:setting :model-provider)))))
+       (error "lane ~d cannot use its model ~a~@[: its API ~s is not in the lane — an extension defines it, so load that extension in the lanes with (evo.swarm:in-lanes ...) in swarm.lisp~]"
+              ,(lane-n lane) (evo:setting :model)
+              ;; The model's API, when that is what the lane lacks.  No
+              ;; variables: a symbol built here would be this package's,
+              ;; which a lane has never heard of.
+              (and (not (member (cdr (assoc (evo:setting :model) ',apis :test #'equal))
+                                (evo:api-keys)))
+                   (cdr (assoc (evo:setting :model) ',apis :test #'equal)))))))
+
 (defun provider-registration-form (key)
   (let ((reg (provider-registration key)))
     `(evo:register-provider ,key
@@ -284,8 +313,10 @@ coordinator's models as well as the swarm's own settings."
  1. the coordinator's providers (keys by variable name only), and its model
     and thinking level as the lane's defaults — what IN-LANES may override;
  2. every IN-LANES form from swarm.lisp;
- 3. the coordinator's models those forms did not register (only now: a model
-    whose API an extension defines needs IN-LANES to load it first);
+ 3. the coordinator's models those forms did not register and whose API the
+    lane has (only now: a model whose API an extension defines needs IN-LANES
+    to load it first; without that, the model is skipped), then a check that
+    the lane's default model is registered, with an error saying why not;
  4. the report tool, the lane's prompt note, its tool limit — the swarm's
     own, last, so IN-LANES cannot lose them;
  5. a run for any goal continuation its resumed session left queued."
@@ -301,11 +332,8 @@ coordinator's models as well as the swarm's own settings."
      (when state
        `((evo:set-setting :thinking ,(effective-thinking state (agent-thinking-override agent)))))
      (lane-code-forms lane swarm)
-     (mapcar (lambda (model)
-               `(unless (ignore-errors (evo.provider:find-model ,(getf model :id)
-                                                                ,(getf model :provider)))
-                  ,(model-registration-form model)))
-             (all-models))
+     (mapcar #'model-fill-in-form (all-models))
+     (list (lane-model-check-form lane))
      (list (report-tool-form)
            `(evo:register-prompt-note "swarm-worker"
                                       ,(worker-note lane (swarm-workers swarm))))

@@ -1051,9 +1051,11 @@ the other way round (`tests/evo-only.lisp`). The reference is
   time — on start, on every restart, then the code the coordinator evaluated
   into it since. The **baseline** gives it the coordinator's providers and
   default model and thinking, then the `in-lanes` forms from `swarm.lisp`,
-  then the coordinator's models those did not register (after them, because
-  a model can depend on an API an extension defines), and last the report
-  tool, the worker note and the tool limit. `swarm.lisp` is evo-swarm's own
+  then the coordinator's models those did not register and whose API the
+  lane has (after them, because a model can depend on an API an extension
+  defines; a model on an API the lane lacks is skipped, and only a missing
+  default model is an error, one that says which extension to load), and
+  last the report tool, the worker note and the tool limit. `swarm.lisp` is evo-swarm's own
   config, loaded as the last step of the userspace build (a
   `*post-init-hooks*` entry, so evo never names the swarm) — it can set the
   coordinator's models for the swarm. `in-lanes` is a macro because its body

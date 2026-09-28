@@ -426,7 +426,9 @@ extensions: the coordinator hands each one a **baseline** — its providers
 (keys by environment variable name only, never as data), default model and
 thinking level, then any code `swarm.lisp` gives lanes with `in-lanes`
 (evaluated in every lane), then the coordinator's models that code did not
-register, and last the report tool, a prompt note and any tool limit:
+register and whose API the lane has (models on an extension's API are skipped
+unless `in-lanes` loads that extension), and last the report tool, a prompt
+note and any tool limit:
 
 ```lisp
 (evo.swarm:in-lanes (lane lanes)
