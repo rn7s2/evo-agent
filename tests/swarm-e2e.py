@@ -9,8 +9,11 @@ with who made it (the coordinator or lane N, read from the swarm prompt
 notes).  Lanes are checked through their own HTTP API (their url and token
 files are in the swarm directory), exactly as the coordinator reaches them.
 
-Proves: N lanes start and pass auth; each got its baseline and no secret is in
-any journal; delegation runs on a lane; a report wakes the idle coordinator;
+Proves: N lanes start and pass auth; swarm.lisp sets the coordinator's model;
+every lane runs the global and the project swarm.lisp's in-lanes forms (one
+at a time, *load-truename*, the lane variables, a package an earlier form
+loaded, overriding the coordinator's defaults); each got its
+baseline and no secret is in any journal; delegation runs on a lane; a report wakes the idle coordinator;
 interrupt and re-steer of a busy lane; an eval adds a tool to one lane only; a
 worktree lane works in its worktree; a killed lane restarts and the
 coordinator is told; quitting stops every lane; `evo-swarm --resume` restores
@@ -242,6 +245,33 @@ def main():
                 '(evo:register-model "stub-a" :provider :stub :context-window 200000 '
                 ':max-output 8000 :effort t)\n'
                 '(evo:set-setting :model "stub-a")\n')
+    # swarm.lisp, read by evo-swarm only, after post-init: the global one sets
+    # the coordinator's model for the swarm and gives every lane a tool...
+    with open(os.path.join(home, "swarm.lisp"), "w") as f:
+        f.write('(evo:register-model "stub-swarm" :provider :stub :context-window 200000 '
+                ':max-output 8000 :effort t)\n'
+                '(evo:set-setting :model "stub-swarm")\n'
+                '(evo.swarm:in-lanes ()\n'
+                '  (evo:register-tool "e2e_global_lane_tool" :description "from ~/.evo/swarm.lisp"\n'
+                "    :schema '(:object) :execute (lambda (a) (declare (ignore a)) \"ok\")))\n")
+    # ...and the project's has lanes load a file beside it that defines a
+    # package — loaded here too, so the coordinator can read the forms that
+    # name it — then use that package, their lane number and the lane count.
+    os.makedirs(os.path.join(proj, ".evo"))
+    with open(os.path.join(proj, ".evo", "lane-pkg.lisp"), "w") as f:
+        f.write('(defpackage :e2e-lane-pkg (:use :cl) (:export #:tool-name))\n'
+                '(in-package :e2e-lane-pkg)\n'
+                '(defun tool-name (n total) (format nil "e2e_lane_~d_of_~d" n total))\n'
+                '(evo:register-tool "e2e_baseline_tool" :description "from in-lanes"\n'
+                "  :schema '(:object) :execute (lambda (a) (declare (ignore a)) \"ok\"))\n")
+    with open(os.path.join(proj, ".evo", "swarm.lisp"), "w") as f:
+        f.write('(load (merge-pathnames "lane-pkg.lisp" *load-truename*))\n'
+                '(evo.swarm:in-lanes (lane lanes)\n'
+                '  (load (merge-pathnames "lane-pkg.lisp" *load-truename*))\n'
+                '  (evo:register-tool (e2e-lane-pkg:tool-name lane lanes)\n'
+                '    :description "names its lane"\n'
+                "    :schema '(:object) :execute (lambda (a) (declare (ignore a)) \"ok\"))\n"
+                "  (when (= lane 1) (evo:set-setting :thinking :low)))\n")
     env = dict(os.environ, EVO_HOME=home, TERM="xterm-256color", EVO_BINARY=os.path.join(BUILD, "evo"))
     for var in ("EVO_SERVE_TOKEN", "EVO_SUPERVISED_CHILD", "EVO_NO_SUPERVISOR",
                 "EVO_SESSIONS_DIR", "EVO_SERVE_WATCH_PID", "ANTHROPIC_API_KEY"):
@@ -288,11 +318,19 @@ def first_run(term, stub, home, proj):
         check(f"lane {lane.n} baseline: the coordinator's provider, key by env var",
               stub_provider and stub_provider[0]["has_api_key"] is True
               and stub_provider[0]["api_key_env"] == "EVO_SWARM_STUB_API_KEY", stub_provider)
-        check(f"lane {lane.n} baseline: the coordinator's model and default",
-              [m["id"] for m in reg["models"]] == ["stub-a"]
-              and reg["settings"].get("model") == "stub-a", reg["settings"])
+        check(f"lane {lane.n} baseline: the coordinator's models, and its default from swarm.lisp",
+              [m["id"] for m in reg["models"]] == ["stub-a", "stub-swarm"]
+              and reg["settings"].get("model") == "stub-swarm", (reg["models"], reg["settings"]))
         check(f"lane {lane.n} baseline: core tools and the report tool",
               {"read", "write", "edit", "bash", "report"} <= set(t["name"] for t in reg["tools"]))
+        names = [t["name"] for t in reg["tools"]]
+        check(f"lane {lane.n} in-lanes: ~/.evo/swarm.lisp's ran", "e2e_global_lane_tool" in names)
+        check(f"lane {lane.n} in-lanes: the project's loaded a file beside its swarm.lisp",
+              "e2e_baseline_tool" in names)
+        check(f"lane {lane.n} in-lanes: a later form used that file's package, with lane and lanes",
+              f"e2e_lane_{lane.n}_of_{LANES}" in names, names)
+        check(f"lane {lane.n} in-lanes: overrides the coordinator's defaults",
+              (reg["settings"].get("thinking") == "low") == (lane.n == 1), reg["settings"])
         status, state = lane.get("/state")
         check(f"lane {lane.n} starts idle", state["status"] == "idle", state["status"])
     pids = [l.pid() for l in lanes]
@@ -436,6 +474,9 @@ def resumed_run(term, stub, home, proj):
     check("every lane comes back", ready)
     check("lane 2's session was resumed", "resteered now" in lanes[1].transcript_text())
     check("lane 3 got its eval back (replayed)", "probe_three" in lanes[2].tools())
+    check("resumed lanes run their in-lanes forms again",
+          all("e2e_baseline_tool" in l.tools() and f"e2e_lane_{l.n}_of_{LANES}" in l.tools()
+              for l in lanes))
     check("lane 4 still lacks it", "probe_three" not in lanes[3].tools())
     status, reply = lanes[3].eval("(namestring (uiop:getcwd))")
     cwd = json.loads(reply["data"]["values"][0]) if status == 200 else ""

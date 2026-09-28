@@ -26,9 +26,10 @@ Usage:
   evo-swarm --no-supervisor      run the coordinator in-process
   evo-swarm --help | --version
 
-Config: ~/.evo/init.lisp and <cwd>/.evo/init.lisp as for evo, then
-~/.evo/swarm.lisp and <cwd>/.evo/swarm.lisp (worker-init generators, tool
-limits, prompt notes).  See docs/swarm.md.")
+Config: init.lisp, extensions and post-init.lisp as for evo, then
+~/.evo/swarm.lisp and <cwd>/.evo/swarm.lisp: the coordinator's models and
+settings for the swarm, lane count, tool limits, prompt notes, and
+(evo.swarm:in-lanes ...) — code every lane evaluates.  See docs/swarm.md.")
 
 (defun parse-args (argv)
   (let ((opts nil))
@@ -90,17 +91,12 @@ limits, prompt notes).  See docs/swarm.md.")
         (error 'evo.cli:usage-error
                :text "cannot find the evo binary lanes run: put it beside evo-swarm, on PATH, or name it with --evo / EVO_BINARY"))))
 
-(defun load-swarm-files (opts)
-  "~/.evo/swarm.lisp then <cwd>/.evo/swarm.lisp, after the init files."
-  (unless (getf opts :no-userspace)
-    (load-init-file (merge-pathnames "swarm.lisp" (evo-home)))
-    (load-init-file (merge-pathnames "swarm.lisp" (project-evo-dir (uiop:getcwd))))))
-
 (defun install-coordinator ()
   "What the coordinator has beyond an evo session: the swarm tools, the
 lane commands and status segment, the coordinator note.  Installed before the
 session boots, so /reload keeps them (they are the base, not an extension)."
   (register-swarm-tools)
+  (pushnew 'load-swarm-config *post-init-hooks*)
   (install-tui-observation)
   (evo:register-prompt-note "swarm-coordinator"
                             (lambda (pack) (declare (ignore pack)) (coordinator-note))))
@@ -113,7 +109,6 @@ session boots, so /reload keeps them (they are the base, not an extension)."
     (install-coordinator)
     (multiple-value-bind (agent resumed-p)
         (evo.cli:setup-agent opts :frontend (make-instance 'evo.tui:tui-frontend))
-      (load-swarm-files opts)
       (when *coordinator-tools*
         (evo:set-active-tools agent (remove-duplicates *coordinator-tools* :test #'equal)))
       (let* ((record (and resumed-p (evo:custom-state "swarm" agent)))

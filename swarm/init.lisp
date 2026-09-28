@@ -1,19 +1,19 @@
-;;;; init.lisp — what a fresh lane is given: worker init is a program.
+;;;; init.lisp — what a fresh lane is given, and the prompt notes.
 ;;;;
 ;;;; A lane boots `evo serve --no-userspace`: kernel and core extensions,
-;;;; nothing of the user's.  What it then becomes is decided here, by
-;;;; GENERATORS — functions of the lane and the swarm that return forms, which
-;;;; the swarm evaluates in the lane (POST /eval) before it is given any work,
-;;;; and again whenever it restarts.  ~/.evo/swarm.lisp and
-;;;; <project>/.evo/swarm.lisp add, replace or remove generators; the default
-;;;; one, :BASELINE, gives every lane what the coordinator itself runs on.
+;;;; nothing of the user's.  Before it is given any work, and again whenever
+;;;; it restarts, the swarm evaluates the BASELINE in it (POST /eval): the
+;;;; coordinator's providers, its model and thinking level as defaults, then
+;;;; the forms swarm.lisp gave IN-LANES, then whatever models those left out,
+;;;; and last the swarm's own: the report tool, the lane's prompt note and tool
+;;;; limit.
 ;;;;
 ;;;; Secrets never travel as data.  A provider the coordinator reads its key
 ;;;; from an environment variable keeps that name in the lane; one registered
 ;;;; with a literal :api-key gets a swarm-private variable instead
 ;;;; (EVO_SWARM_<PROVIDER>_API_KEY), set in the lane process's environment at
-;;;; launch.  So no form, prompt or journal — the coordinator's or a lane's —
-;;;; ever holds a key.
+;;;; launch.  So no form, prompt or journal the swarm writes — the
+;;;; coordinator's or a lane's — ever holds a key.
 
 (in-package :evo.swarm)
 
@@ -22,16 +22,30 @@
 (defparameter *coordinator-note*
   (evo:cat
    "## Swarm coordinator~%"
-   "You coordinate a swarm: ~d worker lanes, each a separate evo agent with its "
+   "You lead a swarm: ~d worker lanes, each a separate evo agent with its "
    "own context, working in parallel.  You are the only one who talks to the "
    "user; lanes talk only to you.~%~%"
+   "Splitting and delegating work is your own decision — do not wait to be "
+   "told.  The user gives you goals, not lane assignments, and will rarely "
+   "mention lanes at all.  For anything bigger than a quick answer or a small "
+   "edit, decide yourself how to divide it and put lanes on it, without asking "
+   "permission.  The lanes exist for parallel throughput: run independent "
+   "pieces at the same time on different lanes rather than one after another, "
+   "and treat an idle lane as wasted capacity.  Keep for yourself only what is "
+   "quick, tightly coupled, or needs the user.~%~%"
    "How to work:~%"
-   "- Explore just enough to split the work into lane-sized pieces, each with "
-   "a clear, checkable done criterion.  Do small or tightly coupled work "
-   "yourself.~%"
+   "- Explore just enough to split the work into independent, lane-sized "
+   "pieces, each with a clear, checkable done criterion.  Investigation "
+   "splits too — surveying a codebase, reproducing a bug, researching options, "
+   "reviewing — not only edits.~%"
    "- Delegate with the `delegate` tool (a task, and for anything substantial "
    "an objective with done_when, which becomes the lane's goal).  Give each "
    "lane everything it needs: it cannot see this conversation.~%"
+   "- Keep lanes busy.  While they work, prepare the next pieces and review "
+   "what has come back; when a lane finishes and its work checks out, give it "
+   "the next piece.  Handle a lane that is stuck, off track or asking a "
+   "question yourself — answer, steer, reassign — and bring the user only "
+   "decisions that are really theirs.~%"
    "- Lanes share this working directory by default.  When pieces would edit "
    "the same files, give a lane its own git worktree (`lane_worktree`) and "
    "merge its branch yourself when it reports done.~%"
@@ -182,12 +196,81 @@ here would carry this package's symbols, which a lane has never heard of.")
         (*read-eval* nil))
     (read-from-string *report-tool-source*)))
 
+;;; in-lanes — code swarm.lisp has every lane evaluate.
+
+(defvar *lane-forms* nil
+  "What IN-LANES recorded, in order: plists (:LANE var :LANES var :SOURCE
+path :FORMS forms).")
+
+(defmacro in-lanes ((&optional lane lanes) &body forms)
+  "Evaluate FORMS in every lane, not here — swarm.lisp's init.lisp for lanes:
+
+  (evo.swarm:in-lanes (lane lanes)
+    (load \"~/.evo/extensions/020-claude-oauth-provider.lisp\")
+    (when (<= lane 2)
+      (evo:set-setting :model \"claude-opus-5\")))
+
+LANE and LANES, if named, are bound around each form to the lane's number
+(1..LANES) and the lane count; (in-lanes () ...) binds neither.  The forms run
+in the lane's EVO.USER one at a time, in order, each read after the one before
+it ran, with *LOAD-TRUENAME* the swarm.lisp they came from — before any work,
+and again whenever the lane restarts.  Every call adds to what lanes run."
+  (dolist (var (list lane lanes))
+    (when var
+      (unless (and (symbolp var) (not (keywordp var)) (not (constantp var)))
+        (error "evo.swarm:in-lanes: ~s is not a variable name" var))))
+  `(add-lane-forms ',lane ',lanes ',forms *load-truename*))
+
+(defun add-lane-forms (lane lanes forms source)
+  (setf *lane-forms*
+        (append *lane-forms*
+                (list (list :lane lane :lanes lanes :forms forms
+                            :source (and source (namestring source))))))
+  (length *lane-forms*))
+
+(defun lane-code-forms (lane swarm)
+  "Every IN-LANES form, each wrapped in its bindings for LANE."
+  (loop for entry in *lane-forms*
+        for source = (getf entry :source)
+        for bindings = (append
+                        (when source
+                          `((*load-truename* (pathname ,source))
+                            (*load-pathname* (pathname ,source))))
+                        (when (getf entry :lane) `((,(getf entry :lane) ,(lane-n lane))))
+                        (when (getf entry :lanes) `((,(getf entry :lanes) ,(swarm-workers swarm)))))
+        append (mapcar (lambda (form) (if bindings `(let ,bindings ,form) form))
+                       (getf entry :forms))))
+
+;;; What swarm.lisp sets, fresh on every boot and /reload.
+
+(defparameter *default-coordinator-note* *coordinator-note*)
+(defparameter *default-worker-note* *worker-note*)
+
+(defun load-swarm-config (cwd)
+  "Forget what swarm.lisp said last time, then load ~/.evo/swarm.lisp and
+<cwd>/.evo/swarm.lisp — as the last step of evo's userspace build (after
+post-init.lisp; see EVO.KERNEL:*POST-INIT-HOOKS*), so swarm.lisp can set the
+coordinator's models as well as the swarm's own settings."
+  (setf *lane-forms* nil
+        *lane-tools* nil
+        *coordinator-tools* nil
+        *coordinator-note* *default-coordinator-note*
+        *worker-note* *default-worker-note*)
+  (load-init-file (merge-pathnames "swarm.lisp" (evo-home)))
+  (load-init-file (merge-pathnames "swarm.lisp" (project-evo-dir cwd))))
+
+;;; The baseline, in order.
+
 (defun baseline-forms (lane swarm)
-  "The default generator: the coordinator's models and providers (keys by
-variable name only), its model and thinking as the lane's defaults, the
-report tool, the lane's prompt note, its tool limit — and a run for any goal
-continuation its resumed session left queued behind the missing model."
-  (declare (ignore swarm))
+  "Everything a lane is given, in order:
+ 1. the coordinator's providers (keys by variable name only), and its model
+    and thinking level as the lane's defaults — what IN-LANES may override;
+ 2. every IN-LANES form from swarm.lisp;
+ 3. the coordinator's models those forms did not register (only now: a model
+    whose API an extension defines needs IN-LANES to load it first);
+ 4. the report tool, the lane's prompt note, its tool limit — the swarm's
+    own, last, so IN-LANES cannot lose them;
+ 5. a run for any goal continuation its resumed session left queued."
   (let* ((agent evo:*agent*)
          (state (and agent (fold-state (agent-journal agent))))
          (model-id (and state (ignore-errors (effective-model-id state agent))))
@@ -195,51 +278,21 @@ continuation its resumed session left queued behind the missing model."
          (limit (lane-tool-limit lane)))
     (append
      (mapcar #'provider-registration-form (provider-keys))
-     (mapcar #'model-registration-form (all-models))
      (when model-id `((evo:set-setting :model ,model-id)))
      (when provider `((evo:set-setting :model-provider ,provider)))
      (when state
        `((evo:set-setting :thinking ,(effective-thinking state (agent-thinking-override agent)))))
+     (lane-code-forms lane swarm)
+     (mapcar (lambda (model)
+               `(unless (ignore-errors (evo.provider:find-model ,(getf model :id)
+                                                                ,(getf model :provider)))
+                  ,(model-registration-form model)))
+             (all-models))
      (list (report-tool-form)
            `(evo:register-prompt-note "swarm-worker"
-                                      ,(worker-note lane (swarm-workers *swarm*))))
+                                      ,(worker-note lane (swarm-workers swarm))))
      (when limit `((evo:set-active-tools evo:*agent* ',limit)))
      '((when (evo.kernel:steering-pending-p evo:*agent*) (evo:request-run))))))
-
-(defvar *worker-inits* (list (cons :baseline 'baseline-forms))
-  "Ordered alist (NAME . FUNCTION): every generator, run in order for each
-lane initialization.  FUNCTION takes (LANE SWARM) and returns a list of forms.")
-
-(defun default-worker-init (lane swarm)
-  "The baseline generator, callable from a replacement that extends it."
-  (baseline-forms lane swarm))
-
-(defun add-worker-init (name function)
-  "Add (or replace, keeping its place) the generator NAME.  FUNCTION takes the
-lane and the swarm and returns forms to evaluate in the lane, e.g.
-  (evo.swarm:add-worker-init :my-tools
-    (lambda (lane swarm)
-      (declare (ignore swarm))
-      (when (evenp (evo.swarm:lane-n lane))
-        '((evo:load-extension \"/home/me/tools/lint.lisp\")))))"
-  (let ((entry (assoc name *worker-inits*)))
-    (if entry
-        (setf (cdr entry) function)
-        (setf *worker-inits* (append *worker-inits* (list (cons name function))))))
-  name)
-
-(defun remove-worker-init (name)
-  "Remove the generator NAME — :BASELINE included, for a swarm.lisp that
-builds lanes from scratch."
-  (setf *worker-inits* (remove name *worker-inits* :key #'car))
-  name)
-
-(defun worker-inits () (mapcar #'car *worker-inits*))
-
-(defun init-forms (lane swarm)
-  "Every generator's forms for LANE, in order."
-  (loop for (nil . fn) in *worker-inits*
-        append (funcall fn lane swarm)))
 
 (defun forms->code (forms)
   "FORMS as source text a lane reads back in EVO.USER."
@@ -249,3 +302,5 @@ builds lanes from scratch."
           (*print-case* :downcase)
           (*print-pretty* nil))
       (format nil "~{~s~%~}" forms))))
+
+

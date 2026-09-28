@@ -120,10 +120,12 @@ exits first."
            (sleep 0.2)))
 
 (defun initialize-lane (lane)
-  "Run every generator's forms in LANE, then the code the coordinator has
-evaluated into it before (so a restart gets back what it had)."
-  (let ((code (forms->code (init-forms lane *swarm*))))
-    (lane-eval lane code))
+  "Evaluate the baseline in LANE, then the code the coordinator has
+evaluated into it before (so a restart gets back what it had).  One form per
+eval, as LOAD would: the lane reads each form only after the one before it
+ran, so an IN-LANES form can name a package an earlier one loaded."
+  (dolist (form (baseline-forms lane *swarm*))
+    (lane-eval lane (forms->code (list form))))
   (dolist (extra (with-swarm-lock () (copy-list (lane-extra-forms lane))))
     (handler-case (lane-eval lane extra)
       (lane-error (e)

@@ -24,9 +24,9 @@
       -HeapMb   Dynamic heap (MiB) baked into the binary (D10).
 
   install differs from the Unix one on purpose.  There is no /usr/local on
-  Windows and no sudo to write outside your profile with, so the binary goes
-  to $Prefix\bin\evo.exe — $HOME\.evo\bin\evo.exe by default, beside the
-  evo home it already owns.  That directory is yours to write, needs no
+  Windows and no sudo to write outside your profile with, so the binaries go
+  to $Prefix\bin — evo.exe and evo-swarm.exe in $HOME\.evo\bin by default,
+  beside the evo home it already owns.  That directory is yours to write, needs no
   elevation, and the script tells you how to put it on PATH.
 
 .EXAMPLE

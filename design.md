@@ -1026,8 +1026,10 @@ the other way round (`tests/evo-only.lisp`). The reference is
 
 - **One human-facing agent.** The coordinator is an ordinary evo TUI session
   (the same `setup-agent`, the same TUI) with the swarm tools and a prompt
-  note. It explores, splits work into lane-sized pieces with checkable done
-  criteria, delegates, integrates, verifies, and reports. Input always goes to
+  note. Delegation is its own decision, not the user's instruction: it
+  explores, splits anything non-trivial into lane-sized pieces with checkable
+  done criteria, delegates, keeps lanes busy, integrates, verifies, and
+  reports. Input always goes to
   it; the human watches lanes read-only (a status-line segment, `/lanes`,
   `/lane N`).
 - **Lanes, not roles.** A lane is `evo serve --no-userspace` on loopback: its
@@ -1043,12 +1045,21 @@ the other way round (`tests/evo-only.lisp`). The reference is
   coordinator's input through the frontend protocol (`evo:steer` +
   `evo:request-run`): queued to its next turn boundary when it works, waking
   it when idle. The coordinator never polls.
-- **Worker init is a program.** Generators (functions of lane and swarm
-  returning forms) run in each fresh lane — `:baseline` first, then those
-  ~/.evo/swarm.lisp and <project>/.evo/swarm.lisp add — and again on every
-  restart, followed by the code the coordinator evaluated into the lane since.
-  The baseline gives a lane the coordinator's providers and models, its
-  defaults, the report tool and the worker note. **Keys never travel as
+- **Lanes get the coordinator's setup, plus in-lanes.** A lane loads none of
+  the user's files; the coordinator evaluates its setup into it, a form at a
+  time — on start, on every restart, then the code the coordinator evaluated
+  into it since. The **baseline** gives it the coordinator's providers and
+  default model and thinking, then the `in-lanes` forms from `swarm.lisp`,
+  then the coordinator's models those did not register (after them, because
+  a model can depend on an API an extension defines), and last the report
+  tool, the worker note and the tool limit. `swarm.lisp` is evo-swarm's own
+  config, loaded as the last step of the userspace build (a
+  `*post-init-hooks*` entry, so evo never names the swarm) — it can set the
+  coordinator's models for the swarm. `in-lanes` is a macro because its body
+  runs elsewhere: it records source, which the coordinator sends to every
+  lane, and it binds the lane's number and the lane count in its syntax, as
+  `dolist` binds its variable, rather than pretending to be a function.
+  **Keys never travel as
   data**: a provider's key reaches a lane as an environment variable, by
   name, and a literal key through a swarm-private variable set in the lane's
   process environment only.
@@ -1087,7 +1098,7 @@ the other way round (`tests/evo-only.lisp`). The reference is
 | D13 | **Slim core: everything outside the core loop ships as a core extension** — bundled, on the same API, with the same control as user extensions; essential ones cannot be disabled. | Dogfooding proves the API's depth and keeps the kernel small and honest. See §13. |
 | D14 | **Todo checklists ship**, as a core extension. | Long-running goal work needs user-visible progress. The one deliberate deviation from the minimal omit-list. |
 | D15 | `:done-when` verifiers are **the check itself**: a Lisp form, journaled as source text on the `:goal` entry and evaluated on each completion claim. Never a function name — there is no second place for the check to live. | Users state objectives in prose; the agent formalizes them, and the formalization stays where the human can read it. Source text is data: it survives restart with no load step, and a closure could not round-trip through the journal anyway. |
-| D16 | **Parallel agents are a swarm of processes, not sub-agents.** `evo-swarm` (§18) runs one coordinator agent — the only one a human talks to — and a pool of interchangeable worker *lanes*, each a whole `evo serve` process driven only through serve's public HTTP API. Lanes never talk to each other; they report to the coordinator, whose input their reports become. Worker init is a program (generators in swarm.lisp). This replaces "no sub-agents". | Context isolation did demonstrably beat one transcript once goals outgrew one context — the re-entry condition D16 named. Processes rather than in-image children because every guarantee evo has — the journal as truth, supervision, resume, a crash domain of one — then holds per lane for free, and the coordinator exercises serve's API as any client would. Lanes rather than roles because a role is a prompt, which the coordinator can give any lane per task. |
+| D16 | **Parallel agents are a swarm of processes, not sub-agents.** `evo-swarm` (§18) runs one coordinator agent — the only one a human talks to — and a pool of interchangeable worker *lanes*, each a whole `evo serve` process driven only through serve's public HTTP API. Lanes never talk to each other; they report to the coordinator, whose input their reports become. Lanes get the coordinator's setup plus code swarm.lisp gives them (`in-lanes`). This replaces "no sub-agents". | Context isolation did demonstrably beat one transcript once goals outgrew one context — the re-entry condition D16 named. Processes rather than in-image children because every guarantee evo has — the journal as truth, supervision, resume, a crash domain of one — then holds per lane for free, and the coordinator exercises serve's API as any client would. Lanes rather than roles because a role is a prompt, which the coordinator can give any lane per task. |
 | D17 | **One binary per program, each its own supervisor.** No shell launcher and no separate supervisor executable: `evo` invoked plainly *is* the supervisor parent, re-spawning itself as the session child; `evo-swarm`, a second program (D16), is built the same way on the same supervisor (`evo.cli:supervise` with its own restart arguments). On SBCL the heap is baked in at build time, refining D10. `--no-supervisor` runs in-process. The evo binary contains no swarm code — `make test` loads the `evo` system alone to prove it (`tests/evo-only.lisp`). | A wrapper script is one more artifact to install, breaks TTY inheritance under POSIX background rules, and buys nothing the binary cannot do itself. A second *program* (evo-swarm) is not a wrapper: it has its own users and its own UI, and keeping it out of evo keeps the agent's binary exactly what one agent needs. |
 | D18 | **The core is its own system.** `evo/core` (foundations, kernel, interface-free core extensions) loads without the frontends; the TUI and the CLI build on it in `evo` and define their own packages, and `make test` loads `evo/core` alone before the unit suite. | D13 keeps the kernel small by convention; this makes the direction checkable. A core file that names a frontend does not load, so the question "is the core coupled to the TUI" is answered by the build rather than by reading. |
 | D19 | **No extension patches the core.** Every seam a bundled extension once reached with a function patch or a private symbol is public: `:busy`/`:idle` for the drive, `:user-message` for user input, generation-owned TUI registries, `provider-registration`, a clipboard reader that explains itself. | A patch is a report of a missing protocol. Patches cannot see each other, have to be undone by hand, and break when the patched function's signature grows; a hook or registry has none of those problems, and it belongs to the extension's generation. |

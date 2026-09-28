@@ -39,7 +39,8 @@ variables as parameters (SBCL only — see [Windows](#windows)):
 
 ```powershell
 .\make.ps1 build          # requires SBCL + Quicklisp
-.\make.ps1 install        # builds, seeds $HOME\.evo, installs $HOME\.evo\bin\evo.exe
+.\make.ps1 install        # builds, seeds $HOME\.evo, installs evo.exe and
+                          #   evo-swarm.exe to $HOME\.evo\bin
 ```
 
 evo ships **no built-in model table**. At minimum, register one model and pick
@@ -406,7 +407,8 @@ A second program on top of evo ([docs/swarm.md](docs/swarm.md)): one
 **coordinator** agent in your terminal — the only one you talk to — and a
 pool of worker **lanes**, each a separate `evo serve --no-userspace` process
 with its own context, token and journal (default 6, `--workers N`). The
-coordinator splits the work into lane-sized pieces with clear done criteria,
+coordinator decides for itself — you give it goals, not lane assignments — to
+split the work into lane-sized pieces with clear done criteria,
 `delegate`s them (optionally as goals with `done_when`), steers or
 interrupts lanes, evaluates capabilities into a lane when it asks, gives a
 lane its own git worktree when a task needs isolation, and integrates and
@@ -415,11 +417,21 @@ piece of work; reports, finished runs, errors and crashes reach the
 coordinator as input — waking it when idle. Lanes talk only to the
 coordinator, only through serve's HTTP API.
 
-What a lane becomes is a program: `~/.evo/swarm.lisp` and
-`<project>/.evo/swarm.lisp` define worker-init generators (see
-[docs/examples/swarm.lisp](docs/examples/swarm.lisp)); the default baseline
-hands each lane the coordinator's models and providers — keys by environment
-variable name only, never as data — the report tool and a prompt note. Lanes
+evo-swarm reads your `init.lisp`, extensions and `post-init.lisp` like evo,
+then `~/.evo/swarm.lisp` and `<project>/.evo/swarm.lisp` — read by evo-swarm
+only — where you set the coordinator's model for the swarm, the lane count,
+tool limits and prompt notes. A lane loads none of your config or
+extensions: the coordinator hands each one a **baseline** — its providers
+(keys by environment variable name only, never as data), models, default
+model, the report tool and a prompt note — plus any code `swarm.lisp` gives
+it with `in-lanes`, evaluated in every lane:
+
+```lisp
+(evo.swarm:in-lanes (lane lanes)
+  (load "~/.evo/extensions/020-claude-oauth-provider.lisp"))
+```
+
+(see [docs/examples/swarm.lisp](docs/examples/swarm.lisp)). Lanes
 are supervised (a crash restarts and resumes them, and the coordinator is
 told); quitting stops them all; `evo-swarm --resume` restores coordinator and
 lanes from the coordinator's journal. Watch lanes read-only with the status
@@ -700,7 +712,7 @@ swarm/                   EVO.SWARM — evo-swarm (system `evo-swarm`; docs/swarm
   package.lisp
   state.lisp             the swarm and its lanes, one lock
   client.lisp            serve's HTTP API, as a client: requests, the event stream
-  init.lisp              worker-init generators, the baseline, prompt notes, limits
+  init.lisp              the baseline, in-lanes, swarm.lisp, prompt notes, limits
   lanes.lisp             launch, initialize, watch, recover, stop; the journal record
   tools.lisp             the coordinator's tools
   tui.lisp               the lanes on the status line, /lanes, /lane N

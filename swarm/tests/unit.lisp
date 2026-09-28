@@ -1,5 +1,5 @@
 ;;;; swarm/tests/unit.lisp — unit tests for evo-swarm: worker init (and keeping
-;;;; secrets out of it), generators, tool limits, the journal record, lane
+;;;; secrets out of it), in-lanes, tool limits, the journal record, lane
 ;;;; events turned into coordinator input, restart arguments.  Nothing here
 ;;;; starts a process; tests/swarm-e2e.py does that.
 
@@ -89,7 +89,7 @@
              (and (search "(register-model \"m-a\"" code)
                   (search "(set-setting :model \"m-a\")" code)))
       (check "baseline: the effort ladder is quoted, not evaluated"
-             (let ((model (find 'evo:register-model (read-all code) :key #'car)))
+             (let ((model (third (find 'unless (read-all code) :key #'car))))
                (equal '(quote (:low :medium)) (getf (cddr model) :effort))))
       (check "baseline: the report tool and the lane's prompt note"
              (and (search "(register-tool \"report\"" code)
@@ -109,20 +109,93 @@
           (check "report tool: emits a :report event with its fields"
                  (and event (equal "x" (getf event :done)) (equal "y" (getf event :evidence)))))))))
 
-(defun test-generators ()
-  (let ((evo.swarm::*worker-inits* (list (cons :baseline (lambda (l s) (declare (ignore l s)) '((a)))))))
-    (add-worker-init :second (lambda (l s) (declare (ignore s)) `((b ,(lane-n l)))))
-    (add-worker-init :third (lambda (l s) (declare (ignore l s)) '((c))))
-    (let* ((*swarm* (test-swarm))
-           (lane (second (swarm-lanes *swarm*))))
-      (check "generators: run in order, every one's forms appended"
-             (equal '((a) (b 2) (c)) (evo.swarm::init-forms lane *swarm*)))
-      (add-worker-init :second (lambda (l s) (declare (ignore l s)) '((b2))))
-      (check "generators: re-adding a name replaces it in place"
-             (equal '((a) (b2) (c)) (evo.swarm::init-forms lane *swarm*)))
-      (remove-worker-init :baseline)
-      (check "generators: the baseline can be removed"
-             (equal '(:second :third) (worker-inits))))))
+(defun test-in-lanes ()
+  (with-registries ()
+    (register-provider* :stub :base-url "http://127.0.0.1:1" :api-key-env "STUB_KEY")
+    (register-model* "m-a" :provider :stub :context-window 1000 :max-output 100)
+    (set-setting :model "m-a")
+    (let* ((project (uiop:ensure-directory-pathname
+                     (format nil "~a/evo-swarm-project-~a/" (tmp-dir) (gen-id))))
+           (global (merge-pathnames "swarm.lisp" (evo-home)))
+           (local (merge-pathnames ".evo/swarm.lisp" project))
+           (evo.swarm::*lane-forms* nil)
+           (evo.swarm::*lane-tools* nil)
+           (evo.swarm::*coordinator-tools* nil)
+           (evo.swarm::*worker-note* evo.swarm::*worker-note*)
+           (evo.swarm::*coordinator-note* evo.swarm::*coordinator-note*)
+           (agent (fresh-agent))
+           (evo:*agent* agent)
+           (*swarm* (test-swarm :agent agent :workers 4))
+           (lane (third (swarm-lanes *swarm*))))
+      (ensure-directories-exist global)
+      (ensure-directories-exist local)
+      (write-file-string global "(evo.swarm:in-lanes (lane) (list :global lane))")
+      (write-file-string local "(evo:set-setting :swarm-workers 4)
+(evo.swarm:in-lanes (n total)
+  (defvar *in-lanes-probe* t)
+  (list n total (namestring *load-truename*)))
+(evo.swarm:in-lanes () (evo:set-setting :thinking :low))")
+      (unwind-protect
+           (progn
+             (evo.swarm::load-swarm-config project)
+             (let* ((code (lane-code-forms* lane))
+                    (forms (read-all (evo.swarm::forms->code (baseline-forms lane *swarm*))))
+                    (heads (mapcar (lambda (f) (and (consp f) (car f))) forms))
+                    (first-code (position (first code) forms :test #'equal)))
+               (check "in-lanes: nothing runs in the coordinator"
+                      (not (boundp (find-symbol "*IN-LANES-PROBE*" :evo.user))))
+               (check "in-lanes: ~/.evo/swarm.lisp's forms first, then the project's, in order"
+                      (and (= 4 (length code))
+                           (search "(list :global lane)" (evo.swarm::forms->code (list (first code))))
+                           (search "(set-setting :thinking :low)"
+                                   (evo.swarm::forms->code (last code)))))
+               (check "in-lanes: the named variables are the lane's number and the lane count"
+                      (equal (list :global 3) (eval (first code))))
+               (check "in-lanes: *load-truename* is the swarm.lisp the form came from"
+                      (equal (list 3 4 (namestring (truename local))) (eval (third code))))
+               (check "in-lanes: () binds no lane variable"
+                      (let ((bindings (second (fourth code))))
+                        (equal '(*load-truename* *load-pathname*) (mapcar #'first bindings))))
+               (check "in-lanes: after the coordinator's providers and defaults"
+                      (and first-code
+                           (< (position 'evo:register-provider heads) first-code)
+                           (< (position '(evo:set-setting :model "m-a") forms :test #'equal)
+                              first-code)))
+               (check "in-lanes: before the coordinator's models (filled in if missing) and the report tool"
+                      (let ((last-code (position (car (last code)) forms :test #'equal)))
+                        (and last-code
+                             (< last-code (position 'unless heads))
+                             (< last-code (position 'evo:register-tool heads)))))
+               (check "in-lanes: the forms read back in a lane"
+                      (= (length forms) (length (baseline-forms lane *swarm*)))))
+             (evo.swarm::load-swarm-config project)
+             (check "in-lanes: a /reload starts from scratch, not on top"
+                    (= 3 (length evo.swarm::*lane-forms*)))
+             (check "in-lanes: swarm.lisp's settings apply"
+                    (eql 4 (setting :swarm-workers)))
+             (check "in-lanes: a keyword is not a variable name"
+                    (handler-case (progn (macroexpand '(in-lanes (:lane) (foo))) nil)
+                      (error () t))))
+        (delete-file global)))))
+
+(defun lane-code-forms* (lane)
+  (evo.swarm::lane-code-forms lane *swarm*))
+
+(defun test-model-fill-in ()
+  "A coordinator model is registered in the lane only if in-lanes did not."
+  (with-registries ()
+    (register-provider* :stub :base-url "http://127.0.0.1:1" :api-key-env "STUB_KEY")
+    (register-model* "m-a" :provider :stub :context-window 1000 :max-output 100)
+    (let* ((agent (fresh-agent))
+           (evo:*agent* agent)
+           (*swarm* (test-swarm :agent agent))
+           (fill (find 'unless (baseline-forms (first (swarm-lanes *swarm*)) *swarm*)
+                       :key (lambda (f) (and (consp f) (car f))))))
+      ;; in-lanes registered m-a its own way: the fill-in leaves it alone.
+      (register-model* "m-a" :provider :stub :context-window 5 :max-output 5)
+      (eval fill)
+      (check "fill-in: a model in-lanes registered is kept as it is"
+             (eql 5 (getf (find-model "m-a" :stub) :context-window))))))
 
 (defun test-tool-limits ()
   (let ((evo.swarm::*lane-tools* nil)
@@ -291,19 +364,18 @@
 
 (defun test-sample-config ()
   "docs/examples/swarm.lisp is what people copy: it must load as shipped."
-  (let ((evo.swarm::*worker-inits* (copy-alist evo.swarm::*worker-inits*))
-        (evo.util:*settings* (copy-list evo.util:*settings*)))
+  (let ((evo.util:*settings* (copy-list evo.util:*settings*))
+        (evo.swarm::*lane-forms* nil))
     (let ((*package* (find-package :evo.user)))
       (load (merge-pathnames "docs/examples/swarm.lisp" (uiop:getcwd))))
-    (check "sample swarm.lisp: adds its generator after the baseline"
-           (equal '(:baseline :project-tools) (worker-inits)))
     (check "sample swarm.lisp: sets the lane count"
            (eql 4 (setting :swarm-workers)))))
 
 (defun run-all ()
   (let ((*pass* 0) (*fail* 0))
     (test-baseline)
-    (test-generators)
+    (test-in-lanes)
+    (test-model-fill-in)
     (test-tool-limits)
     (test-notes)
     (test-events)

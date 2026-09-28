@@ -2,66 +2,47 @@
 ;;;; ~/.evo/swarm.lisp (every swarm) or <project>/.evo/swarm.lisp (this
 ;;;; project's swarms) and edit.  See docs/swarm.md.
 ;;;;
-;;;; evo-swarm evaluates ~/.evo/swarm.lisp then <project>/.evo/swarm.lisp in
-;;;; the coordinator's image, after init.lisp, the extensions and
-;;;; post-init.lisp.  Like init.lisp it is Lisp, not data: what a lane becomes
-;;;; is a program.  Each lane boots as `evo serve --no-userspace` — kernel and
-;;;; core extensions only — and then evaluates, in order, the forms returned by
-;;;; every worker-init GENERATOR: a function of the lane and the swarm.  The
-;;;; default generator, :BASELINE, gives each lane the coordinator's models and
-;;;; providers (keys by environment-variable name only), its model and
-;;;; thinking level, the `report` tool and the lane's prompt note.
+;;;; evo-swarm reads this in the coordinator, as the last step of the files
+;;;; evo itself reads (init.lisp, extensions, post-init.lisp) — and again on
+;;;; /reload.  Plain `evo` never reads it.  It configures the swarm: the
+;;;; coordinator's own setup for the swarm, how many lanes, what the lanes run
+;;;; beyond what they inherit, and how the coordinator shapes them.
+
+;;; The coordinator.  Any init.lisp call works here and overrides your init
+;;; files for the swarm only.  Lanes inherit the coordinator's providers,
+;;; models, model and thinking level.
+;; (evo:set-setting :model "claude-opus-5")
+;; (evo:set-setting :thinking :high)
 
 ;;; How many lanes, when --workers is not given (default 6).
 (evo:set-setting :swarm-workers 4)
 
-;;; Add to every lane: here, an extension file of project tools.  Generators
-;;; return FORMS, evaluated in the lane (package EVO.USER) — so anything a
-;;; lane should have can be expressed, and nothing in the coordinator's image
-;;; leaks into it by accident.
-(evo.swarm:add-worker-init :project-tools
-  (lambda (lane swarm)
-    (declare (ignore lane swarm))
-    (let ((tools (merge-pathnames ".evo/lane-tools.lisp" (uiop:getcwd))))
-      (when (probe-file tools)
-        `((evo:load-extension ,(namestring tools)))))))
+;;; Code every lane evaluates — not here, in each lane — before it gets any
+;;; work and whenever it restarts.  LANE is bound to the lane's number
+;;; (1..LANES), LANES to the lane count; name only what you use, or () for
+;;; neither.  Needed whenever the coordinator's models or tools come from an
+;;; extension: with Claude OAuth, for one, the extension defines the API its
+;;; models use, and a lane without it cannot register them.  Keys: use
+;;; :api-key-env, never a literal :api-key — these forms run in the lane as
+;;; written.
+;; (evo.swarm:in-lanes (lane lanes)
+;;   (load "~/.evo/extensions/020-claude-oauth-provider.lisp")
+;;   (when (<= lane 2)
+;;     (evo:set-setting :model "claude-sonnet-5")))
 
-;;; Different lanes, different setups: odd lanes also get a cheaper default
-;;; model for routine work (it must be registered in init.lisp, and the
-;;; baseline registers every model the coordinator knows).
-;; (evo.swarm:add-worker-init :cheap-odd-lanes
-;;   (lambda (lane swarm)
-;;     (declare (ignore swarm))
-;;     (when (oddp (evo.swarm:lane-n lane))
-;;       '((evo:set-setting :model "claude-sonnet-5")))))
-
-;;; An MCP server for every lane: install the extension's registration the
-;;; same way it would be installed in init.lisp.
-;; (evo.swarm:add-worker-init :mcp
-;;   (lambda (lane swarm)
-;;     (declare (ignore lane swarm))
-;;     '((evo:load-extension "/home/me/.evo/extensions/500-mcp.lisp"))))
-
-;;; Tool limits.  The coordinator has every tool unless limited; lanes too.
-;;; The report tool is always kept for lanes.
+;;; Tool limits for the lanes: every lane, or the ones named.  The report tool
+;;; is always kept.
 ;; (evo.swarm:set-lane-tools '("read" "write" "edit" "bash" "wait" "todo"))
-;; (evo.swarm:set-lane-tools '("read" "bash") :lanes '(5 6))  ; read-only-ish lanes
+;; (evo.swarm:set-lane-tools '("read" "bash") :lanes '(5 6))
+
+;;; The lanes' prompt note: a FORMAT control taking the lane's number, its
+;;; number again, the lane count, and a sentence on where it works.
+;; (evo.swarm:set-worker-note
+;;  "## Swarm lane ~d~%You are lane ~d of ~d. ~a Run the tests before you report done.~%")
+
+;;; The coordinator itself: its tools and its prompt note (a FORMAT control
+;;; taking the lane count).
 ;; (evo.swarm:set-coordinator-tools '("read" "bash" "lanes" "delegate" "steer_lane"
 ;;                                    "interrupt_lane" "interrupt_and_steer" "lane_command"
 ;;                                    "lane_eval" "lane_transcript" "lane_reports"
 ;;                                    "restart_lane" "lane_worktree"))
-
-;;; Behavior lives in prompt notes.  Replace either wholesale; each is a FORMAT
-;;; control: the coordinator's takes the lane count, a lane's takes its number,
-;;; its number again, the lane count, and a sentence about where it works.
-;; (evo.swarm:set-worker-note
-;;  "## Swarm lane ~d~%You are lane ~d of ~d. ~a Report with the `report` tool
-;; after every commit, and run the tests before you report done.~%")
-
-;;; Or build lanes from scratch: drop the baseline and supply your own — but
-;;; then providers, models and the report tool are yours to give them.
-;; (evo.swarm:remove-worker-init :baseline)
-;; (evo.swarm:add-worker-init :mine
-;;   (lambda (lane swarm)
-;;     (append (evo.swarm:default-worker-init lane swarm)
-;;             '((evo:register-prompt-note "house-rules" "Never push to main.")))))
