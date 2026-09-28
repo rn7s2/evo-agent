@@ -815,6 +815,11 @@ one out of the supervisor.)"
     (setf (evo.serve::request-headers resumable) '(("last-event-id" . "99")))
     (check "routes: Last-Event-ID wins over ?since"
            (eql 99 (evo.swarm::request-cursor resumable)))
+    (check "routes: a bad or negative event cursor is invalid"
+           (and (eq :invalid (evo.swarm::request-cursor
+                              (get-request "/x" :query '(("since" . "abc")))))
+                (eq :invalid (evo.swarm::request-cursor
+                              (get-request "/x" :query '(("since" . "-1")))))))
     (check "routes: ?limit follows serve's non-negative integer contract"
            (and (eql 5 (evo.swarm::request-limit
                         (get-request "/x" :query '(("limit" . "5")))))

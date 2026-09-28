@@ -354,6 +354,20 @@ def lane_secrets(home):
     return out
 
 
+def tree_secret_leaks(home):
+    """Files under EVO_HOME (except the deliberate init source) containing the
+literal provider secret."""
+    leaks = []
+    for path in glob.glob(os.path.join(home, "**", "*"), recursive=True):
+        if os.path.isfile(path) and path != os.path.join(home, "init.lisp"):
+            try:
+                if SECRET in open(path, errors="replace").read():
+                    leaks.append(path)
+            except OSError:
+                pass
+    return leaks
+
+
 def wait_for(predicate, timeout=30, interval=0.1):
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -457,6 +471,9 @@ def main():
             check("every lane is gone after shutdown",
                   wait_for(lambda: all(lane_health(d) is None for d in dirs), 30),
                   [(d, lane_health(d)) for d in dirs])
+            leaks = tree_secret_leaks(home)
+            check("no provider secret is written to a journal, log or lane file",
+                  not leaks, leaks)
             check("the token file is removed on clean exit", not os.path.exists(first.token_file))
 
             # --- --resume restores the swarm -------------------------------------
@@ -565,6 +582,10 @@ def run_first(swarm, stub, home, work):
           c.post("/lanes/1/transcript")[0] == 405)
     check("an unknown lane's transcript is 404", c.get("/lanes/99/transcript")[0] == 404)
     check("an unknown lane's events is 404", c.get("/lanes/99/events")[0] == 404)
+    check("a bad lane-event cursor is 400 before streaming",
+          c.get("/lanes/1/events?since=abc")[0] == 400)
+    check("a negative lane-event cursor is 400 before streaming",
+          c.get("/lanes/1/events?since=-1")[0] == 400)
 
     # --- a prompt is delegated to a lane -------------------------------------
     t0 = time.time()
