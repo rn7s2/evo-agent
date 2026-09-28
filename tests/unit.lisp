@@ -7597,14 +7597,22 @@ became zero after the first reload."
     (check "route: re-adding a path and method replaces the route"
            (progn (evo.serve:add-route "/widgets/" :get 'widget-get-again :prefix t)
                   (eq 'widget-get-again (evo.serve:route-request "GET" "/widgets/3"))))
-    (check "route: a server takes its own route table"
+    (check "route: a server's routes extend the built-ins"
            (let* ((table (list (evo.serve:make-route "/own" :get 'own-handler)))
-                  (server (evo.serve:make-server :token "t" :routes table)))
-             (and (eq 'own-handler
-                      (evo.serve:route-request "GET" "/own" (evo.serve:server-routes server)))
-                  (eql 404 (nth-value 1
-                            (evo.serve:route-request "GET" "/widgets/3"
-                                                     (evo.serve:server-routes server)))))))
+                  (server (evo.serve:make-server :token "t" :routes table))
+                  (routes (evo.serve:server-routes server)))
+             (and (eq 'own-handler (evo.serve:route-request "GET" "/own" routes))
+                  (eq 'evo.serve::handle-health
+                      (evo.serve:route-request "GET" "/health" routes))
+                  (eq 'widget-get-again
+                      (evo.serve:route-request "GET" "/widgets/3" routes)))))
+    (check "route: dispatch never mutates a caller's prefix table"
+           (let* ((table (list (evo.serve:make-route "/x" :get 'short :prefix t)
+                               (evo.serve:make-route "/x/deep" :get 'deep :prefix t)))
+                  (before (copy-list table)))
+             (evo.serve:route-request "GET" "/x/deep/1" table)
+             (and (equal before table)
+                  (eq 'deep (evo.serve:route-request "GET" "/x/deep/1" table)))))
     (check "route: a server built before a route still sees it added later"
            (let ((server (evo.serve:make-server :token "t")))
              (evo.serve:add-route "/added-later/" :get 'later-handler :prefix t)
@@ -7672,6 +7680,17 @@ became zero after the first reload."
     (evo.serve::handle-health (evo.serve:make-server :token "t") nil nil out)
     (check "identity: the default features are an empty array"
            (equalp #() (getf (evo.serve:decode-json (response-body (response-text out))) :features))))
+  (check "read: a non-integer limit is 400"
+         (eql 400 (http-status-of
+                   (lambda () (evo.serve::query-limit
+                               (evo.serve::%make-request :query '(("limit" . "abc"))))))))
+  (check "read: a negative limit is 400"
+         (eql 400 (http-status-of
+                   (lambda () (evo.serve::query-limit
+                               (evo.serve::%make-request :query '(("limit" . "-1"))))))))
+  (check "read: zero is a valid limit"
+         (zerop (evo.serve::query-limit
+                 (evo.serve::%make-request :query '(("limit" . "0"))))))
   (let ((server (evo.serve:make-server :token "sekrit")))
     (flet ((auth (header)
              (evo.serve::authorized-p

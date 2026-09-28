@@ -30,11 +30,12 @@ alist) but not its own accessor, so the lookup lives here."
   (cdr (assoc name (evo.serve:request-query request) :test #'string=)))
 
 (defun request-limit (request)
-  "The client's ?limit=, or NIL."
-  (and request
-       (ignore-errors
-         (let ((text (serve-query request "limit")))
-           (and text (parse-integer text))))))
+  "The client's ?limit=, NIL when absent, or :INVALID."
+  (let ((text (and request (serve-query request "limit"))))
+    (cond ((null text) nil)
+          ((let ((n (ignore-errors (parse-integer text))))
+             (and n (not (minusp n)) n)))
+          (t :invalid))))
 
 (defun request-cursor (request)
   "The client's resume cursor: Last-Event-ID, then ?since=N, else :LIVE — a
@@ -83,14 +84,15 @@ however the route was reached."
 (defun handle-swarm-lane-transcript (server request body stream)
   "GET /lanes/N/transcript — lane N's context, decoded."
   (declare (ignore server body))
-  (let ((n (route-lane (route-path request))))
+  (let ((n (route-lane (route-path request)))
+        (limit (request-limit request)))
     (cond
       ((null n) (evo.serve:write-error stream 400 "a lane number is required"))
+      ((eq limit :invalid) (evo.serve:write-error stream 400 "limit must be an integer"))
       ((null (find-lane n)) (evo.serve:write-error stream 404 (format nil "no lane ~d" n)))
       (t (handler-case
              (evo.serve:write-json stream 200
-                                   (lane-transcript (find-lane n)
-                                                    :limit (request-limit request)))
+                                   (lane-transcript (find-lane n) :limit limit))
            (lane-error (e) (evo.serve:write-error stream 502 (format nil "~a" e))))))))
 
 (defun handle-swarm-lane-events (server request body stream)

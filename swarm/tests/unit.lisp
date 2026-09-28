@@ -780,13 +780,13 @@ one out of the supervisor.)"
                (check "relay: the last id relayed is returned"
                       (eql 8 (copy-lane-events in out))))))
          (text (flexi-streams:octets-to-string sequence)))
-    (check "relay: ids, types and data are copied through unchanged"
-           (and (search "id: 7" text)
+    (check "relay: ids, types, data and keepalive comments are copied through"
+           (and (search ": hello" text)
+                (search "id: 7" text)
                 (search "event: report" text)
                 (search "data: {\"done\":\"x\"}" text)
                 (search "id: 8" text)
-                (search "event: settled" text)
-                (not (search ": hello" text))))))
+                (search "event: settled" text)))))
 
 (defun test-swarm-route-parsing ()
   (check "routes: the lane number comes out of the path"
@@ -815,9 +815,15 @@ one out of the supervisor.)"
     (setf (evo.serve::request-headers resumable) '(("last-event-id" . "99")))
     (check "routes: Last-Event-ID wins over ?since"
            (eql 99 (evo.swarm::request-cursor resumable)))
-    (check "routes: ?limit is read when there is one"
+    (check "routes: ?limit follows serve's non-negative integer contract"
            (and (eql 5 (evo.swarm::request-limit
                         (get-request "/x" :query '(("limit" . "5")))))
+                (eql 0 (evo.swarm::request-limit
+                        (get-request "/x" :query '(("limit" . "0")))))
+                (eq :invalid (evo.swarm::request-limit
+                              (get-request "/x" :query '(("limit" . "-1")))))
+                (eq :invalid (evo.swarm::request-limit
+                              (get-request "/x" :query '(("limit" . "abc")))))
                 (null (evo.swarm::request-limit fresh))))))
 
 (defun test-swarm-route-registration ()

@@ -43,24 +43,24 @@ handler.")
         (make-route "/load-extension" :post 'handle-load-extension)
         (make-route "/shutdown" :post 'handle-shutdown))
   "The program-wide route table: PATH, METHOD, handler (a function of SERVER
-REQUEST BODY STREAM).  Every server dispatches through it unless MAKE-SERVER
-:ROUTES gave it its own; a program adds routes with ADD-ROUTE.")
+REQUEST BODY STREAM).  Every server dispatches through it, after any routes
+passed to MAKE-SERVER :ROUTES; a program adds routes with ADD-ROUTE.")
 
 (defun add-route (path method handler &key prefix)
-  "Add a route to the program-wide table — the one every server dispatches
-through unless MAKE-SERVER :ROUTES gave it its own.  METHOD (:GET or :POST) on
+  "Add a route to the program-wide table.  METHOD (:GET or :POST) on
 PATH runs HANDLER, a function designator of SERVER REQUEST BODY STREAM.  PREFIX
 makes it a prefix route — \"/widgets/\" also takes \"/widgets/3/state\" — and its
 handler reads the rest of the path from *ROUTE-TAIL*.  Re-adding a PATH and
 METHOD replaces it, so reloading a file of routes does not stack copies.
-Returns the new route."
+Registration is safe while servers are running.  Returns the new route."
   (let ((route (make-route (string-right-trim "/" (string path)) method handler
                            :prefix prefix)))
-    (setf *routes*
-          (cons route (remove-if (lambda (other)
-                                   (and (string= (route-path other) (route-path route))
-                                        (eq (route-method other) (route-method route))))
-                                 *routes*)))
+    (bt:with-lock-held (*routes-lock*)
+      (setf *routes*
+            (cons route (remove-if (lambda (other)
+                                     (and (string= (route-path other) (route-path route))
+                                          (eq (route-method other) (route-method route))))
+                                   *routes*))))
     route))
 
 (defun route-match (route path)
@@ -81,8 +81,8 @@ path on either side."
   "ROUTES as dispatch tries them: exact matches in table order, then prefix
 matches longest pattern first, so the most specific route wins."
   (append (remove-if #'route-prefix-p routes)
-          (sort (remove-if-not #'route-prefix-p routes)
-                #'> :key (lambda (route) (length (route-path route))))))
+          (stable-sort (copy-list (remove-if-not #'route-prefix-p routes))
+                       #'> :key (lambda (route) (length (route-path route))))))
 
 (defun route-request (method path &optional (routes *routes*))
   "The handler for METHOD and PATH in ROUTES: (values HANDLER NIL TAIL), or
@@ -371,8 +371,11 @@ its pictures; POST /eval can fetch one if it is really wanted."
 
 (defun query-limit (request)
   (let ((text (request-query-param request "limit")))
-    (and text (or (ignore-errors (parse-integer text))
-                  (http-fail 400 "limit must be an integer")))))
+    (when text
+      (let ((n (ignore-errors (parse-integer text))))
+        (unless (and n (not (minusp n)))
+          (http-fail 400 "limit must be a non-negative integer"))
+        n))))
 
 (defun handle-transcript (server request body stream)
   "The LLM context the next turn sends: the fold's messages."

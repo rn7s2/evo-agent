@@ -85,9 +85,11 @@ what the coordinator's subscription does — resume after LANE's cursor."
                             (when proxy (list :proxy proxy)))
        :external-format (flexi-streams:make-external-format :utf-8 :eol-style :lf)))))
 
-(defun read-sse-events (stream fn)
-  "Call FN with (ID TYPE DATA) for each event on STREAM until it ends.  The
-kernel's MAP-SSE-EVENTS drops ids; a lane's cursor is made of them."
+(defun read-sse-events (stream fn &key on-comment)
+  "Call FN with (ID TYPE DATA) for each event on STREAM until it ends.  When
+ON-COMMENT is given, call it with each SSE comment's text; relays use that to
+preserve keepalives.  The kernel's MAP-SSE-EVENTS drops ids, but a lane's cursor
+is made of them."
   (let ((id nil) (type nil) (data nil))
     (loop for line = (read-line stream nil nil)
           while line
@@ -96,7 +98,9 @@ kernel's MAP-SSE-EVENTS drops ids; a lane's cursor is made of them."
                       (when data
                         (funcall fn id type (format nil "~{~a~^~%~}" (nreverse data))))
                       (setf id nil type nil data nil))
-                     ((string-prefix-p ":" line))
+                     ((string-prefix-p ":" line)
+                      (when on-comment
+                        (funcall on-comment (string-left-trim " " (subseq line 1)))))
                      ((string-prefix-p "id:" line)
                       (setf id (ignore-errors
                                  (parse-integer (string-trim " " (subseq line 3))))))

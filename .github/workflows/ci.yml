@@ -143,6 +143,13 @@ jobs:
         if: matrix.lisp == 'sbcl'
         run: tests/swarm-e2e.py build
 
+      # The same swarm with no terminal: the coordinator is driven through
+      # serve's HTTP/SSE protocol, while the GUI-only lane surface is checked
+      # for identity, read-only access, event resumption and clean shutdown.
+      - name: served swarm end-to-end test
+        if: matrix.lisp == 'sbcl'
+        run: tests/swarm-serve-e2e.py build
+
   # Windows is SBCL-only (src/port/port.lisp: the ECL branches are Unix
   # facilities with no Windows twin).  It builds, runs the portable unit suite
   # and smoke-tests the artifact — the same guard the Unix job gives, now that

@@ -96,7 +96,7 @@ identical events.  A no-op under a frontend with no event stream (the TUI)."
 (defun lane-transcript (lane &key limit)
   "The messages LANE's next turn would send, as serve replied — read-only."
   (multiple-value-bind (status reply)
-      (lane-get lane (if (and limit (plusp limit))
+      (lane-get lane (if limit
                          (format nil "/transcript?limit=~d" limit)
                          "/transcript"))
     (lane-ok lane status reply "transcript")
@@ -115,7 +115,9 @@ id relayed.  Ends when either side does."
                      (lambda (id type data)
                        (evo.serve:write-sse-event out type data :id id)
                        (when (and id (or (null last) (> id last)))
-                         (setf last id))))
+                         (setf last id)))
+                     :on-comment (lambda (text)
+                                   (evo.serve:write-sse-comment out text)))
     last))
 
 (defun relay-lane-events (lane out &key since)

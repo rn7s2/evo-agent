@@ -383,11 +383,11 @@ or for one server (`evo.serve:make-server :identity`); a route handler reads
 it back with `evo.serve:server-identity`.
 
 **Routes.** The program brings its own endpoints, and serve serves them from
-the same listener, under the same bearer token and the same session thread as
-the ones above. `evo.serve:add-route` adds one — or `make-server :routes`
-gives a server its own table; a server with no table of its own follows the
-program-wide one, so a route added after it was built still reaches it. A
-route is an **exact path** (`/lanes`) or a **prefix**, with `:prefix t` and a
+the same listener, under the same bearer token and HTTP limits as the ones
+above. `evo.serve:add-route` adds one — or `make-server :routes` gives one
+server extra routes considered before the built-ins, so it can override a
+specific path without losing the unchanged protocol. Program-wide routes added
+after a server was built still reach it. A route is an **exact path** (`/lanes`) or a **prefix**, with `:prefix t` and a
 pattern like `/lanes/`, so one route can answer a family of paths: what
 followed the pattern arrives in `evo.serve:*route-tail*` (`/lanes/3/transcript`
 through `/lanes/` is `3/transcript`), and the handler works the rest out. A
