@@ -7477,7 +7477,7 @@ became zero after the first reload."
 ;;; evo serve: the event mapping, HTTP parsing and routing, the event log.
 
 (defun octets-of (string)
-  (flexi-streams:string-to-octets string :external-format :utf-8))
+  (flexi-streams:string-to-octets string :external-format evo.serve::+utf-8+))
 
 (defun request-from (text)
   (evo.serve:read-request (flexi-streams:make-in-memory-input-stream (octets-of text))))
@@ -7590,19 +7590,31 @@ became zero after the first reload."
   (let* ((out (flexi-streams:make-in-memory-output-stream))
          (_ (evo.serve:write-response out 409 "{\"ok\":false}"))
          (text (flexi-streams:octets-to-string (flexi-streams:get-output-stream-sequence out)
-                                               :external-format :utf-8)))
+                                               :external-format evo.serve::+utf-8+)))
     (declare (ignore _))
     (check "http: status line" (string-prefix-p (format nil "HTTP/1.1 409 Conflict~c~%" #\Return) text))
     (check "http: length and close headers"
            (and (search "Content-Length: 12" text) (search "Connection: close" text)))
     (check "http: the body follows a blank line"
            (search (format nil "~c~%~c~%{\"ok\":false}" #\Return #\Return) text)))
+  ;; Windows: flexi-streams' default eol-style is CRLF there.  The framing
+  ;; must not depend on it — checked here by forcing it everywhere.
+  (let ((flexi-streams:*default-eol-style* :crlf))
+    (let ((out (flexi-streams:make-in-memory-output-stream)))
+      (evo.serve:write-response out 200 "{}")
+      (check "http: a CRLF-default platform still frames with one CR per line"
+             (not (search (coerce '(#\Return #\Return) 'string)
+                          (map 'string #'code-char
+                               (flexi-streams:get-output-stream-sequence out))))))
+    (check "http: ...and still parses a request"
+           (equal "/state" (evo.serve:request-path
+                            (request-from (crlf "GET /state HTTP/1.1" "Host: x" ""))))))
   (let* ((out (flexi-streams:make-in-memory-output-stream)))
     (evo.serve::write-sse-event out "text-delta" "{\"a\":1}" :id 42)
     (check "http: an SSE event is id, event, data, blank line"
            (equal (format nil "id: 42~%event: text-delta~%data: {\"a\":1}~%~%")
                   (flexi-streams:octets-to-string (flexi-streams:get-output-stream-sequence out)
-                                                  :external-format :utf-8))))
+                                                  :external-format evo.serve::+utf-8+))))
   ;; Routing and auth.
   (check "route: GET /state"
          (eq 'evo.serve::handle-state (evo.serve:route-request "GET" "/state")))
