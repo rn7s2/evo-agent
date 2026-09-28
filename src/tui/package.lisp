@@ -6,7 +6,15 @@
 
 (defpackage :evo.tui
   (:use :cl :evo.util :evo.journal :evo.provider :evo.kernel)
-  (:export #:start-tui
+  ;; Display helpers the command layer owns and the TUI renders with.
+  (:import-from :evo.command
+                #:format-tool-call-plain #:tool-arg-value
+                #:*tool-key-args* #:*tool-call-max-width*
+                #:format-context-window #:model-row-label #:entry-label
+                #:message-text-block #:first-user-prompt
+                #:resume-summary-text #:resume-select-items
+                #:*resume-summary-max-chars* #:export-image #:template-names)
+  (:export #:start-tui #:tui-frontend
            ;; Status line composition — the supported way for an extension to
            ;; claim a piece of the bottom line (see docs/extension-api.md).
            ;; A segment returns styled text; DIM is the muted style the core

@@ -97,11 +97,12 @@ half-working notifier is worse than an honest refusal."
   (let ((v (evo:setting :baby-evo-reply t)))
     (and (not (null v)) t)))
 
-(defvar *baby-evo-interactive-p* (lambda () (evo.tui:tui-live-p))
-  "True when an interactive frontend that can act on a queued reply is up.
-A reply banner posted into a headless session would outlive the process and
-swallow whatever is typed into it, so headless gets the plain banner.  A
-variable so the tests can simulate both frontends.")
+(defvar *baby-evo-interactive-p* (lambda () (evo:frontend-interactive-p))
+  "True when an interactive frontend that can act on a queued reply is up —
+the core's frontend protocol, answered by whichever frontend runs.  A reply
+banner posted into a headless session (print mode, `evo serve`) would outlive
+the person it asks, so headless gets the plain banner.  A variable so the
+tests can simulate both frontends.")
 
 (defun baby-evo-reply-possible-p ()
   "True when a reply-capable banner can be posted right now: terminal-notifier
@@ -396,7 +397,7 @@ timeout exits 6 with @TIMEOUT, a click prints @ACTIONCLICKED, a close @CLOSED."
           (t trimmed))))
 
 (defvar *baby-evo-run-requester*
-  (lambda (text) (evo.tui:request-run :text text))
+  (lambda (text) (evo:request-run :text text))
   "How a queued reply asks the frontend to start a run that consumes it.
 Called with the reply text, which the frontend echoes as the user's
 submission.  A variable so the tests can count requests without a TUI.")

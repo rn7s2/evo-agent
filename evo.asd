@@ -58,19 +58,26 @@
                               :components ((:file "lang-en")
                                            (:file "todo")
                                            (:file "memory")
-                                           (:file "eval")))))))
+                                           (:file "eval")))
+                             ;; The command layer every frontend dispatches
+                             ;; through — core, because what a command does
+                             ;; must not depend on where it was typed.
+                             (:module "command"
+                              :serial t
+                              :components ((:file "command")))))))
 
 (asdf:defsystem "evo"
   :description "evo — a goal-oriented, self-evolving agent."
   :author "evo-agent"
   :license "MIT"
   :version "0.1.0"
-  :depends-on ("evo/core" "bordeaux-threads" "flexi-streams")
+  :depends-on ("evo/core" "bordeaux-threads" "flexi-streams" "usocket")
   :serial t
   :components ((:module "src"
                 :serial t
                 ;; The frontends, each defining its own package on top of the
-                ;; core's: the TUI first, then the CLI that composes the two.
+                ;; core's: the TUI, the HTTP server, then the CLI that
+                ;; composes them.
                 :components ((:module "tui"
                               :serial t
                               :components ((:file "package")
@@ -82,6 +89,14 @@
                                            (:file "markdown")
                                            (:file "tui")
                                            (:file "commands")))
+                             (:module "serve"
+                              :serial t
+                              :components ((:file "package")
+                                           (:file "json")
+                                           (:file "http")
+                                           (:file "events")
+                                           (:file "server")
+                                           (:file "routes")))
                              (:module "cli"
                               :serial t
                               :components ((:file "package")

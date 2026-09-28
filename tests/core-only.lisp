@@ -9,7 +9,7 @@
 (push (uiop:getcwd) asdf:*central-registry*)
 (ql:quickload "evo/core" :silent t)
 
-(let ((leaked (remove-if-not #'find-package '(:evo.tui :evo.cli))))
+(let ((leaked (remove-if-not #'find-package '(:evo.tui :evo.serve :evo.cli))))
   (if leaked
       (format t "~&core-only: FAIL — loading evo/core also loaded ~{~a~^, ~}~%"
               leaked)

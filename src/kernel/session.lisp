@@ -55,3 +55,57 @@ to the registry).  Journaled, so it survives a restart and a compaction."
 turns."
   (append-entry (agent-journal agent)
                 (list :type :thinking-change :thinking level)))
+
+(defun end-session (agent)
+  "Announce :session-end for AGENT — the session is going away.  Every
+frontend calls this once on its way out (the TUI on quit, print and event mode
+when the run settles, serve on shutdown), BEFORE it stops its task, so
+anything an extension holds open on the user's behalf comes down while the
+session still owns it."
+  (run-hooks :session-end (list :agent agent))
+  agent)
+
+;;; The frontend protocol.
+;;;
+;;; Some extensions produce input off-thread (a notification's reply field) or
+;;; exist only for a person looking at a terminal (a LaTeX renderer's prompt
+;;; note, a status-line poller).  They need two answers from whatever frontend
+;;; this session runs under, and the core cannot name one: is a human attached,
+;;; and will somebody start a run for input queued outside a run?  A frontend
+;;; answers by specializing these generics on its own object and binding
+;;; *FRONTEND* to it before the session boots, so an extension's load-time
+;;; decision already sees it.  No frontend (print mode, event mode, a bare
+;;; core in the unit suite) answers NIL to both.
+
+(defvar *frontend* nil
+  "The frontend object this session runs under, or NIL for none.  Set by the
+CLI before BOOT-SESSION; read through the two generics below.")
+
+(defgeneric frontend-interactive-p (frontend)
+  (:documentation "True when FRONTEND puts a human at a terminal in front of
+the session (the TUI).  A remote-controlled or scripted frontend answers NIL.")
+  (:method ((frontend t)) nil))
+
+(defgeneric frontend-request-run (frontend &key text)
+  (:documentation "Ask FRONTEND to start a run for steering ALREADY QUEUED on
+the agent (EVO:STEER).  TEXT, when given, is what the frontend may show as the
+user's submission.  Returns true when the request was accepted, NIL when this
+frontend cannot start runs for off-thread input.  Safe from any thread.")
+  (:method ((frontend t) &key text)
+    (declare (ignore text))
+    nil))
+
+(in-package :evo)
+
+(defun frontend-interactive-p ()
+  "True when a human sits at an interactive frontend (the TUI) — the question
+to ask before offering something only a person at a terminal can use: a reply
+field, a rendered formula, a poller that only feeds the status line."
+  (and (evo.kernel:frontend-interactive-p evo.kernel:*frontend*) t))
+
+(defun request-run (&key text)
+  "Ask the session's frontend to start a run for steering already queued with
+EVO:STEER from outside a run (a background thread, a notification reply).
+TEXT is echoed as the user's submission where the frontend shows one.  Returns
+true when a frontend accepted the request, NIL when none can (print mode)."
+  (and (evo.kernel:frontend-request-run evo.kernel:*frontend* :text text) t))

@@ -28,6 +28,12 @@ Usage:
   evo --thinking <level>         low|medium|high|xhigh|max (default medium)
   evo --no-userspace             boot without init.lisp, post-init.lisp, or extensions (quarantine mode)
   evo --no-supervisor            run the session in-process, no crash-restart parent
+  evo serve [options]            headless session controlled over HTTP (docs/serve.md)
+      --host <addr>              address to bind (default 127.0.0.1)
+      --port <n>                 port to bind (default 8421; 0 picks a free one)
+      --token-file <path>        write the bearer token here (mode 0600)
+      --allow-remote             permit a non-loopback --host
+      --resume [path] --model <id> --thinking <level> --no-userspace  as above
   evo --help
 
 evo supervises itself: crashes and hangs restart the session with --resume;
@@ -44,9 +50,21 @@ models registered by extensions.  evo ships no built-in model table, e.g.
     :effort t :thinking-mode :adaptive)
   (evo:set-setting :model \"claude-opus-5\")")
 
+(defparameter *serve-default-port* 8421)
+
+(defun parse-port (text)
+  (let ((n (and text (ignore-errors (parse-integer text)))))
+    (unless (and n (<= 0 n 65535))
+      (error "--port needs a number from 0 to 65535"))
+    n))
+
 (defun parse-args (argv)
-  "Parse ARGV into a plist.  Signals on unknown flags."
+  "Parse ARGV into a plist.  Signals on unknown flags.  A leading `serve`
+selects the HTTP frontend (:serve t) and admits its own flags."
   (let ((opts nil))
+    (when (equal (first argv) "serve")
+      (pop argv)
+      (setf (getf opts :serve) t))
     (loop while argv
           for arg = (pop argv)
           do (cond
@@ -76,9 +94,26 @@ models registered by extensions.  evo ships no built-in model table, e.g.
                   (setf (getf opts :thinking) level)))
                ((string= arg "--no-userspace") (setf (getf opts :no-userspace) t))
                ((string= arg "--no-supervisor") (setf (getf opts :no-supervisor) t))
+               ((and (getf opts :serve) (string= arg "--host"))
+                (setf (getf opts :host) (or (pop argv) (error "--host needs an address"))))
+               ((and (getf opts :serve) (string= arg "--port"))
+                (setf (getf opts :port) (parse-port (pop argv))))
+               ((and (getf opts :serve) (string= arg "--token-file"))
+                (setf (getf opts :token-file) (or (pop argv) (error "--token-file needs a path"))))
+               ((and (getf opts :serve) (string= arg "--allow-remote"))
+                (setf (getf opts :allow-remote) t))
                ((member arg '("-h" "--help") :test #'string=) (setf (getf opts :help) t))
                ((string= arg "--version") (setf (getf opts :version) t))
                (t (error "Unknown argument: ~a (try --help)" arg))))
+    (when (getf opts :serve)
+      ;; serve is driven over HTTP: a prompt, an event stream on stdout or a
+      ;; goal on the command line would be a second, competing driver.
+      (dolist (flag '((:prompt . "-p") (:events . "--events") (:images . "--image")
+                      (:goal . "--goal") (:list-sessions . "--list-sessions")))
+        (when (getf opts (car flag))
+          (error "~a does not combine with serve — send it over HTTP" (cdr flag))))
+      (unless (getf opts :port)
+        (setf (getf opts :port) *serve-default-port*)))
     opts))
 
 ;;; Print-mode rendering.
@@ -174,7 +209,13 @@ models registered by extensions.  evo ships no built-in model table, e.g.
           ((getf opts :list-sessions) (cmd-list-sessions) 0)
           ;; One binary, two roles: the plain invocation is the
           ;; supervisor parent; it re-spawns this same binary as the child.
-          ((supervised-run-p opts) (supervise argv))
+          ((supervised-run-p opts)
+           ;; A serve token is minted once per launch, here in the parent,
+           ;; so a restarted child keeps the one clients already hold.
+           (when (getf opts :serve)
+             (check-serve-token opts)
+             (evo.port:setenv "EVO_SERVE_TOKEN" (evo.serve:resolve-token)))
+           (supervise argv))
           (t (run-cli opts)))
       (usage-error (e)
         (format *error-output* "evo: ~a~%" e)
@@ -231,8 +272,11 @@ where /model and /reload can fix the registry in place."
                              (and (getf opts :no-userspace)
                                   "Note: --no-userspace skips init files, so no models are registered in this mode.")))))))
 
-(defun setup-agent (opts &key events-cb)
-  "Shared session bring-up for every frontend.  Returns (values agent resumed-p)."
+(defun setup-agent (opts &key events-cb frontend)
+  "Shared session bring-up for every frontend.  Returns (values agent resumed-p).
+FRONTEND is the object answering the core's frontend protocol, bound before
+anything boots so an extension deciding at load time sees it."
+  (setf *frontend* frontend)
   (let* ((journal (resolve-journal opts))
          (resumed-p (journal-started-p journal))
          (agent (make-agent
@@ -243,7 +287,7 @@ where /model and /reload can fix the registry in place."
     (setf evo:*agent* agent)
     ;; The core locks its own packages; these two are the frontends this
     ;; binary composes it with.
-    (lock-kernel-packages :evo.cli :evo.tui)
+    (lock-kernel-packages :evo.cli :evo.tui :evo.serve)
     ;; Userspace: init files (config), extension dirs, then replay the
     ;; session's :load entries.
     (boot-session agent :resumed-p resumed-p
@@ -261,13 +305,41 @@ where /model and /reload can fix the registry in place."
   (evo.port:tty-p))
 
 (defun run-cli (opts)
-  (if (and (tty-p)
-           (not (getf opts :prompt))
-           (not (getf opts :events)))
-      ;; Interactive: the tui core extension.
-      (multiple-value-bind (agent resumed-p) (setup-agent opts)
-        (evo.tui:start-tui agent :resumed-p resumed-p))
-      (run-headless opts)))
+  (cond
+    ((getf opts :serve) (run-serve opts))
+    ((and (tty-p)
+          (not (getf opts :prompt))
+          (not (getf opts :events)))
+     ;; Interactive: the tui core extension.
+     (multiple-value-bind (agent resumed-p)
+         (setup-agent opts :frontend (make-instance 'evo.tui:tui-frontend))
+       (evo.tui:start-tui agent :resumed-p resumed-p)))
+    (t (run-headless opts))))
+
+(defun check-serve-token (opts)
+  "serve needs somewhere for its token to reach the client: a --token-file to
+write it to, or EVO_SERVE_TOKEN naming it.  With neither, the random token
+would lock everybody out, so refuse up front (exit 64)."
+  (unless (or (getf opts :token-file)
+              (plusp (length (getenv "EVO_SERVE_TOKEN"))))
+    (error 'usage-error
+           :text "serve needs a way to hand its token over: --token-file <path> (written mode 0600), or set EVO_SERVE_TOKEN")))
+
+(defun run-serve (opts)
+  "The HTTP frontend: validate the bind, bring the session up with the server
+as its frontend, then serve until POST /shutdown."
+  (check-serve-token opts)
+  (let ((host (or (getf opts :host) "127.0.0.1")))
+    (unless (or (evo.serve:loopback-host-p host) (getf opts :allow-remote))
+      (error 'usage-error
+             :text (format nil "--host ~a is not a loopback address; pass --allow-remote to expose the session (eval over HTTP is remote code execution — the token is the only gate)"
+                           host)))
+    (let ((server (evo.serve:make-server :host host
+                                         :port (getf opts :port)
+                                         :token (evo.serve:resolve-token)
+                                         :token-file (getf opts :token-file))))
+      (multiple-value-bind (agent resumed-p) (setup-agent opts :frontend server)
+        (evo.serve:serve server agent :resumed-p resumed-p)))))
 
 (defun headless-images (opts)
   "Resolve --image paths to :image content blocks.  A bad path is a usage
@@ -296,7 +368,9 @@ prompt without the image the user asked for is worse than not running."
           ((and goal (eq (pget goal :status) :active))
            (queue-steering agent (evo.kernel:goal-continuation-for agent goal)))
           (t (error 'usage-error :text "Nothing to do headless: give -p \"prompt\", --goal, or --resume a session with an active goal"))))
-      (let* ((outcome (run-until-settled agent))
+      (let* ((outcome (unwind-protect (run-until-settled agent)
+                        ;; The session ends here, whatever the outcome.
+                        (end-session agent)))
              (goal (evo.kernel:current-goal agent)))
         (when (journal-started-p journal)
           (format *error-output* "~&session: ~a~%" (namestring (journal-path journal))))

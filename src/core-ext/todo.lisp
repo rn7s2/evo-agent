@@ -45,6 +45,10 @@
       (append-entry (agent-journal evo:*agent*)
                     (list :type :custom :key "todo" :data todos))
       (run-hooks :todo-changed (list :todos todos))
+      ;; ...and an event, so every frontend (the TUI's panel, --events,
+      ;; serve's stream) sees the new list without subscribing a hook.
+      (let ((agent (or *executing-agent* evo:*agent*)))
+        (when agent (emit-event agent :type :todo-changed :todos todos)))
       (format nil "Todo list updated: ~d item~:p (~d done, ~d in progress).~%~a"
               (length todos)
               (count :done todos :key (lambda (i) (pget i :status)))
