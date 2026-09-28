@@ -54,8 +54,19 @@ a guess was right."
 Owned by the session thread; forgotten only after its thread is joined."
   id kind thread (started (get-universal-time)) (step-started nil))
 
+(defparameter *identity* (list :name "evo" :version "0.1.0" :features nil)
+  "Who this program is, as GET /health reports it: :NAME and :VERSION strings
+and :FEATURES, a list of capability names a client may negotiate on.  The
+default names this program; a program built on this server sets it — or passes
+:IDENTITY to MAKE-SERVER — so a client can tell which program answered.")
+
 (defstruct (server (:constructor %make-server))
   host port token token-file
+  ;; Who serves this session, and the routes it serves.  NIL means the
+  ;; program-wide defaults — *IDENTITY* and *ROUTES* — so a program that sets
+  ;; either after the server is built (a boot extension, say) is still heard;
+  ;; MAKE-SERVER :IDENTITY / :ROUTES pin one server to its own instead.
+  identity-override routes-override
   agent
   (log (make-event-log))
   ;; Messages to the session thread, guarded by INBOX-LOCK.  STOPPING is
@@ -69,9 +80,29 @@ Owned by the session thread; forgotten only after its thread is joined."
   (connections nil) (connections-lock (bt:make-lock "serve-connections"))
   (wrote-token-file nil))
 
-(defun make-server (&key (host "127.0.0.1") (port 8421) token token-file)
+;; The default route table lives with the routes (routes.lisp), which loads
+;; after this file; SERVER-ROUTES reads it at dispatch time.
+(declaim (special *routes*))
+
+(defun make-server (&key (host "127.0.0.1") (port 8421) token token-file
+                         identity routes)
+  "A server.  IDENTITY says who this program is (see *IDENTITY*); ROUTES gives
+one server its own table (see *ROUTES*, ADD-ROUTE).  Without them the server
+follows the program-wide defaults, including changes made after it is built."
   (%make-server :host host :port port :token (or token (resolve-token))
+                :identity-override identity
+                :routes-override routes
                 :token-file token-file))
+
+(defun server-identity (server)
+  "Who the program serving this session says it is: the server's own identity,
+or the program-wide *IDENTITY*."
+  (or (server-identity-override server) *identity*))
+
+(defun server-routes (server)
+  "The route table this server dispatches through: its own, or the
+program-wide *ROUTES* — so ADD-ROUTE reaches a server already built."
+  (or (server-routes-override server) *routes*))
 
 (defun stopping-p (server)
   (bt:with-lock-held ((server-inbox-lock server))
@@ -90,6 +121,19 @@ Owned by the session thread; forgotten only after its thread is joined."
 
 (defun say-event (server text style)
   (publish (server-log server) (list :type :output :style style :text text)))
+
+(defun server-publish (server event)
+  "Append EVENT — a plist with :type, like the kernel's own events — to this
+server's event log.  Every /events stream (and every client that reconnects
+with Last-Event-ID) sees it exactly as it sees a session event: numbered, once,
+in order.  Any thread.  Returns the event's id."
+  (publish (server-log server) event))
+
+(defun server-cursor (server)
+  "The id of the newest event in this server's log: the cursor a client resumes
+from — GET /events?since=<cursor> — and what a reply that starts work should
+hand back with it."
+  (last-event-id (server-log server)))
 
 ;;; Calls into the session thread.
 

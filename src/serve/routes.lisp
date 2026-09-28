@@ -10,33 +10,93 @@
 
 (in-package :evo.serve)
 
-(defparameter *routes*
-  '(("/health" :get handle-health)
-    ("/state" :get handle-state)
-    ("/transcript" :get handle-transcript)
-    ("/journal" :get handle-journal)
-    ("/lore" :get handle-lore)
-    ("/sessions" :get handle-sessions)
-    ("/registry" :get handle-registry)
-    ("/events" :get handle-events)
-    ("/prompt" :post handle-prompt)
-    ("/steer" :post handle-steer)
-    ("/follow-up" :post handle-follow-up)
-    ("/interrupt" :post handle-interrupt)
-    ("/command" :post handle-command)
-    ("/eval" :post handle-evaluate)
-    ("/load-extension" :post handle-load-extension)
-    ("/shutdown" :post handle-shutdown))
-  "PATH, METHOD, handler name (a function of SERVER REQUEST BODY STREAM).")
+(defstruct (route (:constructor make-route (path method handler &key prefix)))
+  "One entry in a route table.  PATH is matched exactly, or — when it is a
+prefix route — as a prefix: \"/widgets/\" also takes \"/widgets/3/state\", and what
+followed the prefix is bound to *ROUTE-TAIL* for the handler."
+  path method handler (prefix nil))
 
-(defun route-request (method path)
-  "The handler for METHOD and PATH: (values HANDLER NIL), or (values NIL
-STATUS) — 404 for an unknown path, 405 for a known path and the wrong method."
-  (let ((route (assoc (string-right-trim "/" path) *routes* :test #'string=)))
-    (cond ((null route) (values nil 404))
-          ((string-equal method (symbol-name (second route)))
-           (values (third route) nil))
-          (t (values nil 405)))))
+(defun route-prefix-p (route)
+  "T when ROUTE takes every path under its pattern rather than the whole path."
+  (route-prefix route))
+
+(defvar *route-tail* nil
+  "What followed a prefix route's pattern in the request path: \"/widgets/3/state\"
+through the route \"/widgets/\" is \"3/state\".  NIL outside a prefix route's
+handler.")
+
+(defparameter *routes*
+  (list (make-route "/health" :get 'handle-health)
+        (make-route "/state" :get 'handle-state)
+        (make-route "/transcript" :get 'handle-transcript)
+        (make-route "/journal" :get 'handle-journal)
+        (make-route "/lore" :get 'handle-lore)
+        (make-route "/sessions" :get 'handle-sessions)
+        (make-route "/registry" :get 'handle-registry)
+        (make-route "/events" :get 'handle-events)
+        (make-route "/prompt" :post 'handle-prompt)
+        (make-route "/steer" :post 'handle-steer)
+        (make-route "/follow-up" :post 'handle-follow-up)
+        (make-route "/interrupt" :post 'handle-interrupt)
+        (make-route "/command" :post 'handle-command)
+        (make-route "/eval" :post 'handle-evaluate)
+        (make-route "/load-extension" :post 'handle-load-extension)
+        (make-route "/shutdown" :post 'handle-shutdown))
+  "The program-wide route table: PATH, METHOD, handler (a function of SERVER
+REQUEST BODY STREAM).  Every server dispatches through it unless MAKE-SERVER
+:ROUTES gave it its own; a program adds routes with ADD-ROUTE.")
+
+(defun add-route (path method handler &key prefix)
+  "Add a route to the program-wide table — the one every server dispatches
+through unless MAKE-SERVER :ROUTES gave it its own.  METHOD (:GET or :POST) on
+PATH runs HANDLER, a function designator of SERVER REQUEST BODY STREAM.  PREFIX
+makes it a prefix route — \"/widgets/\" also takes \"/widgets/3/state\" — and its
+handler reads the rest of the path from *ROUTE-TAIL*.  Re-adding a PATH and
+METHOD replaces it, so reloading a file of routes does not stack copies.
+Returns the new route."
+  (let ((route (make-route (string-right-trim "/" (string path)) method handler
+                           :prefix prefix)))
+    (setf *routes*
+          (cons route (remove-if (lambda (other)
+                                   (and (string= (route-path other) (route-path route))
+                                        (eq (route-method other) (route-method route))))
+                                 *routes*)))
+    route))
+
+(defun route-match (route path)
+  "Whether ROUTE takes PATH: (values T TAIL) — TAIL what followed a prefix
+route's pattern, NIL for an exact one — or NIL.  A trailing slash is the same
+path on either side."
+  (let ((pattern (string-right-trim "/" (route-path route)))
+        (path (string-right-trim "/" (string path))))
+    (if (route-prefix-p route)
+        (cond ((string= pattern path) (values t nil))
+              ((and (plusp (length pattern))
+                    (string-prefix-p (concatenate 'string pattern "/") path))
+               (values t (subseq path (1+ (length pattern)))))
+              (t nil))
+        (when (string= pattern path) (values t nil)))))
+
+(defun route-dispatch-order (routes)
+  "ROUTES as dispatch tries them: exact matches in table order, then prefix
+matches longest pattern first, so the most specific route wins."
+  (append (remove-if #'route-prefix-p routes)
+          (sort (remove-if-not #'route-prefix-p routes)
+                #'> :key (lambda (route) (length (route-path route))))))
+
+(defun route-request (method path &optional (routes *routes*))
+  "The handler for METHOD and PATH in ROUTES: (values HANDLER NIL TAIL), or
+(values NIL STATUS NIL) — 404 for an unknown path, 405 for a known path and the
+wrong method.  An exact route beats a prefix route; among prefix routes the
+longest pattern wins.  TAIL is what followed a prefix route's pattern."
+  (let ((matched nil))
+    (dolist (route (route-dispatch-order routes))
+      (multiple-value-bind (hit tail) (route-match route path)
+        (when hit
+          (setf matched t)
+          (when (string-equal method (symbol-name (route-method route)))
+            (return-from route-request (values (route-handler route) nil tail))))))
+    (values nil (if matched 405 404) nil)))
 
 (defun authorized-p (server request)
   (let ((header (request-header request "authorization")))
@@ -60,10 +120,12 @@ body that is not an object."
     (return-from respond
       (write-response stream 401 (encode-json (list :ok 'false :error "missing or wrong bearer token"))
                       :extra-headers '(("WWW-Authenticate" . "Bearer realm=\"evo\"")))))
-  (multiple-value-bind (handler status) (route-request (request-method request)
-                                                       (request-path request))
+  (multiple-value-bind (handler status tail)
+      (route-request (request-method request) (request-path request)
+                     (server-routes server))
     (if handler
-        (funcall handler server request (request-json request) stream)
+        (let ((*route-tail* tail))
+          (funcall handler server request (request-json request) stream))
         (write-error stream status (if (= status 404) "no such endpoint" "method not allowed")))))
 
 (defun body-string (body key &key required)
@@ -266,10 +328,19 @@ run going it is simply the next prompt."
 (defun answer-read (server stream fn)
   (write-json stream 200 (call-on-session server fn)))
 
+(defun identity-json (identity)
+  "The program identity as JSON-ready fields: NAME and VERSION strings, and
+FEATURES always an array whichever way the program spelled it."
+  (list :name (getf identity :name)
+        :version (getf identity :version)
+        :features (coerce (or (getf identity :features) '()) 'vector)))
+
 (defun handle-health (server request body stream)
   (declare (ignore request body))
-  (write-json stream 200 (list :ok t :pid (evo.port:getpid)
-                               :cursor (last-event-id (server-log server)))))
+  (write-json stream 200
+              (list* :ok t :pid (evo.port:getpid)
+                     :cursor (last-event-id (server-log server))
+                     (identity-json (server-identity server)))))
 
 (defun handle-state (server request body stream)
   (declare (ignore request body))
