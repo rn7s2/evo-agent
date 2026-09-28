@@ -40,6 +40,7 @@ by the swarm's lock: the lane's subscriber thread, the coordinator's tools
 
 (defstruct (swarm (:constructor %make-swarm))
   id dir cwd workers lanes evo-binary agent
+  view               ; where its notices go and how it runs: a VIEW (view.lisp)
   (lock (bt:make-lock "evo-swarm"))
   (stopping nil))
 

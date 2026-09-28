@@ -20,7 +20,7 @@
            ;; A segment returns styled text; DIM is the muted style the core
            ;; segments wear.
            #:add-status-segment #:remove-status-segment #:status-segments
-           #:dim
+           #:dim #:short-duration
            #:request-repaint #:request-run #:tui-live-p #:post-notice
            ;; Math rendering seam — an extension installs a rasterizer here
            ;; (see extensions/300-latex-math.lisp and docs/extension-api.md).

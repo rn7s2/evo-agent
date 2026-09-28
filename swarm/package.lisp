@@ -19,4 +19,12 @@
            #:baseline-forms
            #:*swarm* #:swarm-lanes #:swarm-id #:swarm-dir
            #:lane-n #:lane-state #:lane-task #:lane-cwd #:lane-worktree
-           #:find-lane #:lane-eval #:lane-command #:tell-coordinator))
+           #:find-lane #:lane-eval #:lane-command #:tell-coordinator
+           ;; the frontend seam (view.lisp): where notices, machine events and
+           ;; the run itself go.  SWARM-VIEW is the swarm's own slot.
+           #:view #:tui-view #:serve-view #:serve-view-server
+           #:view-say #:view-repaint #:view-publish #:view-run
+           #:swarm-view #:swarm-say #:swarm-repaint #:swarm-publish #:swarm-run
+           ;; the swarm's commands, which both frontends get, and the TUI's
+           ;; own status-line segment, which only it gets (tui.lisp)
+           #:register-swarm-commands #:install-tui-observation))

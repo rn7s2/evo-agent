@@ -50,9 +50,17 @@
          (format nil "following lane ~d (read-only; your input still goes to the coordinator)~@[~%~a~]"
                  n recent))))))
 
-(defun install-tui-observation ()
-  (evo.tui:add-status-segment :swarm-lanes #'lanes-segment :side :right :order 300)
+(defun register-swarm-commands ()
+  "The coordinator's swarm commands, for every frontend — over HTTP they are
+POST /command {\"text\": \"/lanes\"}.  Separate from INSTALL-TUI-OBSERVATION, so
+a coordinator with no screen still has them."
   (evo:register-command "lanes" #'lanes-command
                         :description "list the swarm's lanes: state, step clock, task")
   (evo:register-command "lane" #'lane-view-command
                         :description "follow lane N's transcript live (read-only); /lane off"))
+
+(defun install-tui-observation ()
+  "What the TUI has that a headless coordinator does not: a segment on the
+status line.  Commands are not the TUI's (REGISTER-SWARM-COMMANDS) — a
+segment is a screen."
+  (evo.tui:add-status-segment :swarm-lanes #'lanes-segment :side :right :order 300))
