@@ -38,14 +38,15 @@ alist) but not its own accessor, so the lookup lives here."
           (t :invalid))))
 
 (defun request-cursor (request)
-  "The client's resume cursor: Last-Event-ID, then ?since=N, else :LIVE — a
-fresh client tails the lane rather than replaying its whole log."
-  (or (and request
-           (ignore-errors
-             (let ((text (or (evo.serve:request-header request "last-event-id")
-                             (serve-query request "since"))))
-               (and text (parse-integer text)))))
-      :live))
+  "The client's resume cursor: Last-Event-ID, then ?since=N, else :LIVE.  A
+present cursor must be a non-negative integer; otherwise return :INVALID."
+  (let ((text (and request
+                   (or (evo.serve:request-header request "last-event-id")
+                       (serve-query request "since")))))
+    (cond ((null text) :live)
+          ((let ((n (ignore-errors (parse-integer text))))
+             (and n (not (minusp n)) n)))
+          (t :invalid))))
 
 (defun route-path (request)
   "The part of REQUEST's path below the /lanes prefix, \"\" for the bare
@@ -99,16 +100,20 @@ however the route was reached."
   "GET /lanes/N/events — lane N's own event stream, relayed live."
   (declare (ignore server body))
   (let* ((n (route-lane (route-path request)))
-         (lane (and n (find-lane n))))
+         (lane (and n (find-lane n)))
+         (cursor (request-cursor request)))
     (cond
       ((null n) (evo.serve:write-error stream 400 "a lane number is required"))
+      ((eq cursor :invalid)
+       (evo.serve:write-error stream 400
+                              "Last-Event-ID / since must be a non-negative integer"))
       ((null lane) (evo.serve:write-error stream 404 (format nil "no lane ~d" n)))
       (t
        (evo.serve:write-sse-head stream)
        (evo.serve:write-sse-comment stream (format nil "lane ~d events" n))
        ;; Any failure — the lane is gone, the client left — ends the stream,
        ;; saying so in-band while the client is still there to read it.
-       (handler-case (relay-lane-events lane stream :since (request-cursor request))
+       (handler-case (relay-lane-events lane stream :since cursor)
          (error (e)
            (ignore-errors
              (evo.serve:write-sse-event
