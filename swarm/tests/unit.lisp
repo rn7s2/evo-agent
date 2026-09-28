@@ -633,6 +633,221 @@ one out of the supervisor.)"
       (evo.port:setenv "EVO_NO_SUPERVISOR" (or saved ""))
       (evo.port:setenv "EVO_SERVE_TOKEN" (or saved-token "")))))
 
+;;; The read-only HTTP API (api.lisp, routes.lisp): lane state with its cached
+;;; goal, GET /lanes, a lane's transcript, and its own event stream relayed.
+
+(defun plist-keys (value)
+  "Every keyword key anywhere in VALUE — plists, lists, vectors."
+  (cond ((and (consp value) (keywordp (car value)))
+         (loop for (k v) on value by #'cddr append (cons k (plist-keys v))))
+        ((consp value) (append (plist-keys (car value)) (plist-keys (cdr value))))
+        ((and (vectorp value) (not (stringp value)))
+         (loop for x across value append (plist-keys x)))
+        (t nil)))
+
+(defun get-request (path &key query headers)
+  (evo.serve::%make-request :method "GET" :path path :query query
+                            :headers headers :body ""))
+
+(defun rendered (fn)
+  "What FN writes to a fresh octet stream, as a string."
+  (flexi-streams:octets-to-string
+   (flexi-streams:with-output-to-sequence (out) (funcall fn out))))
+
+(defun test-lane-api ()
+  (let* ((agent (fresh-agent))
+         (*swarm* (test-swarm :agent agent))
+         (lane (first (swarm-lanes *swarm*))))
+    (note-lane-goal lane (list :goal-id "g1" :objective "ship it" :status "active"))
+    (check "api: a cached goal reaches the lane's snapshot"
+           (equal "active" (getf (getf (evo.swarm::lane-snapshot lane) :goal) :status)))
+    (note-lane-goal-status lane "complete")
+    (check "api: an event's goal status updates the cached goal"
+           (equal "complete" (cached-lane-goal-status lane)))
+    (note-lane-goal-status (second (swarm-lanes *swarm*)) "active")
+    (check "api: an event naming a goal with none cached creates one"
+           (equal "active" (cached-lane-goal-status (second (swarm-lanes *swarm*)))))
+    (let* ((body (swarm-lanes-response))
+           (lanes (getf body :lanes))
+           (info (aref lanes 0))
+           (keys (plist-keys info)))
+      (check "api: /lanes carries the swarm and one row per lane"
+             (and (= 3 (length lanes))
+                  (equal "unit" (getf (getf body :swarm) :id))
+                  (eql 0 (getf (getf body :swarm) :busy))))
+      (check "api: a lane row has its number, state, goal and clocks"
+             (and (= 1 (getf info :n))
+                  (eq :starting (getf info :state))
+                  (equal "complete" (getf (getf info :goal) :status))
+                  (member :task-age keys)
+                  (member :step-age keys)))
+      (check "api: a lane row never carries a token, url, port or dir"
+             (null (intersection '(:token :url :port :dir) keys))))))
+
+(defun test-lane-state-events ()
+  (let* ((agent (fresh-agent))
+         (evo.kernel:*frontend* nil)
+         (recording (make-instance 'recording-view))
+         (*swarm* (test-swarm :agent agent :view recording))
+         (lane (first (swarm-lanes *swarm*))))
+    (maybe-publish-lane-state lane)
+    (check "lane-state: the first shape is published through the view"
+           (let ((event (first (slot-value recording 'events))))
+             (and (eq :lane-state (getf event :type))
+                  (= 1 (getf event :lane)))))
+    (maybe-publish-lane-state lane)
+    (check "lane-state: an unchanged lane publishes nothing"
+           (= 1 (length (slot-value recording 'events))))
+    (evo.swarm::handle-lane-event lane "task-start" '(:type "task-start" :kind "run"))
+    (check "lane-state: a state change publishes again"
+           (let ((event (first (slot-value recording 'events))))
+             (and (= 2 (length (slot-value recording 'events)))
+                  (eq :working (getf event :state)))))
+    (evo.swarm::handle-lane-event lane "report"
+                                  '(:type "report" :done "did it" :goal "active"))
+    (check "lane-state: a goal status change publishes"
+           (let ((event (first (slot-value recording 'events))))
+             (and (= 3 (length (slot-value recording 'events)))
+                  (equal "active" (getf event :goal)))))
+    (evo.kernel::drain-steering agent)
+    (evo.swarm::handle-lane-event lane "settled" '(:type "settled" :outcome "stop"))
+    (check "lane-state: settling publishes the lane idle"
+           (and (= 4 (length (slot-value recording 'events)))
+                (eq :idle (getf (first (slot-value recording 'events)) :state))))
+    (evo.kernel::drain-steering agent)
+    ;; A TUI view has no event stream: publishing is a no-op, not an error.
+    (let ((*swarm* (test-swarm :agent agent)))
+      (check "lane-state: a view without a stream drops it"
+             (null (maybe-publish-lane-state lane))))))
+
+(defun test-swarm-json-handlers ()
+  (let* ((agent (fresh-agent))
+         (*swarm* (test-swarm :agent agent)))
+    (note-lane-goal (first (swarm-lanes *swarm*))
+                    (list :goal-id "g1" :objective "ship it" :status "active"))
+    (let ((text (rendered (lambda (out)
+                            (evo.swarm::handle-swarm-lanes nil nil nil out)))))
+      (check "handlers: GET /lanes writes the swarm, its lanes and their goals"
+             (and (search "\"lanes\"" text) (search "\"swarm\"" text)
+                  (search "\"goal\"" text) (search "ship it" text)
+                  (search "\"status\":\"active\"" text)))
+      (check "handlers: GET /lanes writes no token and no port key"
+             (and (not (search "\"token\"" text)) (not (search "\"port\"" text)))))
+    (check "handlers: the bare /lanes path through the prefix route is the listing"
+           (search "\"lanes\""
+                   (rendered (lambda (out)
+                               (evo.swarm::handle-swarm-lane-route
+                                nil (get-request "/lanes") nil out)))))
+    (check "handlers: an unknown action under /lanes is a JSON 404"
+           (search "no such swarm endpoint"
+                   (rendered (lambda (out)
+                               (evo.swarm::handle-swarm-lane-route
+                                nil (get-request "/lanes/3/reports") nil out)))))
+    (let ((text (rendered (lambda (out)
+                            (evo.swarm::handle-swarm-lane-transcript
+                             nil (get-request "/lanes/9/transcript") nil out)))))
+      (check "handlers: a transcript for an unknown lane is a 404 JSON error"
+             (and (search "404 Not Found" text) (search "no lane 9" text))))
+    (let ((text (rendered (lambda (out)
+                            (evo.swarm::handle-swarm-lane-transcript
+                             nil (get-request "/lanes/x/transcript") nil out)))))
+      (check "handlers: a transcript without a lane number is a 400 JSON error"
+             (and (search "400 Bad Request" text) (search "lane number" text))))
+    ;; A reply that cannot be a stream is an HTTP error, never a 200 SSE head.
+    (let ((text (rendered (lambda (out)
+                            (evo.swarm::handle-swarm-lane-events
+                             nil (get-request "/lanes/9/events") nil out)))))
+      (check "handlers: an unknown lane's events is a 404 JSON error"
+             (and (search "404 Not Found" text) (search "no lane 9" text))))
+    (let ((text (rendered (lambda (out)
+                            (evo.swarm::handle-swarm-lane-events
+                             nil (get-request "/lanes/x/events") nil out)))))
+      (check "handlers: events without a lane number is a 400, before any SSE head"
+             (and (search "400 Bad Request" text)
+                  (search "lane number" text)
+                  (not (search "text/event-stream" text)))))
+    (check "handlers: /lanes with no swarm is a JSON error"
+           (let ((*swarm* nil))
+             (search "no swarm"
+                     (rendered (lambda (out)
+                                 (evo.swarm::handle-swarm-lanes nil nil nil out))))))))
+
+(defun test-lane-event-relay ()
+  (let* ((sequence
+           (flexi-streams:with-output-to-sequence (out)
+             (with-input-from-string
+                 (in (format nil ": hello~%~%id: 7~%event: report~%data: {\"done\":\"x\"}~%~%id: 8~%event: settled~%data: {}~%~%"))
+               (check "relay: the last id relayed is returned"
+                      (eql 8 (copy-lane-events in out))))))
+         (text (flexi-streams:octets-to-string sequence)))
+    (check "relay: ids, types and data are copied through unchanged"
+           (and (search "id: 7" text)
+                (search "event: report" text)
+                (search "data: {\"done\":\"x\"}" text)
+                (search "id: 8" text)
+                (search "event: settled" text)
+                (not (search ": hello" text))))))
+
+(defun test-swarm-route-parsing ()
+  (check "routes: the lane number comes out of the path"
+         (and (eql 3 (evo.swarm::route-lane "3/transcript"))
+              (eql 12 (evo.swarm::route-lane "/12/events"))
+              (null (evo.swarm::route-lane ""))))
+  (check "routes: the action comes out of the path"
+         (and (equal "/transcript" (evo.swarm::route-action "3/transcript"))
+              (equal "/events" (evo.swarm::route-action "12/events"))
+              (null (evo.swarm::route-action "3"))))
+  (check "routes: the path below /lanes is taken whole or as a suffix"
+         (and (equal "3/events" (evo.swarm::route-path (get-request "/lanes/3/events")))
+              (equal "3/events" (evo.swarm::route-path (get-request "/3/events")))
+              (equal "" (evo.swarm::route-path (get-request "/lanes")))
+              (equal "" (evo.swarm::route-path nil))))
+  ;; What a prefix route's handler reads when the router bound it.
+  (let ((evo.serve:*route-tail* "3/events"))
+    (check "routes: a prefix route's tail is the path below /lanes"
+           (equal "3/events" (evo.swarm::route-path (get-request "/lanes/3/events")))))
+  (let ((resumable (get-request "/lanes/1/events" :query '(("since" . "42"))))
+        (fresh (get-request "/lanes/1/events")))
+    (check "routes: ?since is the resume cursor"
+           (eql 42 (evo.swarm::request-cursor resumable)))
+    (check "routes: no cursor at all tails the lane live"
+           (eq :live (evo.swarm::request-cursor fresh)))
+    (setf (evo.serve::request-headers resumable) '(("last-event-id" . "99")))
+    (check "routes: Last-Event-ID wins over ?since"
+           (eql 99 (evo.swarm::request-cursor resumable)))
+    (check "routes: ?limit is read when there is one"
+           (and (eql 5 (evo.swarm::request-limit
+                        (get-request "/x" :query '(("limit" . "5")))))
+                (null (evo.swarm::request-limit fresh))))))
+
+(defun test-swarm-route-registration ()
+  (let ((server (evo.serve:make-server :token "t"))
+        (before (length (evo.serve:server-routes (evo.serve:make-server :token "t")))))
+    (declare (ignorable server))
+    (register-swarm-routes)
+    (check "routes: registering adds one route"
+           (= (1+ before) (length (evo.serve:server-routes server))))
+    (register-swarm-routes)
+    (check "routes: re-registering replaces, never stacks"
+           (= (1+ before) (length (evo.serve:server-routes server))))
+    (multiple-value-bind (handler status tail)
+        (evo.serve:route-request "GET" "/lanes")
+      (check "routes: GET /lanes takes the swarm's handler"
+             (and (eq handler #'evo.swarm::handle-swarm-lane-route) (null tail))))
+    (multiple-value-bind (handler status tail)
+        (evo.serve:route-request "GET" "/lanes/3/transcript")
+      (check "routes: a lane's path takes it too, tail and all"
+             (and (eq handler #'evo.swarm::handle-swarm-lane-route)
+                  (equal "3/transcript" tail))))
+    (multiple-value-bind (handler status tail)
+        (evo.serve:route-request "POST" "/lanes")
+      (declare (ignore tail))
+      (check "routes: the swarm's API is read-only (POST is a 405)"
+             (and (null handler) (eql 405 status))))
+    (check "routes: the swarm says who it is, for a client that asks"
+           (equal '(:name "evo-swarm" :version "0.1.0" :features ("swarm"))
+                  *swarm-identity*))))
+
 (defun test-sse-reader ()
   (let ((seen nil))
     (with-input-from-string
@@ -663,6 +878,12 @@ one out of the supervisor.)"
     (test-notes)
     (test-coordinator-tools)
     (test-events)
+    (test-lane-api)
+    (test-lane-state-events)
+    (test-swarm-json-handlers)
+    (test-lane-event-relay)
+    (test-swarm-route-parsing)
+    (test-swarm-route-registration)
     (test-view)
     (test-serve-view)
     (test-record)

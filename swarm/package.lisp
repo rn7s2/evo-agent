@@ -27,4 +27,12 @@
            #:swarm-view #:swarm-say #:swarm-repaint #:swarm-publish #:swarm-run
            ;; the swarm's commands, which both frontends get, and the TUI's
            ;; own status-line segment, which only it gets (tui.lisp)
-           #:register-swarm-commands #:install-tui-observation))
+           #:register-swarm-commands #:install-tui-observation
+           ;; the read-only HTTP API (`evo-swarm serve`): lane goal cache,
+           ;; GET /lanes, /lanes/N/transcript, /lanes/N/events (api.lisp,
+           ;; routes.lisp)
+           #:note-lane-goal #:note-lane-goal-status #:cached-lane-goal-status
+           #:lane-state-event #:maybe-publish-lane-state
+           #:lane-info #:swarm-summary #:swarm-lanes-response
+           #:lane-transcript #:relay-lane-events #:copy-lane-events
+           #:register-swarm-routes #:*swarm-identity*))

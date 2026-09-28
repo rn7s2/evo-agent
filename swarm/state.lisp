@@ -27,7 +27,10 @@ by the swarm's lock: the lane's subscriber thread, the coordinator's tools
   (restarts 0)
   (stopping nil)     ; set while the swarm itself stops or restarts it
   (watched nil)      ; the TUI is showing its live transcript
-  (partial ""))      ; streamed text not yet shown as a whole line
+  (partial "")       ; streamed text not yet shown as a whole line
+  goal               ; cached goal plist from the lane's /state, or nil
+  goal-at            ; when GOAL was last refreshed
+  published)         ; (state task goal-status) last published as lane-state
 
 (define-condition lane-error (error)
   ((lane :initarg :lane :reader lane-error-lane)
@@ -55,14 +58,18 @@ by the swarm's lock: the lane's subscriber thread, the coordinator's tools
 (defun lane-snapshot (lane)
   "LANE's status as a plist, read under the lock."
   (with-swarm-lock ()
-    (list :n (lane-n lane) :state (lane-state lane) :task (lane-task lane)
-          :pid (lane-pid lane) :port (lane-port lane)
-          :worktree (lane-worktree lane) :branch (lane-branch lane)
-          :restarts (lane-restarts lane)
-          :step-age (and (lane-step-started lane)
-                         (member (lane-state lane) '(:working :compacting))
-                         (- (get-universal-time) (lane-step-started lane)))
-          :reports (length (lane-reports lane)))))
+    (let ((now (get-universal-time)))
+      (list :n (lane-n lane) :state (lane-state lane) :task (lane-task lane)
+            :pid (lane-pid lane) :port (lane-port lane)
+            :worktree (lane-worktree lane) :branch (lane-branch lane)
+            :restarts (lane-restarts lane)
+            :step-age (and (lane-step-started lane)
+                           (member (lane-state lane) '(:working :compacting))
+                           (- now (lane-step-started lane)))
+            :task-age (and (lane-task-started lane)
+                           (- now (lane-task-started lane)))
+            :goal (lane-goal lane)
+            :reports (length (lane-reports lane))))))
 
 (defun fresh-token ()
   "A lane's bearer token: 32 bytes from the OS, as hex."
