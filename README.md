@@ -17,7 +17,8 @@ Five properties define the system:
 - **Self-healing.** Crash, restart, resume, continue the goal. The supervisor
   and the journal together make process death a recoverable event.
 - **Minimal.** Real agent functionality and nothing ceremonial. Every omission
-  (no sub-agents, no permission popups) is deliberate, with a stated re-entry
+  (no permission popups, no sub-agents inside an agent — parallel agents are
+  a separate program, `evo-swarm`) is deliberate, with a stated re-entry
   condition — and what is *not* omitted stays out of the kernel: MCP is a
   userspace extension, not a protocol in the core.
 
@@ -27,8 +28,9 @@ decision record, and provenance.
 ## Quick start
 
 ```sh
-make build                # requires SBCL + Quicklisp (or: make build LISP=ecl)
-make install              # copies to /usr/local/bin/evo (PREFIX=…)
+make build                # build/evo and build/evo-swarm; requires SBCL +
+                          #   Quicklisp (or: make build LISP=ecl)
+make install              # copies both to /usr/local/bin (PREFIX=…)
 make install-home         # seeds ~/.evo with docs + example extensions
 ```
 
@@ -65,6 +67,7 @@ evo --resume                           # reopen the last session worked in here
 evo --image shot.png -p "what broke?"  # attach an image to the prompt
 evo --list-sessions
 evo serve --token-file ~/.evo/serve.token   # headless, controlled over HTTP
+evo-swarm --workers 4                       # a coordinator + 4 worker lanes
 ```
 
 Invoked plainly, `evo` is its own supervisor: the parent process re-spawns the
@@ -397,6 +400,31 @@ Loopback only unless `--allow-remote`; a bearer token on every request
 supervisor like any session. `/eval` is remote code execution by design — the
 token is the gate. Full reference: [docs/serve.md](docs/serve.md).
 
+### evo-swarm
+
+A second program on top of evo ([docs/swarm.md](docs/swarm.md)): one
+**coordinator** agent in your terminal — the only one you talk to — and a
+pool of worker **lanes**, each a separate `evo serve --no-userspace` process
+with its own context, token and journal (default 6, `--workers N`). The
+coordinator splits the work into lane-sized pieces with clear done criteria,
+`delegate`s them (optionally as goals with `done_when`), steers or
+interrupts lanes, evaluates capabilities into a lane when it asks, gives a
+lane its own git worktree when a task needs isolation, and integrates and
+verifies what comes back. Lanes call a `report` tool after each meaningful
+piece of work; reports, finished runs, errors and crashes reach the
+coordinator as input — waking it when idle. Lanes talk only to the
+coordinator, only through serve's HTTP API.
+
+What a lane becomes is a program: `~/.evo/swarm.lisp` and
+`<project>/.evo/swarm.lisp` define worker-init generators (see
+[docs/examples/swarm.lisp](docs/examples/swarm.lisp)); the default baseline
+hands each lane the coordinator's models and providers — keys by environment
+variable name only, never as data — the report tool and a prompt note. Lanes
+are supervised (a crash restarts and resumes them, and the coordinator is
+told); quitting stops them all; `evo-swarm --resume` restores coordinator and
+lanes from the coordinator's journal. Watch lanes read-only with the status
+line, `/lanes` and `/lane N`.
+
 ### Skills, templates, slash commands
 
 - **Skills**: the Agent Skills standard (SKILL.md + frontmatter) with
@@ -488,7 +516,8 @@ implement the generics, `evo:register-api` it, and a model can name it via
 ## Tests
 
 ```sh
-make test           # unit: sexpr IO, journal, schema, registries, provider
+make test           # evo/core without frontends, evo without the swarm, then
+                    # unit: sexpr IO, journal, schema, registries, provider
                     #       APIs, SSE + transport, request builders, handoff,
                     #       init files, preflight, editor, input parser,
                     #       templates, compaction, lore, images
@@ -500,6 +529,8 @@ make integration    # live e2e: tool round-trip, kill -9 + manual resume,
                     #       (+ optional _VISION_MODEL for the image test)
 make serve-test     # evo serve end to end over HTTP, no backend: a stub
                     #       Messages endpoint (python3) stands in for the model
+make swarm-test     # evo-swarm end to end, no backend: the coordinator TUI
+                    #       under a pty, real lanes, the stub scripting both
 make tui-test       # expect-driven TUI under a pty: image paste
                     #       (EVO_TEST_VISION_MODEL), pasting in every shape a
                     #       terminal sends it, model routing, the IDE bridge
@@ -572,7 +603,10 @@ Every directory under `src/` is one component owning exactly one package.
 `evo.asd` defines two systems and lists their components in load order,
 foundations first: `evo/core` is the agent itself — foundations, kernel, the
 core extensions and the command layer — and loads with no frontend at all;
-`evo` adds the TUI, the HTTP server and the CLI on top of it. `make test` loads `evo/core` on its own before the
+`evo` adds the TUI, the HTTP server and the CLI on top of it; `evo-swarm`
+(its own `evo-swarm.asd`, sources in `swarm/`) is a second program on top of
+`evo`, and `make test` also loads `evo` alone to prove the binary carries none
+of it (`tests/evo-only.lisp`). `make test` loads `evo/core` on its own before the
 unit suite runs (`tests/core-only.lisp`), so the dependency only ever points
 from the frontends to the core.
 
@@ -662,9 +696,21 @@ extensions/examples/     reference-only example extensions (installed to
                          ~/.evo/docs/examples) — user extensions, distinct from
                          the bundled core extensions in src/core-ext/
 
+swarm/                   EVO.SWARM — evo-swarm (system `evo-swarm`; docs/swarm.md)
+  package.lisp
+  state.lisp             the swarm and its lanes, one lock
+  client.lisp            serve's HTTP API, as a client: requests, the event stream
+  init.lisp              worker-init generators, the baseline, prompt notes, limits
+  lanes.lisp             launch, initialize, watch, recover, stop; the journal record
+  tools.lisp             the coordinator's tools
+  tui.lisp               the lanes on the status line, /lanes, /lane N
+  main.lisp              arguments, supervision, bring-up
+  tests/                 the swarm's unit suite (make test)
+
 Makefile                 build/install on Unix
 make.ps1                 the same targets on Windows (SBCL only)
 build.lisp               shared by both: saves build/evo (build/evo.exe)
+build-swarm.lisp         the same, for build/evo-swarm (build/evo-swarm.exe)
 ```
 
 ## License

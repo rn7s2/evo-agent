@@ -11,10 +11,15 @@ and answers from the last user turn, so a test script decides what the
   a goal continuation that
     mentions FINISH             -> update_goal {"status": "complete"}
   "SLOW" in the text            -> 60 text deltas, 0.1 s apart (6 s)
+  text starting "CALL <tool> {json}"
+                                -> one tool_use call to <tool> with that JSON
+  a leading "DELAY<n> "         -> wait n seconds first (then the rest applies)
   anything else                 -> text "ok: <the first 40 chars>"
 
 Every request is recorded; GET /_requests returns them as JSON (model,
-tool names, effort, the last user text), so a test can check what evo sent.
+tool names, effort, the last user text, and who asked: "coordinator",
+"lane N" or "agent", read from the swarm prompt notes), so a test can check
+what evo sent.
 
 Usage: stub-messages.py PORT     (prints "stub listening PORT" when ready)
 """
@@ -41,14 +46,19 @@ def block_text(block):
 
 
 def last_user(messages):
+    """The last user message's text, whether it carries a tool result, and
+    the text of its LAST block — what the stub acts on.  Consecutive user
+    turns reach the model merged into one message (an interrupted turn in
+    between is elided), and it is the newest of them that asks something."""
     for message in reversed(messages):
         if message.get("role") == "user":
             content = message.get("content")
             if isinstance(content, str):
-                return content, False
+                return content, False, content
             has_result = any(b.get("type") == "tool_result" for b in content)
-            return " ".join(block_text(b) for b in content), has_result
-    return "", False
+            texts = [block_text(b) for b in content]
+            return " ".join(texts), has_result, (texts[-1] if texts else "")
+    return "", False, ""
 
 
 def system_text(system):
@@ -83,9 +93,17 @@ class Handler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length") or 0)
         request = json.loads(self.rfile.read(length) or b"{}")
         messages = request.get("messages", [])
-        text, has_result = last_user(messages)
+        text, has_result, newest = last_user(messages)
         system = system_text(request.get("system"))
+        role = "agent"
+        if "## Swarm coordinator" in system:
+            role = "coordinator"
+        elif "## Swarm lane " in system:
+            role = "lane " + system.split("## Swarm lane ", 1)[1].split()[0]
         record = {
+            "role": role,
+            "time": time.time(),
+            "system_has_report_note": "`report` tool" in system,
             "model": request.get("model"),
             "tools": [t.get("name") for t in request.get("tools", [])],
             "effort": (request.get("output_config") or {}).get("effort"),
@@ -106,7 +124,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Connection", "close")
         self.end_headers()
         try:
-            self.respond(request.get("model"), text, has_result, record)
+            self.respond(request.get("model"), newest, has_result, record)
         except (BrokenPipeError, ConnectionResetError):
             pass  # evo interrupted the request: exactly what a test wants
 
@@ -117,6 +135,15 @@ class Handler(BaseHTTPRequestHandler):
                         "model": model, "content": [],
                         "usage": {"input_tokens": 10, "output_tokens": 0}}})
         tool = None
+        stripped = text.strip()
+        if stripped.startswith("DELAY") and not has_result:
+            head, _, rest = stripped.partition(" ")
+            try:
+                time.sleep(float(head[5:] or "1"))
+            except ValueError:
+                pass
+            stripped = rest.strip()
+            text = stripped
         if record["summarizer"]:
             # First: the transcript being summarized quotes every marker below.
             reply = "SUMMARY: the session so far, condensed by the stub."
@@ -124,6 +151,12 @@ class Handler(BaseHTTPRequestHandler):
             reply = "tool done"
         elif "You are idle but your goal is still active" in text and "FINISH" in text:
             tool = ("update_goal", {"status": "complete"})
+        elif stripped.startswith("CALL "):
+            name, _, rest = stripped[5:].partition(" ")
+            args = {}
+            if rest.strip():
+                args, _ = json.JSONDecoder().raw_decode(rest.strip())
+            tool = (name, args)
         elif "TOOL:" in text:
             name = text.split("TOOL:", 1)[1].split()[0]
             tool = (name, {})

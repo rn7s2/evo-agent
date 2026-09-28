@@ -133,6 +133,16 @@ jobs:
         if: matrix.lisp == 'sbcl'
         run: tests/serve-e2e.py build/evo
 
+      # evo-swarm end to end: the coordinator's TUI driven through a
+      # pseudo-terminal (python3's pty), lanes as real `evo serve` processes,
+      # the stub Messages endpoint scripting coordinator and lanes alike.
+      # Delegation, reports waking the coordinator, interrupt + re-steer, an
+      # eval into one lane, a worktree lane, a killed lane restarting, quit
+      # stopping every lane, and --resume restoring the swarm.
+      - name: swarm end-to-end test
+        if: matrix.lisp == 'sbcl'
+        run: tests/swarm-e2e.py build
+
   # Windows is SBCL-only (src/port/port.lisp: the ECL branches are Unix
   # facilities with no Windows twin).  It builds, runs the portable unit suite
   # and smoke-tests the artifact — the same guard the Unix job gives, now that
