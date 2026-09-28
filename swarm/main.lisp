@@ -5,6 +5,12 @@
 ;;;; and a crash restarts it with --resume — and a resumed coordinator
 ;;;; restores its lanes from its journal.  Its lanes watch its pid, so lanes
 ;;;; never outlive the coordinator that drove them.
+;;;;
+;;;; The coordinator has two frontends, and the command line picks one: the
+;;;; TUI plainly, or `serve` — the same session, controlled over HTTP.  A VIEW
+;;;; (view.lisp) is what the swarm needs either way: somewhere for its notices
+;;;; to go, and the call that runs the session until it quits.  Nothing here
+;;;; names a terminal or a socket beyond choosing the view.
 
 (in-package :evo.swarm)
 
@@ -14,6 +20,12 @@
 Usage:
   evo-swarm                      start a swarm here: the coordinator in this
                                  terminal, lanes as `evo serve` processes
+  evo-swarm serve [options]      headless: the coordinator is itself an
+                                 `evo serve` session, driven over HTTP
+      --host <addr>              address to bind (default 127.0.0.1)
+      --port <n>                 port to bind (default 8421; 0 picks a free one)
+      --token-file <path>        write the bearer token here (mode 0600)
+      --allow-remote             permit a non-loopback --host
   evo-swarm --workers <n>        how many lanes (default: the :swarm-workers
                                  setting, else 6)
   evo-swarm --resume [path]      resume the coordinator session (default: the
@@ -26,6 +38,10 @@ Usage:
   evo-swarm --no-supervisor      run the coordinator in-process
   evo-swarm --help | --version
 
+serve takes evo serve's flags and the swarm's own together.  Its bearer token
+is minted once per launch, in the supervisor parent, so a restarted
+coordinator keeps the one clients already hold.
+
 Config: init.lisp, extensions and post-init.lisp as for evo, then
 ~/.evo/swarm.lisp and <cwd>/.evo/swarm.lisp: the coordinator's models and
 settings for the swarm, lane count, tool limits, prompt notes, and
@@ -33,6 +49,9 @@ settings for the swarm, lane count, tool limits, prompt notes, and
 
 (defun parse-args (argv)
   (let ((opts nil))
+    (when (equal (first argv) "serve")
+      (pop argv)
+      (setf (getf opts :serve) t))
     (loop while argv
           for arg = (pop argv)
           do (cond
@@ -57,24 +76,56 @@ settings for the swarm, lane count, tool limits, prompt notes, and
                 (setf (getf opts :evo) (or (pop argv) (error 'evo.cli:usage-error :text "--evo needs a path"))))
                ((string= arg "--no-userspace") (setf (getf opts :no-userspace) t))
                ((string= arg "--no-supervisor") (setf (getf opts :no-supervisor) t))
+               ;; serve's own flags, exactly as `evo serve` takes them — a
+               ;; swarm is one session, and this is the flag set that opens
+               ;; its door.  Without the subcommand they are unknown, so a
+               ;; typo cannot silently start something headless.
+               ((and (getf opts :serve) (string= arg "--host"))
+                (setf (getf opts :host)
+                      (or (pop argv) (error 'evo.cli:usage-error :text "--host needs an address"))))
+               ((and (getf opts :serve) (string= arg "--port"))
+                (setf (getf opts :port) (evo.cli:parse-port (pop argv))))
+               ((and (getf opts :serve) (string= arg "--token-file"))
+                (setf (getf opts :token-file)
+                      (or (pop argv) (error 'evo.cli:usage-error :text "--token-file needs a path"))))
+               ((and (getf opts :serve) (string= arg "--allow-remote"))
+                (setf (getf opts :allow-remote) t))
                ((member arg '("-h" "--help") :test #'string=) (setf (getf opts :help) t))
                ((string= arg "--version") (setf (getf opts :version) t))
                (t (error 'evo.cli:usage-error
                          :text (format nil "Unknown argument: ~a (try --help)" arg)))))
+    (when (getf opts :serve)
+      (unless (getf opts :port)
+        (setf (getf opts :port) evo.cli:*serve-default-port*)))
     opts))
 
 (defun restart-argv (argv)
   "A restarted coordinator: its own flags minus the session ones, plus
---resume when it has a session to resume (its journal records the lanes)."
-  (append (loop while argv
-                for arg = (pop argv)
-                when (member arg '("--workers" "--evo") :test #'equal)
-                  append (list arg (pop argv))
-                when (member arg '("--no-userspace") :test #'equal)
-                  collect arg
-                when (member arg '("--resume" "--model" "--thinking") :test #'equal)
-                  do (when (and argv (not (string-prefix-p "-" (first argv)))) (pop argv)))
-          (when (latest-session) '("--resume"))))
+--resume when it has a session to resume (its journal records the lanes).
+
+serve's flags are kept — where it listens and where its token goes — because
+the child that comes back must open the same door for the clients that hold
+its token.  --model and --thinking are not: the journal already carries the
+session's, and re-passing them would override a /model switch made since."
+  (let* ((serve (equal (first argv) "serve"))
+         (args (if serve (rest argv) argv)))
+    (append (when serve '("serve"))
+            (loop while args
+                  for arg = (pop args)
+                  when (member arg '("--workers" "--evo") :test #'equal)
+                    append (list arg (pop args))
+                  when (member arg '("--no-userspace") :test #'equal)
+                    collect arg
+                  when (member arg '("--resume" "--model" "--thinking") :test #'equal)
+                    do (when (and args (not (string-prefix-p "-" (first args)))) (pop args)))
+            ;; evo serve's own restart flags: --host, --port, --token-file,
+            ;; --allow-remote.  --no-userspace is already kept above, so the
+            ;; copy serve-restart-flags also returns is dropped.
+            (when serve
+              (remove "--no-userspace"
+                      (evo.cli:serve-restart-flags (rest argv))
+                      :test #'equal))
+            (when (latest-session) '("--resume")))))
 
 (defun find-evo-binary (opts)
   "The evo binary lanes run."
@@ -91,29 +142,55 @@ settings for the swarm, lane count, tool limits, prompt notes, and
         (error 'evo.cli:usage-error
                :text "cannot find the evo binary lanes run: put it beside evo-swarm, on PATH, or name it with --evo / EVO_BINARY"))))
 
-(defun install-coordinator ()
-  "What the coordinator has beyond an evo session: the swarm tools, the swarm
-commands, the coordinator note.  Installed before the session boots, so
-/reload keeps them (they are the base, not an extension).  The status-line
-segment is the TUI's own and is installed by RUN-SWARM."
+(defun check-serve-host (host opts)
+  "A served coordinator binds loopback unless --allow-remote says otherwise:
+eval over HTTP is remote code execution, and the token is the only gate.  The
+same rule, and the same words, as `evo serve`."
+  (unless (or (evo.serve:loopback-host-p host) (getf opts :allow-remote))
+    (error 'evo.cli:usage-error
+           :text (format nil "--host ~a is not a loopback address; pass --allow-remote to expose the swarm (eval over HTTP is remote code execution — the token is the only gate)"
+                         host)))
+  host)
+
+(defun coordinator-view (opts)
+  "The view the coordinator runs under: the TUI in a terminal, `evo serve`
+when asked for a headless swarm (:serve)."
+  (if (getf opts :serve)
+      (let ((host (or (getf opts :host) "127.0.0.1")))
+        (evo.cli:check-serve-token opts)
+        (check-serve-host host opts)
+        (make-instance 'serve-view
+                       :server (evo.serve:make-server
+                                :host host
+                                :port (getf opts :port)
+                                :token (evo.serve:resolve-token)
+                                :token-file (getf opts :token-file))))
+      (progn
+        (unless (evo.port:tty-p)
+          (error 'evo.cli:usage-error
+                 :text "evo-swarm's coordinator is a TUI: run it in a terminal, or `evo-swarm serve` for a headless swarm driven over HTTP"))
+        (make-instance 'tui-view))))
+
+(defun install-coordinator (view)
+  "Install the swarm tools, commands and prompt note for either frontend; only
+the TUI gets a status-line segment."
   (register-swarm-tools)
   (pushnew 'load-swarm-config *post-init-hooks*)
   (register-swarm-commands)
+  (when (typep view 'tui-view)
+    (install-tui-observation))
   (evo:register-prompt-note "swarm-coordinator"
                             (lambda (pack) (declare (ignore pack)) (coordinator-note))))
 
 (defun run-swarm (opts)
-  (unless (evo.port:tty-p)
-    (error 'evo.cli:usage-error
-           :text "evo-swarm needs a terminal: the coordinator is a TUI (lanes are driven over HTTP; for a headless single agent use `evo serve`)"))
-  (let ((evo-binary (find-evo-binary opts)))
-    (install-coordinator)
-    ;; The coordinator's frontend: where its notices go, where its machine
-    ;; events go, and how it runs (view.lisp).  The TUI's own status segment
-    ;; belongs with it — a segment is a screen.
-    (install-tui-observation)
+  (let* ((view (coordinator-view opts))
+         (evo-binary (find-evo-binary opts))
+         (frontend (if (getf opts :serve)
+                       (serve-view-server view)
+                       (make-instance 'evo.tui:tui-frontend))))
+    (install-coordinator view)
     (multiple-value-bind (agent resumed-p)
-        (evo.cli:setup-agent opts :frontend (make-instance 'evo.tui:tui-frontend))
+        (evo.cli:setup-agent opts :frontend frontend)
       (apply-coordinator-tools agent)
       (let* ((record (and resumed-p (evo:custom-state "swarm" agent)))
              (workers (or (getf opts :workers)
@@ -121,7 +198,7 @@ segment is the TUI's own and is installed by RUN-SWARM."
                           6)))
         (setf *swarm* (make-swarm :agent agent :workers workers
                                   :evo-binary evo-binary :record record
-                                  :view (make-instance 'tui-view)))
+                                  :view view))
         (ensure-directories-exist (swarm-dir *swarm*))
         (record-swarm)
         ;; A journal switch (/new, /fork, /resume) takes the swarm along: the
@@ -140,21 +217,33 @@ segment is the TUI's own and is installed by RUN-SWARM."
           (stop-swarm))))))
 
 (defun main (&optional (argv (evo.port:argv)))
-  "Exit codes as evo's: 0 done, 1 error, 64 usage error."
-  (handler-case
-      (let ((opts (parse-args argv)))
+  "Exit codes as evo's: 0 done, 1 error, 64 usage error.
+
+A command line that does not parse is a usage error like any other, whatever
+condition it raised — 64 is the code the supervisor never restarts, and a
+mistyped flag cannot be fixed by trying it again."
+  (let ((opts (handler-case (parse-args argv)
+                (error (e)
+                  (format *error-output* "evo-swarm: ~a~%" e)
+                  (return-from main 64)))))
+    (handler-case
         (cond
           ((getf opts :help) (write-line *usage*) 0)
           ((getf opts :version) (write-line "evo-swarm 0.1.0") 0)
           ((evo.cli:supervised-run-p opts)
+           ;; A serve token is minted once per launch, here in the parent, so a
+           ;; restarted child keeps the one clients already hold.
+           (when (getf opts :serve)
+             (evo.cli:check-serve-token opts)
+             (evo.port:setenv "EVO_SERVE_TOKEN" (evo.serve:resolve-token)))
            (evo.cli:supervise argv :restart-argv #'restart-argv))
-          (t (run-swarm opts))))
-    (evo.cli:usage-error (e)
-      (format *error-output* "evo-swarm: ~a~%" e)
-      64)
-    (error (e)
-      (format *error-output* "evo-swarm: ~a~%" e)
-      1)))
+          (t (run-swarm opts)))
+      (evo.cli:usage-error (e)
+        (format *error-output* "evo-swarm: ~a~%" e)
+        64)
+      (error (e)
+        (format *error-output* "evo-swarm: ~a~%" e)
+        1))))
 
 (defun toplevel ()
   "Entry point of the built binary, as evo.cli:toplevel is evo's."
