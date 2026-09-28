@@ -547,6 +547,92 @@ through serve's own log: the call site never names the server's internals."
                                                    "--resume" "/old/path"))
                         :test #'equal))))
 
+(defun test-serve-cli ()
+  "`evo-swarm serve`: serve's flags alongside the swarm's, the loopback guard,
+and what a restarted coordinator keeps."
+  (check "serve: the subcommand is recognised"
+         (getf (evo.swarm::parse-args '("serve")) :serve))
+  (check "serve: the port defaults to serve's own"
+         (eql evo.cli:*serve-default-port*
+              (getf (evo.swarm::parse-args '("serve")) :port)))
+  (check "serve: serve's flags and the swarm's parse together"
+         (let ((opts (evo.swarm::parse-args
+                      '("serve" "--host" "0.0.0.0" "--port" "9000"
+                        "--token-file" "/tmp/serve.token" "--allow-remote"
+                        "--workers" "2" "--evo" "/x/evo" "--no-userspace"))))
+           (and (getf opts :serve)
+                (equal "0.0.0.0" (getf opts :host))
+                (eql 9000 (getf opts :port))
+                (equal "/tmp/serve.token" (getf opts :token-file))
+                (getf opts :allow-remote)
+                (eql 2 (getf opts :workers))
+                (equal "/x/evo" (getf opts :evo))
+                (getf opts :no-userspace))))
+  (check "serve: a serve flag without the subcommand is unknown"
+         (handler-case (progn (evo.swarm::parse-args '("--host" "0.0.0.0")) nil)
+           (evo.cli:usage-error () t)))
+  (check "serve: a port outside 0..65535 is an error"
+         (handler-case (progn (evo.swarm::parse-args '("serve" "--port" "70000")) nil)
+           (error () t)))
+  (check "serve: a bad flag is a usage error, not a crash"
+         (handler-case (progn (evo.swarm::parse-args '("serve" "--wat")) nil)
+           (evo.cli:usage-error () t)))
+  (check "serve: loopback needs no --allow-remote"
+         (equal "127.0.0.1" (evo.swarm::check-serve-host "127.0.0.1" '(:serve t))))
+  (check "serve: another address is refused without --allow-remote"
+         (handler-case (progn (evo.swarm::check-serve-host "0.0.0.0" '(:serve t)) nil)
+           (evo.cli:usage-error () t)))
+  (check "serve: ...and taken with it"
+         (equal "0.0.0.0" (evo.swarm::check-serve-host "0.0.0.0" '(:serve t :allow-remote t))))
+  (check "serve: a restarted coordinator keeps where it listens and its token"
+         (equal '("serve" "--workers" "4" "--evo" "/x/evo" "--no-userspace"
+                  "--host" "127.0.0.1" "--port" "9000" "--token-file" "/tmp/t"
+                  "--allow-remote")
+                (remove "--resume"
+                        (evo.swarm::restart-argv
+                         '("serve" "--workers" "4" "--model" "m" "--evo" "/x/evo"
+                           "--thinking" "high" "--no-userspace" "--resume" "/old"
+                           "--host" "127.0.0.1" "--port" "9000" "--token-file" "/tmp/t"
+                           "--allow-remote"))
+                        :test #'equal)))
+  (check "serve: ...and does not re-pass the session's model or thinking"
+         (notany (lambda (a) (member a '("--model" "--thinking") :test #'equal))
+                 (evo.swarm::restart-argv '("serve" "--model" "m" "--thinking" "high")))))
+
+(defun test-serve-exit-codes ()
+  "`evo-swarm`'s exit code for a command line that cannot start anything: 64,
+whatever raised it — a mistyped flag cannot be fixed by trying it again, so
+the supervisor must never restart it.  (These argv never get past the
+preconditions, so nothing is spawned; EVO_NO_SUPERVISOR keeps even the last
+one out of the supervisor.)"
+  (let ((saved (getenv "EVO_NO_SUPERVISOR"))
+        (saved-token (getenv "EVO_SERVE_TOKEN")))
+    (unwind-protect
+         (progn
+           (evo.port:setenv "EVO_NO_SUPERVISOR" "1")
+           (evo.port:setenv "EVO_SERVE_TOKEN" "")
+           (flet ((code (&rest argv)
+                    ;; The usage text and the complaint are not the point;
+                    ;; only what it exits with.
+                    (let ((*standard-output* (make-broadcast-stream))
+                          (*error-output* (make-broadcast-stream)))
+                      (evo.swarm::main argv))))
+             (check "exit: --help is 0" (eql 0 (code "--help")))
+             (check "exit: --version is 0" (eql 0 (code "--version")))
+             (check "exit: an unknown flag is 64" (eql 64 (code "--wat")))
+             (check "exit: a serve flag without serve is 64"
+                    (eql 64 (code "--host" "0.0.0.0")))
+             (check "exit: a bad --port is 64" (eql 64 (code "serve" "--port" "nope")))
+             (check "exit: a --token-file with no path is 64"
+                    (eql 64 (code "serve" "--token-file")))
+             (check "exit: serve with no way to hand its token over is 64"
+                    (eql 64 (code "serve")))
+             (check "exit: a non-loopback --host without --allow-remote is 64"
+                    (eql 64 (code "serve" "--token-file" "/tmp/serve.token"
+                                  "--host" "0.0.0.0")))))
+      (evo.port:setenv "EVO_NO_SUPERVISOR" (or saved ""))
+      (evo.port:setenv "EVO_SERVE_TOKEN" (or saved-token "")))))
+
 (defun test-sse-reader ()
   (let ((seen nil))
     (with-input-from-string
@@ -583,6 +669,8 @@ through serve's own log: the call site never names the server's internals."
     (test-launch-environment)
     (test-sessions-dir)
     (test-cli)
+    (test-serve-cli)
+    (test-serve-exit-codes)
     (test-sse-reader)
     (test-pid-alive)
     (test-sample-config)
