@@ -345,7 +345,7 @@ fatal — a corrupted runtime is repaired by fixing/removing a source file."
 
 (defparameter *kernel-packages*
   '(:evo.port :evo.util :evo.media :evo.journal :evo.provider :evo.kernel
-    :evo :evo.todo :evo.memory :evo.eval)
+    :evo :evo.todo :evo.memory :evo.eval :evo.command)
   "The core's packages that LOCK-KERNEL-PACKAGES locks.  Frontends are not
 named here; they pass their own.")
 

@@ -244,6 +244,42 @@ block the rest of shutdown."
     value)
   #+ecl (ext:setenv name value))
 
+;;; Secrets on disk.
+
+(defun chmod-private (path)
+  "Restrict PATH to its owner (mode 0600).  A no-op on Windows, where a file
+in the user's profile is already private to that user by its ACL."
+  #+(and sbcl (not evo-windows)) (sb-posix:chmod (namestring path) #o600)
+  #+ecl (ext:chmod (namestring path) #o600)
+  #+evo-windows (declare (ignore path))
+  path)
+
+(defun write-private-file (path string)
+  "Write STRING to PATH readable by its owner only.  The file is recreated
+empty, restricted, and only then written, so the secret is never on disk
+under a looser mode — not even when PATH existed before with one."
+  (let ((path (merge-pathnames path)))
+    (ensure-directories-exist path)
+    (when (probe-file path) (delete-file path))
+    (with-open-file (out path :direction :output :if-does-not-exist :create))
+    (chmod-private path)
+    (with-open-file (out path :direction :output :if-exists :append
+                              :external-format :utf-8)
+      (write-string string out))
+    path))
+
+(defun random-octets (n)
+  "N bytes from the operating system's entropy source, for secrets.  The
+image's own random state is not one: a saved image starts from the state it
+was built with.  /dev/urandom on Unix; on Windows a freshly seeded state."
+  (let ((octets (make-array n :element-type '(unsigned-byte 8))))
+    (or (ignore-errors
+          (with-open-file (in "/dev/urandom" :element-type '(unsigned-byte 8))
+            (when (= n (read-sequence octets in)) octets)))
+        (let ((state (make-random-state t)))
+          (dotimes (i n octets)
+            (setf (aref octets i) (random 256 state)))))))
+
 (define-condition timeout-error (error)
   ((seconds :initarg :seconds :reader timeout-error-seconds))
   (:report (lambda (condition stream)

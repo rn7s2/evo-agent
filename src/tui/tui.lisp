@@ -133,6 +133,21 @@ the request was posted, NIL when no TUI is running."
     (push-event tui (list :type :run-requested :text text))
     t))
 
+;;; The TUI as the session's frontend (EVO.KERNEL's frontend protocol): a
+;;; human is at the terminal, and off-thread input gets a run through
+;;; REQUEST-RUN.  The CLI binds *FRONTEND* to one of these before the session
+;;; boots, so extensions deciding at load time already see the answer — the
+;;; TUI object itself does not exist yet then, which is why the frontend is a
+;;; separate, stateless object that finds the live TUI through *TUI*.
+
+(defclass tui-frontend () ()
+  (:documentation "The interactive terminal frontend."))
+
+(defmethod frontend-interactive-p ((frontend tui-frontend)) t)
+
+(defmethod frontend-request-run ((frontend tui-frontend) &key text)
+  (request-run :text text))
+
 (defun drain-events (tui)
   (bt:with-lock-held ((tui-events-lock tui))
     (nreverse (shiftf (tui-events tui) nil))))
@@ -383,68 +398,8 @@ a file onto the terminal arrives here as its escaped path."
           ((zerop (length text)) (paste-clipboard-image tui :quiet-reason t))
           (t (eb-paste (tui-editor tui) text)))))
 
-;;; Tool call display formatting.
-
-(defparameter *tool-call-max-width* 80
-  "Max rendered width for a tool-call line before truncation.")
-
-(defparameter *tool-key-args*
-  '(("bash" . ("command"))
-    ("read" . ("path"))
-    ("write" . ("path"))
-    ("edit" . ("path" "old_string"))
-    ("create_goal" . ("objective"))
-    ("update_goal" . ("status" "objective"))
-    ("todo" . ("items"))
-    ("eval" . ("code")))
-  "Alist mapping tool name -> list of key argument names to show.")
-
-(defun tool-arg-value (arguments name)
-  "Value for argument NAME in an arguments plist.  Provider JSON keys
-land as hyphenated keywords (\"old_string\" -> :OLD-STRING), while
-*tool-key-args* names keep the schema's underscores — fold case and _/-
-so both spellings match."
-  (flet ((canon (s) (substitute #\- #\_ (string-upcase s))))
-    (loop for (k v) on arguments by #'cddr
-          when (and (symbolp k) (equal (canon (string k)) (canon name)))
-            return v)))
-
-(defun format-tool-call-plain (name arguments &optional arguments-json)
-  "Format a tool call as one line, no ANSI: ⏺ name(key=\"val\", ...),
-truncated at *tool-call-max-width*.  Total by construction: this renders
-inside the TUI tick loop and on session resume, so malformed ARGUMENTS
-(non-list, dotted, odd-length) degrade to the bare name — never signal.
-
-A :json tool is shown its raw ARGUMENTS-JSON instead: the plist spelling of
-its keys is not what the tool received, and a display that renames the file
-the model just wrote is worse than no display."
-  (when (and arguments-json
-             (eq arguments-json
-                 (tool-call-display-arguments name arguments arguments-json)))
-    (return-from format-tool-call-plain
-      (truncate-string (format nil "⏺ ~a(~a)" name
-                               (substitute #\Space #\Newline arguments-json))
-                       *tool-call-max-width* "…")))
-  (or (ignore-errors
-        (let* ((arguments (and (listp arguments) arguments))
-               (keys (or (cdr (assoc name *tool-key-args* :test #'equal))
-                         (loop for k in arguments by #'cddr
-                               when (symbolp k)
-                                 collect (substitute #\_ #\-
-                                                     (string-downcase (string k))))))
-               (arg-strs
-                 (loop for key in keys
-                       for val = (tool-arg-value arguments key)
-                       when val
-                         collect (format nil "~a=~a" (string-downcase key)
-                                         (substitute #\Space #\Newline
-                                                     (format nil "~s" val))))))
-          (truncate-string
-           (if arg-strs
-               (format nil "⏺ ~a(~{~a~^, ~})" name arg-strs)
-               (format nil "⏺ ~a" name))
-           *tool-call-max-width* "…")))
-      (format nil "⏺ ~a" name)))
+;;; Tool call display formatting.  The plain line is the command layer's
+;;; (FORMAT-TOOL-CALL-PLAIN, shared with the /tree picker); this is its color.
 
 (defun format-tool-call (name arguments &optional arguments-json)
   "FORMAT-TOOL-CALL-PLAIN in scrollback colors."
@@ -1066,67 +1021,26 @@ wrapped between two rules, and the model status line under the editbox."
 ;;; Rewind (double-escape).
 
 (defun rewind-to-last-user (tui)
-  (let* ((agent (tui-agent tui))
-         (journal (agent-journal agent))
-         (path (and (journal-leaf-id journal) (entry-path journal))))
-    (let ((entry (find-if (lambda (e)
-                            (and (eq (pget e :type) :message)
-                                 (eq (pget (pget e :message) :role) :user)))
-                          path :from-end t)))
-      (cond
-        ((null entry) (scroll tui (dim "nothing to rewind")))
-        (t
-         (setf (journal-leaf-id journal) (pget entry :parent-id))
-         (let ((text (pget (find :text (pget (pget entry :message) :content)
-                                 :key (lambda (b) (pget b :type)))
-                           :text)))
-           (when text (eb-set-text (tui-editor tui) text)))
-         (refresh-goal tui)
-         (scroll tui (yellow "⎌ rewound — edit and resubmit to branch")))))))
+  "Double escape: the command layer's rewind, refusals shown dim."
+  (evo.command:with-refusals-shown (tui)
+    (evo.command:rewind-command tui)))
 
 ;;; Slash-command completion (Tab).
 
-(defparameter *builtin-commands*
+(defparameter *tui-builtin-commands*
   '(("help" . "commands and keys")
-    ("goal" . "show, create, refine, pause, or resume the goal")
     ("todo" . "toggle the todo panel")
     ("theme" . "switch the light/dark theme (math colours follow it)")
-    ("model" . "pick the model from a list, or set it directly")
-    ("thinking" . "low·medium·high·xhigh·max")
-    ("lang" . "language of the system prompt and replies")
-    ("compact" . "compact the context now")
     ("image" . "attach an image (path, or the clipboard)")
-    ("lore" . "show lore, or add project-scope guidance")
-    ("global-lore" . "show lore, or add user-scope guidance")
-    ("tree" . "navigate entries, move the leaf (rewind/branch)")
-    ("resume" . "switch to another session")
-    ("fork" . "fork this session at the current leaf")
-    ("new" . "start a fresh session")
-    ("export" . "export the transcript as markdown")
-    ("reload" . "reload extension directories")
     ("quit" . "exit")
-    ("exit" . "same as /quit")))
-
-(defun template-names ()
-  (loop for dir in (template-directories)
-        append (mapcar #'pathname-name
-                       (ignore-errors (directory (merge-pathnames "*.md" dir))))))
+    ("exit" . "same as /quit"))
+  "Completion entries for the commands only the TUI has; the rest come from
+the command layer's catalog.")
 
 (defun all-commands ()
   "Completion candidates as (name . description), mirroring dispatch order:
 extension commands, builtins, skills, prompt templates (first wins)."
-  (sort (remove-duplicates
-         (append (loop for (name . cmd) in (registered-commands)
-                       collect (cons name (or (pget cmd :description)
-                                              "extension command")))
-                 (copy-alist *builtin-commands*)
-                 (mapcar (lambda (s) (cons (format nil "skill:~a" (pget s :name))
-                                           (or (pget s :description) "skill")))
-                         (available-skills))
-                 (mapcar (lambda (name) (cons name "prompt template"))
-                         (template-names)))
-         :key #'car :test #'string= :from-end t)
-        #'string< :key #'car))
+  (evo.command:command-catalog *tui-builtin-commands*))
 
 (defparameter *completion-max-rows* 6)
 
@@ -1512,28 +1426,17 @@ first rather than left to reappear later."
            (submit-to-agent tui text images))))))
 
 (defun dispatch-command (tui text)
-  (let* ((space (position #\Space text))
-         (name (subseq text 1 space))
-         (args (string-trim " " (if space (subseq text (1+ space)) ""))))
-    (cond
-      ;; 1. extension commands
-      ((find-command name)
-       (let ((fn (pget (find-command name) :fn)))
-         (handler-case
-             (let ((result (funcall fn (list :agent (tui-agent tui) :args args :tui tui))))
-               (when (stringp result) (scroll tui result))
-               (refresh-goal tui)
-               (when (and (steering-pending-p (tui-agent tui))
-                          (not (tui-running tui)))
-                 (start-worker tui)))
-           (error (e) (scroll tui (red (format nil "✗ /~a: ~a" name e)))))))
-      ;; 2. builtins
-      ((builtin-command tui name args))
-      ;; 3. skills (/skill:name or /name matching a skill)
-      ((command-as-skill tui name args))
-      ;; 4. prompt templates
-      ((command-as-template tui name args))
-      (t (scroll tui (dim (format nil "unknown command /~a — /help lists commands" name)))))))
+  "Resolve TEXT through the command layer, the TUI's own builtins included;
+a refusal is a dim line, an unknown command a hint."
+  (handler-case
+      (unless (evo.command:dispatch-command
+               tui text
+               :frontend-builtin (lambda (name args)
+                                   (tui-builtin-command tui name args)))
+        (scroll tui (dim (format nil "unknown command /~a — /help lists commands"
+                                 (evo.command:parse-command text)))))
+    (evo.command:command-refused (c)
+      (scroll tui (dim (evo.command:command-refused-text c))))))
 
 (defun shutdown-task (tui &key (seconds 5))
   "Stop TUI's task and reap it.  Returns T once no task is left.  Draining the
@@ -1550,24 +1453,3 @@ was cleared behind its back."
                (ignore-errors (handle-agent-event tui event)))
              (sleep 0.02)))
   (not (tui-running tui)))
-
-(defun session-quiescent-p (tui)
-  "True when switching journals or rebuilding userspace cannot strand work.
-A queued model-gated submission is work even though no task exists."
-  (and (not (tui-running tui))
-       (not (agent-pending-work-p (tui-agent tui)))))
-
-(defun require-session-quiescent (tui what)
-  (cond ((tui-running tui)
-         (scroll tui (dim (format nil "~a needs an idle agent (esc to interrupt)" what)))
-         nil)
-        ((agent-pending-work-p (tui-agent tui))
-         (scroll tui (dim (format nil "~a cannot switch sessions while input is queued; resolve the model and run it first" what)))
-         nil)
-        (t t)))
-
-(defun require-idle (tui what)
-  (if (tui-running tui)
-      (progn (scroll tui (dim (format nil "~a needs an idle agent (esc to interrupt)" what)))
-             nil)
-      t))

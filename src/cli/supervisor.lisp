@@ -23,6 +23,21 @@
   (- (get-universal-time)
      (or (ignore-errors (file-write-date path)) start-time)))
 
+(defparameter *serve-restart-flags* '("--host" "--port" "--token-file")
+  "serve flags a restarted child keeps, each with its value.")
+
+(defun serve-restart-flags (argv)
+  "The serve flags in ARGV that describe the server rather than the session:
+where it listens and where its token goes.  --model, --thinking and --resume
+are session state, which the journal already carries — re-passing --model
+would re-journal the launch model over a /model switch made since."
+  (loop while argv
+        for arg = (pop argv)
+        when (member arg *serve-restart-flags* :test #'equal)
+          append (list arg (pop argv))
+        when (member arg '("--allow-remote" "--no-userspace") :test #'equal)
+          collect arg))
+
 (defun restart-argv (argv)
   "Arguments for a restarted child.
 
@@ -31,7 +46,9 @@ check the guess: a child that died before it journalled anything leaves
 nothing to resume, and passing --resume then only turns one failure into
 \"No sessions to resume\" — a different, misleading error, once per attempt.
 With no session on disk, restart fresh instead."
-  (append (when (latest-session) '("--resume"))
+  (append (when (equal (first argv) "serve")
+            (cons "serve" (serve-restart-flags (rest argv))))
+          (when (latest-session) '("--resume"))
           (when (member "--events" argv :test #'equal) '("--events"))))
 
 (defun spawn-child (args heartbeat-file)

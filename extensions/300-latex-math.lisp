@@ -598,9 +598,13 @@ Installed as EVO.TUI:*MATH-RENDERER*."
        "prefer proper LaTeX for anything mathematical."))
 
 (defun math-sync-prompt-note ()
-  "Register the note when math will actually render, withdraw it otherwise."
+  "Register the note when math will actually render, withdraw it otherwise.
+Rendering needs a person at a terminal: under a headless frontend (print
+mode, `evo serve`) nothing draws the images, so the agent must not be told
+its LaTeX will become pictures."
   (evo:register-prompt-note "latex-math"
-                            (and (math-usable-p)
+                            (and (evo:frontend-interactive-p)
+                                 (math-usable-p)
                                  (format nil (math-prompt-note)))))
 
 (defun math-status-text ()

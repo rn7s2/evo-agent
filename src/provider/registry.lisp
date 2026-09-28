@@ -159,6 +159,10 @@ default would silently blind a correctly-configured session."
         (setf *providers* (append *providers* (list (cons key kvs))))))
   key)
 
+(defun provider-keys ()
+  "Every registered provider key, in registration order."
+  (mapcar #'car *providers*))
+
 (defun provider-registration (key)
   "What is registered for provider KEY, as given to REGISTER-PROVIDER — a
 fresh plist of the fields set so far (:base-url :api-key :api-key-env), merged

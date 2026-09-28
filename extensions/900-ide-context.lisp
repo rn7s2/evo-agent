@@ -255,4 +255,7 @@ else."
 ;; file's generation and there is nothing to undo by hand.
 (when (ide-context-path)
   (ide-context-install)
-  (ide-context-start-poller))
+  ;; The poller exists only to repaint a status line; a headless frontend
+  ;; has none, so it would be a thread polling for nobody.
+  (when (evo:frontend-interactive-p)
+    (ide-context-start-poller)))

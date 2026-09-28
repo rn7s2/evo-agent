@@ -27,7 +27,8 @@
            #:install-signal-handler #:+sigwinch+
            #:terminal-raw-mode #:restore-terminal-mode #:terminal-sane
            #:terminal-size
-           #:tty-p #:disable-debugger #:ensure-in-image-compiler))
+           #:tty-p #:disable-debugger #:ensure-in-image-compiler
+           #:chmod-private #:write-private-file #:random-octets))
 
 (defpackage :evo.util
   (:use :cl)
@@ -76,7 +77,7 @@
            #:model-effort #:model-thinking-mode #:model-vision-p #:+effort-levels+
            #:normalize-thinking-level
            #:register-model* #:register-provider* #:provider-config
-           #:provider-registration #:json->sexpr
+           #:provider-registration #:provider-keys #:json->sexpr
            #:reset-user-registries
            #:call-provider #:provider-error
            #:parse-sse-stream
@@ -133,7 +134,9 @@
            #:effective-thinking
            ;; session operations — the journal writes a frontend asks for
            #:boot-session #:switch-session
-           #:set-session-model #:set-session-thinking
+           #:set-session-model #:set-session-thinking #:end-session
+           ;; frontend protocol — answered by whichever frontend runs
+           #:*frontend* #:frontend-interactive-p #:frontend-request-run
            ;; goal
            #:current-goal #:goal-continuation-message #:goal-continuation-for
            #:register-goal-tools #:create-goal-entry #:goal-tokens-used
@@ -167,6 +170,8 @@
            #:register-model #:register-provider #:set-setting #:setting
            #:set-active-tools #:all-tools #:*agent* #:current-goal
            #:steer #:inject-context #:custom-state #:set-custom-state
+           ;; the frontend this session runs under
+           #:frontend-interactive-p #:request-run
            ;; provider-API protocol (imported from EVO.PROVIDER above)
            #:provider-api #:register-api #:find-api #:api-keys
            #:endpoint-path #:auth-headers #:build-request #:parse-stream
@@ -203,3 +208,39 @@
            ;; completion source: the image's own answer to "what could this
            ;; half-typed token be?", which frontends render.
            #:token-start #:completions-for #:symbol-kind))
+
+;; The command layer: what a slash command does to the session, once, for
+;; every frontend (src/command/command.lisp).  Frontends implement its HOST
+;; protocol; the core names none of them.
+(defpackage :evo.command
+  (:use :cl :evo.util :evo.journal :evo.provider :evo.kernel)
+  (:export ;; the host protocol a frontend implements
+           #:host-agent #:host-running-p #:host-start-run #:host-start-compact
+           #:host-say #:host-refresh #:host-choose #:host-set-draft
+           #:host-session-switched #:host-show-history #:host-submit
+           #:host-command-context #:host-interrupt-hint #:host-data
+           #:host-command-failed
+           ;; refusals and quiescence
+           #:command-refused #:command-refused-text #:command-refused-kind
+           #:refuse #:with-refusals-shown
+           #:session-quiescent-p #:require-session-quiescent #:require-idle
+           #:release-queued-input #:switch-journal
+           ;; dispatch
+           #:dispatch-command #:parse-command #:builtin-command
+           #:command-catalog #:*builtin-commands* #:template-names
+           ;; the commands, callable directly
+           #:goal-command #:set-model #:model-select #:thinking-command
+           #:set-language #:language-select #:lore-command #:compact-command
+           #:tree-command #:move-leaf #:rewind-command
+           #:resume-command #:resume-session #:fork-command #:new-command
+           #:export-command #:reload-command
+           #:command-as-skill #:command-as-template
+           ;; display helpers the frontends share
+           #:format-context-window #:model-row-label
+           #:format-tool-call-plain #:tool-arg-value
+           #:*tool-key-args* #:*tool-call-max-width*
+           #:entry-label #:message-text-block #:first-user-prompt
+           #:resume-summary-text #:resume-select-items
+           #:*resume-summary-max-chars* #:export-image
+           ;; derived state
+           #:session-summary))
