@@ -30,11 +30,13 @@ STDIN_GUARD =
 endif
 
 # All targets are actions, not files — declare them phony so they always run.
-.PHONY: build test integration tui-test tui-test-offline serve-test clean install install-home
+.PHONY: build test integration tui-test tui-test-offline serve-test swarm-test clean install install-home
 
-# Compile the standalone evo binary into build/evo.
+# Compile both binaries: build/evo, and build/evo-swarm (its own system on
+# top of evo — evo-swarm.asd, docs/swarm.md).
 build:
 	$(BUILD_SCRIPT) build.lisp $(STDIN_GUARD)
+	$(BUILD_SCRIPT) build-swarm.lisp $(STDIN_GUARD)
 
 # Out-of-box install: build the binary, seed $(EVO_HOME) (install-home), then
 # drop the binary into $(PREFIX)/bin. Falls back to sudo when the target dir
@@ -47,12 +49,15 @@ install: build install-home
 	  sudo install -m 755 build/evo $(PREFIX)/bin/evo; \
 	fi
 
-# Run the unit-test suite — after proving the core loads on its own, without
-# the TUI or the CLI (tests/core-only.lisp): the frontends build on the core,
-# never the other way round.
+# Run the unit-test suites — after proving the core loads on its own, without
+# the TUI or the CLI (tests/core-only.lisp), and evo without the swarm
+# (tests/evo-only.lisp): each layer builds on the one below, never the other
+# way round.  Then evo's suite, then the swarm's.
 test:
 	$(RUN_SCRIPT) tests/core-only.lisp $(STDIN_GUARD)
+	$(RUN_SCRIPT) tests/evo-only.lisp $(STDIN_GUARD)
 	$(RUN_SCRIPT) tests/run-unit.lisp $(STDIN_GUARD)
+	$(RUN_SCRIPT) swarm/tests/run-unit.lisp $(STDIN_GUARD)
 
 # End-to-end integration tests against a freshly built binary.  The backend is
 # configurable via EVO_TEST_BASE_URL / EVO_TEST_API_KEY / EVO_TEST_MODEL; the
@@ -99,6 +104,12 @@ tui-test-offline: build
 serve-test: build
 	tests/serve-e2e.py build/evo
 
+# evo-swarm end to end, with no backend: the coordinator driven through a
+# pseudo-terminal, the stub Messages endpoint scripting both it and the lanes
+# (tests/swarm-e2e.py; python3 and git).  Runs in CI too.
+swarm-test: build
+	tests/swarm-e2e.py build
+
 # Seed corpus: docs + example extensions into the global evo home.
 # Everything installed under docs/ is reference-only — nothing ships active in
 # $(EVO_HOME)/extensions (core extensions ship inside the binary).
@@ -109,7 +120,7 @@ serve-test: build
 install-home:
 	mkdir -p $(EVO_HOME)/extensions $(EVO_HOME)/docs/examples $(EVO_HOME)/skills $(EVO_HOME)/prompts
 	cp docs/*.md $(EVO_HOME)/docs/
-	cp docs/examples/init.lisp $(EVO_HOME)/docs/examples/
+	cp docs/examples/init.lisp docs/examples/swarm.lisp $(EVO_HOME)/docs/examples/
 	cp extensions/examples/*.lisp $(EVO_HOME)/docs/examples/
 	cp extensions/*.lisp $(EVO_HOME)/extensions/
 	rm -f $(EVO_HOME)/extensions/*.fasl
