@@ -19,8 +19,9 @@
 ;;;; arrays vectors, null and false NIL.  What JSON cannot say is a keyword
 ;;;; value (it comes back as its string) and the list/vector distinction (it
 ;;;; comes back a vector) — so the round trip is exact at the JSON level:
-;;;; encode, decode, encode again gives back the same text, which the unit
-;;;; suite checks for every event shape the kernel emits.
+;;;; encode, decode, encode again gives back the same JSON value (object key
+;;;; order aside, which JSON does not define), which the unit suite checks for
+;;;; every event shape the kernel emits.
 
 (in-package :evo.serve)
 
