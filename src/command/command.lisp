@@ -757,7 +757,7 @@ reload waits for an idle session."
     ("fork" . "fork this session at the current leaf")
     ("new" . "start a fresh session")
     ("export" . "export the transcript as markdown")
-    ("reload" . "reload extension directories"))
+    ("reload" . "re-evaluate init files, extensions and post-init files"))
   "The frontend-independent builtins as (name . description), for completion
 and listings.  A frontend adds its own presentational ones.")
 

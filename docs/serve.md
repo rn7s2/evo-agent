@@ -2,9 +2,9 @@
 
 `evo serve` runs an evo session with no terminal attached and hands its
 controls to HTTP: anything a person can do in the TUI, a program can do by
-request. It exists to be driven — a coordinator process (the planned
-`evo-swarm`) starts worker evos this way and talks to them through nothing
-else — but curl works just as well.
+request. It exists to be driven — a coordinator process
+([`evo-swarm`](swarm.md)) starts worker evos this way and talks to them
+through nothing else — but curl works just as well.
 
 ```sh
 evo serve --token-file ~/.evo/serve.token          # 127.0.0.1:8421
@@ -190,8 +190,10 @@ esc). `data`: `{"interrupted": true}`, or `null` when nothing was running
 **`POST /command`** `{"text": "/goal ship it"}` or `{"name": "goal", "args":
 "ship it"}` — a slash command, resolved exactly as the TUI resolves one:
 extension commands, then builtins, then skills (`/skill:name` or `/name`),
-then prompt templates. An unknown command is `404`. The builtins, all from
-the shared command layer (`src/command/command.lisp`):
+then prompt templates. An unknown command is `404`. The builtins — from the
+shared command layer (`src/command/command.lisp`), except `/memory`,
+`/global-memory` and `/eval`, which core extensions register
+(`src/core-ext/memory.lisp`, `src/core-ext/eval.lisp`):
 
 | Command | Effect | `data` |
 |---|---|---|

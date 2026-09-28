@@ -34,8 +34,10 @@ make install              # copies both to /usr/local/bin (PREFIX=…)
 make install-home         # seeds ~/.evo with docs + example extensions
 ```
 
-On Windows, `make.ps1` beside the Makefile takes the same targets, with the
-variables as parameters (SBCL only — see [Windows](#windows)):
+On Windows, `make.ps1` beside the Makefile takes the build, install and test
+targets, with the variables as parameters (SBCL only — see
+[Windows](#windows); the pty-driven `serve-test` and `swarm-test` are
+POSIX-only):
 
 ```powershell
 .\make.ps1 build          # requires SBCL + Quicklisp
@@ -190,8 +192,7 @@ point.
   human-only: `/goal pause` stops the idle loop, `/goal resume` restarts it,
   and `update_goal` status `paused` is rejected with an explanation.
 - **Budgets** run every turn over tokens. Exhaustion moves the goal to
-  `:budget-limited` and the next steering is a wrap-up template. A
-  session-level budget exists too.
+  `:budget-limited` and the next steering is a wrap-up template.
 - **Verified completion**: when an objective is mechanically checkable, the
   agent attaches a `done_when` verifier (at creation, or later with
   `update_goal done_when`). It is always the check itself — an inline Lisp
@@ -247,7 +248,7 @@ This is the evolution engine. Four mechanisms make it work:
   fixing or removing a file, never by surgery on opaque state.
 
 Seed corpus: [docs/](docs/) (extension API, journal format, self-extension
-guide, Windows field manual) and example extensions — git-checkpoint and
+guide, serve, swarm, math) and example extensions — git-checkpoint and
 permission-gate ([extensions/examples/](extensions/examples/)).
 
 ### Core extensions
@@ -262,7 +263,7 @@ the essential ones cannot be disabled.
   SIGWINCH live reflow, multi-line editor (Enter sends, Shift+Enter newline,
   a big paste collapses to a placeholder, paste-to-expand), pasting with or
   without bracketed paste, image paste (ctrl+v, cmd+v, drop a path), slash
-  commands, streaming rendering, `--swank` developer side-door.
+  commands, streaming rendering.
 - **Todo** — checklist tool rendered in the panel; state rides `:custom`
   entries (invisible to the LLM), survives restart and compaction, embedded in
   goal continuation steering.
@@ -422,9 +423,10 @@ then `~/.evo/swarm.lisp` and `<project>/.evo/swarm.lisp` — read by evo-swarm
 only — where you set the coordinator's model for the swarm, the lane count,
 tool limits and prompt notes. A lane loads none of your config or
 extensions: the coordinator hands each one a **baseline** — its providers
-(keys by environment variable name only, never as data), models, default
-model, the report tool and a prompt note — plus any code `swarm.lisp` gives
-it with `in-lanes`, evaluated in every lane:
+(keys by environment variable name only, never as data), default model and
+thinking level, then any code `swarm.lisp` gives lanes with `in-lanes`
+(evaluated in every lane), then the coordinator's models that code did not
+register, and last the report tool, a prompt note and any tool limit:
 
 ```lisp
 (evo.swarm:in-lanes (lane lanes)
@@ -453,10 +455,10 @@ line, `/lanes` and `/lane N`.
   /quit` are the TUI's own.
 - **`/lang [code]`**: the language of the system prompt and of replies. The
   prompt's words are a registered language pack — English ships as a core
-  extension, `extensions/100-lang-zh-cn.lisp` adds 简体中文, and
-  `evo:register-prompt-language` adds any other (untranslated sections fall
-  back to English). Set the default with `(evo:set-setting :language "zh-CN")`
-  in init.lisp. Evo's own interface stays English.
+  extension, and `evo:register-prompt-language` adds any other (untranslated
+  sections fall back to English); any other value ("Korean") is a
+  response-language hint only. Set the default with
+  `(evo:set-setting :language "...")` in init.lisp. Evo's own interface stays English.
 - **`/eval <sexpr>`**: a REPL into the live image. The content is read and
   evaluated in `EVO.USER` — the same package extensions and agent-written code
   live in — so registered tools, extension state and `evo:*agent*` are all
@@ -480,7 +482,10 @@ line, `/lanes` and `/lane N`.
 ## Configuration
 
 Config is code: global `~/.evo/init.lisp`, then project `<cwd>/.evo/init.lisp`,
-evaluated in that order on every boot — an override is just a later call.
+then the extension directories, then `~/.evo/post-init.lisp` and
+`<cwd>/.evo/post-init.lisp` (which can use what extensions registered),
+evaluated in that order on every boot and `/reload` — an override is just a
+later call.
 `EVO_HOME` overrides `~/.evo`. `--no-userspace` skips config and extensions.
 
 ```lisp
@@ -548,9 +553,9 @@ make tui-test       # expect-driven TUI under a pty: image paste
                     #       terminal sends it, model routing, the IDE bridge
 ```
 
-`.\make.ps1 test` runs the unit suite on Windows. The integration and TUI
-suites are POSIX-only (a shell script and expect against a pty), and CI
-builds Windows without testing it — see below.
+`.\make.ps1 test` runs the unit suites on Windows, and CI runs it there too.
+The integration, TUI, serve and swarm end-to-end suites are POSIX-only (shell
+scripts, expect and Python against a pty) — see below.
 
 ## Windows
 
@@ -606,13 +611,14 @@ Requirements and caveats:
   and `tests/windows-console-live.lisp` open `CONIN$`/`CONOUT$`, inject real
   `INPUT_RECORD`s with `WriteConsoleInputW`, and read glyphs back with
   `ReadConsoleOutputCharacterW`, asserting the exact bytes evo produces. They
-  need a real console, so they run here and not in CI (which stays build-only
-  on Windows).
+  need a real console, so they run here and not in CI (which builds, runs the
+  unit suites and installs on Windows).
 
 ## Layout
 
 Every directory under `src/` is one component owning exactly one package.
-`evo.asd` defines two systems and lists their components in load order,
+`evo.asd` defines three systems — `evo/core`, `evo` and `evo/tests` — and
+lists their components in load order,
 foundations first: `evo/core` is the agent itself — foundations, kernel, the
 core extensions and the command layer — and loads with no frontend at all;
 `evo` adds the TUI, the HTTP server and the CLI on top of it; `evo-swarm`
@@ -719,8 +725,16 @@ swarm/                   EVO.SWARM — evo-swarm (system `evo-swarm`; docs/swarm
   main.lisp              arguments, supervision, bring-up
   tests/                 the swarm's unit suite (make test)
 
-Makefile                 build/install on Unix
-make.ps1                 the same targets on Windows (SBCL only)
+tests/                   unit suites (run-unit.lisp, unit.lisp), the core-only and
+                         evo-only load checks, integration.sh, the expect TUI
+                         suites, serve-e2e.py / swarm-e2e.py against the stub
+                         Messages endpoint (stub-messages.py), and the Windows
+                         console proofs
+
+evo.asd                  systems evo/core, evo, evo/tests
+evo-swarm.asd            system evo-swarm
+Makefile                 build/install/test on Unix
+make.ps1                 build/install/test on Windows (SBCL only)
 build.lisp               shared by both: saves build/evo (build/evo.exe)
 build-swarm.lisp         the same, for build/evo-swarm (build/evo-swarm.exe)
 ```

@@ -89,7 +89,7 @@ evo (one binary; evo-swarm is a second program on top of it — §18)
    │                         both extension tiers build on this
    │    goal driver          idle-continuation loop, budgets, audits
    │    compactor            usage-anchored, self-contained checkpoints
-   │    budget guard         per-goal and per-session hard stops
+   │    budget guard         per-goal token budget, a hard stop
    │    extension loader     compile, load, journal the load
    │    media                images in: clipboard readers, sniffing,
    │                          size cap + downscale, :image blocks
@@ -114,9 +114,10 @@ evo (one binary; evo-swarm is a second program on top of it — §18)
 
 Directory conventions:
 
-- Global `~/.evo/` — `init.lisp`, `sessions/`, `extensions/`, `skills/`,
-  `prompts/`, `lore.sexp`, `docs/`
-- Project `<cwd>/.evo/` — `init.lisp`, `extensions/`, `skills/`, `prompts/`
+- Global `~/.evo/` — `init.lisp`, `post-init.lisp`, `sessions/`,
+  `extensions/`, `skills/`, `prompts/`, `lore.sexp`, `docs/`
+- Project `<cwd>/.evo/` — `init.lisp`, `post-init.lisp`, `extensions/`,
+  `skills/`, `prompts/`, `lore.sexp`
 
 Project scope shadows global scope wherever both exist.
 
@@ -159,8 +160,10 @@ Three of these carry architectural weight:
 - `:compaction` materializes the retained tail on the entry, so rebuilding
   context is `[summary, ...retained-tail, ...entries-after]` — O(1), with no
   walk past the compaction.
-- `:load` is what makes runtime evolution replayable. Boot is: load kernel,
-  then replay the path's `:load` entries against the source files on disk.
+- `:load` is what makes runtime evolution replayable. Boot is: load kernel
+  and core extensions, build userspace (init files, extension directories,
+  post-init files), then replay the path's `:load` entries against the source
+  files on disk.
 
 ### 4.3 Format rules
 
@@ -474,14 +477,13 @@ A goal is journal state; the current goal is a fold over `:goal` entries.
  :done-when nil)          ; source text of the check itself (D15)
 ```
 
-Statuses are `:active`, `:paused`, `:blocked`, `:budget-limited`, `:complete`.
-Through `update_goal` the model may transition to `:complete` or `:blocked`
-(under the audit rules below), `:paused` (stop the idle loop when it needs the
-user) and back to `:active` (resume), and may **refine** the live goal —
-rewrite its `:objective` or attach/replace its `:done-when` verifier. The user
-does not drive the goal directly; they express intent and the agent folds it
-in (this is by design — the same tool surface serves the human's requests and
-the agent's own judgement). Budget transitions belong to the system.
+Statuses are `:active`, `:paused`, `:budget-limited`, `:complete`. Through
+`update_goal` the model may transition to `:complete` (under the audit rules
+below), resume a paused goal to `:active`, and **refine** the live goal —
+rewrite its `:objective` or attach/replace its `:done-when` verifier. There is
+no `:blocked`: a goal is never given up on. Pausing is the user's alone
+(`/goal pause`, `/goal resume`); a model that needs the user says so in its
+reply and keeps doing what it can. Budget transitions belong to the system.
 
 ### 9.2 Driver
 
@@ -493,31 +495,29 @@ the agent's own judgement). Budget transitions belong to the system.
   carrying the objective (as untrusted data), budget numbers,
   anti-scope-shrinking fidelity rules, a **completion audit** (completion must
   be proven from current evidence — files, test output, runtime behavior —
-  requirement by requirement, never from memory or intent), and a **blocked
-  audit** (declare `:blocked` only after the same blocker recurs across three
-  consecutive goal turns).
+  requirement by requirement, never from memory or intent).
 - Doing nothing is not completion. An idle active goal is always re-steered.
-  Termination is explicit: the model calls `update_goal` (complete/blocked), a
-  budget trips, or the goal is paused.
-- **Pause/resume**: `update_goal :paused` stops the idle-continuation loop —
-  the settled hook only re-steers an `:active` goal, so a paused goal settles
-  and waits. It does not auto-resume on session restart either (resumption
-  keys on `:active`). The model pauses when it genuinely needs the user before
-  proceeding, then resumes with `update_goal :active`. Headless, a paused goal
-  exits like a blocked one (code 2, human needed, no auto-restart).
+  Termination is explicit: the model calls `update_goal` (complete), a budget
+  trips, or the user pauses the goal.
+- **Pause/resume**: `/goal pause` stops the idle-continuation loop — the
+  settled hook only re-steers an `:active` goal, so a paused goal settles and
+  waits. It does not auto-resume on session restart either (resumption keys
+  on `:active`). `/goal resume` (or the model's `update_goal :active`) picks it
+  back up. Headless, a paused goal exits with code 2 (human needed, no
+  auto-restart).
 - **Budget accounting** runs every turn over tokens. Exhaustion moves the goal
   to `:budget-limited`, and the next steering is a wrap-up template —
   summarize progress, remaining work, next step, start nothing new. This
-  doubles as the runaway-cost brake; a session-level budget exists too.
-- A turn error moves the goal to `:blocked`, which is also the supervisor
-  hook: on restart, a goal blocked by `turn-error` rather than by model
-  decision is eligible for automatic resumption (§15).
+  doubles as the runaway-cost brake.
+- A turn error leaves the goal `:active`. Headless, evo exits 1 and the
+  supervisor's `--resume` restart picks the goal back up (§15);
+  interactively the error is shown and the next message re-steers.
 
 ### 9.3 Model-facing tools
 
 `get_goal`; `create_goal`, which is for explicit user requests only and
 refuses while an unfinished goal exists; and `update_goal`, which changes
-status (`complete`/`blocked`/`paused`/`active`) **and** refines the live goal
+status (`complete`, or `active` to resume a paused goal) **and** refines the live goal
 (`objective` text, `done_when` verifier) — at least one field required, the
 audit language carried in the tool description itself.
 
@@ -586,7 +586,7 @@ permission, how to handle git, and how to treat injected system material.
 **Language packs.** The kernel owns the assembly order; the *words* belong to
 a registered language pack, and English is one — `src/core-ext/lang-en.lisp`,
 a core extension like todo or memory. `evo:register-prompt-language` adds
-another (`extensions/100-lang-zh-cn.lisp` is a full one); a pack may translate
+another; a pack may translate
 any subset of `*prompt-sections*` and inherits English for the rest, so adding
 a section never leaves a translated prompt with a hole. Which pack is in force
 follows the model's precedence — a journalled `/lang` pick, then the
@@ -636,7 +636,7 @@ something to say.
   `/resume <n>`, `/tree <id>`). So a command typed in the TUI and the same
   command sent over HTTP cannot differ in effect: there is one copy of it.
 - **One mode.** There is no mode switch and no mode indicator: the agent is
-  fully permissive, always, and that is the whole design (D2). What a mode
+  fully permissive, always, and that is the whole design (§1). What a mode
   would have been built from stays public API, so a userspace extension can
   still impose a policy without the kernel knowing: `set-active-tools` gates
   the tool set as journal state (`:tools-change`), `inject-context` adds a
@@ -775,7 +775,7 @@ in-process.
    event, with a generous configurable hang timeout — tool calls can legally
    run for a long time. A stale heartbeat means the child is killed.
 3. **Restart.** Re-launch with `--resume <session>`. If the resumed session
-   has an `:active` goal, or one `:blocked` by `turn-error`, the goal driver's
+   has an `:active` goal — a turn error leaves it active — the goal driver's
    idle continuation picks it up: crash, reboot, re-steer, with no human in
    the loop.
 4. **Boot-failure quarantine.** After N failed boots, retry with
@@ -806,15 +806,17 @@ public API and not disableable.
   the user last spoke. That number hides a wedge behind an hour of honest work,
   and telling a slow step from a wedged one is the only reason the clock is
   there.
-- Resize is SIGWINCH through `evo.port`, re-querying `TIOCGWINSZ` and
-  reflowing the managed region. Long content wraps; wide content truncates
-  with indicators.
-- Raw mode and ANSI escapes go through a thin CFFI termios layer. Avoiding a
-  curses dependency keeps the binary self-contained and the renderer
-  debuggable. The scope is a deliberate subset: no windowing, no widgets
+- Resize is SIGWINCH through `evo.port` (polled on Windows), re-querying the
+  size with `stty size` and reflowing the managed region. Long content wraps;
+  wide content truncates with indicators.
+- Raw mode goes through `stty` (console mode on Windows) and output is plain
+  ANSI escapes — no curses, no FFI. That keeps the binary self-contained and
+  the renderer debuggable. The scope is a deliberate subset: no windowing, no widgets
   beyond the editor, list-select, and confirm.
-- **Editor** (D12): a plain multi-line text editor — no completions, no
-  highlighting — because multi-line editing is the part that matters.
+- **Editor** (D12): a plain multi-line text editor — no highlighting, and
+  completion only for what is unambiguous to complete (Tab on a `/command`
+  name or an `/eval` symbol) — because multi-line editing is the part that
+  matters.
   - The editor region grows and reflows with content, as part of the managed
     bottom region.
   - **Enter sends; Shift+Enter inserts a newline.**
@@ -832,8 +834,7 @@ public API and not disableable.
     place. Paste once to keep it compact, twice to edit.
   - Shift+Enter is indistinguishable from Enter in legacy terminals, so the
     kitty keyboard protocol or `modifyOtherKeys` (CSI-u) is used where
-    available, with a documented fallback of Alt+Enter or
-    backslash-then-Enter elsewhere.
+    available, with Alt+Enter and Ctrl+J as fallbacks elsewhere.
 - **Image input across terminals** (§16.1): the one feature whose plumbing is
   entirely terminal-dependent, so it is specified as a ladder rather than a
   gesture.
@@ -842,10 +843,10 @@ public API and not disableable.
   give the supervisor and the tests a UI-less harness.
 - Streaming rendering is driven by the loop's event protocol (deltas plus a
   partial accumulator).
-- `--swank <port>` is the developer side-door for live image inspection, off
-  by default.
+- The live image is reachable from inside through `/eval` (and the model's
+  `eval` tool); evo ships no Swank listener.
 
-#### 15.0.1 A paste arrives in one of two shapes
+### 16.0 A paste arrives in one of two shapes
 
 Bracketed paste (`CSI ?2004h`) is a request, not a guarantee: a terminal may
 ignore it, a multiplexer or ssh hop may eat it, and `tmux send-keys` and every
@@ -1086,16 +1087,16 @@ the other way round (`tests/evo-only.lisp`). The reference is
 | D1 | Sessions are an append-only entry **tree** in a journal file; state is a fold over the root→leaf path. | Branching, rewind, resume, and pause fall out for free; write-ahead makes it crash-safe. |
 | D2 | **No image-based session persistence.** The journal is the only source of truth; Lisp images are build artifacts. | Both target APIs are stateless and replay in full, so transcript-as-data is mandatory anyway. Images are opaque, undiffable, and propagate corruption. |
 | D3 | **Journal format is native sexprs**, one form per line, and sexprs are the default for every data format evo controls (lore, goal state). Config is not data: init.lisp is evaluated Lisp (D6). | Human-readable and `read`-able from Lisp with no external serialization dependency. |
-| D4 | **A CLI with an adaptive TUI**, mandatory live console-resize. Not Emacs/Swank-first. | Approachable for newcomers and adapts to the most contexts. Swank stays a developer side-door, not the product. |
+| D4 | **A CLI with an adaptive TUI**, mandatory live console-resize. Not Emacs/Swank-first. | Approachable for newcomers and adapts to the most contexts. The live image stays reachable from inside (`/eval`), not through an editor. |
 | D5 | **A supervisor owns launch, crash detection, restart, and resume.** | Long-running goal pursuit requires surviving self-inflicted death. |
 | D6 | **One adapter ships** (Anthropic Messages) as a CLOS *provider API*; **models and endpoints are user-registered from init.lisp**. A wire protocol is an extension point, not a kernel privilege: `evo:register-api` takes any `provider-api` subclass. One unified message model for all APIs. Anthropic's own models (Sonnet 5, Opus 5, Fable 5) and Messages-compatible third-party endpoints (Kimi Code K3, DeepSeek, proxies) all ride the same adapter; the OpenAI Responses adapter was deleted when it stopped earning its parsing surface. | The API/registry split keeps the bundled protocol curated while models stay configuration, avoiding a 40-provider table. Making the protocol registerable follows D13: if the TUI can be a core extension, a wire protocol can be a user one. |
-| D7 | The goal system follows **codex's design**: persisted goal, idle-continuation steering, explicit audited completion, budgets. Optional Lisp acceptance predicate as a kernel-side verifier. | See §8. |
+| D7 | The goal system follows **codex's design**: persisted goal, idle-continuation steering, explicit audited completion, budgets. Optional Lisp acceptance predicate as a kernel-side verifier. | See §9. |
 | D8 | The kernel/userspace split is enforced with **package locks** (SBCL native, ECL `si:package-lock`, both behind `evo.port`). | Permissive but not suicidal: touching the kernel requires an explicit, auditable unlock. |
 | D9 | Tool execution is **sequential**. | Parallelism is where the thread-discipline complexity lives, and nothing yet demands it. |
 | D10 | **SBCL and ECL on Unix, SBCL on Windows**, through a single portability layer (`evo.port` — the only package permitted to touch `sb-*`, `ext:`, or `si:` symbols, and now the only one that may branch on the platform). Two axes, not one: implementation *and* platform. Windows branches read on an `:evo-windows` feature the layer pushes itself, so a new implementation is one form, not fifty. | The implementation-specific surface proved small: env/argv/exit, processes, locks, fd streams, signals. Windows added a second small one — console mode instead of stty, no SIGWINCH (poll), `taskkill` instead of `pgrep`+`kill`, PowerShell instead of `/bin/sh`, PATHEXT — and asking the console for VT input/output means the key parser, the escape sequences and the renderer are untouched by it. ECL on Windows stays unsupported: it would need its own copy of that surface with no user waiting for it. |
 | D11 | Naming: binary `evo`, directories `~/.evo/` and `<project>/.evo/`, package prefix `EVO.`. | Settled to stop revisiting it. |
-| D12 | The TUI editor is a **plain multi-line text editor**: Enter sends, Shift+Enter inserts a newline, pastes over three lines collapse to a placeholder that re-pasting expands. No completions or highlighting. | Multi-line editing is crucial UX; editor sophistication is not where the novelty is. |
-| D13 | **Slim core: everything outside the core loop ships as a core extension** — bundled, on the same API, with the same control as user extensions; essential ones cannot be disabled. | Dogfooding proves the API's depth and keeps the kernel small and honest. See §13. |
+| D12 | The TUI editor is a **plain multi-line text editor**: Enter sends, Shift+Enter inserts a newline, pastes over three lines collapse to a placeholder that re-pasting expands. No highlighting; Tab completes only `/command` names and `/eval` symbols. | Multi-line editing is crucial UX; editor sophistication is not where the novelty is. |
+| D13 | **Slim core: everything outside the core loop ships as a core extension** — bundled, on the same API, with the same control as user extensions; essential ones cannot be disabled. | Dogfooding proves the API's depth and keeps the kernel small and honest. See §14. |
 | D14 | **Todo checklists ship**, as a core extension. | Long-running goal work needs user-visible progress. The one deliberate deviation from the minimal omit-list. |
 | D15 | `:done-when` verifiers are **the check itself**: a Lisp form, journaled as source text on the `:goal` entry and evaluated on each completion claim. Never a function name — there is no second place for the check to live. | Users state objectives in prose; the agent formalizes them, and the formalization stays where the human can read it. Source text is data: it survives restart with no load step, and a closure could not round-trip through the journal anyway. |
 | D16 | **Parallel agents are a swarm of processes, not sub-agents.** `evo-swarm` (§18) runs one coordinator agent — the only one a human talks to — and a pool of interchangeable worker *lanes*, each a whole `evo serve` process driven only through serve's public HTTP API. Lanes never talk to each other; they report to the coordinator, whose input their reports become. Lanes get the coordinator's setup plus code swarm.lisp gives them (`in-lanes`). This replaces "no sub-agents". | Context isolation did demonstrably beat one transcript once goals outgrew one context — the re-entry condition D16 named. Processes rather than in-image children because every guarantee evo has — the journal as truth, supervision, resume, a crash domain of one — then holds per lane for free, and the coordinator exercises serve's API as any client would. Lanes rather than roles because a role is a prompt, which the coordinator can give any lane per task. |

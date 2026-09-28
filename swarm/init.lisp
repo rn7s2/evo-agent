@@ -81,9 +81,9 @@ sentence about where it works.")
 
 (defun set-coordinator-note (text)
   "Replace the coordinator's prompt note (a FORMAT control taking the lane
-count), from swarm.lisp.  Takes effect from the next prompt built."
-  (setf *coordinator-note* text)
-  (install-coordinator-note))
+count), from swarm.lisp.  Takes effect from the next prompt built: the
+registered note is a function that formats it with the live lane count."
+  (setf *coordinator-note* text))
 
 (defun set-worker-note (text)
   "Replace the lanes' prompt note (a FORMAT control taking lane, lane, lane
@@ -100,9 +100,6 @@ count and a where-you-work sentence).  Lanes get it when next initialized."
                       (lane-worktree lane) (lane-branch lane))
               "You share the working directory with the coordinator and the other lanes, so keep to the files your task names.")))
 
-(defun install-coordinator-note ()
-  (evo:register-prompt-note "swarm-coordinator" (coordinator-note)))
-
 ;;; Tool limits.
 
 (defvar *coordinator-tools* nil
@@ -113,8 +110,25 @@ count and a where-you-work sentence).  Lanes get it when next initialized."
 every lane without its own entry.  No entry means every tool.")
 
 (defun set-coordinator-tools (names)
-  "Limit the coordinator to NAMES (strings), or NIL for every tool."
+  "Limit the coordinator to NAMES (strings), or NIL for every tool.  Applied
+at startup, on /reload and in every new session (APPLY-COORDINATOR-TOOLS)."
   (setf *coordinator-tools* names))
+
+(defvar *applied-coordinator-tools* nil
+  "The coordinator tool limit last journaled, so an unchanged one is not
+journaled again on every /reload.")
+
+(defun apply-coordinator-tools (agent &key new-session)
+  "Journal the coordinator's tool limit in AGENT's session when it changed —
+or, in a NEW-SESSION (whose journal carries no limit yet), whenever there is
+one.  Lifting a limit restores every tool."
+  (let ((names (and *coordinator-tools*
+                    (remove-duplicates *coordinator-tools* :test #'equal))))
+    (when (if new-session
+              names
+              (not (equal names *applied-coordinator-tools*)))
+      (evo:set-active-tools agent names))
+    (setf *applied-coordinator-tools* names)))
 
 (defun set-lane-tools (names &key lanes)
   "Limit LANES (a list of lane numbers; NIL = every lane) to NAMES, or with
@@ -257,7 +271,11 @@ coordinator's models as well as the swarm's own settings."
         *coordinator-note* *default-coordinator-note*
         *worker-note* *default-worker-note*)
   (load-init-file (merge-pathnames "swarm.lisp" (evo-home)))
-  (load-init-file (merge-pathnames "swarm.lisp" (project-evo-dir cwd))))
+  (load-init-file (merge-pathnames "swarm.lisp" (project-evo-dir cwd)))
+  ;; On /reload the swarm is running: its coordinator gets the new limit.  At
+  ;; startup there is no swarm yet, and RUN-SWARM applies it after boot.
+  (when *swarm*
+    (apply-coordinator-tools (swarm-agent *swarm*))))
 
 ;;; The baseline, in order.
 

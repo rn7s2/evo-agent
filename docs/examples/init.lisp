@@ -152,8 +152,8 @@
 ;; (evo:set-setting :compact-reserve 16000)
 ;; (evo:set-setting :compact-keep-recent 20000)
 ;; Language of the system prompt and of replies.  A registered pack code
-;; ("en", or "zh-CN" from extensions/100-lang-zh-cn.lisp) switches the prompt
-;; itself into that language; any other string ("Korean") is just a
+;; ("en", or one an extension adds with evo:register-prompt-language) switches
+;; the prompt itself into that language; any other string ("Korean") is just a
 ;; response-language hint.  /lang switches it live.
 ;; (evo:set-setting :language "zh-CN")
 

@@ -235,7 +235,34 @@
            (progn (set-worker-note "lane ~d/~d/~d ~a")
                   (check "notes: swarm.lisp can replace the worker note"
                          (string-prefix-p "lane 4/4/5 " (worker-note lane 5))))
-        (setf evo.swarm::*worker-note* saved)))))
+        (setf evo.swarm::*worker-note* saved)))
+    (let ((saved evo.swarm::*coordinator-note*))
+      (unwind-protect
+           (progn (set-coordinator-note "Lead ~d lanes.")
+                  (check "notes: a replaced coordinator note gets the live lane count"
+                         (equal "Lead 5 lanes." (coordinator-note))))
+        (setf evo.swarm::*coordinator-note* saved)))))
+
+(defun test-coordinator-tools ()
+  (let* ((agent (fresh-agent))
+         (evo.swarm::*coordinator-tools* nil)
+         (evo.swarm::*applied-coordinator-tools* nil))
+    (flet ((changes ()
+             (count :tools-change (evo.journal:journal-entries (agent-journal agent))
+                    :key (lambda (e) (getf e :type)))))
+      (evo.swarm::apply-coordinator-tools agent)
+      (check "coordinator tools: no limit, nothing journaled" (= 0 (changes)))
+      (set-coordinator-tools '("read" "lanes"))
+      (evo.swarm::apply-coordinator-tools agent)
+      (check "coordinator tools: a limit is journaled" (= 1 (changes)))
+      (evo.swarm::apply-coordinator-tools agent)
+      (check "coordinator tools: an unchanged limit is not journaled again (/reload)"
+             (= 1 (changes)))
+      (evo.swarm::apply-coordinator-tools agent :new-session t)
+      (check "coordinator tools: a new session gets the limit" (= 2 (changes)))
+      (set-coordinator-tools nil)
+      (evo.swarm::apply-coordinator-tools agent)
+      (check "coordinator tools: lifting the limit restores every tool" (= 3 (changes))))))
 
 (defun test-events ()
   (let* ((agent (fresh-agent))
@@ -378,6 +405,7 @@
     (test-model-fill-in)
     (test-tool-limits)
     (test-notes)
+    (test-coordinator-tools)
     (test-events)
     (test-record)
     (test-launch-environment)

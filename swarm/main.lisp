@@ -20,8 +20,8 @@ Usage:
                                  last one here) and restore its lanes
   evo-swarm --model <id>         the coordinator's model (lanes default to it)
   evo-swarm --thinking <level>   low|medium|high|xhigh|max
-  evo-swarm --evo <path>         the evo binary lanes run (default: the one
-                                 beside evo-swarm, then EVO_BINARY, then PATH)
+  evo-swarm --evo <path>         the evo binary lanes run (default: EVO_BINARY,
+                                 then the one beside evo-swarm, then PATH)
   evo-swarm --no-userspace       no init files, extensions or swarm.lisp
   evo-swarm --no-supervisor      run the coordinator in-process
   evo-swarm --help | --version
@@ -109,8 +109,7 @@ session boots, so /reload keeps them (they are the base, not an extension)."
     (install-coordinator)
     (multiple-value-bind (agent resumed-p)
         (evo.cli:setup-agent opts :frontend (make-instance 'evo.tui:tui-frontend))
-      (when *coordinator-tools*
-        (evo:set-active-tools agent (remove-duplicates *coordinator-tools* :test #'equal)))
+      (apply-coordinator-tools agent)
       (let* ((record (and resumed-p (evo:custom-state "swarm" agent)))
              (workers (or (getf opts :workers)
                           (let ((n (setting :swarm-workers))) (and (integerp n) n))
@@ -121,7 +120,10 @@ session boots, so /reload keeps them (they are the base, not an extension)."
         (record-swarm)
         ;; A journal switch (/new, /fork, /resume) takes the swarm along: the
         ;; new session records the lanes too.
-        (evo:on :session-start (lambda (event) (declare (ignore event)) (record-swarm))
+        (evo:on :session-start (lambda (event)
+                                 (declare (ignore event))
+                                 (record-swarm)
+                                 (apply-coordinator-tools agent :new-session t))
                 :name :evo-swarm-record)
         ;; Quitting stops every lane — before the coordinator's own task
         ;; stops, as :session-end promises.

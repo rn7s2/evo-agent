@@ -283,7 +283,10 @@ Config is the same userspace code, evaluated from `~/.evo/init.lisp` then
 extension `:load` entries, init files are **not journaled**: they are
 environment, re-evaluated fresh on every boot (and `/reload`), with the
 model/provider/settings registries reset first — so re-running them is
-idempotent and an override is just a later call.
+idempotent and an override is just a later call. `~/.evo/post-init.lisp` then
+`<project>/.evo/post-init.lisp` run the same way *after* the extension
+directories, for config that needs what an extension registered (a model on
+an extension's provider API, say).
 
 ```lisp
 (evo:register-model "deepseek-v4-pro"       ; evo has NO built-in models
@@ -549,7 +552,8 @@ is not translated and is not part of this.
   model. An unknown section key is refused at registration.
 - Re-registering a code replaces the pack, so reloading an extension is
   idempotent. Codes compare case-insensitively (`zh-CN` = `zh-cn`).
-- The bundled `extensions/100-lang-zh-cn.lisp` is a complete worked pack.
+- The English pack, `src/core-ext/lang-en.lisp`, is the complete worked
+  example: every section a pack can translate.
 
 Choosing one:
 
