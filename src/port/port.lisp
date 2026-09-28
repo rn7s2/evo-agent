@@ -383,22 +383,32 @@ effort — returns PROGRAM/ARGS unchanged if no mechanism is available."
         (values program args))))
 
 (defun launch-child (program args &key (input t) (output t) (error-output t)
-                                       environment new-session)
+                                       environment new-session directory)
   "Spawn PROGRAM (an absolute path) with ARGS, without waiting.
 INPUT/OUTPUT/ERROR-OUTPUT: t inherits the parent's fd, a pathname redirects
 to that file (superseding), nil is the null device; ERROR-OUTPUT may also be
 :output to merge stderr into OUTPUT.  ENVIRONMENT nil inherits the parent's
 environment; otherwise a list of \"VAR=VALUE\" strings.  NEW-SESSION detaches
-the child from the controlling terminal (see WRAP-NEW-SESSION)."
+the child from the controlling terminal (see WRAP-NEW-SESSION).  DIRECTORY,
+when given, is the child's working directory."
   (when new-session
     (multiple-value-setq (program args) (wrap-new-session program args)))
+  ;; ECL's run-program takes no working directory: a shell changes into it
+  ;; and execs the real program, so the handle is still the program's own.
+  #+ecl
+  (when directory
+    (setf args (list* "-c" "cd \"$0\" && exec \"$@\""
+                      (namestring directory) program args)
+          program "/bin/sh"
+          directory nil))
   #+sbcl
   (apply #'sb-ext:run-program program args
          :wait nil
          :input input :output output
          :error (if (eq error-output :output) :output error-output)
          :if-output-exists :supersede
-         (when environment (list :environment environment)))
+         (append (when environment (list :environment environment))
+                 (when directory (list :directory (namestring directory)))))
   #+ecl
   (multiple-value-bind (stream code process)
       (apply #'ext:run-program program args
@@ -409,6 +419,24 @@ the child from the controlling terminal (see WRAP-NEW-SESSION)."
              (when environment (list :environ environment)))
     (declare (ignore stream code))
     process))
+
+(defun pid-alive-p (pid)
+  "True while a process with PID exists — for watching a process this image
+did not start (it has no handle to ask).  kill(pid, 0) on Unix, where EPERM
+still means alive; tasklist on Windows."
+  #+(and sbcl (not evo-windows))
+  (handler-case (progn (sb-posix:kill pid 0) t)
+    (sb-posix:syscall-error (e) (= (sb-posix:syscall-errno e) sb-posix:eperm)))
+  #+ecl (zerop (si:system (format nil "kill -0 ~d 2>/dev/null" pid)))
+  #+evo-windows
+  (let ((exe (program-in-path "tasklist")))
+    (or (null exe)                      ; cannot tell: assume alive
+        (let ((out (with-output-to-string (s)
+                     (ignore-errors
+                       (uiop:run-program (list (namestring exe) "/FI"
+                                               (format nil "PID eq ~d" pid) "/NH")
+                                         :output s :ignore-error-status t)))))
+          (and (search (princ-to-string pid) out) t)))))
 
 (defun process-alive-p (process)
   #+sbcl (sb-ext:process-alive-p process)

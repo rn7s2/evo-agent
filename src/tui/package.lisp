@@ -21,7 +21,7 @@
            ;; segments wear.
            #:add-status-segment #:remove-status-segment #:status-segments
            #:dim
-           #:request-repaint #:request-run #:tui-live-p
+           #:request-repaint #:request-run #:tui-live-p #:post-notice
            ;; Math rendering seam — an extension installs a rasterizer here
            ;; (see extensions/300-latex-math.lisp and docs/extension-api.md).
            #:register-math-renderer #:*math-renderer* #:*math-enabled*

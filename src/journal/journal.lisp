@@ -23,7 +23,14 @@
   (lock (bt:make-lock "journal")))
 
 (defun sessions-directory (&optional (cwd (uiop:getcwd)))
-  (merge-pathnames (format nil "sessions/~a/" (encode-cwd cwd)) (evo-home)))
+  "Where CWD's sessions live: ~/.evo/sessions/<encoded cwd>/, unless
+EVO_SESSIONS_DIR names a directory for this process's sessions outright.  An
+evo-swarm lane runs with one, so its journals stay out of the coordinator's
+/resume list and a restarted lane's --resume finds its own session."
+  (let ((override (getenv "EVO_SESSIONS_DIR")))
+    (if (plusp (length override))
+        (uiop:ensure-directory-pathname override)
+        (merge-pathnames (format nil "sessions/~a/" (encode-cwd cwd)) (evo-home)))))
 
 (defun session-file-timestamp ()
   (multiple-value-bind (sec min hour day month year)

@@ -16,7 +16,7 @@
   (:export #:exit-lisp #:add-exit-hook #:run-exit-hooks
            #:argv #:runtime-pathname #:environ #:setenv #:getpid
            #:call-with-timeout #:timeout-error
-           #:launch-child #:process-alive-p #:process-kill #:process-kill-tree
+           #:launch-child #:process-alive-p #:pid-alive-p #:process-kill #:process-kill-tree
            #:reap-pid-tree #:process-wait #:process-pid
            #:program-in-path #:windows-p #:path-separator
            #:shell-invocation #:shell-name

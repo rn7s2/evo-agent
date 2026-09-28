@@ -318,9 +318,29 @@ owns the task's step clock."
       (when (member (getf event :type) '(:turn-start :compaction-start :compaction-end))
         (post server (list :step))))))
 
+(defparameter *watch-interval* 2
+  "Seconds between checks that the watched process (EVO_SERVE_WATCH_PID) is
+still alive.")
+
+(defun watched-pid ()
+  "The pid in EVO_SERVE_WATCH_PID, or NIL.  A process that started this
+server to drive it — an evo-swarm coordinator — names itself here, so a
+server whose driver died shuts itself down instead of idling forever."
+  (let ((text (getenv "EVO_SERVE_WATCH_PID")))
+    (and (plusp (length text)) (ignore-errors (parse-integer text)))))
+
 (defun session-loop (server)
-  (loop until (server-quit server)
+  (loop with watched = (watched-pid)
+        with next-watch = (+ (get-universal-time) *watch-interval*)
+        until (server-quit server)
         do (heartbeat-touch)
+           (when (and watched (>= (get-universal-time) next-watch))
+             (setf next-watch (+ (get-universal-time) *watch-interval*))
+             (unless (evo.port:pid-alive-p watched)
+               (say-event server (format nil "the driving process ~d is gone — shutting down"
+                                         watched)
+                          :dim)
+               (setf (server-quit server) t)))
            (dolist (message (drain-inbox server))
              (handler-case (handle-message server message)
                (serious-condition (e)
