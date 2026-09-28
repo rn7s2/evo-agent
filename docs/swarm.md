@@ -65,8 +65,8 @@ Every tool reaches a lane through serve's HTTP API and nothing else.
 
 ### What reaches the coordinator
 
-The coordinator subscribes to every lane's event stream (`GET /events`, with
-`Last-Event-ID` resume). What it must hear becomes its **input**, exactly like
+The coordinator subscribes to every lane's event stream (`GET /events`,
+resuming from its last event id with `?since=` after a reconnect). What it must hear becomes its **input**, exactly like
 a message you type: queued to its next turn boundary when it is working, and
 starting a run — waking it — when it is idle. You see each one in the
 scrollback too.
@@ -211,8 +211,8 @@ evo-swarm [--workers N] [--resume [path]] [--model id] [--thinking level]
           [--evo path] [--no-userspace] [--no-supervisor]
 ```
 
-`--evo` names the evo binary lanes run; by default the one beside
-`evo-swarm`, then `EVO_BINARY`, then `evo` on `PATH`. evo-swarm needs a
+`--evo` names the evo binary lanes run; without it, `EVO_BINARY`, then the
+one beside `evo-swarm`, then `evo` on `PATH`. evo-swarm needs a
 terminal — for a headless single agent, use `evo serve`.
 
 Files: `~/.evo/swarm/<swarm-id>/` holds each lane's `lane-N/` directory

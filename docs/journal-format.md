@@ -22,7 +22,7 @@ form-by-form, not line-by-line.
 | type | meaning |
 |---|---|
 | `:message` | payload `:message` is a message plist (in LLM context) |
-| `:model-change` | `:model` id (state fold); older journals may add `:provider` — ignored |
+| `:model-change` | `:model` id, and `:provider` when the id is registered under more than one (state fold) |
 | `:thinking-change` | `:thinking` level (state fold) |
 | `:tools-change` | `:tools` vector of active tool names (state fold) |
 | `:compaction` | `:summary` + `:retained-tail` — self-contained checkpoint; context rebuild = [summary, …tail, …entries-after] |
@@ -33,6 +33,7 @@ form-by-form, not line-by-line.
 | `:session-info` | session name etc. |
 | `:goal` | goal created/updated: `:goal-id :objective :status :token-budget :tokens-used [:done-when]` (`:token-budget` nil = no limit, the default; `:done-when` is the verifier — the source text of a Lisp form, evaluated on each completion claim) |
 | `:load` | userspace source file loaded (`:path` + `:reason`) — replayed on boot |
+| `:provider-retry` | a provider request re-sent: `:attempt :max :delay :reason` — for postmortems; the fold ignores it |
 
 Every entry carries `:id` (short random hex), `:parent-id` (nil for a root),
 `:timestamp` (ISO-8601 UTC).

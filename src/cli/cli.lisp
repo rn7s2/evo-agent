@@ -34,7 +34,7 @@ Usage:
       --token-file <path>        write the bearer token here (mode 0600)
       --allow-remote             permit a non-loopback --host
       --resume [path] --model <id> --thinking <level> --no-userspace  as above
-  evo --help
+  evo --help | --version
 
 evo supervises itself: crashes and hangs restart the session with --resume;
 a goal that was active picks itself back up.  Exit codes: 0 done, 1 error,

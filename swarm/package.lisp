@@ -11,11 +11,12 @@
   (:export ;; the program
            #:main #:toplevel
            ;; swarm.lisp — code for lanes, lane count, tool limits, prompt notes
-           #:in-lanes #:baseline-forms
+           #:in-lanes
            #:set-lane-tools #:set-coordinator-tools
            #:set-worker-note #:set-coordinator-note
            #:worker-note #:coordinator-note
-           ;; the live swarm, for eval in the coordinator
+           ;; the live swarm, for eval in the coordinator; what a lane is given
+           #:baseline-forms
            #:*swarm* #:swarm-lanes #:swarm-id #:swarm-dir
            #:lane-n #:lane-state #:lane-task #:lane-cwd #:lane-worktree
            #:find-lane #:lane-eval #:lane-command #:tell-coordinator))
