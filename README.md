@@ -64,6 +64,7 @@ evo --goal "make ./test.sh pass"       # goal run; survives its own death
 evo --resume                           # reopen the last session worked in here
 evo --image shot.png -p "what broke?"  # attach an image to the prompt
 evo --list-sessions
+evo serve --token-file ~/.evo/serve.token   # headless, controlled over HTTP
 ```
 
 Invoked plainly, `evo` is its own supervisor: the parent process re-spawns the
@@ -73,6 +74,17 @@ and quarantines repeated boot failures with `--no-userspace`. Exit codes:
 `0` done · `1` error · `2` goal paused · `3` budget-limited · `64` usage error.
 
 `--no-supervisor` (or `EVO_NO_SUPERVISOR=1`) runs the session in-process.
+
+`evo serve` runs a session with no terminal and hands all of its controls to
+HTTP — prompt (with images), steer, follow-up, interrupt, every slash command,
+`/eval`, the full state, and a live event stream. It binds 127.0.0.1 and
+requires a bearer token on every request (see [docs/serve.md](docs/serve.md)):
+
+```sh
+evo serve --port 8421 --token-file ~/.evo/serve.token
+curl -sN -H "Authorization: Bearer $(cat ~/.evo/serve.token)" \
+     -d '{"text": "summarize the README", "stream": true}' localhost:8421/prompt
+```
 
 ## What's inside
 
@@ -368,6 +380,23 @@ exactly as written (the plist spelling would turn `src/App.jsx` into
 `src/app.jsx`). See
 [docs/extension-api.md](docs/extension-api.md#tools-whose-contract-was-written-elsewhere).
 
+### evo serve
+
+A headless frontend beside the TUI: one session, controlled over HTTP/1.1
+with JSON bodies — the base a coordinator drives worker evos through. POSTs
+are commands (`/prompt`, `/steer`, `/follow-up`, `/interrupt`, `/command`,
+`/eval`, `/load-extension`, `/shutdown`), each of which can answer with an SSE
+stream of the events it causes until the session settles; GETs read state
+(`/state`, `/transcript`, `/journal`, `/lore`, `/sessions`, `/registry`, no
+secrets); `GET /events` streams every session event with ids and
+`Last-Event-ID` resume. Events are the `--events` plists under one documented
+JSON mapping. Commands run on the session's own thread, so a command that
+needs a quiet session and finds a busy one gets `409` — never a race.
+Loopback only unless `--allow-remote`; a bearer token on every request
+(`--token-file`, written 0600, or `EVO_SERVE_TOKEN`); runs under the
+supervisor like any session. `/eval` is remote code execution by design — the
+token is the gate. Full reference: [docs/serve.md](docs/serve.md).
+
 ### Skills, templates, slash commands
 
 - **Skills**: the Agent Skills standard (SKILL.md + frontmatter) with
@@ -377,8 +406,11 @@ exactly as written (the plist spelling would turn `src/App.jsx` into
   and `$@` substitution.
 - **Slash command resolution**: extension commands → builtins → skills →
   prompt templates → send to the agent. Built-ins: `/goal /lore /global-lore
-  /memory /global-memory /compact /image /eval /tree /fork /resume
-  /model /lang /reload /export /help /quit /exit`.
+  /memory /global-memory /compact /image /eval /tree /rewind /fork /resume
+  /new /model /thinking /lang /reload /export /help /quit /exit`. What each
+  one *does* lives once, in the core command layer (`src/command/`), which the
+  TUI and `evo serve` both dispatch through; only `/help /todo /theme /image
+  /quit` are the TUI's own.
 - **`/lang [code]`**: the language of the system prompt and of replies. The
   prompt's words are a registered language pack — English ships as a core
   extension, `extensions/100-lang-zh-cn.lisp` adds 简体中文, and
@@ -466,6 +498,8 @@ make integration    # live e2e: tool round-trip, kill -9 + manual resume,
                     #       Backend via env (skips if unreachable):
                     #       EVO_TEST_BASE_URL / _API_KEY / _MODEL
                     #       (+ optional _VISION_MODEL for the image test)
+make serve-test     # evo serve end to end over HTTP, no backend: a stub
+                    #       Messages endpoint (python3) stands in for the model
 make tui-test       # expect-driven TUI under a pty: image paste
                     #       (EVO_TEST_VISION_MODEL), pasting in every shape a
                     #       terminal sends it, model routing, the IDE bridge
@@ -536,9 +570,9 @@ Requirements and caveats:
 
 Every directory under `src/` is one component owning exactly one package.
 `evo.asd` defines two systems and lists their components in load order,
-foundations first: `evo/core` is the agent itself — foundations, kernel and
-the core extensions — and loads with no frontend at all; `evo` adds the TUI
-and the CLI on top of it. `make test` loads `evo/core` on its own before the
+foundations first: `evo/core` is the agent itself — foundations, kernel, the
+core extensions and the command layer — and loads with no frontend at all;
+`evo` adds the TUI, the HTTP server and the CLI on top of it. `make test` loads `evo/core` on its own before the
 unit suite runs (`tests/core-only.lisp`), so the dependency only ever points
 from the frontends to the core.
 
@@ -584,6 +618,10 @@ src/core-ext/            core extensions: bundled, but built on the same public
   memory.lisp            EVO.MEMORY: global/project memory stores
   eval.lisp              EVO.EVAL: /eval, the `eval` tool, completion source
 
+src/command/             EVO.COMMAND — the command layer: what /goal, /model,
+  command.lisp           /compact, /tree, /resume ... do, once, for every
+                         frontend (the host protocol a frontend implements)
+
 src/tui/                 EVO.TUI — the interactive frontend (system `evo`);
   package.lisp           a core extension too, essential so it cannot be
   term.lisp              disabled
@@ -594,6 +632,14 @@ src/tui/                 EVO.TUI — the interactive frontend (system `evo`);
   markdown.lisp
   tui.lisp
   commands.lisp
+
+src/serve/               EVO.SERVE — `evo serve`, the HTTP frontend (system
+  package.lisp           `evo`; docs/serve.md)
+  json.lisp              the one sexpr <-> JSON mapping for events and state
+  http.lisp              HTTP/1.1 request parsing, responses, SSE
+  events.lisp            the numbered event log streams replay from
+  server.lisp            session thread, task, host methods, listener
+  routes.lisp            the endpoints
 
 src/cli/                 EVO.CLI (system `evo`)
   package.lisp

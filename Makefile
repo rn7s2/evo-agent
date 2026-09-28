@@ -30,7 +30,7 @@ STDIN_GUARD =
 endif
 
 # All targets are actions, not files — declare them phony so they always run.
-.PHONY: build test integration tui-test clean install install-home
+.PHONY: build test integration tui-test tui-test-offline serve-test clean install install-home
 
 # Compile the standalone evo binary into build/evo.
 build:
@@ -91,6 +91,13 @@ tui-test-offline: build
 	tests/step-clock.exp
 	tests/lang.exp
 	tests/mcp.exp
+
+# `evo serve` end to end, over HTTP only and with no backend: a stub
+# Messages endpoint (tests/stub-messages.py) stands in for the model, which
+# the test registers through POST /eval like any coordinator would.  Needs
+# python3 and a built binary; runs in CI (.github/workflows/ci.yml).
+serve-test: build
+	tests/serve-e2e.py build/evo
 
 # Seed corpus: docs + example extensions into the global evo home.
 # Everything installed under docs/ is reference-only — nothing ships active in
