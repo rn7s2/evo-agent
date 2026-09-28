@@ -271,12 +271,19 @@ able to put this exact runtime back."
   (evo.util:restore-settings (runtime-catalog-settings catalog))
   catalog)
 
+(defvar *post-init-hooks* nil
+  "Functions of CWD, called in order at the end of every userspace build (boot
+and /reload), after the post-init files — for a program built on evo to load
+its own config in the same pass, e.g. evo-swarm's swarm.lisp.  evo itself
+adds none.")
+
 (defun boot-userspace (&key journal (cwd (uiop:getcwd)))
   "Build a new userspace generation and install it.
 
 Order: settings and user registries reset, init files (global then project — an
 override is just a later call), extension directories, then post-init files, so
-extensions can register models before post-init picks a default.  Init files are
+extensions can register models before post-init picks a default; then
+*POST-INIT-HOOKS*.  Init files are
 environment, not history: re-evaluated every boot, never journaled.
 
 The registry build is all-or-nothing: a failure anywhere restores the previous
@@ -312,6 +319,7 @@ normal repair."
            (boot-extensions :journal journal :cwd cwd)
            (load-init-file (merge-pathnames "post-init.lisp" (evo-home)))
            (load-init-file (merge-pathnames "post-init.lisp" (project-evo-dir cwd)))
+           (dolist (hook *post-init-hooks*) (funcall hook cwd))
            (setf installed t)
            (bt:with-lock-held (*registry-lock*) (incf *registry-generation*))
            t)

@@ -121,7 +121,7 @@
            ;; extension api internals
            #:run-hooks #:add-hook #:event-hook-functions
            #:remove-hooks-if #:load-extension* #:*current-journal*
-           #:boot-extensions #:boot-userspace #:load-init-file
+           #:boot-extensions #:boot-userspace #:load-init-file #:*post-init-hooks*
            #:replay-loads #:lock-kernel-packages
            ;; slash-command registry (resolved by a frontend)
            #:register-command* #:find-command #:registered-commands

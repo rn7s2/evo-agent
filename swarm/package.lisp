@@ -10,13 +10,12 @@
   (:use :cl :evo.util :evo.journal :evo.provider :evo.kernel)
   (:export ;; the program
            #:main #:toplevel
-           ;; swarm.lisp — worker init is a program
-           #:add-worker-init #:remove-worker-init #:worker-inits
-           #:default-worker-init #:baseline-forms
+           ;; swarm.lisp — code for lanes, lane count, tool limits, prompt notes
+           #:in-lanes #:baseline-forms
            #:set-lane-tools #:set-coordinator-tools
            #:set-worker-note #:set-coordinator-note
            #:worker-note #:coordinator-note
-           ;; the live swarm, for swarm.lisp and eval
+           ;; the live swarm, for eval in the coordinator
            #:*swarm* #:swarm-lanes #:swarm-id #:swarm-dir
            #:lane-n #:lane-state #:lane-task #:lane-cwd #:lane-worktree
            #:find-lane #:lane-eval #:lane-command #:tell-coordinator))
