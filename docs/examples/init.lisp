@@ -53,6 +53,11 @@
   :context-window 1000000 :max-output 128000
   :effort t :thinking-mode :adaptive)
 
+(evo:register-model "claude-sonnet-5-5"
+  :provider :anthropic
+  :context-window 1000000 :max-output 128000
+  :effort t :thinking-mode :adaptive)
+
 (evo:register-model "claude-opus-5"
   :provider :anthropic
   :context-window 1000000 :max-output 128000

@@ -680,6 +680,163 @@ line2")))
         (evo.port:setenv (car pair) (or (cdr pair) "")))
       (when (probe-file token-file) (delete-file token-file)))))
 
+(defun test-claude-oauth-284-parity ()
+  ;; What the extension claims to be must be what Claude Code 2.1.284 is: the
+  ;; billing header, the client headers, and the models its catalog lists.
+  ;; Goldens below were produced by the 2.1.284 binary's own construction
+  ;; (klt/Zwe in the darwin-arm64 bundle: salt 59cf53e54c78, positions 4/7/20,
+  ;; sha256(salt + sampled + VERSION)[0:3]) and must move together with
+  ;; *CLAUDE-CODE-VERSION* — the API refuses a stale cc_version outright.
+  (let* ((env-names '("CLAUDE_OAUTH_ACCESS_TOKEN" "CLAUDE_OAUTH_REFRESH_TOKEN"))
+         (saved-env (mapcar (lambda (name) (cons name (getenv name))) env-names))
+         (saved-models evo.provider::*models*)
+         (saved-providers (copy-alist evo.provider::*providers*)))
+    (unwind-protect
+         (progn
+           ;; A token in the environment is what makes the extension register
+           ;; its models at load time; it is never dereferenced here.
+           (evo.port:setenv "CLAUDE_OAUTH_ACCESS_TOKEN" "sk-ant-oat-test-token")
+           (evo.port:setenv "CLAUDE_OAUTH_REFRESH_TOKEN" "")
+           (load (merge-pathnames "extensions/020-claude-oauth-provider.lisp"
+                                  (uiop:getcwd))
+                 :verbose nil :print nil)
+           (let ((build (symbol-function
+                         (find-symbol "BUILD-BILLING-HEADER-VALUE" :evo.user)))
+                 (pget #'pget)
+                 (api (find-api :anthropic-oauth-messages)))
+             (labels ((header (text)
+                        (funcall build
+                                 (list (list :role :user
+                                             :content (list (list :type :text
+                                                                  :text text)))))))
+               (check "claude oauth: version is the claimed release"
+                      (string= (symbol-value
+                                (find-symbol "*CLAUDE-CODE-VERSION*" :evo.user))
+                               "2.1.284"))
+               ;; One golden per shape of the sampling rule: characters at all
+               ;; three positions, a string shorter than the last position
+               ;; (which contributes "0"), and the empty string.
+               (check "claude oauth: billing header, long first message"
+                      (equal (header "Hello, world! This is a test message for the billing header.")
+                             "x-anthropic-billing-header: cc_version=2.1.284.dee; cc_entrypoint=sdk-cli; cch=00000;"))
+               (check "claude oauth: billing header, short first message"
+                      (equal (header "hi")
+                             "x-anthropic-billing-header: cc_version=2.1.284.12a; cc_entrypoint=sdk-cli; cch=00000;"))
+               (check "claude oauth: billing header, 26-char first message"
+                      (equal (header "abcdefghijklmnopqrstuvwxyz")
+                             "x-anthropic-billing-header: cc_version=2.1.284.2e4; cc_entrypoint=sdk-cli; cch=00000;"))
+               (check "claude oauth: billing header, empty first message"
+                      (equal (header "")
+                             "x-anthropic-billing-header: cc_version=2.1.284.12a; cc_entrypoint=sdk-cli; cch=00000;"))
+               (check "claude oauth: no first user text → no billing header"
+                      (null (funcall build (list (list :role :assistant
+                                                       :content (list (list :type :text
+                                                                            :text "hello"))))))))
+             ;; The headers Claude Code puts on a first-party OAuth request.
+             (let ((headers (auth-headers api (list :api-key "sk-ant-oat-test-token"))))
+               (flet ((value (name)
+                        (cdr (assoc name headers :test #'string-equal))))
+                 (check "claude oauth: sends the oauth_auth beta"
+                        (equal (value "anthropic-beta") "oauth-2025-04-20"))
+                 (check "claude oauth: sends x-app"
+                        (equal (value "x-app") "cli"))
+                 (check "claude oauth: User-Agent names the version and entrypoint"
+                        (equal (value "User-Agent")
+                               "claude-cli/2.1.284 (external, sdk-cli)"))
+                 (check "claude oauth: sends anthropic-version"
+                        (equal (value "anthropic-version") "2023-06-01"))))
+             ;; Sonnet 5.5, as 2.1.284's model catalog describes it:
+             ;; first_party id claude-sonnet-5-5, 1M context, 128K output,
+             ;; effort (including xhigh), adaptive thinking, vision.
+             (let ((model (find "claude-sonnet-5-5" evo.provider::*models*
+                                :key (lambda (m) (funcall pget m :id))
+                                :test #'string=)))
+               (check "claude oauth: claude-sonnet-5-5 is registered"
+                      (not (null model)))
+               (when model
+                 (check "claude oauth: claude-sonnet-5-5 provider"
+                        (eq (funcall pget model :provider) :anthropic-oauth))
+                 (check "claude oauth: claude-sonnet-5-5 context window"
+                        (= (funcall pget model :context-window) 1000000))
+                 (check "claude oauth: claude-sonnet-5-5 max output"
+                        (= (funcall pget model :max-output) 128000))
+                 (check "claude oauth: claude-sonnet-5-5 effort ladder"
+                        (equal (funcall pget model :effort)
+                               '(:low :medium :high :xhigh :max)))
+                 (check "claude oauth: claude-sonnet-5-5 thinking mode"
+                        (eq (funcall pget model :thinking-mode) :adaptive))
+                 (check "claude oauth: claude-sonnet-5-5 vision"
+                        (funcall pget model :vision))))))
+      (setf evo.provider::*models* saved-models
+            evo.provider::*providers* saved-providers)
+      (dolist (pair saved-env)
+        (evo.port:setenv (car pair) (or (cdr pair) ""))))))
+
+(defun test-claude-oauth-assistant-split ()
+  ;; The assistant-turn shaping the OAuth provider applies for Kimi's sake:
+  ;; after it, no block may follow a tool_use block inside one message.
+  ;; Anthropic accepts the un-split shape (probed 2026-09-29); Kimi does not,
+  ;; so the invariant is what the test pins, not any one provider's mood.
+  (let ((saved-models evo.provider::*models*)
+        (saved-providers (copy-alist evo.provider::*providers*)))
+    (unwind-protect
+         (progn
+           (load (merge-pathnames "extensions/020-claude-oauth-provider.lisp"
+                                  (uiop:getcwd))
+                 :verbose nil :print nil)
+           (let* ((split (symbol-function
+                          (find-symbol "CLAUDE-OAUTH--SPLIT-ASSISTANT-TOOL-USE"
+                                       :evo.user)))
+                  (call (lambda () (list :type :tool-call :id "t1" :name "echo"
+                                         :arguments '(:text "ping"))))
+                  (text (lambda (s) (list :type :text :text s)))
+                  (shapes (lambda (messages)
+                            (mapcar (lambda (m)
+                                      (mapcar (lambda (b) (getf b :type))
+                                              (getf m :content)))
+                                    messages)))
+                  (invariant-p
+                    (lambda (messages)
+                      (every (lambda (m)
+                               (let ((seen-tool nil))
+                                 (every (lambda (b)
+                                          (if (eq (getf b :type) :tool-call)
+                                              (setf seen-tool t)
+                                              (not seen-tool)))
+                                        (getf m :content))))
+                             messages))))
+             (let* ((interleaved (list (list :role :assistant
+                                             :content (list (funcall text "a")
+                                                            (funcall call)
+                                                            (funcall text "b")))))
+                    (out (funcall split interleaved)))
+               (check "assistant split: two messages, tool_use first"
+                      (equal (funcall shapes out)
+                             '((:tool-call) (:text :text))))
+               (check "assistant split: text order preserved"
+                      (equal (mapcar (lambda (b) (getf b :text)) (getf (second out) :content))
+                             '("a" "b")))
+               (check "assistant split: invariant holds"
+                      (funcall invariant-p out)))
+             (let* ((already-clean (list (list :role :assistant
+                                               :content (list (funcall text "a")
+                                                              (funcall call)))))
+                    (out (funcall split already-clean)))
+               (check "assistant split: a turn already ending in tool_use is untouched"
+                      (eq (first out) (first already-clean))))
+             (let* ((trailing (list (list :role :assistant
+                                          :content (list (funcall call)
+                                                         (funcall text "b")))))
+                    (out (funcall split trailing)))
+               (check "assistant split: trailing content split off"
+                      (equal (funcall shapes out) '((:tool-call) (:text))))
+               (check "assistant split: user and tool-result turns pass through"
+                      (let ((other (list (list :role :user
+                                               :content (list (funcall text "hi"))))))
+                        (equal (funcall split other) other))))))
+      (setf evo.provider::*models* saved-models
+            evo.provider::*providers* saved-providers))))
+
 ;;; Editor
 
 (defun test-editor ()
@@ -7836,6 +7993,8 @@ became zero after the first reload."
     (test-env-proxy)
     (test-claude-oauth-proxy-guards)
     (test-claude-oauth-auto-refresh)
+    (test-claude-oauth-284-parity)
+    (test-claude-oauth-assistant-split)
     (test-init-files)
     (test-extension-load-order)
     (test-preflight)
