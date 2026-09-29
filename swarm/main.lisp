@@ -209,11 +209,11 @@ the TUI gets a status-line segment."
                                   :view view))
         (ensure-directories-exist (swarm-dir *swarm*))
         (record-swarm)
-        ;; A journal switch (/new, /fork, /resume) takes the swarm along: the
-        ;; new session records the lanes too.
+        ;; A journal switch (/new, /fork, /resume): a resumed session gets
+        ;; its own recorded swarm back; any other takes the running one along.
         (evo:on :session-start (lambda (event)
                                  (declare (ignore event))
-                                 (record-swarm)
+                                 (adopt-session-swarm agent)
                                  (apply-coordinator-tools agent :new-session t))
                 :name :evo-swarm-record)
         ;; Quitting stops every lane — before the coordinator's own task

@@ -529,6 +529,74 @@ through serve's own log: the call site never names the server's internals."
                  (and (= 64 (length (evo.swarm::lane-token two)))
                       (integerp (evo.swarm::lane-port two)))))))))
 
+(defun test-session-switch ()
+  "/resume, /new and /fork on the coordinator: a resumed session recording
+another swarm gets that swarm's lanes back; any other keeps the running one."
+  (let* ((agent (fresh-agent))
+         (view (make-instance 'recording-view))
+         (*swarm* (test-swarm :agent agent :workers 2 :view view))
+         (current *swarm*)
+         (saved-start (symbol-function 'evo.swarm::start-lanes))
+         (saved-stop (symbol-function 'evo.swarm::stop-swarm))
+         (started nil) (stopped nil))
+    (unwind-protect
+         (progn
+           (setf (symbol-function 'evo.swarm::start-lanes)
+                 (lambda (swarm &key resume) (push (list swarm resume) started))
+                 (symbol-function 'evo.swarm::stop-swarm)
+                 (lambda (&optional (swarm *swarm*)) (push swarm stopped)))
+           ;; A session with no swarm (/new): the running lanes come along.
+           (evo.swarm::adopt-session-swarm agent)
+           (check "switch: a session with no swarm keeps the running lanes"
+                  (and (eq current *swarm*) (null started) (null stopped)))
+           (check "switch: ... and records them"
+                  (equal "unit" (getf (evo:custom-state "swarm" agent) :id)))
+           ;; The same swarm recorded (/fork, or this very session): kept.
+           (evo.swarm::adopt-session-swarm agent)
+           (check "switch: a session recording this swarm keeps it"
+                  (and (eq current *swarm*) (null started) (null stopped)))
+           ;; Another swarm recorded (/resume of an older session).
+           (let ((dir (format nil "~a/evo-swarm-unit-~a/" (tmp-dir) (gen-id))))
+             (evo:set-custom-state
+              "swarm" (list :id "older" :dir dir :workers 3
+                            :lanes (vector (list :n 1 :cwd (namestring (uiop:getcwd))
+                                                 :task "old task" :extra-forms #())
+                                           (list :n 2 :cwd (namestring (uiop:getcwd))
+                                                 :extra-forms #())
+                                           (list :n 3 :cwd (namestring (uiop:getcwd))
+                                                 :extra-forms #())))
+              agent)
+             (evo.swarm::adopt-session-swarm agent)
+             (check "switch: the running lanes stop"
+                    (equal (list current) stopped))
+             (check "switch: the recorded swarm replaces them"
+                    (and (not (eq current *swarm*))
+                         (equal "older" (swarm-id *swarm*))
+                         (equal dir (namestring (swarm-dir *swarm*)))
+                         (= 3 (length (swarm-lanes *swarm*)))
+                         (equal "old task" (lane-task (first (swarm-lanes *swarm*))))))
+             (check "switch: its lanes come up resuming their sessions"
+                    (equal (list (list *swarm* t)) started))
+             (check "switch: the new swarm keeps the frontend and agent"
+                    (and (eq view (evo.swarm::swarm-view *swarm*))
+                         (eq agent (evo.swarm::swarm-agent *swarm*))))
+             (check "switch: the session still records the swarm it has"
+                    (equal "older" (getf (evo:custom-state "swarm" agent) :id)))))
+      (setf (symbol-function 'evo.swarm::start-lanes) saved-start
+            (symbol-function 'evo.swarm::stop-swarm) saved-stop)))
+  ;; A lane stopped before it launched is not launched after.
+  (let* ((*swarm* (test-swarm :workers 1))
+         (lane (first (swarm-lanes *swarm*))))
+    (setf (evo.swarm::lane-dir lane)
+          (uiop:ensure-directory-pathname
+           (format nil "~a/evo-swarm-unit-~a/" (tmp-dir) (gen-id)))
+          (evo.swarm::lane-stopping lane) t)
+    (check "switch: a stopped lane does not launch"
+           (and (null (evo.swarm::launch-lane lane))
+                (null (evo.swarm::lane-process lane))))
+    (check "switch: ... nor come up"
+           (null (evo.swarm::bring-up-lane lane)))))
+
 (defun test-launch-environment ()
   (let ((saved (getenv "EVO_SUPERVISED_CHILD")))
     (unwind-protect
@@ -929,6 +997,7 @@ one out of the supervisor.)"
     (test-view)
     (test-serve-view)
     (test-record)
+    (test-session-switch)
     (test-launch-environment)
     (test-sessions-dir)
     (test-cli)

@@ -272,7 +272,11 @@ directory, and for each lane its worktree, branch, task and the code evaluated
 into it. `evo-swarm --resume` reopens the coordinator's session and brings
 every lane back from that record — each resuming its own session, in its own
 worktree, re-initialized and with its evaluations replayed. A coordinator that
-crashes is restarted by evo-swarm's supervisor the same way.
+crashes is restarted by evo-swarm's supervisor the same way. `/resume` inside a
+running swarm does the same: when the chosen session records another swarm,
+the running lanes stop (their sessions stay on disk, recorded by the session
+just left) and the recorded lanes come back. `/new`, `/fork` and a session with
+no swarm keep the running lanes.
 
 ## Command line
 
