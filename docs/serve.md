@@ -1,7 +1,7 @@
-# evo serve — one session, controlled over HTTP
+# serve — one session, controlled over HTTP
 
-`evo serve` runs an evo session with no terminal attached and hands its
-controls to HTTP: anything a person can do in the TUI, a program can do by
+`evo-agent serve` runs an agent session with no terminal attached and hands
+its controls to HTTP: anything a person can do in the TUI, a program can do by
 request. It exists to be driven — a coordinator process
 ([`evo-swarm`](swarm.md)) starts worker evos this way and talks to them
 through nothing else — but curl works just as well.
@@ -13,25 +13,25 @@ serve` is that program, and it is documented in
 [`docs/swarm.md`](swarm.md#serving-the-swarm).
 
 ```sh
-evo serve --token-file ~/.evo/serve.token          # 127.0.0.1:8421
+evo-agent serve --token-file ~/.evo/serve.token    # 127.0.0.1:8421
 TOKEN=$(cat ~/.evo/serve.token)
 curl -s -H "Authorization: Bearer $TOKEN" localhost:8421/state
 curl -sN -H "Authorization: Bearer $TOKEN" \
      -d '{"text": "run the tests", "stream": true}' localhost:8421/prompt
 ```
 
-It is a mode of the one `evo` binary, not a separate program: the same
-kernel, journal, extensions and supervisor, with an HTTP frontend where the
-TUI would be. The session is a normal session — its journal lands in
-`~/.evo/sessions/`, `evo --resume` opens it in the TUI later, and the reverse
-works too.
+It is a mode of the agent binary (`evo-agent`), not a separate program: the
+same kernel, journal, extensions and supervisor, with an HTTP frontend where
+the TUI would be. The session is a normal session — its journal lands in
+`~/.evo/sessions/`, `evo-agent --resume` opens it in the TUI later, and the
+reverse works too.
 
 ## Starting it
 
 ```text
-evo serve [--host <addr>] [--port <n>] [--token-file <path>] [--allow-remote]
-          [--resume [path]] [--model <id>] [--thinking <level>] [--no-userspace]
-          [--no-supervisor]
+evo-agent serve [--host <addr>] [--port <n>] [--token-file <path>] [--allow-remote]
+                [--resume [path]] [--model <id>] [--thinking <level>]
+                [--no-userspace] [--no-supervisor]
 ```
 
 | Flag | Meaning |
@@ -40,9 +40,9 @@ evo serve [--host <addr>] [--port <n>] [--token-file <path>] [--allow-remote]
 | `--port` | Port to bind. Default `8421`; `0` lets the OS pick (the chosen one is printed). |
 | `--token-file` | Write the bearer token here, mode 0600, deleted again on a clean shutdown. |
 | `--allow-remote` | Permit a non-loopback `--host`. |
-| `--resume`, `--model`, `--thinking`, `--no-userspace`, `--no-supervisor` | As for plain `evo`. |
+| `--resume`, `--model`, `--thinking`, `--no-userspace`, `--no-supervisor` | As for plain `evo-agent`. |
 
-On start it prints one line to stdout, `evo serve: listening on
+On start it prints one line to stdout, `evo-agent serve: listening on
 http://127.0.0.1:8421/ (token in …)`, and serves until `POST /shutdown`,
 which exits 0. A port it cannot bind is a usage error (exit 64), which the
 supervisor never restarts. `-p`, `--events`, `--image` and `--goal` are
@@ -82,8 +82,8 @@ refused: serve has exactly one driver, and it is HTTP.
 
 ## Supervision
 
-Invoked plainly, `evo serve` runs under evo's own supervisor like any other
-session (design.md §15): the parent mints the token once and passes it to the
+Invoked plainly, `evo-agent serve` runs under evo's own supervisor like any
+other session (design.md §15): the parent mints the token once and passes it to the
 child in `EVO_SERVE_TOKEN`, so a restarted child keeps the token clients
 already hold. The child touches the heartbeat file from its session loop; a
 crash or a hang restarts it with `--resume` and the server flags (`--host`,
@@ -245,9 +245,9 @@ closed, the token file is removed, and the process exits 0.
 ### State
 
 **`GET /health`** — `{"ok": true, "pid", "cursor", "name", "version",
-"features"}`. The last three say what this server is: `evo serve` names itself
-`evo`, with the binary's version and no features, and a program that runs its
-own session on serve names itself and lists what it adds
+"features"}`. The last three say what this server is: the agent's serve names
+itself `evo-agent`, with the binary's version and no features, and a program that
+runs its own session on serve names itself and lists what it adds
 ([below](#the-two-seams-a-program-adds)). A client that ignores them sees the
 `/health` it always saw.
 
@@ -366,13 +366,13 @@ nothing in the core names `evo-swarm`.
 
 ```json
 {"ok": true, "pid": 51234, "cursor": 118,
- "name": "evo", "version": "0.1.0", "features": []}
+ "name": "evo-agent", "version": "0.1.0", "features": []}
 ```
 
-`name` is the program (`evo` or `evo-swarm`), `version` its version, and
+`name` is the program (`evo-agent` or `evo-swarm`), `version` its version, and
 `features` the capability names it serves beyond the protocol above — always
-an array, empty when the program adds nothing. `evo serve` is `evo` with none;
-`evo-swarm serve` is `evo-swarm` with `["swarm"]`, whose meaning is
+an array, empty when the program adds nothing. The agent's serve is
+`evo-agent` with none; `evo-swarm serve` is `evo-swarm` with `["swarm"]`, whose meaning is
 [`GET /lanes` and its siblings](swarm.md#serving-the-swarm). A client reads
 them to learn what it is talking to — and what it may ask for — before it asks
 for anything. They are additive: a client that ignores them sees the
@@ -440,7 +440,7 @@ identity (`*identity*`, or `make-server :identity`) and adds routes
   (already in the image through dexador), JSON is jzon, both portable to SBCL,
   ECL and SBCL on Windows.
 - **Tested end to end.** `make serve-test` (`tests/serve-e2e.py`) drives a
-  real `build/evo serve` over HTTP only, against a stub Messages endpoint
+  real `build/evo-agent serve` over HTTP only, against a stub Messages endpoint
   (`tests/stub-messages.py`): tokens, registration by eval, a streamed prompt,
   interrupt, steer, 409s, `/compact`, the goal controls, model and thinking
   switches, a tool registered mid-session offered on the next turn,

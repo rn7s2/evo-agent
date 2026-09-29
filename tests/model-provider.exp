@@ -68,7 +68,7 @@ proc fail {name} {
     puts "\nFAIL: $name"
 }
 
-spawn "$repo/build/evo"
+spawn "$repo/build/evo-agent"
 
 # 1. An ambiguous bare id must still boot: first registration wins, and the
 # status line names which provider that is.

@@ -73,7 +73,7 @@ proc check {name} { puts "\nPASS: $name" }
 proc fail {name} { global failures; lappend failures $name; puts "\nFAIL: $name" }
 
 set stty_init "rows 40 cols 110"
-spawn "$repo/build/evo"
+spawn "$repo/build/evo-agent"
 
 expect {
     -re {ctx \d+k/\d+k} { check "startup status line" }

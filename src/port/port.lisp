@@ -16,6 +16,12 @@
 
 (in-package :evo.port)
 
+(defvar *program-name* "evo-agent"
+  "What the running program calls itself: in its own diagnostics, in serve's
+banner and in GET /health.  The agent — the base program — is \"evo-agent\";
+evo-swarm sets \"evo-swarm\" at its entry point.  \"evo\" is the project's
+name, never a program's.")
+
 #-(or sbcl ecl)
 (error "evo runs on SBCL or ECL; this is ~a" (lisp-implementation-type))
 
@@ -210,7 +216,8 @@ block the rest of shutdown."
                                     (merge-pathnames argv0
                                                      (uiop:ensure-directory-pathname dir))))
                   when found return found)
-            (error "evo: cannot locate own executable (argv[0] = ~a)" argv0)))))
+            (error "~a: cannot locate own executable (argv[0] = ~a)"
+                   *program-name* argv0)))))
 
 (defun environ ()
   "The current environment as a list of \"VAR=VALUE\" strings."
@@ -1004,7 +1011,8 @@ thread instead."
     (setf *main-process* mp:*current-process*)
     (flet ((fatal-hook (condition hook)
              (declare (ignore hook))
-             (format *error-output* "~&evo: fatal [~a]: ~a~%"
+             (format *error-output* "~&~a: fatal [~a]: ~a~%"
+                     *program-name*
                      (mp:process-name mp:*current-process*) condition)
              (finish-output *error-output*)
              (if (or (null *main-process*)

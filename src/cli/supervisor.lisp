@@ -77,7 +77,8 @@ Returns (values exit-code hung-p)."
              ;; Only judge staleness once the child has had time to boot.
              (when (and (> (- (get-universal-time) start-time) 30)
                         (> (heartbeat-age heartbeat-file start-time) hang-timeout))
-               (format *error-output* "~&evo: heartbeat stale — killing hung child~%")
+               (format *error-output* "~&~a: heartbeat stale — killing hung child~%"
+                       evo.port:*program-name*)
                (setf hung t)
                (ignore-errors (evo.port:process-kill process))))
     (multiple-value-bind (status code) (evo.port:process-wait process)
@@ -102,8 +103,8 @@ supervisor (evo-swarm) passes its own."
         (unless first
           ;; Name the actual arguments: "restarting with --resume" while
           ;; quietly restarting without it is how a supervisor lies.
-          (format *error-output* "~&evo: restarting~{ ~a~} (attempt ~d)~%"
-                  args restarts))
+          (format *error-output* "~&~a: restarting~{ ~a~} (attempt ~d)~%"
+                  evo.port:*program-name* args restarts))
         (multiple-value-bind (code hung)
             (monitor-child (spawn-child args heartbeat) heartbeat start hang-timeout)
           (ignore-errors (delete-file heartbeat))
@@ -115,27 +116,33 @@ supervisor (evo-swarm) passes its own."
             (setf first nil)
             (case code
               (0 (return 0))
-              (2 (format *error-output* "~&evo: goal paused — human needed~%")
+              (2 (format *error-output* "~&~a: goal paused — human needed~%"
+                         evo.port:*program-name*)
                  (return 2))
-              (3 (format *error-output* "~&evo: goal budget-limited — human needed~%")
+              (3 (format *error-output* "~&~a: goal budget-limited — human needed~%"
+                         evo.port:*program-name*)
                  (return 3))
               (64 (return 64)))         ; usage error: restarting won't help
             (when hung
-              (format *error-output* "~&evo: child was hung (killed)~%"))
+              (format *error-output* "~&~a: child was hung (killed)~%"
+                      evo.port:*program-name*))
             ;; Boot-failure quarantine.
             (if (< duration boot-grace)
                 (incf boot-failures)
                 (setf boot-failures 0))
             (when (>= boot-failures max-boot-failures)
               (when quarantined
-                (format *error-output* "~&evo: quarantined boot is failing too — giving up. Fix or remove the offending source file (see ':load replay' lines above).~%")
+                (format *error-output* "~&~a: quarantined boot is failing too — giving up. Fix or remove the offending source file (see ':load replay' lines above).~%"
+                        evo.port:*program-name*)
                 (return 1))
-              (format *error-output* "~&evo: boot failed ~d times fast — QUARANTINE: retrying with --no-userspace~%"
+              (format *error-output* "~&~a: boot failed ~d times fast — QUARANTINE: retrying with --no-userspace~%"
+                      evo.port:*program-name*
                       boot-failures)
               (setf extra '("--no-userspace") quarantined t boot-failures 0))
             (incf restarts)
             (when (>= restarts max-restarts)
-              (format *error-output* "~&evo: restart budget exhausted~%")
+              (format *error-output* "~&~a: restart budget exhausted~%"
+                      evo.port:*program-name*)
               (return 1))
             (sleep 2)))))))
 

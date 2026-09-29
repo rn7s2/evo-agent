@@ -25,8 +25,9 @@
 
   install differs from the Unix one on purpose.  There is no /usr/local on
   Windows and no sudo to write outside your profile with, so the binaries go
-  to $Prefix\bin — evo.exe and evo-swarm.exe in $HOME\.evo\bin by default,
-  beside the evo home it already owns.  That directory is yours to write, needs no
+  to $Prefix\bin — evo-agent.exe, evo-swarm.exe and evo.exe (a copy of
+  evo-swarm.exe; Unix links it instead) in $HOME\.evo\bin by default, beside
+  the evo home it already owns.  That directory is yours to write, needs no
   elevation, and the script tells you how to put it on PATH.
 
 .EXAMPLE
@@ -52,8 +53,11 @@ Set-StrictMode -Version Latest
 
 $RepoRoot = $PSScriptRoot
 $BuildDir = Join-Path $RepoRoot 'build'
-$Binary = Join-Path $BuildDir 'evo.exe'
+$AgentBinary = Join-Path $BuildDir 'evo-agent.exe'
 $SwarmBinary = Join-Path $BuildDir 'evo-swarm.exe'
+# The product's name, pointed at the swarm binary — the copy the Unix build
+# makes a soft link for.
+$EvoBinary = Join-Path $BuildDir 'evo.exe'
 
 function Write-Step([string]$message) {
     Write-Host "==> $message" -ForegroundColor Cyan
@@ -101,10 +105,13 @@ function Invoke-LispScript {
     }
 }
 
-# Both binaries, as on Unix: evo, and evo-swarm (its own system on top of
-# evo — evo-swarm.asd).  One Lisp process each: saving an image ends it.
+# Both binaries, as on Unix: evo-agent (the agent alone), and evo-swarm (its
+# own system on top of evo — evo-swarm.asd).  One Lisp process each: saving an
+# image ends it.  evo.exe is then a copy of evo-swarm.exe: `evo` is the swarm
+# binary, which the Unix build links rather than copies for want of a
+# dependable symlink here.
 function Invoke-Build {
-    foreach ($pair in @(@('build.lisp', $Binary), @('build-swarm.lisp', $SwarmBinary))) {
+    foreach ($pair in @(@('build.lisp', $AgentBinary), @('build-swarm.lisp', $SwarmBinary))) {
         $script, $output = $pair
         Write-Step "building $output (heap ${HeapMb}MiB)"
         Invoke-LispScript -Script (Join-Path $RepoRoot $script) -Build
@@ -112,6 +119,11 @@ function Invoke-Build {
             throw "build reported success but $output is missing"
         }
         Write-Host "built $output" -ForegroundColor Green
+    }
+    Write-Step "copying $SwarmBinary -> $EvoBinary"
+    Copy-Item $SwarmBinary $EvoBinary -Force
+    if (-not (Test-Path $EvoBinary)) {
+        throw "copy reported success but $EvoBinary is missing"
     }
 }
 
@@ -143,8 +155,15 @@ function Invoke-Install {
     Invoke-InstallHome
     $binDir = Join-Path $Prefix 'bin'
     New-Item -ItemType Directory -Force -Path $binDir | Out-Null
-    foreach ($source in @($Binary, $SwarmBinary)) {
-        $target = Join-Path $binDir (Split-Path -Leaf $source)
+    # Source -> name to install it as.  evo.exe is the swarm binary again,
+    # under the product's name.
+    $installations = @(
+        @($AgentBinary, 'evo-agent.exe'),
+        @($SwarmBinary, 'evo-swarm.exe'),
+        @($SwarmBinary, 'evo.exe'))
+    foreach ($pair in $installations) {
+        $source, $leaf = $pair
+        $target = Join-Path $binDir $leaf
         Write-Step "installing $target"
         # A running evo holds its own image open; replacing it in place fails
         # with "being used by another process", and the fix is to say so

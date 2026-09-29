@@ -1,6 +1,6 @@
 ;;;; lanes.lisp — lanes: launched, initialized, watched, restarted, stopped.
 ;;;;
-;;;; A lane is `evo serve --no-userspace` invoked plainly, so evo's own
+;;;; A lane is `evo-agent serve --no-userspace` invoked plainly, so evo's own
 ;;;; supervisor runs it (design.md §15): a crash or a hang restarts it with
 ;;;; --resume, which finds the lane's own session because EVO_SESSIONS_DIR
 ;;;; points it at the lane's directory — the same variable keeps lane
@@ -81,7 +81,7 @@ coordinator's own supervision and session, not the lane's.")
   (directory (merge-pathnames "sessions/*.sexp" (lane-dir lane))))
 
 (defun launch-lane (lane &key resume)
-  "Start LANE's process: `evo serve --no-userspace` on its port, supervised,
+  "Start LANE's process: `evo-agent serve --no-userspace` on its port, supervised,
 detached from our terminal, logging to its directory.  RESUME continues its
 session when it has one."
   (ensure-directories-exist (merge-pathnames "sessions/" (lane-dir lane)))

@@ -3,8 +3,8 @@
 ;;;; A separate system on top of evo (evo-swarm.asd): nothing in the evo
 ;;;; binary names it, and `make test` proves so (tests/evo-only.lisp).  One
 ;;;; coordinator agent in this process's TUI; a pool of worker lanes, each an
-;;;; `evo serve` process driven only through serve's public HTTP API.  See
-;;;; docs/swarm.md and design.md §18.
+;;;; `evo-agent serve` process driven only through serve's public HTTP API.
+;;;; See docs/swarm.md and design.md §18.
 
 (defpackage :evo.swarm
   (:use :cl :evo.util :evo.journal :evo.provider :evo.kernel)

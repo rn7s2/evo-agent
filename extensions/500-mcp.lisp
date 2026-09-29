@@ -44,7 +44,9 @@
 (in-package :evo.user)
 
 (defparameter *mcp-protocol-version* "2025-06-18")
-(defparameter *mcp-client-name* "evo")
+(defparameter *mcp-client-name* nil
+  "clientInfo.name an MCP server is told; NIL names the running program
+(evo.port:*program-name*).")
 (defparameter *mcp-client-version* "0.1")
 (defparameter *mcp-connect-timeout* 15
   "Seconds to wait for the TCP/TLS connection to an MCP server.")
@@ -283,7 +285,8 @@ reported connected before its tools are registered."
                            :params (mcp-json
                                     "protocolVersion" *mcp-protocol-version*
                                     "capabilities" (mcp-json)
-                                    "clientInfo" (mcp-json "name" *mcp-client-name*
+                                    "clientInfo" (mcp-json "name" (or *mcp-client-name*
+                                                                     evo.port:*program-name*)
                                                            "version" *mcp-client-version*)))))
     (setf (mcp-server-instructions server) (mcp-nonempty (mcp-jget init "instructions")))
     (mcp-notify server "notifications/initialized")

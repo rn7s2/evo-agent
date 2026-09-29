@@ -15,6 +15,7 @@
   (:use :cl)
   (:export #:exit-lisp #:add-exit-hook #:run-exit-hooks
            #:argv #:runtime-pathname #:environ #:setenv #:getpid
+           #:*program-name*
            #:call-with-timeout #:timeout-error
            #:launch-child #:process-alive-p #:pid-alive-p #:process-kill #:process-kill-tree
            #:reap-pid-tree #:process-wait #:process-pid

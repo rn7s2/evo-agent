@@ -2,7 +2,7 @@
 
 `evo-swarm` runs one **coordinator** agent in your terminal — or headless,
 with [`evo-swarm serve`](#serving-the-swarm) — and a pool of
-**lanes**: worker agents, each a separate `evo serve` process with its own
+**lanes**: worker agents, each a separate `evo-agent serve` process with its own
 context, working in parallel. You talk only to the coordinator and give it
 goals; you do not need to tell it to use lanes. It decides for itself how to
 split the work into lane-sized pieces with clear done criteria, delegates them,
@@ -16,16 +16,17 @@ evo-swarm serve --token-file ~/.evo/serve.token   # headless, over HTTP
 ```
 
 It is a separate program on top of evo: its own system (`evo-swarm.asd`,
-`swarm/`), its own binary (`build/evo-swarm`, installed beside `evo`). The
-evo binary contains none of it — `make test` checks that the `evo` system
-loads without the swarm — and lanes are the evo binary itself, driven only
-through its public HTTP API ([docs/serve.md](serve.md)).
+`swarm/`), its own binary (`build/evo-swarm`, installed beside `evo-agent` —
+the installed `evo` is a soft link to this binary). The agent binary contains
+none of it — `make test` checks that the `evo` system loads without the swarm
+— and lanes are the `evo-agent` binary itself, driven only through its public
+HTTP API ([docs/serve.md](serve.md)).
 
 ## Lanes are lanes, not roles
 
 A lane is like a CPU core: interchangeable capacity, not a specialist. Each is
-`evo serve --no-userspace` on loopback, started with the swarm and idle until
-given work. The coordinator decides what each one does, task by task.
+`evo-agent serve --no-userspace` on loopback, started with the swarm and idle
+until given work. The coordinator decides what each one does, task by task.
 
 - **Own process, own token, own journal.** Each lane has a random bearer
   token, its own port, and its own session journal under
@@ -116,7 +117,7 @@ Input always goes to the coordinator; lanes are only watched.
 terminal, driven over HTTP through [serve's protocol](serve.md) — the same
 `/prompt`, `/steer`, `/follow-up`, `/interrupt`, `/command`, `/eval`, `/state`,
 `/transcript`, `/journal`, `/events` and `/shutdown` — plus the panel data a
-GUI needs. It takes evo serve's flags (`--host`, `--port`, `--token-file`,
+GUI needs. It takes the agent's serve flags (`--host`, `--port`, `--token-file`,
 `--allow-remote`) and evo-swarm's (`--workers`, `--evo`, `--resume`, …). The
 swarm code is the same code either way; only the frontend differs.
 
@@ -128,8 +129,8 @@ swarm code is the same code either way; only the frontend differs.
  "name": "evo-swarm", "version": "0.1.0", "features": ["swarm"]}
 ```
 
-so a client can tell it from `evo serve` (name `evo`, no features) before it
-asks for anything. Those fields are the [identity
+so a client can tell it from the agent's serve (name `evo-agent`, no features)
+before it asks for anything. Those fields are the [identity
 seam](serve.md#the-two-seams-a-program-adds); the endpoints below are the
 [route seam](serve.md#the-two-seams-a-program-adds).
 
@@ -160,7 +161,7 @@ and lanes — from the coordinator's journal, as it does for the TUI.
 evo-swarm boots the coordinator as evo boots any session — `init.lisp`,
 extensions, `post-init.lisp` — then reads `~/.evo/swarm.lisp` and
 `<project>/.evo/swarm.lisp`, as the last step of the same pass (so `/reload`
-re-reads them too). Plain `evo` never reads swarm.lisp. It is where the swarm
+re-reads them too). Plain `evo-agent` never reads swarm.lisp. It is where the swarm
 is configured:
 
 ```lisp
@@ -284,10 +285,11 @@ evo-swarm serve [--host addr] [--port n] [--token-file path] [--allow-remote]
                 [--evo path] [--no-userspace] [--no-supervisor]
 ```
 
-`--evo` names the evo binary lanes run; without it, `EVO_BINARY`, then the
-one beside `evo-swarm`, then `evo` on `PATH`. The TUI form needs a terminal;
-`evo-swarm serve` does not — see [Serving the swarm](#serving-the-swarm). For
-a headless single agent, `evo serve` is still the smaller answer.
+`--evo` names the evo-agent binary lanes run; without it, `EVO_BINARY`, then
+the one beside `evo-swarm`, then `evo-agent` on `PATH`. The TUI form needs a
+terminal; `evo-swarm serve` does not — see
+[Serving the swarm](#serving-the-swarm). For a headless single agent,
+`evo-agent serve` is still the smaller answer.
 
 Files: `~/.evo/swarm/<swarm-id>/` holds each lane's `lane-N/` directory
 (`sessions/`, `token` (0600), `url`, `lane.log`) and `worktrees/lane-N/`.

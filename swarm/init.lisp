@@ -1,6 +1,6 @@
 ;;;; init.lisp — what a fresh lane is given, and the prompt notes.
 ;;;;
-;;;; A lane boots `evo serve --no-userspace`: kernel and core extensions,
+;;;; A lane boots `evo-agent serve --no-userspace`: kernel and core extensions,
 ;;;; nothing of the user's.  Before it is given any work, and again whenever
 ;;;; it restarts, the swarm evaluates the BASELINE in it (POST /eval): the
 ;;;; coordinator's providers, its model and thinking level as defaults, then

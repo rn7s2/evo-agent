@@ -51,7 +51,7 @@ proc fail {name} {
     puts "\nFAIL: $name"
 }
 
-spawn "$repo/build/evo"
+spawn "$repo/build/evo-agent"
 
 # 1. the region paints on startup: status line with live context usage
 expect {

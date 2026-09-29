@@ -54,11 +54,12 @@ a guess was right."
 Owned by the session thread; forgotten only after its thread is joined."
   id kind thread (started (get-universal-time)) (step-started nil))
 
-(defparameter *identity* (list :name "evo" :version "0.1.0" :features nil)
+(defparameter *identity* (list :name "evo-agent" :version "0.1.0" :features nil)
   "Who this program is, as GET /health reports it: :NAME and :VERSION strings
 and :FEATURES, a list of capability names a client may negotiate on.  The
-default names this program; a program built on this server sets it — or passes
-:IDENTITY to MAKE-SERVER — so a client can tell which program answered.")
+default names the agent, the base program; a program built on this server sets
+it — or passes :IDENTITY to MAKE-SERVER — so a client can tell which program
+answered (evo-swarm names itself \"evo-swarm\").")
 
 (defstruct (server (:constructor %make-server))
   host port token token-file
@@ -516,7 +517,8 @@ usage error — restarting would not free the port)."
         (agent-events-cb agent) (events-callback server))
   (handler-case (open-listener server)
     (error (e)
-      (format *error-output* "~&evo serve: cannot listen on ~a:~a — ~a~%"
+      (format *error-output* "~&~a serve: cannot listen on ~a:~a — ~a~%"
+              (getf (server-identity server) :name)
               (server-host server) (server-port server) e)
       (return-from serve 64)))
   (when (server-token-file server)
@@ -527,7 +529,8 @@ usage error — restarting would not free the port)."
                  :session (namestring (journal-path (agent-journal agent)))))
   (setf (server-listener-thread server)
         (bt:make-thread (lambda () (accept-loop server)) :name "evo-serve-listener"))
-  (format t "~&evo serve: listening on http://~a:~d/~@[ (token in ~a)~]~%"
+  (format t "~&~a serve: listening on http://~a:~d/~@[ (token in ~a)~]~%"
+          (getf (server-identity server) :name)
           (server-host server) (server-port server) (server-token-file server))
   (finish-output)
   (unwind-protect

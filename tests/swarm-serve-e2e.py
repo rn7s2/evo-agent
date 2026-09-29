@@ -7,7 +7,7 @@ GET /lanes, a lane's transcript and live events, and lane-state events on the
 coordinator's own stream.  No terminal: the swarm runs as a `serve` process.
 The "model" is tests/stub-messages.py, which scripts both the coordinator and
 its lanes from what they are sent (`CALL <tool> {json}` becomes that tool call),
-so this needs nothing but python3, git-free, and a built evo + evo-swarm.
+so this needs nothing but python3, git-free, and a built evo-agent + evo-swarm.
 
 Covers:
   * /health names the server a swarm (name, version, features);
@@ -48,7 +48,7 @@ import time
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BUILD = os.path.abspath(sys.argv[1]) if len(sys.argv) > 1 else os.path.join(ROOT, "build")
 SWARM = os.path.join(BUILD, "evo-swarm")
-EVO = os.path.join(BUILD, "evo")
+EVO = os.path.join(BUILD, "evo-agent")
 SECRET = "swarm-serve-e2e-secret-4c1f"
 LANES = 2
 # DELAY2 makes the lane wait before it "thinks", then SLOW streams 60 deltas a

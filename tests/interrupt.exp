@@ -61,7 +61,7 @@ proc settle {s} {
     expect { timeout {} }
 }
 
-spawn "$repo/build/evo"
+spawn "$repo/build/evo-agent"
 
 expect {
     -re {ctx \d+k/\d+k} { check "startup status line" }

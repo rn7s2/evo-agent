@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""serve-e2e.py — drive `build/evo serve --no-userspace` over HTTP only.
+"""serve-e2e.py — drive `build/evo-agent serve --no-userspace` over HTTP only.
 
 Backend-free: the model is tests/stub-messages.py, registered at runtime
 through POST /eval, so this needs nothing but python3 and a built binary.
@@ -15,7 +15,7 @@ new, resume; state, transcript, journal, lore, sessions, registry (no
 secrets); event replay by Last-Event-ID; clean shutdown with :session-end
 fired and exit 0 — under the supervisor, as `evo serve` normally runs.
 
-Usage: tests/serve-e2e.py [path/to/evo]      (exit 0 on success)
+Usage: tests/serve-e2e.py [path/to/evo-agent]    (exit 0 on success)
 """
 
 import http.client
@@ -29,7 +29,7 @@ import tempfile
 import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-EVO = os.path.abspath(sys.argv[1]) if len(sys.argv) > 1 else os.path.join(ROOT, "build", "evo")
+EVO = os.path.abspath(sys.argv[1]) if len(sys.argv) > 1 else os.path.join(ROOT, "build", "evo-agent")
 SECRET = "e2e-secret-api-key-never-shown"
 
 passed = 0
@@ -204,7 +204,7 @@ def main():
               status == 200 and isinstance(health, dict) and health.get("ok")
               and isinstance(health.get("pid"), int)
               and isinstance(health.get("cursor"), int)
-              and health.get("name") == "evo" and health.get("version")
+              and health.get("name") == "evo-agent" and health.get("version")
               and health.get("features") == [], health)
 
         run_all(evo, stub_port, work, ended_file)

@@ -7653,7 +7653,7 @@ became zero after the first reload."
                         (search "\"tail\":\"7/thing\"" (third (first events))))))))))
   ;; Identity: what a program says it is, and what /health answers.
   (check "identity: a server defaults to the program's identity"
-         (equal '(:name "evo" :version "0.1.0" :features nil)
+         (equal '(:name "evo-agent" :version "0.1.0" :features nil)
                 (evo.serve:server-identity (evo.serve:make-server :token "t"))))
   (check "identity: a server takes the identity it is given"
          (equal '(:name "widget-host" :version "2.0" :features ("widgets"))

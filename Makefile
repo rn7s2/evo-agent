@@ -6,8 +6,9 @@
 # Configuration variables (override on the command line, e.g. `make LISP=ecl`):
 #   LISP     — Common Lisp implementation used to build and run scripts.
 #   EVO_HOME — Global evo home seeded by `install-home` (docs, examples, ...).
-#   PREFIX   — Install prefix; the binaries land in $(PREFIX)/bin/evo and
-#              $(PREFIX)/bin/evo-swarm.
+#   PREFIX   — Install prefix; the binaries land in $(PREFIX)/bin/evo-agent
+#              and $(PREFIX)/bin/evo-swarm, with $(PREFIX)/bin/evo a soft
+#              link to evo-swarm — the name for the whole product.
 #   HEAP_MB  — Dynamic heap (MiB) for the SBCL-built binary, baked in via
 #              :save-runtime-options (D10). ECL grows its heap on demand, so
 #              this has no effect there.
@@ -33,23 +34,30 @@ endif
 # All targets are actions, not files — declare them phony so they always run.
 .PHONY: build test integration tui-test tui-test-offline serve-test swarm-test swarm-serve-test clean install install-home
 
-# Compile both binaries: build/evo, and build/evo-swarm (its own system on
-# top of evo — evo-swarm.asd, docs/swarm.md).
+# Compile both binaries — build/evo-agent (the agent alone) and
+# build/evo-swarm (its own system on top of evo — evo-swarm.asd,
+# docs/swarm.md) — then point build/evo at the swarm binary: `evo` is the
+# product's name, evo-swarm the program.  A soft link here, a copy on Windows
+# (make.ps1), which has no dependable symlink to build with.
 build:
 	$(BUILD_SCRIPT) build.lisp $(STDIN_GUARD)
 	$(BUILD_SCRIPT) build-swarm.lisp $(STDIN_GUARD)
+	ln -sfn evo-swarm build/evo
 
 # Out-of-box install: build both binaries, seed $(EVO_HOME) (install-home),
-# then drop evo and evo-swarm into $(PREFIX)/bin. Falls back to sudo when the
-# target dir isn't writable.
+# then drop evo-agent and evo-swarm into $(PREFIX)/bin and link evo to
+# evo-swarm (replacing any older evo there — the link is the upgrade).  Falls
+# back to sudo when the target dir isn't writable.
 install: build install-home
 	@if [ -w $(PREFIX)/bin ] || mkdir -p $(PREFIX)/bin 2>/dev/null && [ -w $(PREFIX)/bin ]; then \
-	  install -m 755 build/evo $(PREFIX)/bin/evo; \
+	  install -m 755 build/evo-agent $(PREFIX)/bin/evo-agent; \
 	  install -m 755 build/evo-swarm $(PREFIX)/bin/evo-swarm; \
+	  ln -sfn evo-swarm $(PREFIX)/bin/evo; \
 	else \
 	  echo "Need sudo to write to $(PREFIX)/bin"; \
-	  sudo install -m 755 build/evo $(PREFIX)/bin/evo; \
+	  sudo install -m 755 build/evo-agent $(PREFIX)/bin/evo-agent; \
 	  sudo install -m 755 build/evo-swarm $(PREFIX)/bin/evo-swarm; \
+	  sudo ln -sfn evo-swarm $(PREFIX)/bin/evo; \
 	fi
 
 # Run the unit-test suites — after proving the core loads on its own, without
@@ -100,12 +108,12 @@ tui-test-offline: build
 	tests/lang.exp
 	tests/mcp.exp
 
-# `evo serve` end to end, over HTTP only and with no backend: a stub
+# `evo-agent serve` end to end, over HTTP only and with no backend: a stub
 # Messages endpoint (tests/stub-messages.py) stands in for the model, which
 # the test registers through POST /eval like any coordinator would.  Needs
 # python3 and a built binary; runs in CI (.github/workflows/ci.yml).
 serve-test: build
-	tests/serve-e2e.py build/evo
+	tests/serve-e2e.py build/evo-agent
 
 # evo-swarm end to end, with no backend: the coordinator driven through a
 # pseudo-terminal, the stub Messages endpoint scripting both it and the lanes
@@ -114,9 +122,9 @@ swarm-test: build
 	tests/swarm-e2e.py build
 
 # evo-swarm serve end to end, over HTTP only and with no backend: the headless
-# swarm driven through `evo serve`'s protocol plus the swarm feature, the stub
+# swarm driven through serve's protocol plus the swarm feature, the stub
 # scripting both the coordinator and its lanes (tests/swarm-serve-e2e.py;
-# python3).  Needs the evo and evo-swarm binaries.
+# python3).  Needs the evo-agent and evo-swarm binaries.
 swarm-serve-test: build
 	tests/swarm-serve-e2e.py build
 

@@ -46,7 +46,7 @@ proc settle {seconds} {
 }
 
 set stty_init "rows 12 cols 80"
-spawn "$repo/build/evo"
+spawn "$repo/build/evo-agent"
 
 expect {
     -re {ctx \d+k/\d+k} { check "startup" }

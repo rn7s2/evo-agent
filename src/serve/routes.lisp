@@ -119,7 +119,9 @@ body that is not an object."
   (unless (authorized-p server request)
     (return-from respond
       (write-response stream 401 (encode-json (list :ok 'false :error "missing or wrong bearer token"))
-                      :extra-headers '(("WWW-Authenticate" . "Bearer realm=\"evo\"")))))
+                      :extra-headers (list (cons "WWW-Authenticate"
+                                                 (format nil "Bearer realm=~s"
+                                                         evo.port:*program-name*))))))
   (multiple-value-bind (handler status tail)
       (route-request (request-method request) (request-path request)
                      (server-routes server))
@@ -543,5 +545,6 @@ log still holds."
                          (http-fail 400 "Last-Event-ID / since must be an integer"))
                      (last-event-id (server-log server)))))
     (write-sse-head stream)
-    (write-sse-comment stream (format nil "evo events after ~d" cursor))
+    (write-sse-comment stream (format nil "~a events after ~d"
+                                      evo.port:*program-name* cursor))
     (stream-events server stream cursor)))
