@@ -500,8 +500,8 @@ Re-registering the same pair replaces it in place; evo ships no built-in
 models.  :api defaults to :anthropic-messages, the one bundled wire API —
 every supported endpoint speaks it.
 
-The knobs are context window, max output, effort ladder, thinking mode and
-vision; a model that cannot think at all is not worth driving and has no
+The knobs are context window, max output, effort ladder, thinking mode,
+vision and input-item cap; a model that cannot think at all is not worth driving and has no
 switch.
 
 :effort declares the levels the model accepts for Anthropic's
@@ -520,7 +520,15 @@ makes their reasoning summaries visible.
 
 :vision declares image input, and defaults to t.  Give :vision nil to a
 text-only model: pasted images then degrade to a text placeholder for that
-model instead of the endpoint rejecting every request that replays one."
+model instead of the endpoint rejecting every request that replays one.
+
+:max-input-items declares an endpoint's cap on input items per request
+(messages, tool calls, tool results, reasoning blocks), independent of
+tokens — Ark behind aiden rejects more than 1000.  With it, compaction also
+triggers once the context nears the cap (64 items short, the
+:compact-input-item-reserve setting), keeps at most a third of the cap
+verbatim, and the endpoint's item-limit error recovers by compact+retry.
+Default nil: no cap."
   (apply #'evo.provider:register-model* id args))
 
 (defun register-provider (key &rest args)

@@ -294,6 +294,10 @@ an extension's provider API, say).
   :context-window 1000000 :max-output 192000 :effort t
   :vision nil)                              ; image input; t is the default,
                                             ; nil degrades images to text
+(evo:register-model "ark-glm-5.2"           ; an endpoint that caps input
+  :provider :aiden                          ; items per request, whatever
+  :context-window 936000 :max-output 32000  ; the tokens: compaction also
+  :max-input-items 1000)                    ; triggers near the cap
 (evo:register-provider :deepseek            ; :anthropic is pre-seeded,
   :base-url "https://api.deepseek.com/anthropic"   ; others you register;
   :api-key-env "DEEPSEEK_API_KEY")          ; re-registering merges field-wise

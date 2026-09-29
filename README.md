@@ -538,7 +538,7 @@ later call.
 ;; Optional (kernel defaults exist for all of these):
 (evo:set-setting :thinking :medium)          ; low medium high xhigh max (no off rung)
 (evo:set-setting :goal-token-budget 2000000) ; per-goal token cap; omit = no limit
-;; :compact-reserve / :compact-keep-recent tune compaction.
+;; :compact-reserve / :compact-keep-recent / :compact-input-item-reserve tune compaction.
 
 ;; Endpoints: :anthropic is pre-seeded (ANTHROPIC_API_KEY); any other key you
 ;; register yourself, and re-registering overrides field-wise, e.g. to point a
