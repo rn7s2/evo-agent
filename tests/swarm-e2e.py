@@ -20,7 +20,7 @@ interrupt and re-steer of a busy lane, and a bare interrupt; a report with goal
 complete closes the lane's goal in the same run, with no continuation; an eval adds a tool to one lane only; a
 worktree lane works in its worktree; a killed lane restarts and the
 coordinator is told; quitting stops every lane; `evo-swarm --resume` restores
-coordinator and lanes.
+coordinator and lanes, and so does `/resume` of that session in a fresh swarm.
 
 Usage: tests/swarm-e2e.py [build-dir]     (exit 0 on success; Unix only)
 """
@@ -206,8 +206,8 @@ class Lane:
         return json.dumps(tr["messages"]) if status == 200 else ""
 
 
-def lanes_of(home):
-    dirs = sorted(glob.glob(os.path.join(home, "swarm", "*", "lane-*")),
+def lanes_of(home, swarm="*"):
+    dirs = sorted(glob.glob(os.path.join(home, "swarm", swarm, "lane-*")),
                   key=lambda d: int(d.rsplit("-", 1)[1]))
     return [Lane(d) for d in dirs]
 
@@ -307,6 +307,8 @@ def main():
         first_run(term, stub, home, proj)
         term = Terminal(["--resume"], proj, env)
         resumed_run(term, stub, home, proj)
+        term = Terminal(["--workers", "2"], proj, env)
+        resume_in_session(term, home)
         no_secrets(home)
     except BaseException as e:
         global failed
@@ -571,6 +573,42 @@ def resumed_run(term, stub, home, proj):
     code = term.wait_exit()
     check("the resumed swarm quits cleanly too", code == 0, code)
     check("resumed lanes stop on quit", wait_for(lambda: not any(pid_alive(p) for p in pids if p), 30))
+
+
+def resume_in_session(term, home):
+    """A fresh evo-swarm, then /resume of the first swarm's coordinator
+    session: its own lanes stop, and the recorded swarm's come back, each
+    resuming its session."""
+    old_swarm = glob.glob(os.path.join(home, "swarm", "*"))[0]
+    session = glob.glob(os.path.join(home, "sessions", "*", "*.sexp"))[0]
+    fresh = wait_for(lambda: [d for d in glob.glob(os.path.join(home, "swarm", "*"))
+                              if d != old_swarm], timeout=30)
+    check("a fresh evo-swarm starts its own swarm", fresh)
+    new_lanes = lanes_of(home, os.path.basename(fresh[0]))
+    check("...with its own lanes", len(new_lanes) == 2)
+    check("...up and initialized",
+          wait_for(lambda: all(lane_ready(l) for l in new_lanes), timeout=120))
+    new_pids = [l.pid() for l in new_lanes]
+    old_lanes = lanes_of(home, os.path.basename(old_swarm))
+    term.type(f"/resume {session}")
+    check("/resume says it switches swarms",
+          wait_for(lambda: "switching to this session's swarm" in term.text(), 30))
+    check("/resume stops the fresh swarm's lanes",
+          wait_for(lambda: not any(pid_alive(p) for p in new_pids if p), 60), new_pids)
+    check("/resume brings the session's own lanes back",
+          wait_for(lambda: all(lane_ready(l) for l in old_lanes), timeout=120))
+    check("/resume: lane 2's session was resumed, not started empty",
+          "resteered now" in old_lanes[1].transcript_text())
+    check("/resume: lane 1's too", "lane one finished" in old_lanes[0].transcript_text())
+    check("/resume: lane 3 got its eval back", "probe_three" in old_lanes[2].tools())
+    status, reply = old_lanes[3].eval("(namestring (uiop:getcwd))")
+    cwd = json.loads(reply["data"]["values"][0]) if status == 200 else ""
+    check("/resume: lane 4 is back in its worktree", "/worktrees/lane-4" in cwd, cwd)
+    pids = [l.pid() for l in old_lanes]
+    term.type("/quit")
+    check("the switched swarm quits cleanly", term.wait_exit() == 0)
+    check("its lanes stop on quit",
+          wait_for(lambda: not any(pid_alive(p) for p in pids if p), 30))
 
 
 def no_secrets(home):

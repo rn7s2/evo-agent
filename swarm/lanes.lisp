@@ -104,6 +104,8 @@ session when it has one."
   (ensure-directories-exist (merge-pathnames "sessions/" (lane-dir lane)))
   (write-file-string (merge-pathnames "url" (lane-dir lane))
                      (format nil "http://127.0.0.1:~d~%" (lane-port lane)))
+  (when (lane-stopping-p lane)
+    (return-from launch-lane nil))
   (let ((process (evo.port:launch-child
                   (namestring (swarm-evo-binary *swarm*))
                   (append (list "serve" "--no-userspace"
@@ -118,11 +120,18 @@ session when it has one."
                   ;; Never share the coordinator's terminal: a lane's
                   ;; supervisor resets the tty it has after a crash.
                   :new-session t)))
-    (with-swarm-lock ()
-      (setf (lane-process lane) process
-            (lane-state lane) :starting
-            (lane-pid lane) nil
-            (lane-cursor lane) 0))
+    ;; A stop that came while we launched saw no process to reap: reap it
+    ;; here, or it would outlive the swarm that dropped it.
+    (when (with-swarm-lock ()
+            (setf (lane-process lane) process)
+            (cond ((or (lane-stopping lane) (swarm-stopping *swarm*)) t)
+                  (t (setf (lane-state lane) :starting
+                           (lane-pid lane) nil
+                           (lane-cursor lane) 0)
+                     nil)))
+      (ignore-errors (evo.port:process-kill-tree process))
+      (ignore-errors (evo.port:process-wait process))
+      (return-from launch-lane nil))
     (maybe-publish-lane-state lane)
     process))
 
@@ -170,10 +179,13 @@ working, idle) rather than an idle event for a lane never given work."
 
 (defun bring-up-lane (lane &key resume)
   "Launch LANE, wait for it, initialize it, and start reading its events.
-Returns T when it came up."
-  (launch-lane lane :resume resume)
+Returns T when it came up.  A lane stopped while it came up (the swarm
+quitting, or switched away from by /resume) stops coming up, quietly."
+  (unless (launch-lane lane :resume resume)
+    (return-from bring-up-lane nil))
   (let ((health (wait-for-health lane)))
     (cond
+      ((lane-stopping-p lane) nil)
       ((null health)
        (with-swarm-lock () (setf (lane-state lane) :down))
        (maybe-publish-lane-state lane)
@@ -192,6 +204,8 @@ Returns T when it came up."
        ;; Subscribe from here on: what the lane said before it was
        ;; initialized (its model gate complaining that no model exists yet)
        ;; is not news for the coordinator.
+       (when (lane-stopping-p lane)
+         (return-from bring-up-lane nil))
        (let ((now (lane-health lane)))
          (with-swarm-lock () (setf (lane-cursor lane) (or (getf now :cursor) 0))))
        (sync-lane-state lane :announce nil)
@@ -462,6 +476,30 @@ wait for them."
                             (swarm-say (format nil "lane ~d: ~a" (lane-n lane) e)
                                        :style :error))))
                       :name (format nil "evo-swarm-start-~d" (lane-n lane))))))
+
+(defun adopt-session-swarm (agent)
+  "Called when AGENT's coordinator switched journals (/new, /fork, /resume).
+A resumed session that records a different swarm gets that swarm back: the
+running lanes stop (their sessions stay in their own swarm directory, which
+the session just left still records) and the recorded lanes come up, each
+resuming its own session.  Any other session — a new one, a fork, one with
+no swarm — takes the running lanes along.  Either way the session then
+records the swarm it has."
+  (let ((record (evo:custom-state "swarm" agent))
+        (old *swarm*))
+    (when (and old record (getf record :id)
+               (not (equal (getf record :id) (swarm-id old))))
+      (swarm-say (format nil "switching to this session's swarm ~a: stopping the current lanes…"
+                         (getf record :id)))
+      (stop-swarm old)
+      (setf *swarm* (make-swarm :agent agent :record record
+                                :workers (swarm-workers old)
+                                :evo-binary (swarm-evo-binary old)
+                                :view (swarm-view old)))
+      (ensure-directories-exist (swarm-dir *swarm*))
+      (start-lanes *swarm* :resume t)
+      (swarm-repaint))
+    (record-swarm)))
 
 (defun stop-swarm (&optional (swarm *swarm*))
   "Stop every lane, in parallel, and wait for them all."
