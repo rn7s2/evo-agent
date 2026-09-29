@@ -11,39 +11,39 @@
 (in-package :evo.cli)
 
 (defparameter *usage*
-  "evo — a goal-oriented, self-evolving agent
+  "evo-agent — a goal-oriented, self-evolving agent
 
 Usage:
-  evo                            interactive TUI (on a terminal)
-  evo -p \"prompt\"              run one task in print mode, stream text to stdout
-  evo --image <path> -p ...      attach an image to the first prompt (repeatable)
-  evo --goal \"objective\" [-p \"first prompt\"]
-                                 create a goal and run until complete or budget
-  evo --resume [path] [-p ...]   resume a session (default: the one most recently
-                                 worked in, for this cwd);
-                                 with an active goal and no -p, continues the goal
-  evo --events ...               emit line-delimited sexpr events instead of text
-  evo --list-sessions            list sessions for this cwd, last worked in first
-  evo --model <id>               model id (default: the :model setting from init.lisp)
-  evo --thinking <level>         low|medium|high|xhigh|max (default medium)
-  evo --no-userspace             boot without init.lisp, post-init.lisp, or extensions (quarantine mode)
-  evo --no-supervisor            run the session in-process, no crash-restart parent
-  evo serve [options]            headless session controlled over HTTP (docs/serve.md)
-      --host <addr>              address to bind (default 127.0.0.1)
-      --port <n>                 port to bind (default 8421; 0 picks a free one)
-      --token-file <path>        write the bearer token here (mode 0600)
-      --allow-remote             permit a non-loopback --host
+  evo-agent                              interactive TUI (on a terminal)
+  evo-agent -p \"prompt\"                  run one task in print mode, stream text to stdout
+  evo-agent --image <path> -p ...        attach an image to the first prompt (repeatable)
+  evo-agent --goal \"objective\" [-p \"first prompt\"]
+                                         create a goal and run until complete or budget
+  evo-agent --resume [path] [-p ...]     resume a session (default: the one most recently
+                                         worked in, for this cwd);
+                                         with an active goal and no -p, continues the goal
+  evo-agent --events ...                 emit line-delimited sexpr events instead of text
+  evo-agent --list-sessions              list sessions for this cwd, last worked in first
+  evo-agent --model <id>                 model id (default: the :model setting from init.lisp)
+  evo-agent --thinking <level>           low|medium|high|xhigh|max (default medium)
+  evo-agent --no-userspace               boot without init.lisp, post-init.lisp, or extensions (quarantine mode)
+  evo-agent --no-supervisor              run the session in-process, no crash-restart parent
+  evo-agent serve [options]              headless session controlled over HTTP (docs/serve.md)
+      --host <addr>                      address to bind (default 127.0.0.1)
+      --port <n>                         port to bind (default 8421; 0 picks a free one)
+      --token-file <path>                write the bearer token here (mode 0600)
+      --allow-remote                     permit a non-loopback --host
       --resume [path] --model <id> --thinking <level> --no-userspace  as above
-  evo --help | --version
+  evo-agent --help | --version
 
-evo supervises itself: crashes and hangs restart the session with --resume;
-a goal that was active picks itself back up.  Exit codes: 0 done, 1 error,
-2 goal paused, 3 budget-limited, 64 usage error.
+evo-agent supervises itself: crashes and hangs restart the session with
+--resume; a goal that was active picks itself back up.  Exit codes: 0 done,
+1 error, 2 goal paused, 3 budget-limited, 64 usage error.
 
 Config: ~/.evo/init.lisp, then <cwd>/.evo/init.lisp, then extensions, then
 ~/.evo/post-init.lisp, then <cwd>/.evo/post-init.lisp (Lisp, evaluated in order;
 later calls override).  post-init.lisp runs after extensions, so it can reference
-models registered by extensions.  evo ships no built-in model table, e.g.
+models registered by extensions.  evo-agent ships no built-in model table, e.g.
   (evo:register-model \"claude-opus-5\"
     :provider :anthropic
     :context-window 1000000 :max-output 128000
@@ -198,14 +198,15 @@ selects the HTTP frontend (:serve t) and admits its own flags."
 (defun main (&optional (argv (evo.port:argv)))
   "Exit codes are supervisor protocol: 0 done, 1 error (restart-eligible),
 2 goal paused, 3 budget-limited, 64 usage error (never restart)."
+  (setf evo.port:*program-name* "evo-agent")
   (let ((opts (handler-case (parse-args argv)
                 (error (e)
-                  (format *error-output* "evo: ~a~%" e)
+                  (format *error-output* "~a: ~a~%" evo.port:*program-name* e)
                   (return-from main 64)))))
     (handler-case
         (cond
           ((getf opts :help) (write-line *usage*) 0)
-          ((getf opts :version) (write-line "evo 0.1.0") 0)
+          ((getf opts :version) (write-line "evo-agent 0.1.0") 0)
           ((getf opts :list-sessions) (cmd-list-sessions) 0)
           ;; One binary, two roles: the plain invocation is the
           ;; supervisor parent; it re-spawns this same binary as the child.
@@ -218,10 +219,10 @@ selects the HTTP frontend (:serve t) and admits its own flags."
            (supervise argv))
           (t (run-cli opts)))
       (usage-error (e)
-        (format *error-output* "evo: ~a~%" e)
+        (format *error-output* "~a: ~a~%" evo.port:*program-name* e)
         64)
       (error (e)
-        (format *error-output* "evo: ~a~%" e)
+        (format *error-output* "~a: ~a~%" evo.port:*program-name* e)
         1))))
 
 (defun toplevel ()
@@ -237,7 +238,7 @@ repeat across processes."
   (evo.port:exit-lisp (main)))
 
 (defun no-model-message (opts)
-  (format nil (cat "No model is configured. evo ships no built-in model table: create~%"
+  (format nil (cat "No model is configured. evo-agent ships no built-in model table: create~%"
                    "~a~%(or <project>/.evo/init.lisp) and register the models you use, then pick a default:~%~%  "
                    "(evo:register-model \"claude-opus-5\"~%    "
                    ":provider :anthropic~%    "

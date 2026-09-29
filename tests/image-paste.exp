@@ -62,7 +62,7 @@ proc fail {name} {
     puts "\nFAIL: $name"
 }
 
-spawn "$repo/build/evo"
+spawn "$repo/build/evo-agent"
 
 expect {
     -re {ctx \d+k/\d+k} { }

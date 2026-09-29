@@ -38,7 +38,7 @@ fi
 unset EVO_SUPERVISED_CHILD EVO_HEARTBEAT_FILE
 
 repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-evo="$repo/build/evo"
+evo="$repo/build/evo-agent"
 scratch=$(mktemp -d /tmp/evo-integration.XXXXXX)
 export EVO_HOME="$scratch/home"
 work="$scratch/work"

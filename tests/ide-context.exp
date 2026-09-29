@@ -105,7 +105,7 @@ proc fail {name} {
     puts "\nFAIL: $name"
 }
 
-spawn "$repo/build/evo"
+spawn "$repo/build/evo-agent"
 
 # 1. the selection segment appears, and the core status line survives wrapping.
 #    Patterns stay ASCII-anchored: the ⧉ glyph is multibyte and what expect

@@ -131,7 +131,7 @@ cancelled request is a stopped request, never one still running unobserved.
   :description "Show project stats")
 ```
 
-A command runs the same way in every frontend: the TUI and `evo serve` both
+A command runs the same way in every frontend: the TUI and serve both
 resolve what was typed through the core command layer (`src/command/`) —
 extension commands first, then builtins, skills, prompt templates. The
 context's `:host` is the frontend running it; the TUI adds `:tui`, serve
@@ -180,7 +180,7 @@ also how the bundled extensions stay idempotent.
   does.
 - `:session-end` — `(:agent a)`, as the session goes away: every frontend
   fires it on its way out (the TUI on quit, print and event mode when the run
-  settles, `evo serve` on `/shutdown`), before the task is stopped. Take down
+  settles, serve on `/shutdown`), before the task is stopped. Take down
   anything you hold open on the user's behalf. A crash cannot fire it.
 - `:todo-changed` — `(:todos vector)`, the todo list was replaced. The same
   change is also emitted as a `:todo-changed` *event*, so frontends (the TUI
@@ -614,7 +614,7 @@ questions about it are an extension's:
 
 ```lisp
 (evo:frontend-interactive-p)   ; is a person at a terminal (the TUI)?  NIL in
-                               ;   print/event mode and under `evo serve`
+                               ;   print/event mode and under serve
 (evo:request-run :text "hi")   ; start a run for steering you already queued
                                ;   with evo:steer from outside a run; T when
                                ;   the frontend took it (TUI, serve), NIL when
@@ -627,7 +627,7 @@ prompt note headless, `extensions/900-ide-context.lisp` starts its
 status-line poller only for an interactive frontend. Use the second for input
 that arrives off-thread — `extensions/360-baby-evo.lisp` steers a
 notification's reply and asks for a run, and it works the same in the TUI and
-in `evo serve`. The answer is known before any extension loads, so a
+in serve. The answer is known before any extension loads, so a
 load-time decision is safe.
 
 A frontend answers by specializing `evo.kernel:frontend-interactive-p` and

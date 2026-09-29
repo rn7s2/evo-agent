@@ -19,9 +19,9 @@
 
 Usage:
   evo-swarm                      start a swarm here: the coordinator in this
-                                 terminal, lanes as `evo serve` processes
-  evo-swarm serve [options]      headless: the coordinator is itself an
-                                 `evo serve` session, driven over HTTP
+                                 terminal, lanes as `evo-agent serve` processes
+  evo-swarm serve [options]      headless: the coordinator is itself a serve
+                                 session, driven over HTTP
       --host <addr>              address to bind (default 127.0.0.1)
       --port <n>                 port to bind (default 8421; 0 picks a free one)
       --token-file <path>        write the bearer token here (mode 0600)
@@ -32,14 +32,15 @@ Usage:
                                  last one here) and restore its lanes
   evo-swarm --model <id>         the coordinator's model (lanes default to it)
   evo-swarm --thinking <level>   low|medium|high|xhigh|max
-  evo-swarm --evo <path>         the evo binary lanes run (default: EVO_BINARY,
-                                 then the one beside evo-swarm, then PATH)
+  evo-swarm --evo <path>         the evo-agent binary lanes run (default:
+                                 EVO_BINARY, then the one beside evo-swarm,
+                                 then PATH)
   evo-swarm --no-userspace       no init files, extensions or swarm.lisp
   evo-swarm --no-supervisor      run the coordinator in-process
   evo-swarm --help | --version
 
-serve takes evo serve's flags and the swarm's own together.  Its bearer token
-is minted once per launch, in the supervisor parent, so a restarted
+serve takes the agent's serve flags and the swarm's own together.  Its bearer
+token is minted once per launch, in the supervisor parent, so a restarted
 coordinator keeps the one clients already hold.
 
 Config: init.lisp, extensions and post-init.lisp as for evo, then
@@ -76,10 +77,10 @@ settings for the swarm, lane count, tool limits, prompt notes, and
                 (setf (getf opts :evo) (or (pop argv) (error 'evo.cli:usage-error :text "--evo needs a path"))))
                ((string= arg "--no-userspace") (setf (getf opts :no-userspace) t))
                ((string= arg "--no-supervisor") (setf (getf opts :no-supervisor) t))
-               ;; serve's own flags, exactly as `evo serve` takes them — a
-               ;; swarm is one session, and this is the flag set that opens
-               ;; its door.  Without the subcommand they are unknown, so a
-               ;; typo cannot silently start something headless.
+               ;; serve's own flags, exactly as the agent's serve takes them
+               ;; — a swarm is one session, and this is the flag set that
+               ;; opens its door.  Without the subcommand they are unknown, so
+               ;; a typo cannot silently start something headless.
                ((and (getf opts :serve) (string= arg "--host"))
                 (setf (getf opts :host)
                       (or (pop argv) (error 'evo.cli:usage-error :text "--host needs an address"))))
@@ -128,24 +129,26 @@ session's, and re-passing them would override a /model switch made since."
             (when (latest-session) '("--resume")))))
 
 (defun find-evo-binary (opts)
-  "The evo binary lanes run."
+  "The evo-agent binary lanes run.  A lane is the agent alone — `evo-agent
+serve` — never this program: the `evo` beside evo-swarm is the swarm itself,
+and a lane running it would only spawn swarms of its own."
   (let* ((suffix (if (evo.port:windows-p) ".exe" ""))
-         (beside (merge-pathnames (format nil "evo~a" suffix)
+         (beside (merge-pathnames (format nil "evo-agent~a" suffix)
                                   (uiop:pathname-directory-pathname
                                    (evo.port:runtime-pathname))))
          (candidates (list (getf opts :evo)
                            (getenv "EVO_BINARY")
                            (and (probe-file beside) (namestring beside))
-                           (let ((p (evo.port:program-in-path "evo")))
+                           (let ((p (evo.port:program-in-path "evo-agent")))
                              (and p (namestring p))))))
     (or (find-if (lambda (c) (and c (probe-file c))) candidates)
         (error 'evo.cli:usage-error
-               :text "cannot find the evo binary lanes run: put it beside evo-swarm, on PATH, or name it with --evo / EVO_BINARY"))))
+               :text "cannot find the evo-agent binary lanes run: put it beside evo-swarm, on PATH, or name it with --evo / EVO_BINARY"))))
 
 (defun check-serve-host (host opts)
   "A served coordinator binds loopback unless --allow-remote says otherwise:
 eval over HTTP is remote code execution, and the token is the only gate.  The
-same rule, and the same words, as `evo serve`."
+same rule, and the same words, as the agent's serve."
   (unless (or (evo.serve:loopback-host-p host) (getf opts :allow-remote))
     (error 'evo.cli:usage-error
            :text (format nil "--host ~a is not a loopback address; pass --allow-remote to expose the swarm (eval over HTTP is remote code execution — the token is the only gate)"
@@ -153,8 +156,8 @@ same rule, and the same words, as `evo serve`."
   host)
 
 (defun coordinator-view (opts)
-  "The view the coordinator runs under: the TUI in a terminal, `evo serve`
-when asked for a headless swarm (:serve)."
+  "The view the coordinator runs under: the TUI in a terminal, or serve —
+the swarm's own headless view — when asked for one (:serve)."
   (if (getf opts :serve)
       (let ((host (or (getf opts :host) "127.0.0.1")))
         (evo.cli:check-serve-token opts)
@@ -226,6 +229,9 @@ the TUI gets a status-line segment."
 A command line that does not parse is a usage error like any other, whatever
 condition it raised — 64 is the code the supervisor never restarts, and a
 mistyped flag cannot be fixed by trying it again."
+  ;; The shared layers (supervise, boot, serve) name this program in their
+  ;; messages; the swarm is evo-swarm, and its lanes say evo-agent.
+  (setf evo.port:*program-name* "evo-swarm")
   (let ((opts (handler-case (parse-args argv)
                 (error (e)
                   (format *error-output* "evo-swarm: ~a~%" e)

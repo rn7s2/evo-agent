@@ -9,7 +9,8 @@ with who made it (the coordinator or lane N, read from the swarm prompt
 notes).  Lanes are checked through their own HTTP API (their url and token
 files are in the swarm directory), exactly as the coordinator reaches them.
 
-Proves: N lanes start and pass auth, skipping a coordinator model whose API
+Proves: the build's `evo` is a soft link to the swarm binary and runs it;
+N lanes start and pass auth, skipping a coordinator model whose API
 they lack; swarm.lisp sets the coordinator's model;
 every lane runs the global and the project swarm.lisp's in-lanes forms (one
 at a time, *load-truename*, the lane variables, a package an earlier form
@@ -224,10 +225,23 @@ def pid_alive(pid):
         return False
 
 
+def check_alias():
+    """`evo` is this program: the build makes it a soft link to evo-swarm (a
+    copy on Windows), so running it runs the swarm."""
+    evo = os.path.join(BUILD, "evo")
+    check("the evo alias is a soft link to evo-swarm",
+          os.path.islink(evo) and os.readlink(evo) == "evo-swarm", evo)
+    out = subprocess.run([evo, "--version"], capture_output=True, text=True, timeout=120)
+    check("the evo alias runs the swarm binary",
+          out.returncode == 0 and out.stdout.strip().startswith("evo-swarm"),
+          f"exit {out.returncode}: {out.stdout.strip()!r} {out.stderr.strip()!r}")
+
+
 def main():
     if not os.access(SWARM, os.X_OK):
         print(f"swarm-e2e: no binary at {SWARM} (make build first)")
         return 1
+    check_alias()
     work = tempfile.mkdtemp(prefix="evo-swarm-e2e-")
     home = os.path.join(work, "home")
     proj = os.path.join(work, "proj")
@@ -280,7 +294,10 @@ def main():
                 '    :description "names its lane"\n'
                 "    :schema '(:object) :execute (lambda (a) (declare (ignore a)) \"ok\"))\n"
                 "  (when (= lane 1) (evo:set-setting :thinking :low)))\n")
-    env = dict(os.environ, EVO_HOME=home, TERM="xterm-256color", EVO_BINARY=os.path.join(BUILD, "evo"))
+    # Neither --evo nor EVO_BINARY: the swarm must find evo-agent beside its
+    # own binary, where the build puts it — the path a real install takes.
+    # (swarm-serve-e2e.py covers the explicit override.)
+    env = dict(os.environ, EVO_HOME=home, TERM="xterm-256color")
     for var in ("EVO_SERVE_TOKEN", "EVO_SUPERVISED_CHILD", "EVO_NO_SUPERVISOR",
                 "EVO_SESSIONS_DIR", "EVO_SERVE_WATCH_PID", "ANTHROPIC_API_KEY"):
         env.pop(var, None)

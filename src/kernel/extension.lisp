@@ -156,7 +156,8 @@ fasl litter next to config, and ECL evaluates it without the compiler."
     (let ((*package* (find-package :evo.user)))
       (handler-case (load path :verbose nil :print nil)
         (error (e)
-          (format *error-output* "~&evo: error in init file ~a: ~a~%" path e)))))
+          (format *error-output* "~&~a: error in init file ~a: ~a~%"
+                  evo.port:*program-name* path e)))))
   path)
 
 ;;; Slash commands.  The registry is the kernel's, like the tool registry;
@@ -343,7 +344,8 @@ fatal — a corrupted runtime is repaired by fixing/removing a source file."
       (unless (member path *loaded-extension-paths* :test #'equal)
         ;; Progress goes to stderr so a supervisor quarantining a failed
         ;; boot can report which :load entry was reached.
-        (format *error-output* "~&evo: replaying :load ~a~%" path)
+        (format *error-output* "~&~a: replaying :load ~a~%"
+                evo.port:*program-name* path)
         (handler-case
             (if (probe-file path)
                 (load-extension* path :reason "replay" :record nil)

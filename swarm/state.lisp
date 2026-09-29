@@ -8,7 +8,7 @@
 (in-package :evo.swarm)
 
 (defstruct (lane (:constructor %make-lane))
-  "One worker lane — a supervised `evo serve` process.  Every slot is guarded
+  "One worker lane — a supervised `evo-agent serve` process.  Every slot is guarded
 by the swarm's lock: the lane's subscriber thread, the coordinator's tools
 (on its run thread) and the TUI's status segment all read or write it."
   n port token

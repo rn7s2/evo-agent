@@ -1,6 +1,13 @@
-;;;; build.lisp — build the single evo executable (images are build
+;;;; build.lisp — build the evo-agent executable (images are build
 ;;;; artifacts only).  Run via: make build [LISP=sbcl|ecl]
 ;;;; on Unix, or `./make.ps1 build` on Windows (SBCL only there).
+;;;;
+;;;; Three artifacts come out of a full build: build/evo-agent (here),
+;;;; build/evo-swarm (build-swarm.lisp), and build/evo — a soft link to
+;;;; build/evo-swarm (a copy of evo-swarm.exe on Windows) made by the
+;;;; Makefile / make.ps1 once both binaries exist.  `evo` is the swarm
+;;;; binary: the name for the whole product; `evo-agent` is the agent
+;;;; alone, and the binary a swarm runs as its lanes.
 ;;;;
 ;;;; SBCL: the Makefile invokes sbcl with --dynamic-space-size 4096 and we
 ;;;; save with :save-runtime-options t, so the heap size is baked into the
@@ -18,11 +25,11 @@
 (require :asdf)
 (push (uiop:getcwd) asdf:*central-registry*)
 
-;; What to build.  evo by default; build-swarm.lisp binds these to build
-;; evo-swarm with the very same steps (one image per binary: SBCL's save
-;; ends the process).
+;; What to build.  evo-agent by default; build-swarm.lisp binds these to
+;; build evo-swarm with the very same steps (one image per binary: SBCL's save
+;; ends the process).  The `evo` link between them is the Makefile's step.
 (defvar cl-user::*build-system* "evo")
-(defvar cl-user::*build-output* "build/evo")
+(defvar cl-user::*build-output* "build/evo-agent")
 (defvar cl-user::*build-toplevel* '("EVO.CLI" "TOPLEVEL"))
 
 (ql:quickload cl-user::*build-system* :silent t)

@@ -47,7 +47,7 @@ proc fail {name} {
 # A wide, one-line status region so the right-hand jobs segment is never
 # dropped for width or wrapped mid-token.
 set stty_init "rows 24 cols 100"
-spawn "$repo/build/evo"
+spawn "$repo/build/evo-agent"
 
 expect {
     -re {ctx \d+k/\d+k} { check "startup status line" }

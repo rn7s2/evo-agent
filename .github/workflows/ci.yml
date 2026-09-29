@@ -123,7 +123,7 @@ jobs:
           tests/lang.exp
           tests/mcp.exp
 
-      # `evo serve` driven end to end over HTTP against a stub Messages
+      # `evo-agent serve` driven end to end over HTTP against a stub Messages
       # endpoint (python3, stdlib only): auth, eval registration, a streamed
       # prompt, interrupt, steer, /compact, the goal controls, model and
       # thinking switches, a tool registered mid-session, fork/new/resume,
@@ -131,14 +131,15 @@ jobs:
       # binary is already built, so the script runs directly.
       - name: serve end-to-end test
         if: matrix.lisp == 'sbcl'
-        run: tests/serve-e2e.py build/evo
+        run: tests/serve-e2e.py build/evo-agent
 
       # evo-swarm end to end: the coordinator's TUI driven through a
-      # pseudo-terminal (python3's pty), lanes as real `evo serve` processes,
-      # the stub Messages endpoint scripting coordinator and lanes alike.
-      # Delegation, reports waking the coordinator, interrupt + re-steer, an
-      # eval into one lane, a worktree lane, a killed lane restarting, quit
-      # stopping every lane, and --resume restoring the swarm.
+      # pseudo-terminal (python3's pty), lanes as real `evo-agent serve`
+      # processes, the stub Messages endpoint scripting coordinator and lanes
+      # alike.  Delegation, reports waking the coordinator, interrupt +
+      # re-steer, an eval into one lane, a worktree lane, a killed lane
+      # restarting, quit stopping every lane, and --resume restoring the
+      # swarm.
       - name: swarm end-to-end test
         if: matrix.lisp == 'sbcl'
         run: tests/swarm-e2e.py build
@@ -159,7 +160,8 @@ jobs:
   # screen-buffer readback) a redirected CI runner does not have; and the .exp
   # suites, which need a pty.  So this job guards that every #+/#- branch in the
   # port layer still READS and COMPILES on Windows, that the unit suite is
-  # green, and that the artifact is a runnable evo.exe.
+  # green, and that the artifacts are runnable: evo-agent.exe, evo-swarm.exe
+  # and evo.exe (a copy of the swarm binary).
   build-and-test-windows:
     runs-on: windows-latest
     timeout-minutes: 25
@@ -275,10 +277,14 @@ jobs:
         shell: pwsh
         run: .\make.ps1 install
 
-      # The binary must at least start, parse argv and exit cleanly — a
-      # build that produces an evo.exe which dies on startup is not a build.
-      - name: evo.exe --version
+      # Each installed artifact must at least start, parse argv and exit
+      # cleanly — a build that produces an evo-agent.exe or an evo.exe which
+      # dies on startup is not a build.  evo.exe is the swarm binary under the
+      # product's name (the copy the Unix build makes a soft link for).
+      - name: the installed binaries start
         shell: pwsh
         run: |
+          & (Join-Path $HOME '.evo\bin\evo-agent.exe') --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & (Join-Path $HOME '.evo\bin\evo.exe') --version
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

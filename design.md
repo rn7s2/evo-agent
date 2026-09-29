@@ -69,7 +69,7 @@ in code.
 ## 3. Architecture
 
 ```
-evo (one binary; evo-swarm is a second program on top of it — §18)
+evo (one binary, built as `evo-agent`; evo-swarm is a second program on top of it — §18)
 │
 ├─ SUPERVISOR — the same binary, invoked plainly (D17)
 │    re-spawns itself as the session child (EVO_SUPERVISED_CHILD=1,
@@ -335,7 +335,7 @@ Few threads, and every mutable object has exactly one owner. Threads exchange
 resources. Locks appear only at those handoff points, and there are no atomics
 or lock-free tricks anywhere — the model is meant to be checkable by reading.
 
-**Owners.** The TUI loop owns TUI state; under `evo serve` the session
+**Owners.** The TUI loop owns TUI state; under serve the session
 thread owns the task and runs every command, and HTTP connection threads own
 only their sockets. One run worker owns agent execution
 state. A provider request owns its socket. A tool call owns any child process it
@@ -355,8 +355,7 @@ launched. An extension generation owns its hooks, tasks and patches.
   threads read directly.
 
 **One task, not a set of flags.** A run or a manual compaction is a single
-task (id, kind, thread) — `tui-task` in the TUI, serve's `task` under
-`evo serve`. "Running" and "compacting" are questions asked of
+task (id, kind, thread) — `tui-task` in the TUI, `task` in serve. "Running" and "compacting" are questions asked of
 it, not booleans kept in sync, and a completion event names the task it
 finishes, so a late `:worker-done` cannot clear a newer task. A task is only
 forgotten after its thread is joined — including at shutdown.
@@ -733,11 +732,11 @@ deliberate deviation from the minimal omit-list.
 
 ## 15. Supervisor and self-healing
 
-The supervisor is the `evo` binary invoked plainly (D17). There is no wrapper
-script and no second executable: a wrapper would be another artifact to
-install, would break TTY inheritance under POSIX background rules, and buys
-nothing the binary cannot do itself. `--no-supervisor` runs the session
-in-process.
+The supervisor is the agent binary (`evo-agent`) invoked plainly (D17).
+There is no wrapper script and no second executable: a wrapper would be
+another artifact to install, would break TTY inheritance under POSIX
+background rules, and buys nothing the binary cannot do itself.
+`--no-supervisor` runs the session in-process.
 
 1. **Spawn.** Re-spawn the same runtime (`evo.port:runtime-pathname`) with
    `EVO_SUPERVISED_CHILD=1` and inherited stdio, so the TTY passes straight
@@ -892,11 +891,11 @@ over ssh with no display, or a missing `wl-clipboard`/`xclip`, is not the
 user's clipboard being empty, and saying so sends them looking in the wrong
 place.
 
-### 16.2 `evo serve`: the session over HTTP
+### 16.2 serve: the session over HTTP
 
-`evo serve` is the headless frontend (D20): the same binary, kernel, journal,
-extensions and supervisor, with HTTP where the TUI would be — the base a
-coordinator (`evo-swarm`) drives worker evos through, and the server a
+serve is the headless frontend (D20): the same binary (`evo-agent`), kernel,
+journal, extensions and supervisor, with HTTP where the TUI would be — the
+base a coordinator (`evo-swarm`) drives worker evos through, and the server a
 program can run its own session on (D21). The protocol reference is
 `docs/serve.md`; the shape, and why:
 
@@ -978,7 +977,7 @@ would reopen it.
 
 | Absent | Why | What would change it |
 |---|---|---|
-| Sub-agents *inside* one agent | Parallel agents shipped as separate processes instead — evo-swarm (§18, D16): a coordinator driving `evo serve` lanes over HTTP. Nothing in the evo binary knows about it | A workload that needs children sharing one image — none foreseen, since a lane is cheaper to reason about than a thread |
+| Sub-agents *inside* one agent | Parallel agents shipped as separate processes instead — evo-swarm (§18, D16): a coordinator driving `evo-agent serve` lanes over HTTP. Nothing in the agent binary knows about it | A workload that needs children sharing one image — none foreseen, since a lane is cheaper to reason about than a thread |
 | Parallel tool execution | Sequential execution is where the thread-discipline complexity *isn't* (D9) | Measured wall-clock loss on independent calls, plus a thread discipline for the journal writer |
 | MCP *in the kernel* | It shipped as a userspace extension instead (`extensions/500-mcp.lisp`: Streamable HTTP, tools only, no auth flow beyond configured headers) — `register-tool` plus an HTTP client is the whole client. The kernel gained no protocol, only the two seams any foreign contract needs: a JSON Schema passed through verbatim, and `:arguments :json` so a tool receives the model's exact JSON rather than the lossy plist spelling | A transport that cannot be written in userspace — stdio servers (child process + pipes) are the candidate |
 | Permission prompts | Permissiveness is a defining property; the `:tool-call` hook is the seam, and `permission-gate.lisp` is the worked example | A deployment context where the OS boundary is not the trust boundary |
@@ -1005,7 +1004,8 @@ a refactor.
 ## 18. evo-swarm: one coordinator, a pool of lanes
 
 evo-swarm (D16) runs parallel agents as a separate program on top of evo: its
-own system (`evo-swarm.asd`, `swarm/`) and binary, depending on `evo`, never
+own system (`evo-swarm.asd`, `swarm/`) and binary — the installed `evo` is a
+soft link to it, and its lanes run `evo-agent` — depending on `evo`, never
 the other way round (`tests/evo-only.lisp`). The reference is
 `docs/swarm.md`; the decisions:
 
@@ -1018,7 +1018,7 @@ the other way round (`tests/evo-only.lisp`). The reference is
   reports. Input always goes to
   it; the human watches lanes read-only (a status-line segment, `/lanes`,
   `/lane N` in the TUI; `GET /lanes` and its siblings when served).
-- **Lanes, not roles.** A lane is `evo serve --no-userspace` on loopback: its
+- **Lanes, not roles.** A lane is `evo-agent serve --no-userspace` on loopback: its
   own process, bearer token, port and journal. Default 6; started with the
   swarm, idle until given work. What a lane *is* for a task is the prompt the
   coordinator gives it.
@@ -1091,17 +1091,17 @@ the other way round (`tests/evo-only.lisp`). The reference is
 | D8 | The kernel/userspace split is enforced with **package locks** (SBCL native, ECL `si:package-lock`, both behind `evo.port`). | Permissive but not suicidal: touching the kernel requires an explicit, auditable unlock. |
 | D9 | Tool execution is **sequential**. | Parallelism is where the thread-discipline complexity lives, and nothing yet demands it. |
 | D10 | **SBCL and ECL on Unix, SBCL on Windows**, through a single portability layer (`evo.port` — the only package permitted to touch `sb-*`, `ext:`, or `si:` symbols, and now the only one that may branch on the platform). Two axes, not one: implementation *and* platform. Windows branches read on an `:evo-windows` feature the layer pushes itself, so a new implementation is one form, not fifty. | The implementation-specific surface proved small: env/argv/exit, processes, locks, fd streams, signals. Windows added a second small one — console mode instead of stty, no SIGWINCH (poll), `taskkill` instead of `pgrep`+`kill`, PowerShell instead of `/bin/sh`, PATHEXT — and asking the console for VT input/output means the key parser, the escape sequences and the renderer are untouched by it. ECL on Windows stays unsupported: it would need its own copy of that surface with no user waiting for it. |
-| D11 | Naming: binary `evo`, directories `~/.evo/` and `<project>/.evo/`, package prefix `EVO.`. | Settled to stop revisiting it. |
+| D11 | Naming: binaries `evo-agent` (the agent), `evo-swarm` (the swarm) and `evo` (a soft link to `evo-swarm`; a copy of `evo-swarm.exe` on Windows, which has no dependable symlink), directories `~/.evo/` and `<project>/.evo/`, package prefix `EVO.`. The programs name themselves the same way — `/health`, the serve banner, `--version` and the diagnostics all say `evo-agent` or `evo-swarm` — while `evo` stays the project's name. | Settled to stop revisiting it. The artifact names split later — `evo` names the whole product, `evo-agent` the binary a swarm runs as its lanes. |
 | D12 | The TUI editor is a **plain multi-line text editor**: Enter sends, Shift+Enter inserts a newline, pastes over three lines collapse to a placeholder that re-pasting expands. No highlighting; Tab completes only `/command` names and `/eval` symbols. | Multi-line editing is crucial UX; editor sophistication is not where the novelty is. |
 | D13 | **Slim core: everything outside the core loop ships as a core extension** — bundled, on the same API, with the same control as user extensions; essential ones cannot be disabled. | Dogfooding proves the API's depth and keeps the kernel small and honest. See §14. |
 | D14 | **Todo checklists ship**, as a core extension. | Long-running goal work needs user-visible progress. The one deliberate deviation from the minimal omit-list. |
-| D16 | **Parallel agents are a swarm of processes, not sub-agents.** `evo-swarm` (§18) runs one coordinator agent — the only one a human talks to — and a pool of interchangeable worker *lanes*, each a whole `evo serve` process driven only through serve's public HTTP API. Lanes never talk to each other; they report to the coordinator, whose input their reports become. Lanes get the coordinator's setup plus code swarm.lisp gives them (`in-lanes`). This replaces "no sub-agents". | Context isolation did demonstrably beat one transcript once goals outgrew one context — the re-entry condition D16 named. Processes rather than in-image children because every guarantee evo has — the journal as truth, supervision, resume, a crash domain of one — then holds per lane for free, and the coordinator exercises serve's API as any client would. Lanes rather than roles because a role is a prompt, which the coordinator can give any lane per task. |
-| D17 | **One binary per program, each its own supervisor.** No shell launcher and no separate supervisor executable: `evo` invoked plainly *is* the supervisor parent, re-spawning itself as the session child; `evo-swarm`, a second program (D16), is built the same way on the same supervisor (`evo.cli:supervise` with its own restart arguments). On SBCL the heap is baked in at build time, refining D10. `--no-supervisor` runs in-process. The evo binary contains no swarm code — `make test` loads the `evo` system alone to prove it (`tests/evo-only.lisp`). | A wrapper script is one more artifact to install, breaks TTY inheritance under POSIX background rules, and buys nothing the binary cannot do itself. A second *program* (evo-swarm) is not a wrapper: it has its own users and its own UI, and keeping it out of evo keeps the agent's binary exactly what one agent needs. |
+| D16 | **Parallel agents are a swarm of processes, not sub-agents.** `evo-swarm` (§18) runs one coordinator agent — the only one a human talks to — and a pool of interchangeable worker *lanes*, each a whole `evo-agent serve` process driven only through serve's public HTTP API. Lanes never talk to each other; they report to the coordinator, whose input their reports become. Lanes get the coordinator's setup plus code swarm.lisp gives them (`in-lanes`). This replaces "no sub-agents". | Context isolation did demonstrably beat one transcript once goals outgrew one context — the re-entry condition D16 named. Processes rather than in-image children because every guarantee evo has — the journal as truth, supervision, resume, a crash domain of one — then holds per lane for free, and the coordinator exercises serve's API as any client would. Lanes rather than roles because a role is a prompt, which the coordinator can give any lane per task. |
+| D17 | **One binary per program, each its own supervisor.** No shell launcher and no separate supervisor executable: `evo-agent` invoked plainly *is* the supervisor parent, re-spawning itself as the session child; `evo-swarm`, a second program (D16), is built the same way on the same supervisor (`evo.cli:supervise` with its own restart arguments). On SBCL the heap is baked in at build time, refining D10. `--no-supervisor` runs in-process. The agent binary contains no swarm code — `make test` loads the `evo` system alone to prove it (`tests/evo-only.lisp`). | A wrapper script is one more artifact to install, breaks TTY inheritance under POSIX background rules, and buys nothing the binary cannot do itself. A second *program* (evo-swarm) is not a wrapper: it has its own users and its own UI, and keeping it out of evo keeps the agent's binary exactly what one agent needs. |
 | D18 | **The core is its own system.** `evo/core` (foundations, kernel, interface-free core extensions) loads without the frontends; the TUI and the CLI build on it in `evo` and define their own packages, and `make test` loads `evo/core` alone before the unit suite. | D13 keeps the kernel small by convention; this makes the direction checkable. A core file that names a frontend does not load, so the question "is the core coupled to the TUI" is answered by the build rather than by reading. |
 | D19 | **No extension patches the core.** Every seam a bundled extension once reached with a function patch or a private symbol is public: `:busy`/`:idle` for the drive, `:user-message` for user input, generation-owned TUI registries, `provider-registration`, a clipboard reader that explains itself. | A patch is a report of a missing protocol. Patches cannot see each other, have to be undone by hand, and break when the patched function's signature grows; a hook or registry has none of those problems, and it belongs to the extension's generation. |
-| D20 | **One command layer, many frontends; `evo serve` is one of them.** What a slash command does is core code (`src/command/`) behind a small host protocol; the TUI and the HTTP frontend both dispatch through it. `evo serve` is a mode of the one binary with an evo-native HTTP/SSE protocol (§16.2), not MCP or JSON-RPC, and not a second program. Extensions ask the core — `evo:frontend-interactive-p`, `evo:request-run` — never a frontend. | A coordinator must be able to do anything a person can, and the only way to keep two frontends from drifting is to give them one copy of every command. A separate server binary would duplicate the supervisor, the boot and the journal; a foreign protocol would need translating into evo's vocabulary on every call. |
+| D20 | **One command layer, many frontends; serve is one of them.** What a slash command does is core code (`src/command/`) behind a small host protocol; the TUI and the HTTP frontend both dispatch through it. `evo-agent serve` is a mode of the agent binary with an evo-native HTTP/SSE protocol (§16.2), not MCP or JSON-RPC, and not a second program. Extensions ask the core — `evo:frontend-interactive-p`, `evo:request-run` — never a frontend. | A coordinator must be able to do anything a person can, and the only way to keep two frontends from drifting is to give them one copy of every command. A separate server binary would duplicate the supervisor, the boot and the journal; a foreign protocol would need translating into evo's vocabulary on every call. |
 
-| D21 | **One protocol for both programs: serve's program seam is an identity plus routes, and `evo-swarm serve` runs the swarm headless on it.** `/health` reports the server's *identity* — name, version, features; `evo serve` is `evo` with none — and a program adds *routes*, exact paths or prefixes like `/lanes/N/…`, matched by exact path first and then longest prefix, behind the same token, size limits and single session thread. `evo-swarm serve` is `evo-swarm` with the feature `swarm`: `GET /lanes`, a `lane-state` event on the coordinator's `/events` when a lane changes, and a lane's read-only `GET /lanes/N/transcript` and `GET /lanes/N/events`. The swarm's notices and repaints go through the frontend it runs under, so the TUI and serve run the same swarm code. | A GUI drives both binaries with one client and one layout, so it must be able to tell which server it is talking to, and the swarm half must not need a second protocol. Identity and routes are the general form of "this program adds a feature", which keeps both the core and serve free of the swarm's name — `make test` still loads `evo` alone. The lane endpoints are read-only because lane control belongs to the coordinator, the one agent a human talks to (§18), and lane tokens and URLs stay private, so a served swarm keeps the TUI's trust boundary: the client reads lanes, it never talks to them. |
+| D21 | **One protocol for both programs: serve's program seam is an identity plus routes, and `evo-swarm serve` runs the swarm headless on it.** `/health` reports the server's *identity* — name, version, features; the agent's serve is `evo-agent` with none — and a program adds *routes*, exact paths or prefixes like `/lanes/N/…`, matched by exact path first and then longest prefix, behind the same token, size limits and single session thread. `evo-swarm serve` is `evo-swarm` with the feature `swarm`: `GET /lanes`, a `lane-state` event on the coordinator's `/events` when a lane changes, and a lane's read-only `GET /lanes/N/transcript` and `GET /lanes/N/events`. The swarm's notices and repaints go through the frontend it runs under, so the TUI and serve run the same swarm code. | A GUI drives both binaries with one client and one layout, so it must be able to tell which server it is talking to, and the swarm half must not need a second protocol. Identity and routes are the general form of "this program adds a feature", which keeps both the core and serve free of the swarm's name — `make test` still loads `evo` alone. The lane endpoints are read-only because lane control belongs to the coordinator, the one agent a human talks to (§18), and lane tokens and URLs stay private, so a served swarm keeps the TUI's trust boundary: the client reads lanes, it never talks to them. |
 
 ## Appendix B — provenance
 

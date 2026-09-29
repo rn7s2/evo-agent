@@ -28,11 +28,17 @@ decision record, and provenance.
 ## Quick start
 
 ```sh
-make build                # build/evo and build/evo-swarm; requires SBCL +
+make build                # build/evo-agent and build/evo-swarm, plus the
+                          #   evo -> evo-swarm soft link; requires SBCL +
                           #   Quicklisp (or: make build LISP=ecl)
-make install              # copies both to /usr/local/bin (PREFIX=…)
+make install              # installs evo-agent and evo-swarm into /usr/local/bin
+                          #   (PREFIX=…), with evo a soft link to evo-swarm
 make install-home         # seeds ~/.evo with docs + example extensions
 ```
+
+`evo` is the product's front door and a soft link to `evo-swarm`: the swarm
+binary, a coordinator with worker lanes. `evo-agent` is the agent alone — the
+binary a swarm runs as its lanes.
 
 On Windows, `make.ps1` beside the Makefile takes the build, install and test
 targets, with the variables as parameters (SBCL only — see
@@ -41,8 +47,9 @@ targets, with the variables as parameters (SBCL only — see
 
 ```powershell
 .\make.ps1 build          # requires SBCL + Quicklisp
-.\make.ps1 install        # builds, seeds $HOME\.evo, installs evo.exe and
-                          #   evo-swarm.exe to $HOME\.evo\bin
+.\make.ps1 install        # builds, seeds $HOME\.evo, installs evo-agent.exe,
+                          #   evo-swarm.exe and evo.exe (a copy of the swarm
+                          #   binary) to $HOME\.evo\bin
 ```
 
 evo ships **no built-in model table**. At minimum, register one model and pick
@@ -62,33 +69,36 @@ Without that, evo exits with a pointer to the sample.
 ## Usage
 
 ```sh
-evo                                     # interactive TUI (on a tty)
-evo -p "run ls and summarize"           # print mode: text on stdout
-evo --events -p "..."                  # line-delimited sexpr events
-evo --goal "make ./test.sh pass"       # goal run; survives its own death
-evo --resume                           # reopen the last session worked in here
-evo --image shot.png -p "what broke?"  # attach an image to the prompt
-evo --list-sessions
-evo serve --token-file ~/.evo/serve.token   # headless, controlled over HTTP
-evo-swarm --workers 4                       # a coordinator + 4 worker lanes
-evo-swarm serve --token-file ~/.evo/serve.token  # the same swarm, headless
+evo-agent                               # the agent alone: interactive TUI (on a tty)
+evo-agent -p "run ls and summarize"     # print mode: text on stdout
+evo-agent --events -p "..."             # line-delimited sexpr events
+evo-agent --goal "make ./test.sh pass"  # goal run; survives its own death
+evo-agent --resume                      # reopen the last session worked in here
+evo-agent --image shot.png -p "what broke?"  # attach an image to the prompt
+evo-agent --list-sessions
+evo-agent serve --token-file ~/.evo/serve.token   # headless single agent, over HTTP
+evo                                     # the swarm: coordinator TUI + worker lanes
+evo-swarm --workers 4                   # the same binary, named explicitly
+evo-swarm serve --token-file ~/.evo/serve.token   # the swarm, headless
 ```
 
-Invoked plainly, `evo` is its own supervisor: the parent process re-spawns the
-same binary as a supervised child (inherited stdio, so the TUI just works),
-monitors a heartbeat file, restarts with `--resume` after crashes and hangs,
-and quarantines repeated boot failures with `--no-userspace`. Exit codes:
-`0` done · `1` error · `2` goal paused · `3` budget-limited · `64` usage error.
+Invoked plainly, `evo-agent` — like `evo` and `evo-swarm` — is its own
+supervisor: the parent process re-spawns the same binary as a supervised
+child (inherited stdio, so the TUI just works), monitors a heartbeat file,
+restarts with `--resume` after crashes and hangs, and quarantines repeated
+boot failures with `--no-userspace`. Exit codes: `0` done · `1` error ·
+`2` goal paused · `3` budget-limited · `64` usage error.
 
 `--no-supervisor` (or `EVO_NO_SUPERVISOR=1`) runs the session in-process.
 
-`evo serve` runs a session with no terminal and hands all of its controls to
-HTTP — prompt (with images), steer, follow-up, interrupt, every slash command,
-`/eval`, the full state, and a live event stream. It binds 127.0.0.1 and
-requires a bearer token on every request (see [docs/serve.md](docs/serve.md)):
+`evo-agent serve` runs an agent session with no terminal and hands all of its
+controls to HTTP — prompt (with images), steer, follow-up, interrupt, every
+slash command, `/eval`, the full state, and a live event stream. It binds
+127.0.0.1 and requires a bearer token on every request (see
+[docs/serve.md](docs/serve.md)):
 
 ```sh
-evo serve --port 8421 --token-file ~/.evo/serve.token
+evo-agent serve --port 8421 --token-file ~/.evo/serve.token
 curl -sN -H "Authorization: Bearer $(cat ~/.evo/serve.token)" \
      -d '{"text": "summarize the README", "stream": true}' localhost:8421/prompt
 ```
@@ -194,7 +204,7 @@ point.
   rejected with an explanation.
 - **Budgets** run every turn over tokens. Exhaustion moves the goal to
   `:budget-limited` and the next steering is a wrap-up template.
-- **Supervisor**: the `evo` binary invoked plainly *is* the supervisor parent.
+- **Supervisor**: the `evo-agent` binary invoked plainly *is* the supervisor parent.
   It re-spawns itself as the session child, monitors process exit and a
   heartbeat file, restarts with `--resume`, and on repeated boot failures
   retries with `--no-userspace` (kernel and core extensions only), reporting
@@ -378,7 +388,7 @@ exactly as written (the plist spelling would turn `src/App.jsx` into
 `src/app.jsx`). See
 [docs/extension-api.md](docs/extension-api.md#tools-whose-contract-was-written-elsewhere).
 
-### evo serve
+### serve
 
 A headless frontend beside the TUI: one session, controlled over HTTP/1.1
 with JSON bodies — the base a coordinator drives worker evos through. POSTs
@@ -394,10 +404,11 @@ Loopback only unless `--allow-remote`; a bearer token on every request
 (`--token-file`, written 0600, or `EVO_SERVE_TOKEN`); runs under the
 supervisor like any session. `/eval` is remote code execution by design — the
 token is the gate. `GET /health` carries the server's **identity** — name,
-version and features — so a client can tell what it is talking to (`evo serve`
-is `evo` with no features). A program can also run its own session on serve:
-it names itself and adds routes of its own, exact paths or a prefix, behind
-the same token and thread discipline. Those are the only two seams, and they
+version and features — so a client can tell what it is talking to (the
+agent's serve names itself `evo-agent` with no features). A program can also run
+its own session on serve: it names itself and adds routes of its own, exact
+paths or a prefix, behind the same token and thread discipline. Those are the
+only two seams, and they
 name no program; `evo-swarm serve` is the one built on them. Full reference:
 [docs/serve.md](docs/serve.md).
 
@@ -405,7 +416,7 @@ name no program; `evo-swarm serve` is the one built on them. Full reference:
 
 A second program on top of evo ([docs/swarm.md](docs/swarm.md)): one
 **coordinator** agent in your terminal — the only one you talk to — and a
-pool of worker **lanes**, each a separate `evo serve --no-userspace` process
+pool of worker **lanes**, each a separate `evo-agent serve --no-userspace` process
 with its own context, token and journal (default 6, `--workers N`). The
 coordinator decides for itself — you give it goals, not lane assignments — to
 split the work into lane-sized pieces with clear done criteria,
@@ -442,9 +453,10 @@ line, `/lanes` and `/lane N`.
 
 `evo-swarm serve` runs the same swarm headless, on
 [serve's protocol](docs/serve.md): `/health` names it `evo-swarm` with the
-feature `swarm`; the coordinator is driven exactly as `evo serve` is; and the
-lane panels get their data over HTTP — `GET /lanes` (state, current task, goal
-status, worktree, restarts), a `lane-state` event on the coordinator's
+feature `swarm`; the coordinator is driven exactly as `evo-agent serve` drives
+a session; and the lane panels get their data over HTTP — `GET /lanes`
+(state, current task, goal status, worktree, restarts), a `lane-state` event
+on the coordinator's
 `/events` whenever one changes, and `GET /lanes/N/transcript` and
 `GET /lanes/N/events` for one lane's messages and live events. Those three are
 read-only, like the TUI's view: lane control stays the coordinator's, and lane
@@ -463,7 +475,7 @@ tokens and URLs are never handed out. `/shutdown` stops every lane and
   /memory /global-memory /compact /image /eval /tree /rewind /fork /resume
   /new /model /thinking /lang /reload /export /help /quit /exit`. What each
   one *does* lives once, in the core command layer (`src/command/`), which the
-  TUI and `evo serve` both dispatch through; only `/help /todo /theme /image
+  TUI and serve both dispatch through; only `/help /todo /theme /image
   /quit` are the TUI's own.
 - **`/lang [code]`**: the language of the system prompt and of replies. The
   prompt's words are a registered language pack — English ships as a core
@@ -556,7 +568,7 @@ make integration    # live e2e: tool round-trip, kill -9 + manual resume,
                     #       Backend via env (skips if unreachable):
                     #       EVO_TEST_BASE_URL / _API_KEY / _MODEL
                     #       (+ optional _VISION_MODEL for the image test)
-make serve-test     # evo serve end to end over HTTP, no backend: a stub
+make serve-test     # evo-agent serve end to end over HTTP, no backend: a stub
                     #       Messages endpoint (python3) stands in for the model
 make swarm-test     # evo-swarm end to end, no backend: the coordinator TUI
                     #       under a pty, real lanes, the stub scripting both
@@ -639,10 +651,10 @@ foundations first: `evo/core` is the agent itself — foundations, kernel, the
 core extensions and the command layer — and loads with no frontend at all;
 `evo` adds the TUI, the HTTP server and the CLI on top of it; `evo-swarm`
 (its own `evo-swarm.asd`, sources in `swarm/`) is a second program on top of
-`evo`, and `make test` also loads `evo` alone to prove the binary carries none
-of it (`tests/evo-only.lisp`). `make test` loads `evo/core` on its own before the
-unit suite runs (`tests/core-only.lisp`), so the dependency only ever points
-from the frontends to the core.
+`evo`, and `make test` also loads `evo` alone to prove the `evo-agent` binary
+carries none of it (`tests/evo-only.lisp`). `make test` loads `evo/core` on
+its own before the unit suite runs (`tests/core-only.lisp`), so the dependency
+only ever points from the frontends to the core.
 
 ```text
 src/packages.lisp        the core's package graph (kernel locked; EVO.USER open;
@@ -701,7 +713,7 @@ src/tui/                 EVO.TUI — the interactive frontend (system `evo`);
   tui.lisp
   commands.lisp
 
-src/serve/               EVO.SERVE — `evo serve`, the HTTP frontend (system
+src/serve/               EVO.SERVE — serve, the HTTP frontend (system
   package.lisp           `evo`; docs/serve.md)
   json.lisp              the one sexpr <-> JSON mapping for events and state
   http.lisp              HTTP/1.1 request parsing, responses, SSE
@@ -751,8 +763,11 @@ evo.asd                  systems evo/core, evo, evo/tests
 evo-swarm.asd            system evo-swarm
 Makefile                 build/install/test on Unix
 make.ps1                 build/install/test on Windows (SBCL only)
-build.lisp               shared by both: saves build/evo (build/evo.exe)
-build-swarm.lisp         the same, for build/evo-swarm (build/evo-swarm.exe)
+build.lisp               shared by both: saves build/evo-agent (build/evo-agent.exe)
+build-swarm.lisp         the same, for build/evo-swarm (build/evo-swarm.exe);
+                         the Makefile / make.ps1 then point build/evo at the
+                         swarm binary — a soft link, or a copy as evo.exe on
+                         Windows
 ```
 
 ## License
