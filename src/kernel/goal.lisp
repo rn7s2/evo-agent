@@ -110,11 +110,29 @@ Summarize: (1) progress so far, (2) work remaining, (3) the single next step
 a future session should take. Goal objective: ~a"
           used (pget goal :token-budget) (pget goal :objective)))
 
+;;; Holds: who may say "not now" to a continuation.
+
+(defvar *goal-hold-predicates* nil
+  "Functions (agent goal) -> true to skip this settle's continuation.  A
+hold is not a pause: the goal stays :active, the run just settles, and
+whoever holds it owes the agent a wake-up (steering plus a run request) when
+there is something to do.  The swarm holds its coordinator's goal while a
+lane works — the lane's report or finished run is the wake-up.")
+
+(defun goal-held-p (agent goal)
+  (some (lambda (fn)
+          (handler-case (funcall fn agent goal)
+            (error (e)
+              (warn "Goal hold predicate failed: ~a" e)
+              nil)))
+        *goal-hold-predicates*))
+
 ;;; The settled hook: plugs into run-until-settled.
 
 (defun goal-settled-hook (agent outcome)
   (let ((goal (current-goal agent)))
-    (when (and goal (eq (pget goal :status) :active))
+    (when (and goal (eq (pget goal :status) :active)
+               (not (goal-held-p agent goal)))
       (cond
         ((eq outcome :error)
          ;; A failed turn no longer blocks the goal: it stays :active.
