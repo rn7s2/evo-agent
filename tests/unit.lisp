@@ -6641,6 +6641,41 @@ model reads.  Nothing else tells a resumed session how it got here."
                   (evo.kernel::recovery-note-text
                    '(:status :exited :code 1 :attempt 1 :duration 1)))))
 
+(defun test-recovery-wiring ()
+  "What bring-up does with a recovery left in the environment: journal it into
+a resumed session, drop the facts for a fresh start, and clear the variable
+either way — nothing this session spawns may read them as its own."
+  (let ((saved (getenv "EVO_RECOVERY"))
+        (line "status=signaled;code=9;attempt=1;duration=4"))
+    (unwind-protect
+         (let* ((dir (uiop:ensure-directory-pathname
+                      (format nil "~a/evo-recover-wire-~a/" (tmp-dir) (gen-id))))
+                (fresh (progn (ensure-directories-exist dir)
+                              (make-session-journal dir)))
+                (started (progn (ensure-directories-exist dir)
+                                (make-session-journal dir))))
+           ;; A fresh session has nothing to recover — and must still not
+           ;; leave the variable lying around for the children it will spawn.
+           (evo.port:setenv "EVO_RECOVERY" line)
+           (evo.cli::consume-recovery (make-agent :journal fresh) nil)
+           (check "a fresh start records no recovery"
+                  (null (find :recover (entry-path fresh)
+                              :key (lambda (e) (pget e :type)))))
+           (check "and clears the variable anyway"
+                  (not (plusp (length (or (getenv "EVO_RECOVERY") "")))))
+           ;; A resumed session journals the entry and the note.
+           (append-entry started '(:type :message :message (:role :assistant :content "hi")))
+           (evo.port:setenv "EVO_RECOVERY" line)
+           (evo.cli::consume-recovery (make-agent :journal started) t)
+           (let* ((path (entry-path started))
+                  (note (pget (car (last path)) :message)))
+             (check "a resumed session journals the recover entry"
+                    (find :recover path :key (lambda (e) (pget e :type))))
+             (check "with the note in the transcript"
+                    (equal "The previous run (recovery 1) was killed by signal 9 after 4 seconds."
+                           (pget (first (pget note :content)) :text)))))
+      (evo.port:setenv "EVO_RECOVERY" (or saved "")))))
+
 (defun test-parse-args ()
   (check "parse: thinking level keyword"
          (eq :high (getf (evo.cli::parse-args '("--thinking" "high")) :thinking)))
@@ -8067,6 +8102,7 @@ became zero after the first reload."
     (test-proxy-plumbing)
     (test-restart-and-resume)
     (test-recovery-entry)
+    (test-recovery-wiring)
     (test-parse-args)
     (test-editor)
     (test-input)
