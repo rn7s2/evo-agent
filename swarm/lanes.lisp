@@ -25,6 +25,23 @@ it is working, starting a run when it is idle — and shown to the human."
       (swarm-say text :style style)
       (evo:request-run))))
 
+;;; Holding the coordinator's goal.
+
+(defun lanes-busy-p (&optional (swarm *swarm*))
+  "True while some lane of SWARM is working or compacting."
+  (and swarm
+       (bt:with-lock-held ((swarm-lock swarm))
+         (some (lambda (lane) (member (lane-state lane) '(:working :compacting)))
+               (swarm-lanes swarm)))))
+
+(defun hold-goal-while-lanes-work (agent goal)
+  "A goal hold (evo.kernel:*goal-hold-predicates*): the coordinator's active
+goal is not re-steered while a lane works.  Ending its turn then is waiting,
+not idling, and the lane's report or finished run is what wakes it
+(TELL-COORDINATOR).  With every lane idle the goal re-steers as usual."
+  (declare (ignore goal))
+  (and *swarm* (eq agent (swarm-agent *swarm*)) (lanes-busy-p)))
+
 ;;; The journal record: what `evo-swarm --resume` restores.
 
 (defun swarm-record ()

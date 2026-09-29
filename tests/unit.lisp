@@ -3520,6 +3520,20 @@ and the guards around all of it."
     (check "settled hook re-steers an active goal"
            (evo.kernel::goal-settled-hook agent :stop))
     (evo.kernel::drain-steering agent)   ; clear the queued continuation
+    ;; A hold skips the continuation without pausing the goal.
+    (let ((evo.kernel:*goal-hold-predicates* (list (lambda (a g) (declare (ignore a g)) t))))
+      (check "a held goal is not re-steered"
+             (null (evo.kernel::goal-settled-hook agent :stop)))
+      (check "...nothing is queued"
+             (not (evo.kernel:steering-pending-p agent)))
+      (check "...and the goal stays active"
+             (eq (pget (current-goal agent) :status) :active)))
+    (let ((evo.kernel:*goal-hold-predicates*
+            (list (lambda (a g) (declare (ignore a g)) nil)
+                  (lambda (a g) (declare (ignore a g)) (error "broken hold")))))
+      (check "no hold (or a broken one) leaves the continuation on"
+             (evo.kernel::goal-settled-hook agent :stop)))
+    (evo.kernel::drain-steering agent)
     ;; The agent's audited claim completes the goal.
     (evo.kernel::tool-update-goal '(:status "complete"))
     (check "goal complete on the agent's claim"

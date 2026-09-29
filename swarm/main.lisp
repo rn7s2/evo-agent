@@ -182,6 +182,7 @@ the swarm's own headless view — when asked for one (:serve)."
   "Install the swarm tools, commands and prompt note for either frontend; only
 the TUI gets a status-line segment."
   (register-swarm-tools)
+  (pushnew 'hold-goal-while-lanes-work *goal-hold-predicates*)
   (pushnew 'load-swarm-config *post-init-hooks*)
   (register-swarm-commands)
   (when (typep view 'tui-view)
