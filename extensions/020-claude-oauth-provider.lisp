@@ -11,9 +11,9 @@
 ;;;;
 ;;;; What this registers
 ;;;;   provider :anthropic-oauth — https://api.anthropic.com, Bearer auth
-;;;;   models   claude-sonnet-5 · claude-opus-5 · claude-fable-5 ·
-;;;;            claude-fable-5-1 · claude-opus-5-5 — the supported Anthropic
-;;;;            models, statically (no /v1/models fetch):
+;;;;   models   claude-sonnet-5 · claude-sonnet-5-5 · claude-opus-5 ·
+;;;;            claude-fable-5 · claude-fable-5-1 · claude-opus-5-5 — the
+;;;;            supported Anthropic models, statically (no /v1/models fetch):
 ;;;;            1M context, 128K output, full effort ladder, adaptive
 ;;;;            thinking, vision.
 ;;;;
@@ -30,10 +30,15 @@
 ;;; Billing-header constants (must match the current Claude Code release)
 ;;; ---------------------------------------------------------------------------
 
-(defparameter *claude-code-version* "2.1.280")
+(defparameter *claude-code-version* "2.1.284")
 (defparameter *billing-header-salt* "59cf53e54c78")
 (defparameter *billing-header-positions* #(4 7 20))
 (defparameter *claude-code-entrypoint* "sdk-cli")
+
+(defparameter *oauth-auth-beta* "oauth-2025-04-20"
+  "The anthropic-beta Claude Code puts on every request it authenticates with
+an OAuth token — its `oauth_auth` beta, XRe in 2.1.284's beta table.  It
+marks a first-party request as OAuth-authenticated.")
 
 ;;; ---------------------------------------------------------------------------
 ;;; SHA256
@@ -128,7 +133,7 @@
 
 (defun build-billing-header-value (messages)
   "Build the x-anthropic-billing-header value from MESSAGES, or NIL.
-Matches Claude Code 2.1.280's hHn/_Se construction: cc_version is
+Matches Claude Code 2.1.284's klt/Zwe construction: cc_version is
 VERSION.suffix, cc_entrypoint is the entrypoint, and cch is always the
 literal 00000 for firstParty (direct api.anthropic.com, no custom base
 URL) — no longer a hash of the first user message.  The suffix is still
@@ -163,9 +168,19 @@ VERSION), first 3 hex chars."
 
 (defun claude-oauth--split-assistant-tool-use (messages)
   "Split assistant messages that interleave text and tool_use blocks.
-The Anthropic API rejects assistant turns where non-tool_use blocks follow
-a tool_use block.  We split such messages into two consecutive assistant
-turns: one with text/thinking blocks and one with tool_use blocks."
+
+This is a Kimi constraint, not an Anthropic one.  Kimi's Messages API
+refuses a turn in which a non-tool_use block follows a tool_use block, and
+one conversation is replayed across providers — so the stricter shape is
+enforced on every request rather than discovered as a 400 mid-session on
+Kimi.  (Probed against api.anthropic.com on 2026-09-29 with
+claude-sonnet-5-5: Anthropic accepts both shapes, so on this provider the
+split is tolerance, not a workaround.)
+
+Each such message becomes two consecutive assistant turns: the tool_use
+blocks first, then the remaining text/thinking blocks, so nothing follows a
+tool_use block inside a message.  A message that already ends with its
+tool_use blocks is passed through untouched."
   (let ((result nil))
     (dolist (m messages (nreverse result))
       (if (not (eq (getf m :role) :assistant))
@@ -187,7 +202,8 @@ turns: one with text/thinking blocks and one with tool_use blocks."
                             (tool-only (remove :tool-call content
                                                :key (lambda (b) (getf b :type))
                                                :test-not #'eq)))
-                        ;; non-tool first, tool-only second (matches upstream order)
+                        ;; tool_use blocks first, then the rest: nothing may
+                        ;; follow a tool_use block within one message.
                         (push (plist-copy-put m :content tool-only) result)
                         (push (plist-copy-put m :content non-tool) result))))))))))
 
@@ -386,7 +402,8 @@ this is."
       (error 'evo:provider-error
              :message "Token does not look like a Claude/Anthropic OAuth access token (expected sk-ant-oat prefix)."))
     (append `(("Authorization" . ,(format nil "Bearer ~a" token))
-              ("anthropic-version" . "2023-06-01"))
+              ("anthropic-version" . "2023-06-01")
+              ("anthropic-beta" . ,*oauth-auth-beta*))
             (claude-oauth--client-headers))))
 
 (defmethod evo:build-request ((api claude-oauth-messages-api)
@@ -478,7 +495,7 @@ Claude Code's own error reader picks apart."
 (defparameter *claude-oauth-authorize-url* "https://claude.com/cai/oauth/authorize")
 (defparameter *claude-oauth-token-url* "https://platform.claude.com/v1/oauth/token")
 
-;; Scopes, as Claude Code 2.1.280 asks for them.  The two sets differ: login
+;; Scopes, as Claude Code 2.1.284 asks for them.  The two sets differ: login
 ;; also requests the console scope org:create_api_key, which exists only to
 ;; mint an API key, while a refresh re-requests the inference set alone.
 (defparameter *claude-oauth-scope*
@@ -686,8 +703,8 @@ or stored token file."
   ;; Static, and no network: evo supports the Anthropic models, and their
   ;; metadata is documented — 1M context, 128K output, the full effort ladder,
   ;; adaptive thinking, vision.
-  (dolist (id '("claude-sonnet-5" "claude-opus-5" "claude-fable-5" "claude-fable-5-1"
-                "claude-opus-5-5"))
+  (dolist (id '("claude-sonnet-5" "claude-sonnet-5-5" "claude-opus-5"
+                "claude-fable-5" "claude-fable-5-1" "claude-opus-5-5"))
     (evo:register-model id
                         :provider :anthropic-oauth
                         :api :anthropic-oauth-messages
