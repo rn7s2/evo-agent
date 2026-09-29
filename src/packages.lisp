@@ -67,7 +67,7 @@
            #:append-entry #:find-entry #:entry-path #:fold-state #:fork-session
            #:state-messages #:state-model #:state-model-provider #:state-thinking
            #:state-tools
-           #:state-goal #:state-loads #:state-name #:state-custom #:custom-state
+           #:state-goal #:state-loads #:state-custom #:custom-state
            #:list-sessions #:latest-session #:sessions-directory
            #:session-updated #:sort-sessions))
 

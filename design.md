@@ -148,7 +148,6 @@ Project scope shadows global scope wherever both exist.
 :custom               extension/tool state, INVISIBLE to the LLM
 :custom-message       extension-injected content, visible to the LLM
 :label                bookmark on an entry (target id + label)
-:session-info         session name etc.
 :goal                 goal created/updated: objective, status, budget, usage
 :load                 userspace source file loaded (path + reason)
 :provider-retry       an attempt was re-sent: attempt/max, delay, reason
@@ -1072,9 +1071,12 @@ the other way round (`tests/evo-only.lisp`). The reference is
   `EVO_SESSIONS_DIR` — the same variable that keeps lane journals out of the
   coordinator's `/resume` list). One subscriber thread per lane owns its
   stream and notices a restart by the new pid, re-initializes the lane and
-  tells the coordinator. Lanes watch the coordinator's pid
-  (`EVO_SERVE_WATCH_PID`) and stop when it dies; quitting the coordinator
-  stops them all (`:session-end`). One lock guards the lane table (§6).
+  tells the coordinator. The restarted lane journals the recovery in its own
+  session (§15), so how it died is the lane's knowledge, not the
+  coordinator's — the coordinator hears only that it happened. Lanes watch
+  the coordinator's pid (`EVO_SERVE_WATCH_PID`) and stop when it dies;
+  quitting the coordinator stops them all (`:session-end`). One lock guards
+  the lane table (§6).
 - **The journal records the swarm.** The coordinator's session carries the
   swarm as `:custom` state (id, lanes, worktrees, evaluated code), so
   `evo-swarm --resume` — or the supervisor's restart — restores coordinator

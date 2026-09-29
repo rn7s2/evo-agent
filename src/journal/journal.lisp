@@ -152,8 +152,7 @@ Assigns :id/:parent-id/:timestamp.  Returns the completed entry."
   tools            ; list of active tool name strings, nil = default set
   goal             ; current goal plist or nil
   (loads nil)      ; list of :load entry plists, chronological
-  (custom nil)     ; alist key-string -> data (last :custom entry wins)
-  name)
+  (custom nil))    ; alist key-string -> data (last :custom entry wins)
 
 (defun custom-state (state key)
   "Extension state from :custom entries (invisible to the LLM)."
@@ -223,9 +222,6 @@ user message in <summary> tags, then the retained tail."
           (:load
            (setf (state-loads state)
                  (append (state-loads state) (list entry))))
-          (:session-info
-           (when (pget entry :name)
-             (setf (state-name state) (pget entry :name))))
           (:compaction
            ;; Self-contained checkpoint: context rebuild restarts here as
            ;; [summary, ...retained-tail]; no walk past the compaction.

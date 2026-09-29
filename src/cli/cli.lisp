@@ -311,6 +311,19 @@ learn how it ended (see EVO.CLI:SUPERVISE)."
                        ((string= key "reason")
                         (and (plusp (length value)) (list :reason value))))))))
 
+(defun consume-recovery (agent resumed-p)
+  "Journal a recovery the supervisor left in the environment, then clear the
+variable so nothing this session spawns reads it as its own.  RESUMED-P is
+whether AGENT opened an existing session: a fresh start has nothing to
+recover, so the facts are dropped rather than journalled.  Returns what was
+consumed, or NIL."
+  (let ((recovery (parse-recovery-env)))
+    (when (and resumed-p recovery)
+      (evo.kernel:record-recovery agent recovery))
+    (when recovery
+      (evo.port:setenv "EVO_RECOVERY" ""))
+    recovery))
+
 (defun setup-agent (opts &key events-cb frontend)
   "Shared session bring-up for every frontend.  Returns (values agent resumed-p).
 FRONTEND is the object answering the core's frontend protocol, bound before
@@ -329,13 +342,8 @@ anything boots so an extension deciding at load time sees it."
     (lock-kernel-packages :evo.cli :evo.tui :evo.serve)
     ;; A supervisor restart leaves the dead child's exit facts in the
     ;; environment; journal them first, before the userspace build, whose
-    ;; failure must not erase why this process is here.  Read once, then
-    ;; cleared, so nothing this session spawns reads them as its own.
-    (let ((recovery (parse-recovery-env)))
-      (when (and resumed-p recovery)
-        (evo.kernel:record-recovery agent recovery))
-      (when recovery
-        (evo.port:setenv "EVO_RECOVERY" "")))
+    ;; failure must not erase why this process is here.
+    (consume-recovery agent resumed-p)
     ;; Userspace: init files (config), extension dirs, then replay the
     ;; session's :load entries.
     (boot-session agent :resumed-p resumed-p
