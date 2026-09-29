@@ -3838,6 +3838,50 @@ and the guards around all of it."
                                    :key (lambda (e) (pget e :type))))))))
       (setf *compact-fixture-mode* previous-mode
             evo.kernel::*compact-keep-recent-tokens* previous-keep)))
+  ;; Input-item cap: many tiny tool calls stay far under the token window
+  ;; but past the endpoint's item cap.
+  (let* ((messages
+           (cons '(:role :user :content ((:type :text :text "go")))
+                 (loop for i below 500
+                       for id = (format nil "c~a" i)
+                       append (list `(:role :assistant
+                                      :content ((:type :thinking :thinking "t")
+                                                (:type :tool-call :id ,id :name "ls"
+                                                 :arguments (:path "x"))))
+                                    `(:role :tool-result :tool-call-id ,id
+                                      :content ((:type :text :text "ok")))))))
+         (state (evo.journal::make-state :messages messages))
+         (capped '(:id "capped" :context-window 1000000 :max-output 1000
+                   :max-input-items 1000))
+         (uncapped '(:id "uncapped" :context-window 1000000 :max-output 1000)))
+    (check "input items: system + user + (thinking + call + result) per step"
+           (= (+ 1 1 (* 500 3)) (count-input-items messages)))
+    (check "input items: text counts once, an empty assistant once"
+           (= 4 (count-input-items
+                 '((:role :assistant :content ((:type :text :text "a")
+                                               (:type :text :text "b")
+                                               (:type :tool-call :id "x")))
+                   (:role :assistant :content nil)))))
+    (check "item cap triggers compaction under the token window"
+           (compaction-needed-p state capped))
+    (check "no item cap: no compaction under the token window"
+           (not (compaction-needed-p state uncapped)))
+    (check "item threshold is cap minus reserve"
+           (= 936 (evo.kernel::input-item-threshold capped)))
+    (check "reserve never eats more than half a small cap"
+           (= 50 (evo.kernel::input-item-threshold
+                  '(:id "tiny" :max-input-items 100))))
+    (let ((cut (select-cut messages :max-items 333)))
+      (check "capped tail holds at most max-items"
+             (<= (count-input-items (nthcdr cut messages)) 334))
+      (check "capped tail does not start at a tool result"
+             (not (eq :tool-result
+                      (evo.provider:message-role (nth cut messages))))))
+    (check "uncapped cut keeps the token tail"
+           (zerop (select-cut messages))))
+  (check "input-item limit is an overflow"
+         (overflow-error-p '(:role :assistant :stop-reason :error
+                             :error-message "HTTP 400: {\"error\":{\"code\":\"InvalidParameter\",\"message\":\"单次请求最多支持 1000 个输入项，请减少输入项数量或拆分请求后重试。\"}}")))
   ;; Overflow classification.
   (check "overflow detected"
          (overflow-error-p '(:role :assistant :stop-reason :error
@@ -4862,6 +4906,16 @@ extensions still keep theirs."
   (check-signals "unknown :api signals at registration"
                  (register-model* "bad" :provider :x :api :no-such-api
                                   :context-window 1 :max-output 1))
+  (register-model* "reg-items" :provider :anthropic :api :anthropic-messages
+                   :context-window 1000 :max-output 100 :max-input-items 1000)
+  (check ":max-input-items is registered"
+         (= 1000 (model-max-input-items (find-model "reg-items"))))
+  (check "no :max-input-items means no cap"
+         (null (model-max-input-items (find-model "reg-a"))))
+  (check-signals "bad :max-input-items signals at registration"
+                 (register-model* "bad" :provider :anthropic
+                                  :context-window 1 :max-output 1
+                                  :max-input-items 0))
   (check "providers seeded from API defaults"
          (equal "https://api.anthropic.com"
                 (pget (provider-config :anthropic) :base-url)))

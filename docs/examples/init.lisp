@@ -151,6 +151,7 @@
 ;; (evo:set-setting :goal-token-budget 500000)
 ;; (evo:set-setting :compact-reserve 16000)
 ;; (evo:set-setting :compact-keep-recent 20000)
+;; (evo:set-setting :compact-input-item-reserve 64) ; models with :max-input-items
 ;; Language of the system prompt and of replies.  A registered pack code
 ;; ("en", or one an extension adds with evo:register-prompt-language) switches
 ;; the prompt itself into that language; any other string ("Korean") is just a

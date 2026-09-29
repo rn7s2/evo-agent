@@ -1,8 +1,9 @@
 ;;;; compact.lisp — context compaction.
 ;;;;
 ;;;; Trigger: estimated context tokens > context-window - reserve (defaults:
-;;;; reserve 16k, keep-recent 20k), plus overflow-error recovery and manual
-;;;; /compact.  Token accounting is anchored on the last provider-reported
+;;;; reserve 16k, keep-recent 20k), or — for a model registered with
+;;;; :max-input-items — input items > that cap - item reserve (default 64),
+;;;; plus overflow-error recovery and manual /compact.  Token accounting is anchored on the last provider-reported
 ;;;; usage; only the tail after it is estimated (chars/4).  Cut points are
 ;;;; never at a tool result.  The result is a :compaction entry carrying the
 ;;;; summary AND the retained tail materialized on the entry — a
@@ -42,19 +43,64 @@ the tail after it is estimated."
              when (or (null anchor-index) (> i anchor-index))
                sum (estimate-message-tokens m)))))
 
+;;; Input items.  Some endpoints cap the number of input items per request
+;;; (Ark behind aiden: 1000, whatever the token count), and a long session
+;;; of small tool calls reaches that far below its token window.  The count
+;;; mirrors a Responses-style input array: one item for the system prompt,
+;;; one per user message and per tool result, and per assistant message one
+;;; per reasoning block, one per tool call and one for its text (one if the
+;;; message is empty).  Measured against four sessions the Ark gateway
+;;; rejected, this runs a few items ABOVE the gateway's own count — the safe
+;;; side.
+
+(defparameter *compact-input-item-reserve* 64)
+
+(defun count-message-items (message)
+  (let ((blocks (message-content message)))
+    (if (eq (message-role message) :assistant)
+        (if (null blocks)
+            1
+            (flet ((n (type) (count type blocks :key (lambda (b) (pget b :type)))))
+              (+ (n :thinking) (n :tool-call) (min 1 (n :text)))))
+        1)))
+
+(defun count-input-items (messages)
+  "Estimated provider input items for a request carrying MESSAGES."
+  (1+ (loop for m in messages sum (count-message-items m))))
+
+(defun input-item-threshold (model)
+  "Compact above this many items, or NIL when MODEL has no item cap.  The
+reserve never eats more than half the cap."
+  (let ((cap (model-max-input-items model)))
+    (and cap
+         (max (ceiling cap 2)
+              (- cap (setting :compact-input-item-reserve
+                              *compact-input-item-reserve*))))))
+
+(defun tail-item-cap (model)
+  "Most items a compaction retains verbatim for MODEL, or NIL (no cap)."
+  (let ((cap (model-max-input-items model)))
+    (and cap (max 1 (floor cap 3)))))
+
 (defun compaction-needed-p (state model)
-  (let ((messages (evo.journal:state-messages state)))
+  (let ((messages (evo.journal:state-messages state))
+        (item-threshold (input-item-threshold model)))
     (and messages
-         (> (estimate-context-tokens messages)
-            (- (model-context-window model)
-               (setting :compact-reserve *compact-reserve-tokens*)))
+         (or (> (estimate-context-tokens messages)
+                (- (model-context-window model)
+                   (setting :compact-reserve *compact-reserve-tokens*)))
+             (and item-threshold
+                  (> (count-input-items messages) item-threshold)))
          ;; A compaction that would drop nothing is not a compaction.
-         (plusp (select-cut messages)))))
+         (plusp (select-cut messages :max-items (tail-item-cap model))))))
 
 ;;; Cut-point selection: retain a recent tail worth ~keep-recent tokens,
-;;; then extend backwards so the tail never starts at a tool result.
+;;; then extend backwards so the tail never starts at a tool result.  With
+;;; MAX-ITEMS the tail is then trimmed from the front to at most that many
+;;; input items — a run of tiny tool calls can fit hundreds of items in the
+;;; keep-recent tokens — again never starting at a tool result.
 
-(defun select-cut (messages)
+(defun select-cut (messages &key max-items)
   "Index of the first retained message."
   (let ((cut (length messages))
         (acc 0)
@@ -67,7 +113,18 @@ the tail after it is estimated."
     (loop while (and (< cut (length messages))
                      (eq (message-role (nth cut messages)) :tool-result))
           do (decf cut))
-    (max 0 cut)))
+    (setf cut (max 0 cut))
+    (when max-items
+      (let ((items (loop for m in (nthcdr cut messages)
+                         sum (count-message-items m))))
+        (loop while (and (< cut (length messages)) (> items max-items))
+              do (decf items (count-message-items (nth cut messages)))
+                 (incf cut))
+        ;; Moving forward: skip results whose call was just dropped.
+        (loop while (and (< cut (length messages))
+                         (eq (message-role (nth cut messages)) :tool-result))
+              do (incf cut))))
+    cut))
 
 ;;; Deterministic facts: read/modified file sets accumulate across
 ;;; compactions.
@@ -160,7 +217,7 @@ retain the tail on the :compaction entry.  Returns the entry."
          (state (fold-state journal))
          (messages (evo.journal:state-messages state))
          (model (effective-model state agent))
-         (cut (select-cut messages))
+         (cut (select-cut messages :max-items (tail-item-cap model)))
          (dropped (subseq messages 0 cut))
          (tail (subseq messages cut))
          (previous (previous-compaction journal))
@@ -200,10 +257,14 @@ retain the tail on the :compaction entry.  Returns the entry."
                             :dropped-messages (length dropped)))))))
 
 (defun overflow-error-p (message)
-  "Context-overflow classification for compact+retry-once recovery."
+  "Context-overflow classification for compact+retry-once recovery.  An
+input-item cap counts: compacting is what brings the item count down."
   (let ((text (or (pget message :error-message) "")))
     (and (eq (message-stop-reason message) :error)
          (or (search "prompt is too long" text)
+             (search "input items" text)
+             ;; Ark: "单次请求最多支持 1000 个输入项" (at most 1000 input items).
+             (search "个输入项" text)
              (search "too many tokens" text)
              (search "context length" text)
              (search "maximum context" text)

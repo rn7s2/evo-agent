@@ -74,7 +74,7 @@
 (defpackage :evo.provider
   (:use :cl :evo.util)
   (:export #:find-model #:all-models #:model-providers
-           #:model-context-window #:model-max-output
+           #:model-context-window #:model-max-output #:model-max-input-items
            #:model-effort #:model-thinking-mode #:model-vision-p #:+effort-levels+
            #:normalize-thinking-level
            #:register-model* #:register-provider* #:provider-config
@@ -147,6 +147,7 @@
            #:add-lore #:add-session-lore #:all-lore-entries
            #:edit-lore #:remove-lore #:find-lore-scope
            #:compact-now #:compaction-needed-p #:estimate-context-tokens
+           #:count-input-items
            #:overflow-error-p #:select-cut
            ;; background jobs
            #:running-jobs-summary))

@@ -60,7 +60,8 @@ degrades instead of failing."
 
 (defun register-model* (id &key provider (api :anthropic-messages)
                              context-window max-output
-                             (vision t) effort (thinking-mode :effort-only))
+                             (vision t) effort (thinking-mode :effort-only)
+                             max-input-items)
   "Register (or replace, keeping position) a model.  A model's identity is
 its (id, provider) pair: the same id under different providers (direct vs.
 proxy) are distinct, both selectable models; re-registering the same pair
@@ -77,6 +78,10 @@ time, not mid-run."
   (unless (and (integerp max-output) (plusp max-output))
     (error "register-model ~a: :max-output must be a positive integer, got ~s"
            id max-output))
+  (unless (or (null max-input-items)
+              (and (integerp max-input-items) (plusp max-input-items)))
+    (error "register-model ~a: :max-input-items must be a positive integer or nil, got ~s"
+           id max-input-items))
   (unless (member thinking-mode '(:adaptive :effort-only))
     (error (cat "register-model ~a: :thinking-mode must be :adaptive "
                 "or :effort-only, got ~s")
@@ -85,7 +90,8 @@ time, not mid-run."
                      :context-window context-window :max-output max-output
                      :vision (and vision t)
                      :thinking-mode thinking-mode
-                     :effort (normalize-effort id effort)))
+                     :effort (normalize-effort id effort)
+                     :max-input-items max-input-items))
         (tail (member t *models*
                       :key (lambda (m) (and (string= (pget m :id) id)
                                             (equal (pget m :provider) provider))))))
@@ -134,6 +140,10 @@ the initial default.  No fallback: an unknown id is a config error."
 
 (defun model-context-window (model) (pget model :context-window))
 (defun model-max-output (model) (pget model :max-output))
+(defun model-max-input-items (model)
+  "The endpoint's cap on input items (messages, tool calls, tool results,
+reasoning blocks) per request, or NIL for no cap."
+  (pget model :max-input-items))
 (defun model-effort (model) (pget model :effort))
 (defun model-thinking-mode (model) (or (pget model :thinking-mode) :effort-only))
 
