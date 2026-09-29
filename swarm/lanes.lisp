@@ -73,7 +73,8 @@ them.  Called whenever that shape changes."
 
 (defparameter *stripped-environment*
   '("EVO_SUPERVISED_CHILD=" "EVO_HEARTBEAT_FILE=" "EVO_NO_SUPERVISOR="
-    "EVO_SERVE_TOKEN=" "EVO_SESSIONS_DIR=" "EVO_SERVE_WATCH_PID=")
+    "EVO_SERVE_TOKEN=" "EVO_SESSIONS_DIR=" "EVO_SERVE_WATCH_PID="
+    "EVO_RECOVERY=")
   "Variables of this process a lane must not inherit: they describe the
 coordinator's own supervision and session, not the lane's.")
 

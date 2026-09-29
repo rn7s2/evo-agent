@@ -56,6 +56,41 @@ turns."
   (append-entry (agent-journal agent)
                 (list :type :thinking-change :thinking level)))
 
+(defun recovery-note-text (recovery)
+  "One factual sentence about how the previous run ended, for the
+transcript — what the supervisor saw, nothing else.  No advice: whether to
+redo the interrupted work is the agent's call, made with the facts."
+  (let* ((status (pget recovery :status))
+         (code (pget recovery :code))
+         (attempt (pget recovery :attempt))
+         (duration (pget recovery :duration))
+         (reason (pget recovery :reason))
+         (seconds (format nil "~d ~:[seconds~;second~]" duration (eql duration 1))))
+    (format nil "The previous run (recovery ~a) ~a."
+            (or attempt "?")
+            (cond ((and (eq status :signaled) reason)
+                   (format nil "was killed by the supervisor: ~a — signal ~a after ~a"
+                           reason code seconds))
+                  ((eq status :signaled)
+                   (format nil "was killed by signal ~a after ~a" code seconds))
+                  (t (format nil "exited with code ~a after ~a" code seconds))))))
+
+(defun record-recovery (agent recovery)
+  "Journal the supervisor's account of how the run AGENT replaces ended: a
+`:recover' entry (state for extensions, folded under `custom-state
+\"recovery\"') and a user-role note so the model sees how it got here.
+RECOVERY is the plist parsed from the supervisor's EVO_RECOVERY line; the
+note carries the facts only."
+  (let ((journal (agent-journal agent)))
+    (append-entry journal (append (list :type :recover) recovery))
+    (append-entry journal
+                  (list :type :custom-message
+                        :key "recovery"
+                        :message (list :role :user
+                                       :content (list (list :type :text
+                                                            :text (recovery-note-text recovery))))))
+    agent))
+
 (defun end-session (agent)
   "Announce :session-end for AGENT — the session is going away.  Every
 frontend calls this once on its way out (the TUI on quit, print and event mode

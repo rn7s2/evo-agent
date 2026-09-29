@@ -209,6 +209,17 @@ user message in <summary> tags, then the retained tail."
                  (loop for (k v) on entry by #'cddr
                        unless (member k '(:type :id :parent-id :timestamp))
                          append (list k v))))
+          (:recover
+           ;; The supervisor's account of how the previous run ended —
+           ;; appended only by the child booting after a restart; the
+           ;; entries themselves are the history.
+           (setf (state-custom state)
+                 (cons (cons "recovery"
+                             (loop for (k v) on entry by #'cddr
+                                   unless (member k '(:type :id :parent-id :timestamp))
+                                     append (list k v)))
+                       (remove "recovery" (state-custom state)
+                               :key #'car :test #'equal))))
           (:load
            (setf (state-loads state)
                  (append (state-loads state) (list entry))))

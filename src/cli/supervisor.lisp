@@ -51,15 +51,18 @@ With no session on disk, restart fresh instead."
           (when (latest-session) '("--resume"))
           (when (member "--events" argv :test #'equal) '("--events"))))
 
-(defun spawn-child (args heartbeat-file)
+(defun spawn-child (args heartbeat-file &optional recovery)
   (evo.port:launch-child
    (namestring (evo.port:runtime-pathname)) args
-   :environment (list* "EVO_SUPERVISED_CHILD=1"
-                       (format nil "EVO_HEARTBEAT_FILE=~a" heartbeat-file)
-                       (remove-if (lambda (e)
-                                    (or (string-prefix-p "EVO_SUPERVISED_CHILD=" e)
-                                        (string-prefix-p "EVO_HEARTBEAT_FILE=" e)))
-                                  (evo.port:environ)))))
+   :environment (append (list "EVO_SUPERVISED_CHILD=1"
+                              (format nil "EVO_HEARTBEAT_FILE=~a" heartbeat-file))
+                        (when recovery
+                          (list (format nil "EVO_RECOVERY=~a" recovery)))
+                        (remove-if (lambda (e)
+                                     (or (string-prefix-p "EVO_SUPERVISED_CHILD=" e)
+                                         (string-prefix-p "EVO_HEARTBEAT_FILE=" e)
+                                         (string-prefix-p "EVO_RECOVERY=" e)))
+                                   (evo.port:environ)))))
 
 (defun reset-tty ()
   "Best-effort cooked-mode restore.  A child that dies abnormally can die
@@ -70,7 +73,8 @@ raw terminal when the supervisor finally exits."
 
 (defun monitor-child (process heartbeat-file start-time hang-timeout)
   "Poll until PROCESS exits; kill -9 on a stale heartbeat.
-Returns (values exit-code hung-p)."
+Returns (values STATUS CODE HUNG-P): STATUS is :exited or :signaled, CODE the
+exit code or the signal number, HUNG-P true when the kill was the watchdog's."
   (let ((hung nil))
     (loop while (evo.port:process-alive-p process)
           do (sleep 2)
@@ -82,7 +86,15 @@ Returns (values exit-code hung-p)."
                (setf hung t)
                (ignore-errors (evo.port:process-kill process))))
     (multiple-value-bind (status code) (evo.port:process-wait process)
-      (values (if (eq status :signaled) :crashed code) hung))))
+      (values status code hung))))
+
+(defun recovery-env-string (status code attempt duration reason)
+  "The supervisor's account of the child that just died, for the child that
+replaces it — one environment value, e.g.
+`status=signaled;code=9;attempt=2;duration=640;reason=hang too long'.
+REASON is the supervisor's own words or NIL when it has none."
+  (format nil "status=~(~a~);code=~a;attempt=~d;duration=~d~@[;reason=~a~]"
+          status code attempt duration reason))
 
 (defun supervise (argv &key (restart-argv #'restart-argv))
   "The supervisor loop.  Returns the final exit code.  RESTART-ARGV maps the
@@ -93,6 +105,7 @@ supervisor (evo-swarm) passes its own."
         (max-boot-failures (supervisor-setting "EVO_MAX_BOOT_FAILURES" 3))
         (max-restarts (supervisor-setting "EVO_SUPERVISOR_MAX_RESTARTS" 50))
         (restarts 0) (boot-failures 0) (quarantined nil) (extra nil)
+        (recovery nil)                  ; how the child before this one died
         (first t))
     (loop
       (let* ((heartbeat (merge-pathnames
@@ -105,46 +118,53 @@ supervisor (evo-swarm) passes its own."
           ;; quietly restarting without it is how a supervisor lies.
           (format *error-output* "~&~a: restarting~{ ~a~} (attempt ~d)~%"
                   evo.port:*program-name* args restarts))
-        (multiple-value-bind (code hung)
-            (monitor-child (spawn-child args heartbeat) heartbeat start hang-timeout)
+        (multiple-value-bind (status code hung)
+            (monitor-child (spawn-child args heartbeat recovery)
+                           heartbeat start hang-timeout)
           (ignore-errors (delete-file heartbeat))
-          ;; Clean exits (0/2/3/64) ran their own terminal teardown; the
-          ;; abnormal ones may have died in raw mode.
-          (when (or hung (not (member code '(0 2 3 64))))
-            (reset-tty))
-          (let ((duration (- (get-universal-time) start)))
-            (setf first nil)
-            (case code
-              (0 (return 0))
-              (2 (format *error-output* "~&~a: goal paused — human needed~%"
-                         evo.port:*program-name*)
-                 (return 2))
-              (3 (format *error-output* "~&~a: goal budget-limited — human needed~%"
-                         evo.port:*program-name*)
-                 (return 3))
-              (64 (return 64)))         ; usage error: restarting won't help
-            (when hung
-              (format *error-output* "~&~a: child was hung (killed)~%"
-                      evo.port:*program-name*))
-            ;; Boot-failure quarantine.
-            (if (< duration boot-grace)
-                (incf boot-failures)
-                (setf boot-failures 0))
-            (when (>= boot-failures max-boot-failures)
-              (when quarantined
-                (format *error-output* "~&~a: quarantined boot is failing too — giving up. Fix or remove the offending source file (see ':load replay' lines above).~%"
+          (let ((outcome (if (eq status :signaled) :crashed code)))
+            ;; Clean exits (0/2/3/64) ran their own terminal teardown; the
+            ;; abnormal ones may have died in raw mode.
+            (when (or hung (not (member outcome '(0 2 3 64))))
+              (reset-tty))
+            (let ((duration (- (get-universal-time) start)))
+              (setf first nil)
+              (case outcome
+                (0 (return 0))
+                (2 (format *error-output* "~&~a: goal paused — human needed~%"
+                           evo.port:*program-name*)
+                   (return 2))
+                (3 (format *error-output* "~&~a: goal budget-limited — human needed~%"
+                           evo.port:*program-name*)
+                   (return 3))
+                (64 (return 64)))       ; usage error: restarting won't help
+              (when hung
+                (format *error-output* "~&~a: child was hung (killed)~%"
+                        evo.port:*program-name*))
+              ;; Boot-failure quarantine.
+              (if (< duration boot-grace)
+                  (incf boot-failures)
+                  (setf boot-failures 0))
+              (when (>= boot-failures max-boot-failures)
+                (when quarantined
+                  (format *error-output* "~&~a: quarantined boot is failing too — giving up. Fix or remove the offending source file (see ':load replay' lines above).~%"
+                          evo.port:*program-name*)
+                  (return 1))
+                (format *error-output* "~&~a: boot failed ~d times fast — QUARANTINE: retrying with --no-userspace~%"
+                        evo.port:*program-name*
+                        boot-failures)
+                (setf extra '("--no-userspace") quarantined t boot-failures 0))
+              (incf restarts)
+              (when (>= restarts max-restarts)
+                (format *error-output* "~&~a: restart budget exhausted~%"
                         evo.port:*program-name*)
                 (return 1))
-              (format *error-output* "~&~a: boot failed ~d times fast — QUARANTINE: retrying with --no-userspace~%"
-                      evo.port:*program-name*
-                      boot-failures)
-              (setf extra '("--no-userspace") quarantined t boot-failures 0))
-            (incf restarts)
-            (when (>= restarts max-restarts)
-              (format *error-output* "~&~a: restart budget exhausted~%"
-                      evo.port:*program-name*)
-              (return 1))
-            (sleep 2)))))))
+              ;; Hand the next child what only this process knows: how the
+              ;; one it replaces ended.  It journals that; no child can
+              ;; observe its predecessor's death otherwise.
+              (setf recovery (recovery-env-string status code restarts duration
+                                                  (and hung "hang too long")))
+              (sleep 2))))))))
 
 (defun supervised-run-p (opts)
   "Should this invocation run the supervisor parent instead of a session?"
