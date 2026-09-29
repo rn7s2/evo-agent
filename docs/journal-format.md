@@ -34,9 +34,14 @@ form-by-form, not line-by-line.
 | `:goal` | goal created/updated: `:goal-id :objective :status :token-budget :tokens-used` (`:token-budget` nil = no limit, the default) |
 | `:load` | userspace source file loaded (`:path` + `:reason`) — replayed on boot |
 | `:provider-retry` | a provider request re-sent: `:attempt :max :delay :reason` — for postmortems; the fold ignores it |
+| `:recover` | the supervisor's account of how the previous run ended, appended by the child booting after a restart: `:status` (`:exited`/`:signaled`), `:code` (exit code or signal), `:attempt`, `:duration` (seconds), `:reason` (the supervisor's words, or nil) |
 
 Every entry carries `:id` (short random hex), `:parent-id` (nil for a root),
 `:timestamp` (ISO-8601 UTC).
+
+`:recover` folds into `custom-state "recovery"` and is accompanied by a
+`:custom-message` (user role, key `"recovery"`) stating the same facts in one
+sentence — the transcript's record of why the run before it ended.
 
 ## Message plists
 

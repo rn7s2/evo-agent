@@ -135,6 +135,8 @@ t3=$?
 report $? "goal run terminates via update_goal complete"
 
 # --- Test 4: built-in supervision survives an induced crash --------------
+# The restarted child must also journal how the run before it ended:
+# a :recover entry plus a note in the transcript.
 work4="$scratch/work4"
 mkdir -p "$work4"
 (
@@ -146,8 +148,11 @@ mkdir -p "$work4"
         >/dev/null 2>"$scratch/t4.err"
 )
 t4=$?
+journal4=$(find "$EVO_HOME/sessions" -name '*.sexp' -path '*work4*' 2>/dev/null | head -1)
 [ $t4 -eq 0 ] && grep -q "survived" "$work4/crash-proof.txt" 2>/dev/null \
-    && grep -q "restarting --resume" "$scratch/t4.err"
+    && grep -q "restarting --resume" "$scratch/t4.err" \
+    && [ -n "$journal4" ] && grep -q ":type :recover" "$journal4" \
+    && grep -q "The previous run (recovery 1) was killed by signal 9" "$journal4"
 report $? "supervisor: induced crash -> restart -> resume -> goal complete"
 
 # --- Test 5: compaction fires mid-task and the task still finishes -------

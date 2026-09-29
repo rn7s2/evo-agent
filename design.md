@@ -152,6 +152,8 @@ Project scope shadows global scope wherever both exist.
 :goal                 goal created/updated: objective, status, budget, usage
 :load                 userspace source file loaded (path + reason)
 :provider-retry       an attempt was re-sent: attempt/max, delay, reason
+:recover              the supervisor's account of the previous run's death
+                      (state fold + a transcript note)
 ```
 
 Three of these carry architectural weight:
@@ -748,7 +750,11 @@ background rules, and buys nothing the binary cannot do itself.
 2. **Monitor.** Process exit plus a heartbeat file the kernel touches on every
    event, with a generous configurable hang timeout — tool calls can legally
    run for a long time. A stale heartbeat means the child is killed.
-3. **Restart.** Re-launch with `--resume <session>`. If the resumed session
+3. **Restart.** Re-launch with `--resume <session>`. The parent hands the
+   dead child's exit facts — `status`, `code`, `attempt`, `duration`,
+   `reason` — down the environment; the new child journals them as a
+   `:recover` entry plus a one-line note in the transcript, so the session
+   knows how the run it replaces ended. If the resumed session
    has an `:active` goal — a turn error leaves it active — the goal driver's
    idle continuation picks it up: crash, reboot, re-steer, with no human in
    the loop.

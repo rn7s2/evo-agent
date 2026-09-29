@@ -6575,6 +6575,72 @@ five identical restarts, each reporting a different error than the real one."
                   (equal '("--resume" "--events") (evo.cli::restart-argv '("--events")))))
       (evo.port:setenv "EVO_HOME" (or saved "")))))
 
+(defun test-recovery-entry ()
+  "A supervisor restart hands the dead child's exit facts down the
+environment; the child journals them as a :recover entry plus a note the
+model reads.  Nothing else tells a resumed session how it got here."
+  ;; The parent's line and the child's parse are one protocol: round-trip it.
+  (let ((line (evo.cli::recovery-env-string :signaled 9 2 640 "hang too long")))
+    (check "the supervisor's line names every fact"
+           (string= "status=signaled;code=9;attempt=2;duration=640;reason=hang too long" line))
+    (check "the line round-trips"
+           (equal '(:status :signaled :code 9 :attempt 2 :duration 640
+                    :reason "hang too long")
+                  (evo.cli::parse-recovery-env line)))
+    (check "no reason, no field"
+           (string= "status=exited;code=1;attempt=1;duration=3"
+                    (evo.cli::recovery-env-string :exited 1 1 3 nil)))
+    (check "an empty line parses to nothing" (null (evo.cli::parse-recovery-env ""))))
+  ;; The child's side: entry, fold, note.
+  (let* ((dir (uiop:ensure-directory-pathname
+               (format nil "~a/evo-recover-~a/" (tmp-dir) (gen-id))))
+         (journal (progn (ensure-directories-exist dir) (make-session-journal dir)))
+         (agent (make-agent :journal journal)))
+    (append-entry journal '(:type :message :message (:role :assistant :content "hi")))
+    (evo.kernel:record-recovery
+     agent (evo.cli::parse-recovery-env
+            "status=signaled;code=9;attempt=2;duration=640;reason=hang too long"))
+    (let* ((path (entry-path journal))
+           (rec (find :recover path :key (lambda (e) (pget e :type))))
+           (note (pget (car (last path)) :message))
+           (folded (fold-state journal))
+           (messages (state-messages folded)))
+      (check "the :recover entry carries the facts"
+             (and rec
+                  (eq :signaled (pget rec :status))
+                  (eql 9 (pget rec :code))
+                  (eql 2 (pget rec :attempt))
+                  (eql 640 (pget rec :duration))
+                  (equal "hang too long" (pget rec :reason))))
+      (check "the note is a user message"
+             (eq :user (pget note :role)))
+      (check "the note states the facts, and only the facts"
+             (string= "The previous run (recovery 2) was killed by the supervisor: hang too long — signal 9 after 640 seconds."
+                      (pget (first (pget note :content)) :text)))
+      (check "the note carries the filter key"
+             (find-if (lambda (m) (equal "recovery" (pget (pget m :meta) :key)))
+                      messages))
+      (check "the note is in the folded context"
+             (find "The previous run (recovery 2)" messages
+                   :test (lambda (needle m)
+                           (let ((content (pget m :content)))
+                             (and (consp content)
+                                  (some (lambda (b)
+                                          (and (consp b)
+                                               (search needle (or (pget b :text) ""))))
+                                        content))))))
+      (check "the fold exposes recovery state"
+             (equal 2 (pget (custom-state folded "recovery") :attempt)))))
+  ;; The shapes without the supervisor's words.
+  (check "an outside kill reads as a signal"
+         (string= "The previous run (recovery 3) was killed by signal 9 after 12 seconds."
+                  (evo.kernel::recovery-note-text
+                   '(:status :signaled :code 9 :attempt 3 :duration 12 :reason nil))))
+  (check "a non-zero exit says so"
+         (string= "The previous run (recovery 1) exited with code 1 after 1 second."
+                  (evo.kernel::recovery-note-text
+                   '(:status :exited :code 1 :attempt 1 :duration 1)))))
+
 (defun test-parse-args ()
   (check "parse: thinking level keyword"
          (eq :high (getf (evo.cli::parse-args '("--thinking" "high")) :thinking)))
@@ -8000,6 +8066,7 @@ became zero after the first reload."
     (test-preflight)
     (test-proxy-plumbing)
     (test-restart-and-resume)
+    (test-recovery-entry)
     (test-parse-args)
     (test-editor)
     (test-input)

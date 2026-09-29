@@ -273,6 +273,44 @@ where /model and /reload can fix the registry in place."
                              (and (getf opts :no-userspace)
                                   "Note: --no-userspace skips init files, so no models are registered in this mode.")))))))
 
+(defun split-env-fields (text)
+  "TEXT split on `;'."
+  (loop with start = 0
+        for end = (position #\; text :start start)
+        collect (subseq text start end)
+        while end
+        do (setf start (1+ end))))
+
+(defun parse-recovery-env (&optional (text (getenv "EVO_RECOVERY")))
+  "Parse the supervisor's EVO_RECOVERY line into the plist the `:recover'
+journal entry carries, or NIL when this boot was not a supervisor restart:
+\"status=signaled;code=9;attempt=2;duration=640;reason=hang too long\".
+
+The environment is the only carrier for these facts — the parent witnessed
+the death, and the child that replaces the dead one has no other way to
+learn how it ended (see EVO.CLI:SUPERVISE)."
+  (when (and text (plusp (length text)))
+    (loop for field in (split-env-fields text)
+          for eq = (position #\= field)
+          when eq
+            append (let ((key (subseq field 0 eq))
+                         (value (subseq field (1+ eq))))
+                     (cond
+                       ((string= key "status")
+                        (cond ((string= value "signaled") '(:status :signaled))
+                              ((string= value "exited") '(:status :exited))))
+                       ((string= key "code")
+                        (let ((n (parse-integer value :junk-allowed t)))
+                          (and n (list :code n))))
+                       ((string= key "attempt")
+                        (let ((n (parse-integer value :junk-allowed t)))
+                          (and n (list :attempt n))))
+                       ((string= key "duration")
+                        (let ((n (parse-integer value :junk-allowed t)))
+                          (and n (list :duration n))))
+                       ((string= key "reason")
+                        (and (plusp (length value)) (list :reason value))))))))
+
 (defun setup-agent (opts &key events-cb frontend)
   "Shared session bring-up for every frontend.  Returns (values agent resumed-p).
 FRONTEND is the object answering the core's frontend protocol, bound before
@@ -289,6 +327,15 @@ anything boots so an extension deciding at load time sees it."
     ;; The core locks its own packages; these two are the frontends this
     ;; binary composes it with.
     (lock-kernel-packages :evo.cli :evo.tui :evo.serve)
+    ;; A supervisor restart leaves the dead child's exit facts in the
+    ;; environment; journal them first, before the userspace build, whose
+    ;; failure must not erase why this process is here.  Read once, then
+    ;; cleared, so nothing this session spawns reads them as its own.
+    (let ((recovery (parse-recovery-env)))
+      (when (and resumed-p recovery)
+        (evo.kernel:record-recovery agent recovery))
+      (when recovery
+        (evo.port:setenv "EVO_RECOVERY" "")))
     ;; Userspace: init files (config), extension dirs, then replay the
     ;; session's :load entries.
     (boot-session agent :resumed-p resumed-p

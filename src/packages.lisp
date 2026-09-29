@@ -136,6 +136,7 @@
            ;; session operations — the journal writes a frontend asks for
            #:boot-session #:switch-session
            #:set-session-model #:set-session-thinking #:end-session
+           #:record-recovery
            ;; frontend protocol — answered by whichever frontend runs
            #:*frontend* #:frontend-interactive-p #:frontend-request-run
            ;; goal
