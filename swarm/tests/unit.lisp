@@ -598,22 +598,42 @@ another swarm gets that swarm's lanes back; any other keeps the running one."
            (null (evo.swarm::bring-up-lane lane)))))
 
 (defun test-launch-environment ()
-  (let ((saved (getenv "EVO_SUPERVISED_CHILD")))
+  "A lane is launched into the coordinator's session, not into the
+coordinator's supervision: none of these variables may reach a lane — planted
+here with a value no lane may inherit — while the lane's own token, session
+directory and watched pid must.  The list is written out rather than read from
+the strip list, so a name dropped from that list fails here."
+  (let* ((forbidden '("EVO_SUPERVISED_CHILD" "EVO_HEARTBEAT_FILE" "EVO_NO_SUPERVISOR"
+                      "EVO_SERVE_TOKEN" "EVO_SESSIONS_DIR" "EVO_SERVE_WATCH_PID"
+                      "EVO_RECOVERY"))
+         (saved (mapcar (lambda (name) (cons name (getenv name))) forbidden))
+         (stale "swarm-unit-stale"))
     (unwind-protect
          (let* ((*swarm* (test-swarm))
                 (lane (first (swarm-lanes *swarm*))))
-           (evo.port:setenv "EVO_SUPERVISED_CHILD" "1")
+           (check "launch: the strip list names every variable a lane must not inherit"
+                  (every (lambda (name)
+                           (member (concatenate 'string name "=")
+                                   evo.swarm::*stripped-environment* :test #'equal))
+                         forbidden))
+           (dolist (name forbidden)
+             (evo.port:setenv name stale))
            (setf (evo.swarm::lane-dir lane) #p"/tmp/lane-1/"
                  (evo.swarm::lane-token lane) "tok")
            (let ((env (evo.swarm::lane-environment lane)))
-             (check "launch: the coordinator's supervision is not inherited"
-                    (notany (lambda (e) (string-prefix-p "EVO_SUPERVISED_CHILD=" e)) env))
+             (check "launch: not one of the coordinator's variables is inherited"
+                    (null (intersection
+                           env
+                           (mapcar (lambda (name) (concatenate 'string name "=" stale))
+                                   forbidden)
+                           :test #'equal)))
              (check "launch: the lane's token, sessions and watched pid are set"
                     (and (member "EVO_SERVE_TOKEN=tok" env :test #'equal)
                          (member "EVO_SESSIONS_DIR=/tmp/lane-1/sessions/" env :test #'equal)
                          (member (format nil "EVO_SERVE_WATCH_PID=~d" (evo.port:getpid))
                                  env :test #'equal)))))
-      (evo.port:setenv "EVO_SUPERVISED_CHILD" (or saved "")))))
+      (dolist (pair saved)
+        (evo.port:setenv (car pair) (or (cdr pair) ""))))))
 
 (defun test-sessions-dir ()
   (let ((saved (getenv "EVO_SESSIONS_DIR")))
