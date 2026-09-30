@@ -48,6 +48,7 @@
                                            (:file "compact")
                                            (:file "extension")
                                            (:file "session")
+                                           (:file "supervision")
                                            (:file "jobs")
                                            (:file "builtin-tools")
                                            (:file "goal")))
@@ -106,12 +107,9 @@
                               :serial t
                               :components ((:file "package")
                                            (:file "json")
+                                           (:file "lifecycle")
                                            (:file "http")
                                            (:file "server")
-                                           (:file "oplog")
-                                           (:file "topics")
-                                           (:file "view-topic")
-                                           (:file "ops")
                                            (:file "catalog")
                                            (:file "routes")))
                              (:module "cli"

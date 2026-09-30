@@ -138,6 +138,24 @@ the initial default.  No fallback: an unknown id is a config error."
                        ":context-window 200000 :max-output 64000)")
                   id (mapcar (lambda (m) (pget m :id)) *models*) id))))
 
+(defun split-model-ref (text)
+  "TEXT — a model reference as it is written on a command line — as
+\(values ID PROVIDER): \"claude-opus-5\" is that id with no provider,
+\"claude-opus-5@anthropic\" is that id served by :ANTHROPIC.  The **last** @
+separates, so an id that contains one (\"gemini@2024\") still names its
+provider when a provider is given.  Signals when the reference names no id."
+  (let ((at (and (stringp text) (position #\@ text :from-end t))))
+    (cond ((null at) (values text nil))
+          ((zerop at) (error "~s names a provider but no model id" text))
+          (t (values (subseq text 0 at)
+                     (intern (string-upcase (subseq text (1+ at))) :keyword))))))
+
+(defun find-model-ref (text)
+  "Resolve a command-line model reference — ID, or ID@PROVIDER — to its
+registered plist.  Errors exactly as FIND-MODEL does when nothing matches."
+  (multiple-value-bind (id provider) (split-model-ref text)
+    (find-model id provider)))
+
 (defun model-context-window (model) (pget model :context-window))
 (defun model-max-output (model) (pget model :max-output))
 (defun model-max-input-items (model)

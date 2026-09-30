@@ -87,22 +87,18 @@ it — or passes :IDENTITY to MAKE-SERVER — so a client can tell which program
 answered (evo-swarm names itself \"evo-swarm\").")
 
 (defstruct (server (:constructor %make-server))
-  host port token
+  host port token ready-file
   ;; Who serves this session, and the extra routes it serves.  NIL means only
   ;; the program-wide defaults — *IDENTITY* and *ROUTES*.
   identity-override routes-override
   agent
-  ;; The op log: the protocol's one source of ordering (oplog.lisp).
-  (oplog (make-op-log))
-  ;; Topic providers, by name ("session", "swarm", "lane:1").
-  (topics (make-hash-table :test #'equal))
-  (topics-lock (bt:make-lock "serve-topics"))
-  ;; Messages to the session thread.  STOPPING is written once, under the
-  ;; same lock, when the server shuts down; the condition variable is what
-  ;; the session thread waits on (never a sleep).
-  (inbox nil) (inbox-lock (bt:make-lock "serve-inbox"))
-  (inbox-cv (bt:make-condition-variable :name "serve-inbox"))
-  (stopping nil)
+  (log (make-event-log))
+  ;; The tag every cursor of this serving life carries, and what a restart
+  ;; changes (see MINT-EPOCH).
+  (epoch (mint-epoch))
+  ;; Messages to the session thread, guarded by INBOX-LOCK.  STOPPING is
+  ;; written once, under the same lock, when the session thread shuts down.
+  (inbox nil) (inbox-lock (bt:make-lock "serve-inbox")) (stopping nil)
   ;; Session-thread state.
   task quit (loop-tick (op-now-ms))
   ;; Queued input serve minted an id for: id -> (:text … :queue …).  The
@@ -128,20 +124,30 @@ answered (evo-swarm names itself \"evo-swarm\").")
   ;; Listener state: the socket, its thread, and the connection threads it
   ;; started (guarded by CONNECTIONS-LOCK).
   listener listener-thread
-  (connections nil) (connections-lock (bt:make-lock "serve-connections")))
+  (connections nil) (connections-lock (bt:make-lock "serve-connections"))
+  ;; The ready file this process published, and whether it wrote one:
+  ;; --watch-stdin watches the pipe a parent holds (see LIFECYCLE.LISP).
+  (wrote-ready-file nil) (watch-stdin nil))
 
-(defun make-server (&key (host "127.0.0.1") (port 8421) token ready-file
-                         (watch-stdin nil) identity routes (eval-enabled t))
+;; The default route table lives with the routes (routes.lisp), which loads
+;; after this file; SERVER-ROUTES reads it at dispatch time.
+(declaim (special *routes*))
+
+(defvar *routes-lock* (bt:make-lock "serve-routes")
+  "Guards replacement and snapshots of the program-wide route table.")
+
+(defun make-server (&key (host "127.0.0.1") (port 8421) token ready-file watch-stdin
+                         identity routes)
   "A server.  IDENTITY says who this program is (see *IDENTITY*); ROUTES are
-additional routes considered before the built-ins.  READY-FILE is where the
-serving process publishes its port and token (CONTRACT §1); WATCH-STDIN makes
-EOF on stdin a clean shutdown.  EVAL-ENABLED is the --no-http-eval gate."
+additional routes considered before the built-ins (see *ROUTES*, ADD-ROUTE).
+READY-FILE is where this process publishes its URL, token, epoch and session
+once it listens (see WRITE-READY-FILE); WATCH-STDIN makes end-of-file on
+stdin a clean shutdown.  Program-wide routes added later are still seen."
   (%make-server :host host :port port :token (or token (resolve-token))
                 :identity-override identity
                 :routes-override routes
                 :ready-file ready-file
-                :watch-stdin watch-stdin
-                :eval-enabled eval-enabled))
+                :watch-stdin watch-stdin))
 
 (defun server-identity (server)
   "Who the program serving this session says it is: the server's own identity,
@@ -449,24 +455,50 @@ next run if input queued up meanwhile."
       (:run-requested
        (let ((text (first args)))
          (when text
-           (log-user-input server text))
-         (start-run server)))
-      (:stdin-eof
-       (server-notice server "stdin closed — shutting down" :severity :info
-                                                        :source :serve)
-       (setf (server-quit server) t)))))
+           (publish (server-log server) (list :type :user-input :text text)))
+         (start-run server))))))
+
+(defun events-callback (server)
+  "The agent's events callback: every kernel event into the log, on the
+worker's own thread; a step boundary also tells the session thread, which
+owns the task's step clock."
+  (let ((log (server-log server)))
+    (lambda (event)
+      (publish log event)
+      (when (member (getf event :type) '(:turn-start :compaction-start :compaction-end))
+        (post server (list :step))))))
+
+(defun ready-file-value (server agent)
+  "What the ready file says: everything a client needs to reach this session
+without asking for anything (see docs/serve.md \"Starting it\").  No config
+value beyond the session's own path is in it."
+  (let ((journal (agent-journal agent))
+        (identity (server-identity server)))
+    (list :epoch (server-epoch server)
+          :pid (evo.port:getpid)
+          :supervisor-pid (evo.kernel:supervisor-pid)
+          :port (server-port server)
+          :url (format nil "http://~a:~d/" (server-host server) (server-port server))
+          :token (server-token server)
+          :session (list :id (pget (journal-header journal) :id)
+                         :path (namestring (journal-path journal)))
+          :program (getf identity :name)
+          :version (getf identity :version)
+          :restarts (evo.kernel:supervisor-restarts))))
+
+(defun write-ready-file (server agent)
+  "Publish SERVER's readiness where a client is watching.  Rewritten by every
+life of the process, so the epoch, pid and port in it are always the live
+ones."
+  (let ((path (server-ready-file server)))
+    (when path
+      (write-json-atomically path (ready-file-value server agent))
+      (setf (server-wrote-ready-file server) t)
+      path)))
 
 (defun session-loop (server)
-  "The session thread: drain what arrived, then wait for more.
-
-WAIT-FOR-INBOX blocks on a condition variable — work is announced by POST, never
-noticed by polling — and its timeout is only the heartbeat tick, which is what
-keeps a supervisor from mistaking a long idle stretch for a hang.  Without that
-call this loop is a spin: it would still work, at 100% of a core, which is why
-the e2e measures an idle server's CPU."
   (loop until (server-quit server)
         do (heartbeat-touch)
-           (setf (server-loop-tick server) (op-now-ms))
            (dolist (message (drain-inbox server))
              (handler-case (handle-message server message)
                (serious-condition (e)
@@ -511,6 +543,17 @@ owns the task's step clock."
     (setf (server-connections server)
           (remove-if-not #'bt:thread-alive-p (server-connections server)))))
 
+(defun server-error-reply (stream condition)
+  "Answer a request that failed with a condition nobody classified.  The
+client gets a generic message and nothing else: a condition's text can quote
+whatever it was working on — a config value, a header, a key — and an error
+reply is not a place evo gets to leak one.  The detail goes to stderr, where
+the operator of this process can see it."
+  (format *error-output* "~&~a serve: request failed: ~a~%"
+          evo.port:*program-name* condition)
+  (finish-output *error-output*)
+  (ignore-errors (write-error stream 500 "internal server error")))
+
 (defun handle-connection (server socket)
   (let ((stream (usocket:socket-stream socket)))
     (unwind-protect
@@ -523,8 +566,7 @@ owns the task's step clock."
              (http-error (e)
                (ignore-errors (write-error stream (http-error-status e) (http-error-text e))))
              (stream-error () nil)
-             (error (e)
-               (ignore-errors (write-error stream 500 (format nil "~a" e))))))
+             (error (e) (server-error-reply stream e))))
       (ignore-errors (finish-output stream))
       (ignore-errors (usocket:socket-close socket)))))
 
@@ -679,10 +721,10 @@ call still waiting is answered 503.  T once no task is left."
   (delete-ready-file server))
 
 (defun serve (server agent &key resumed-p)
-  "Serve AGENT's session over HTTP until POST /ops server.shutdown — or, with
---watch-stdin, until stdin closes.  Returns the exit code: 0 after a clean
-shutdown, 64 when the address cannot be bound (a usage error — restarting
-would not free the port)."
+  "Serve AGENT's session over HTTP until POST /shutdown (or, with
+--watch-stdin, until the pipe on stdin reaches end of file).  Returns the exit
+code: 0 after a clean shutdown, 64 when the address cannot be bound (a
+usage error — restarting would not free the port)."
   (setf (server-agent server) agent
         (agent-events-cb agent) (events-callback server))
   (handler-case (open-listener server)
@@ -690,17 +732,22 @@ would not free the port)."
       (format *error-output* "~&~a serve: cannot listen on ~a:~a — ~a~%"
               (server-program server) (server-host server) (server-port server) e)
       (return-from serve 64)))
-  (install-session-topic server agent)
-  (when (server-ready-file server) (write-ready-file server))
-  (setf (server-listener-thread server)
-        (bt:make-thread (lambda () (accept-loop server)) :name "evo-serve-listener")
-        (server-flusher-thread server)
-        (bt:make-thread (lambda () (op-flusher-loop server)) :name "evo-serve-flusher"))
+  ;; The port is chosen once: tell the supervisor which one, so a restart
+  ;; binds the same and the clients that hold the URL keep it.
+  (evo.kernel:note-bound-port (server-port server))
+  (write-ready-file server agent)
   (when (server-watch-stdin server)
-    (bt:make-thread (lambda () (watch-stdin-loop server)) :name "evo-serve-stdin"))
+    (watch-stdin-eof (lambda ()
+                       (say-event server "stdin closed — shutting down" :dim)
+                       (setf (server-quit server) t))))
+  (publish (server-log server)
+           (list :type :hello :pid (evo.port:getpid) :port (server-port server)
+                 :session (namestring (journal-path (agent-journal agent)))))
+  (setf (server-listener-thread server)
+        (bt:make-thread (lambda () (accept-loop server)) :name "evo-serve-listener"))
   (format t "~&~a serve: listening on http://~a:~d/~@[ (ready file ~a)~]~%"
-          (server-program server) (server-host server) (server-port server)
-          (server-ready-file server))
+          (getf (server-identity server) :name)
+          (server-host server) (server-port server) (server-ready-file server))
   (finish-output)
   (unwind-protect
        (progn
@@ -713,5 +760,8 @@ would not free the port)."
       (ignore-errors (funcall (server-shutdown-hook server) server)))
     (ignore-errors (end-session agent))
     (ignore-errors (shutdown-task server))
-    (stop-listening server))
+    (publish (server-log server) (list :type :bye))
+    (stop-listening server)
+    (when (server-wrote-ready-file server)
+      (delete-ready-file (server-ready-file server))))
   0)

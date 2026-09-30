@@ -24,6 +24,7 @@ registries are seeded."
           (boot-userspace :journal (and (not resumed-p) journal))
           (when resumed-p
             (replay-loads (fold-state journal)))))
+    (note-current-session (journal-path journal))
     (run-hooks :session-start (list :agent agent :resumed resumed-p))
     ;; The session index is written when its identity is known: here on start,
     ;; when the file first lands, on a switch and on the way out.
@@ -41,6 +42,7 @@ in the new one."
   (setf (agent-journal agent) journal)
   (reset-agent-session-state agent)
   (replay-loads (fold-state journal))
+  (note-current-session (journal-path journal))
   (run-hooks :session-start
              (list :agent agent :resumed (journal-started-p journal)))
   (index-session journal)

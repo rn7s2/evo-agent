@@ -8,7 +8,14 @@
 (in-package :evo.swarm)
 
 (defun lane-url (lane path)
-  (format nil "http://127.0.0.1:~d~a" (lane-port lane) path))
+  "LANE's URL for PATH.  The base is the one its ready file published — the
+only place a lane's port is written down, since a lane now picks its own
+(--port 0) instead of being handed one nothing was listening on yet."
+  (let ((base (getf (lane-ready lane) :url)))
+    (unless base
+      (error 'lane-error :lane lane :status nil
+                         :text "its ready file has not been read yet"))
+    (format nil "~a~a" (string-right-trim "/" base) path)))
 
 (defun lane-headers (lane)
   (list (cons "Authorization" (format nil "Bearer ~a" (lane-token lane)))

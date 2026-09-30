@@ -76,6 +76,11 @@ not idling, and the lane's report or finished run is what wakes it
     (list :id (swarm-id *swarm*)
           :dir (namestring (swarm-dir *swarm*))
           :workers (swarm-workers *swarm*)
+          ;; The lane configuration is swarm data, not a user file: recorded
+          ;; here so a resumed swarm runs its lanes the same way.
+          :lane-model (swarm-lane-model *swarm*)
+          :lane-provider (swarm-lane-provider *swarm*)
+          :lane-thinking (swarm-lane-thinking *swarm*)
           :lanes (coerce
                   (loop for lane in (swarm-lanes *swarm*)
                         collect (list :n (lane-n lane)
@@ -107,21 +112,17 @@ opening the file."
 (defparameter *stripped-environment*
   '("EVO_SUPERVISED_CHILD=" "EVO_HEARTBEAT_FILE=" "EVO_NO_SUPERVISOR="
     "EVO_SERVE_TOKEN=" "EVO_SESSIONS_DIR=" "EVO_SERVE_WATCH_PID="
+    "EVO_SUPERVISOR_STATE_DIR=" "EVO_SUPERVISOR_PID=" "EVO_SUPERVISOR_RESTARTS="
     "EVO_RECOVERY=")
   "Variables of this process a lane must not inherit: they describe the
-coordinator's own supervision and session, not the lane's.")
-
-(defun free-port ()
-  "A port nothing listens on right now."
-  (let ((socket (usocket:socket-listen "127.0.0.1" 0 :reuse-address t)))
-    (unwind-protect (usocket:get-local-port socket)
-      (usocket:socket-close socket))))
+coordinator's own supervision and session, not the lane's.  A lane is its own
+supervised process, so it makes its own supervisor state directory — an
+inherited one would have it report its session to the coordinator's
+supervisor.")
 
 (defun lane-environment (lane)
-  (append (list (format nil "EVO_SERVE_TOKEN=~a" (lane-token lane))
-                (format nil "EVO_SESSIONS_DIR=~a"
-                        (namestring (merge-pathnames "sessions/" (lane-dir lane))))
-                (format nil "EVO_SERVE_WATCH_PID=~d" (evo.port:getpid)))
+  (append (list (format nil "EVO_SESSIONS_DIR=~a"
+                        (namestring (merge-pathnames "sessions/" (lane-dir lane)))))
           (lane-secret-environment)
           (remove-if (lambda (entry)
                        (some (lambda (prefix) (string-prefix-p prefix entry))
@@ -131,54 +132,118 @@ coordinator's own supervision and session, not the lane's.")
 (defun lane-has-session-p (lane)
   (directory (merge-pathnames "sessions/*.sexp" (lane-dir lane))))
 
-(defun launch-lane (lane &key resume)
-  "Start LANE's process: `evo-agent serve --no-userspace` on its port, supervised,
-detached from our terminal, logging to its directory.  RESUME continues its
-session when it has one."
-  (ensure-directories-exist (merge-pathnames "sessions/" (lane-dir lane)))
-  (write-file-string (merge-pathnames "url" (lane-dir lane))
-                     (format nil "http://127.0.0.1:~d~%" (lane-port lane)))
-  (when (lane-stopping-p lane)
-    (return-from launch-lane nil))
-  (let ((process (evo.port:launch-child
-                  (namestring (swarm-evo-binary *swarm*))
-                  (append (list "serve" "--no-userspace"
-                                "--port" (princ-to-string (lane-port lane))
-                                "--token-file" (namestring (merge-pathnames "token" (lane-dir lane))))
-                          (when (and resume (lane-has-session-p lane)) '("--resume")))
-                  :input nil
-                  :output (merge-pathnames "lane.log" (lane-dir lane))
-                  :error-output :output
-                  :environment (lane-environment lane)
-                  :directory (lane-cwd lane)
-                  ;; Never share the coordinator's terminal: a lane's
-                  ;; supervisor resets the tty it has after a crash.
-                  :new-session t)))
-    ;; A stop that came while we launched saw no process to reap: reap it
-    ;; here, or it would outlive the swarm that dropped it.
-    (when (with-swarm-lock ()
-            (setf (lane-process lane) process)
-            (cond ((or (lane-stopping lane) (swarm-stopping *swarm*)) t)
-                  (t (setf (lane-state lane) :starting
-                           (lane-pid lane) nil
-                           (lane-cursor lane) 0)
-                     nil)))
-      (ignore-errors (evo.port:process-kill-tree process))
-      (ignore-errors (evo.port:process-wait process))
-      (return-from launch-lane nil))
-    (maybe-publish-lane-state lane)
-    process))
+(defun lane-ready-file (lane)
+  "Where LANE publishes its URL, token, epoch, pid and session (see
+docs/serve.md): <lane dir>/ready.json."
+  (merge-pathnames "ready.json" (lane-dir lane)))
 
-(defun wait-for-health (lane &key (seconds *lane-boot-seconds*))
-  "LANE's /health once it answers, or NIL after SECONDS or if its process
-exits first."
+(defun lane-ready-plist (lane)
+  "LANE's ready file as a plist, or NIL when it is not there yet."
+  (let ((path (lane-ready-file lane)))
+    (when (probe-file path)
+      (ignore-errors (evo.serve:decode-json (read-file-string path))))))
+
+(defun lane-resume-path (lane)
+  "The session LANE was on, from the ready file it published last, or NIL.
+An exact path — a lane is resumed as the session it was, not as \"whatever is
+newest in this directory\" (which would be a different session the moment
+another lane shares the directory)."
+  (let* ((ready (lane-ready-plist lane))
+         (path (getf (getf ready :session) :path)))
+    (and path (probe-file path) path)))
+
+(defun launch-lane (lane &key resume)
+  "Start LANE's process: `evo-agent serve --no-userspace` with its own ready
+file, supervised, detached from our terminal, logging to its directory.  Its
+stdin is a pipe this process holds: closing it is how a lane is told its
+coordinator is gone (--watch-stdin).  RESUME continues its session when it has
+one."
+  (ensure-directories-exist (merge-pathnames "sessions/" (lane-dir lane)))
+  (let* ((path (and resume (or (lane-resume-path lane)
+                               ;; A lane directory from before ready files
+                               ;; existed: its own sessions directory still
+                               ;; makes a bare --resume unambiguous.
+                               (and (lane-has-session-p lane) :latest))))
+         (ready-file (namestring (lane-ready-file lane))))
+    ;; A ready file from the life before this one says nothing about this
+    ;; one: whoever starts it publishes its own.
+    (ignore-errors (delete-file ready-file))
+    (when (lane-stopping-p lane)
+      (return-from launch-lane nil))
+    (multiple-value-bind (process input)
+        (evo.port:launch-child-piped
+         (namestring (swarm-evo-binary *swarm*))
+         (append (list "serve" "--no-userspace" "--port" "0"
+                       "--ready-file" ready-file)
+                 (when input '("--watch-stdin"))
+                 (when path
+                   (if (eq path :latest) '("--resume") (list "--resume" path))))
+         :output (merge-pathnames "lane.log" (lane-dir lane))
+         :error-output :output
+         :environment (lane-environment lane)
+         :directory (lane-cwd lane)
+         ;; Never share the coordinator's terminal: a lane's supervisor
+         ;; resets the tty it has after a crash.
+         :new-session t)
+      ;; A stop that came while we launched saw no process to reap: reap it
+      ;; here, or it would outlive the swarm that dropped it.
+      (when (with-swarm-lock ()
+              (setf (lane-process lane) process
+                    (lane-input lane) input)
+              (cond ((or (lane-stopping lane) (swarm-stopping *swarm*)) t)
+                    (t (setf (lane-state lane) :starting
+                             (lane-pid lane) nil
+                             (lane-ready lane) nil
+                             (lane-cursor lane) 0)
+                       nil)))
+        (close-lane-input lane)
+        (ignore-errors (evo.port:process-kill-tree process))
+        (ignore-errors (evo.port:process-wait process))
+        (return-from launch-lane nil))
+      (maybe-publish-lane-state lane)
+      process)))
+
+(defun close-lane-input (lane)
+  "Let go of LANE's stdin.  A lane is watching it (--watch-stdin), so this is
+the end-of-file that tells it to stop — the one signal that survives the
+coordinator dying, SIGKILL and all."
+  (let ((input (with-swarm-lock () (shiftf (lane-input lane) nil))))
+    (when input (ignore-errors (close input)))
+    (not (null input))))
+
+(defun wait-for-ready (lane &key (seconds *lane-boot-seconds*))
+  "Read LANE's ready file once it publishes one, and keep it on the lane: the
+URL, token, epoch and pid a client needs, and the session behind them (see
+docs/serve.md \"Starting it\").  NIL after SECONDS, or as soon as its process
+exits — a lane that never becomes ready is a failure, not a wait."
   (loop repeat (* seconds 5)
-        for health = (lane-health lane)
-        when health return health
-        do (let ((process (lane-process lane)))
+        do (let ((ready (lane-ready-plist lane)))
+             (when (and ready (getf ready :port))
+               (with-swarm-lock ()
+                 (setf (lane-ready lane) ready
+                       (lane-port lane) (getf ready :port)
+                       (lane-token lane) (getf ready :token)
+                       (lane-pid lane) (getf ready :pid)))
+               (return ready)))
+           (let ((process (lane-process lane)))
              (when (and process (not (evo.port:process-alive-p process)))
                (return nil)))
            (sleep 0.2)))
+
+(defun refresh-lane-ready (lane)
+  "Re-read LANE's ready file; T when the lane is a different life than the one
+we were talking to (its epoch changed).  Every restart publishes a new one,
+with the port, token, pid and epoch of the process that is serving now."
+  (let ((ready (lane-ready-plist lane)))
+    (when (and ready (getf ready :port))
+      (with-swarm-lock ()
+        (let ((changed (not (equal (getf ready :epoch)
+                                   (getf (lane-ready lane) :epoch)))))
+          (setf (lane-ready lane) ready
+                (lane-port lane) (getf ready :port)
+                (lane-token lane) (getf ready :token)
+                (lane-pid lane) (getf ready :pid))
+          changed)))))
 
 (defun initialize-lane (lane)
   "Evaluate the baseline in LANE, then the code the coordinator has
@@ -212,15 +277,15 @@ working, idle) rather than an idle event for a lane never given work."
       (when announce (maybe-publish-lane-state lane)))))
 
 (defun bring-up-lane (lane &key resume)
-  "Launch LANE, wait for it, initialize it, and start reading its events.
-Returns T when it came up.  A lane stopped while it came up (the swarm
-quitting, or switched away from by /resume) stops coming up, quietly."
+  "Launch LANE, wait for its ready file, initialize it, and start reading its
+events.  Returns T when it came up.  A lane stopped while it came up (the
+swarm quitting, or switched away from by /resume) stops coming up, quietly."
   (unless (launch-lane lane :resume resume)
     (return-from bring-up-lane nil))
-  (let ((health (wait-for-health lane)))
+  (let ((ready (wait-for-ready lane)))
     (cond
       ((lane-stopping-p lane) nil)
-      ((null health)
+      ((null ready)
        (with-swarm-lock () (setf (lane-state lane) :down))
        (maybe-publish-lane-state lane)
        (tell-coordinator (format nil "[lane ~d] failed to start — see ~a"
@@ -233,7 +298,6 @@ quitting, or switched away from by /resume) stops coming up, quietly."
                                   :detail (namestring (merge-pathnames "lane.log" (lane-dir lane)))))
        nil)
       (t
-       (with-swarm-lock () (setf (lane-pid lane) (getf health :pid)))
        (handler-case (initialize-lane lane)
          (lane-error (e)
            (tell-coordinator (format nil "[lane ~d] initialization failed: ~a"
@@ -378,10 +442,11 @@ coordinator must hear — reports, finished runs, errors — into its input."
 
 (defun recover-lane (lane)
   "LANE's stream ended while nobody was stopping it: wait for it to answer
-again.  The same pid is a dropped connection; a new one is a crash its
-supervisor already restarted, and that lane has lost what was evaluated into
-it — re-initialize it and tell the coordinator.  A lane whose supervisor
-itself exited is down.  Returns NIL when the lane is gone for good."
+again.  A dropped connection leaves it the same process; a new epoch in its
+ready file is a crash its own supervisor restarted, and that lane has lost
+what was evaluated into it — re-initialize it and tell the coordinator.  A
+lane whose supervisor itself exited is down.  Returns NIL when the lane is
+gone for good."
   (with-swarm-lock () (setf (lane-state lane) :down))
   (maybe-publish-lane-state lane)
   (loop
@@ -393,31 +458,22 @@ itself exited is down.  Returns NIL when the lane is gone for good."
                           :style :error
                           :origin (lane-event-origin lane :down :severity :error))
         (return nil)))
-    (let ((health (lane-health lane)))
-      (when health
-        (let ((old (with-swarm-lock () (lane-pid lane)))
-              (new (getf health :pid)))
-          (if (eql old new)
-              (sync-lane-state lane)
-              (progn
-                (with-swarm-lock ()
-                  (setf (lane-pid lane) new
-                        (lane-cursor lane) 0)
-                  (incf (lane-restarts lane)))
-                (handler-case (initialize-lane lane)
-                  (lane-error () nil))
-                (sync-lane-state lane)
-                (tell-coordinator
-                 (format nil "[lane ~d] crashed and was restarted by its supervisor (pid ~a → ~a); its session was resumed and it was re-initialized.~@[ The task in flight (~a) may need re-delegating.~]"
-                         (lane-n lane) old new
-                         (with-swarm-lock () (lane-task lane)))
-                 :style :error
-                 :origin (lane-event-origin
-                          lane :crashed :severity :error
-                          :detail (format nil "pid ~a → ~a~@[ — task in flight: ~a~]"
-                                          old new
-                                          (with-swarm-lock () (lane-task lane)))))))
-          (return t))))
+    (when (refresh-lane-ready lane)
+      (with-swarm-lock ()
+        (setf (lane-cursor lane) 0)
+        (incf (lane-restarts lane)))
+      (handler-case (initialize-lane lane)
+        (lane-error () nil))
+      (sync-lane-state lane)
+      (tell-coordinator
+       (format nil "[lane ~d] crashed and was restarted by its supervisor (epoch ~a); its session was resumed and it was re-initialized.~@[ The task in flight (~a) may need re-delegating.~]"
+               (lane-n lane) (getf (lane-ready lane) :epoch)
+               (with-swarm-lock () (lane-task lane)))
+       :style :error)
+      (return t))
+    (when (and (lane-health lane) (lane-ready lane))
+      (sync-lane-state lane)
+      (return t))
     (sleep 0.5)))
 
 (defun subscriber-loop (lane)
@@ -435,9 +491,12 @@ itself exited is down.  Returns NIL when the lane is gone for good."
 ;;; Stopping and restarting.
 
 (defun stop-lane (lane &key (seconds 15))
-  "Shut LANE down cleanly (POST /shutdown), reap its process — killing it
-after SECONDS — and let its subscriber see the stream end."
+  "Shut LANE down: close the pipe it watches and ask it over HTTP — either one
+is a clean stop, and the pipe is the one that works even when its HTTP layer
+is wedged — then reap its process (killing it after SECONDS) and let its
+subscriber see the stream end."
   (with-swarm-lock () (setf (lane-stopping lane) t))
+  (close-lane-input lane)
   (ignore-errors (lane-post lane "/shutdown" :timeout 10))
   (let ((process (lane-process lane)))
     (when process
@@ -482,8 +541,7 @@ session (and the code evaluated into it forgotten).  Picks up a changed cwd
 (defun swarm-home () (merge-pathnames "swarm/" (evo-home)))
 
 (defun make-lane-for (swarm n &key cwd worktree branch task extra-forms)
-  (%make-lane :n n :port (free-port)
-              :token (fresh-token)
+  (%make-lane :n n
               :dir (merge-pathnames (format nil "lane-~d/" n) (swarm-dir swarm))
               :cwd (or cwd (swarm-cwd swarm))
               :worktree worktree :branch branch :task task
@@ -502,7 +560,12 @@ and run (view.lisp)."
                              :workers (if record (length (getf record :lanes)) workers)
                              :evo-binary evo-binary
                              :view view
-                             :agent agent)))
+                             :agent agent
+                             ;; Recorded lane configuration, restored: a
+                             ;; resumed swarm runs its lanes as it did.
+                             :lane-model (getf record :lane-model)
+                             :lane-provider (getf record :lane-provider)
+                             :lane-thinking (getf record :lane-thinking))))
     (setf (swarm-lanes swarm)
           (if record
               (loop for r across (getf record :lanes)

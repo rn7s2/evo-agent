@@ -344,8 +344,9 @@ coordinator's models as well as the swarm's own settings."
 
 (defun baseline-forms (lane swarm)
   "Everything a lane is given, in order:
- 1. the coordinator's providers (keys by variable name only), and its model
-    and thinking level as the lane's defaults — what IN-LANES may override;
+ 1. the coordinator's providers (keys by variable name only), and the model
+    and thinking level a lane runs with — --lane-model / --lane-thinking when
+    the swarm was configured with them, else the coordinator's own defaults;
  2. every IN-LANES form from swarm.lisp;
  3. the coordinator's models those forms did not register and whose API the
     lane has (only now: a model whose API an extension defines needs IN-LANES
@@ -356,15 +357,22 @@ coordinator's models as well as the swarm's own settings."
  5. a run for any goal continuation its resumed session left queued."
   (let* ((agent evo:*agent*)
          (state (and agent (fold-state (agent-journal agent))))
-         (model-id (and state (ignore-errors (effective-model-id state agent))))
-         (provider (and model-id (effective-model-provider state model-id)))
+         (coordinator-model (and state (ignore-errors (effective-model-id state agent))))
+         (coordinator-provider (and coordinator-model
+                                     (effective-model-provider state coordinator-model)))
+         (model-id (or (swarm-lane-model swarm) coordinator-model))
+         (provider (if (swarm-lane-model swarm)
+                       (swarm-lane-provider swarm)
+                       coordinator-provider))
+         (thinking (or (swarm-lane-thinking swarm)
+                       (and state (effective-thinking
+                                   state (agent-thinking-override agent)))))
          (limit (lane-tool-limit lane)))
     (append
      (mapcar #'provider-registration-form (provider-keys))
      (when model-id `((evo:set-setting :model ,model-id)))
      (when provider `((evo:set-setting :model-provider ,provider)))
-     (when state
-       `((evo:set-setting :thinking ,(effective-thinking state (agent-thinking-override agent)))))
+     (when thinking `((evo:set-setting :thinking ,thinking)))
      (lane-code-forms lane swarm)
      (mapcar #'model-fill-in-form (all-models))
      (list (lane-model-check-form lane))

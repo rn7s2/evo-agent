@@ -24,28 +24,27 @@ Usage:
                                          with an active goal and no -p, continues the goal
   evo-agent --events ...                 emit line-delimited sexpr events instead of text
   evo-agent --list-sessions              list sessions for this cwd, last worked in first
-  evo-agent sessions --json              the session list as one JSON document, from the
-                                         index (~/.evo/sessions/index.jsonl); --all every
-                                         directory, --cwd DIR, --program evo-swarm, --rescan
-                                         to rebuild it from the journals
-  evo-agent --model <id>                 model id (default: the :model setting from init.lisp)
+  evo-agent --model <id>[@<provider>]    model id (default: the :model setting from init.lisp);
+                                         @provider picks one of several registrations
   evo-agent --thinking <level>           low|medium|high|xhigh|max (default medium)
   evo-agent --no-userspace               boot without init.lisp, post-init.lisp, or extensions (quarantine mode)
   evo-agent --no-supervisor              run the session in-process, no crash-restart parent
   evo-agent serve [options]              headless session controlled over HTTP (docs/serve.md)
       --host <addr>                      address to bind (default 127.0.0.1)
       --port <n>                         port to bind (default 8421; 0 picks a free one)
-      --ready-file <path>                where to publish {port, url, token, session, ...},
-                                         mode 0600, rewritten after every restart
-      --watch-stdin                      EOF on stdin means the driver is gone: shut down
-      --no-http-eval                     do not offer the eval op (eval is RCE)
+      --ready-file <path>                publish url, token, epoch and session here (mode 0600)
+      --watch-stdin                      shut down cleanly when stdin reaches end of file
       --allow-remote                     permit a non-loopback --host
       --resume [path] --model <id> --thinking <level> --no-userspace  as above
+  evo-agent catalog --json [--no-userspace]
+                                         print what this session can use (models, providers,
+                                         tools, commands, skills, languages) and exit
   evo-agent --help | --version
 
 evo-agent supervises itself: crashes and hangs restart the session with
---resume; a goal that was active picks itself back up.  Exit codes: 0 done,
-1 error, 2 goal paused, 3 budget-limited, 64 usage error.
+--resume, resuming the session it was on; a goal that was active picks itself
+back up.  Exit codes: 0 done, 1 error, 2 goal paused, 3 budget-limited,
+64 usage error.
 
 Config: ~/.evo/init.lisp, then <cwd>/.evo/init.lisp, then extensions, then
 ~/.evo/post-init.lisp, then <cwd>/.evo/post-init.lisp (Lisp, evaluated in order;
@@ -66,15 +65,12 @@ models registered by extensions.  evo-agent ships no built-in model table, e.g.
     n))
 
 (defun parse-args (argv)
-  "Parse ARGV into a plist.  Signals on unknown flags.  A leading `serve`
-selects the HTTP frontend (:serve t) and admits its own flags."
+  "Parse ARGV into a plist.  Signals on unknown flags.  A leading `serve` or
+`catalog` selects that subcommand (:serve / :catalog) and admits its own
+flags."
   (let ((opts nil))
-    (when (equal (first argv) "serve")
-      (pop argv)
-      (setf (getf opts :serve) t))
-    (when (equal (first argv) "sessions")
-      (pop argv)
-      (setf (getf opts :sessions) t))
+    (when (and argv (member (first argv) '("serve" "catalog") :test #'string=))
+      (setf (getf opts (if (string= (pop argv) "serve") :serve :catalog)) t))
     (loop while argv
           for arg = (pop argv)
           do (cond
@@ -88,6 +84,7 @@ selects the HTTP frontend (:serve t) and admits its own flags."
                           (pop argv)
                           :latest)))
                ((string= arg "--events") (setf (getf opts :events) t))
+               ((string= arg "--json") (setf (getf opts :json) t))
                ((string= arg "--list-sessions") (setf (getf opts :list-sessions) t))
                ((and (getf opts :sessions) (string= arg "--json"))
                 (setf (getf opts :json) t))
@@ -104,7 +101,7 @@ selects the HTTP frontend (:serve t) and admits its own flags."
                       (append (getf opts :images)
                               (list (or (pop argv) (error "--image needs a path"))))))
                ((string= arg "--model")
-                (setf (getf opts :model) (or (pop argv) (error "--model needs an id"))))
+                (set-model-opt opts (or (pop argv) (error "--model needs an id"))))
                ((string= arg "--thinking")
                 (let ((level (intern (string-upcase
                                       (or (pop argv) (error "--thinking needs a level")))
@@ -122,8 +119,6 @@ selects the HTTP frontend (:serve t) and admits its own flags."
                 (setf (getf opts :ready-file) (or (pop argv) (error "--ready-file needs a path"))))
                ((and (getf opts :serve) (string= arg "--watch-stdin"))
                 (setf (getf opts :watch-stdin) t))
-               ((and (getf opts :serve) (string= arg "--no-http-eval"))
-                (setf (getf opts :no-http-eval) t))
                ((and (getf opts :serve) (string= arg "--allow-remote"))
                 (setf (getf opts :allow-remote) t))
                ((member arg '("-h" "--help") :test #'string=) (setf (getf opts :help) t))
@@ -140,15 +135,26 @@ selects the HTTP frontend (:serve t) and admits its own flags."
         (when (getf opts (car flag))
           (error "~a does not combine with sessions" (cdr flag)))))
     (when (getf opts :serve)
-      ;; serve is driven over HTTP: a prompt, an event stream on stdout or a
-      ;; goal on the command line would be a second, competing driver.
+      (unless (getf opts :port)
+        (setf (getf opts :port) *serve-default-port*)))
+    (when (or (getf opts :serve) (getf opts :catalog))
+      ;; serve is driven over HTTP and catalog prints one document: a prompt,
+      ;; an event stream on stdout or a goal on the command line would be a
+      ;; second, competing driver.
       (dolist (flag '((:prompt . "-p") (:events . "--events") (:images . "--image")
                       (:goal . "--goal") (:list-sessions . "--list-sessions")))
         (when (getf opts (car flag))
-          (error "~a does not combine with serve — send it over HTTP" (cdr flag))))
-      (unless (getf opts :port)
-        (setf (getf opts :port) *serve-default-port*)))
+          (error "~a does not combine with ~(~a~)"
+                 (cdr flag) (if (getf opts :serve) "serve" "catalog")))))
     opts))
+
+(defun set-model-opt (opts text)
+  "Set OPTS's model from TEXT — ID, or ID@PROVIDER.  The provider is only
+there when the id is registered under several (or when the bare id's first
+registration is not the wanted one), so a plain id keeps working unchanged."
+  (multiple-value-bind (id provider) (split-model-ref text)
+    (setf (getf opts :model) id)
+    (when provider (setf (getf opts :model-provider) provider))))
 
 ;;; Print-mode rendering.
 
@@ -267,15 +273,14 @@ the session list can say whose sessions these are."
           ((getf opts :version) (write-line "evo-agent 0.1.0") 0)
           ((getf opts :sessions) (cmd-sessions opts))
           ((getf opts :list-sessions) (cmd-list-sessions) 0)
+          ((getf opts :catalog) (cmd-catalog opts))
           ;; One binary, two roles: the plain invocation is the
           ;; supervisor parent; it re-spawns this same binary as the child.
           ((supervised-run-p opts)
            ;; A serve token is minted once per launch, here in the parent,
            ;; so a restarted child keeps the one clients already hold.
            (when (getf opts :serve)
-             (check-ready-file opts)
-             ;; One token per launch, minted here in the parent, so a
-             ;; restarted child keeps the one clients already hold.
+             (check-serve-ready opts)
              (evo.port:setenv "EVO_SERVE_TOKEN" (evo.serve:resolve-token)))
            (supervise argv))
           (t (run-cli opts)))
@@ -411,12 +416,21 @@ anything boots so an extension deciding at load time sees it."
                         :no-userspace (getf opts :no-userspace))
     ;; Journal explicit model/thinking choices so resume preserves them.
     (when (getf opts :model)
-      (set-session-model agent (getf opts :model)))
+      (set-session-model agent (getf opts :model) (getf opts :model-provider)))
     (when (getf opts :thinking)
       (set-session-thinking agent (getf opts :thinking)))
     (when (getf opts :goal)
       (evo.kernel:create-goal-entry agent (getf opts :goal)))
     (values agent resumed-p)))
+
+(defun cmd-catalog (opts)
+  "Print what this session can use — the same document GET /catalog answers —
+and exit.  No listener: the userspace is booted in-process, which is the
+whole point (see docs/serve.md \"Starting it\")."
+  (multiple-value-bind (agent resumed-p) (setup-agent opts)
+    (declare (ignore resumed-p))
+    (format t "~a~%" (evo.serve:encode-json (evo.serve:catalog-plist agent)))
+    0))
 
 (defun tty-p ()
   (evo.port:tty-p))
@@ -433,20 +447,20 @@ anything boots so an extension deciding at load time sees it."
        (evo.tui:start-tui agent :resumed-p resumed-p)))
     (t (run-headless opts))))
 
-(defun check-ready-file (opts)
-  "serve needs somewhere to publish the port and the token a client must have:
-a --ready file, or EVO_SERVE_TOKEN when the caller already knows the token
-(tests do).  With neither there is no way in, so refuse up front (exit 64)."
+(defun check-serve-ready (opts)
+  "serve needs somewhere for its URL and token to reach a client: a
+--ready-file to publish them to, or EVO_SERVE_TOKEN naming the token itself.
+With neither, the random token would lock everybody out, so refuse up front
+(exit 64)."
   (unless (or (getf opts :ready-file)
               (plusp (length (getenv "EVO_SERVE_TOKEN"))))
     (error 'usage-error
-           :text "serve needs a way to hand its port and token over: --ready-file <path> (written mode 0600), or set EVO_SERVE_TOKEN")))
+           :text "serve needs a way to hand over its URL and token: --ready-file <path> (written mode 0600, atomically), or set EVO_SERVE_TOKEN")))
 
 (defun run-serve (opts)
   "The HTTP frontend: validate the bind, bring the session up with the server
-as its frontend, then serve until the server.shutdown op — or, with
---watch-stdin, until stdin closes."
-  (check-ready-file opts)
+as its frontend, then serve until POST /shutdown (or end of file on stdin)."
+  (check-serve-ready opts)
   (let ((host (or (getf opts :host) "127.0.0.1")))
     (unless (or (evo.serve:loopback-host-p host) (getf opts :allow-remote))
       (error 'usage-error
@@ -456,8 +470,7 @@ as its frontend, then serve until the server.shutdown op — or, with
                                          :port (getf opts :port)
                                          :token (evo.serve:resolve-token)
                                          :ready-file (getf opts :ready-file)
-                                         :watch-stdin (getf opts :watch-stdin)
-                                         :eval-enabled (not (getf opts :no-http-eval)))))
+                                         :watch-stdin (getf opts :watch-stdin))))
       (multiple-value-bind (agent resumed-p) (setup-agent opts :frontend server)
         (evo.serve:serve server agent :resumed-p resumed-p)))))
 
