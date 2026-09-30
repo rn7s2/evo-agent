@@ -2586,6 +2586,24 @@ the list of replies a run was requested for."
                (evo.user::baby-evo-on-idle (make-agent) :stop))
              (evo.util:set-setting :baby-evo t)
              (check "switched off means silent" (null (car box))))
+           ;; A host (the desktop app) switches it off through the environment.
+           (let ((box (list nil))
+                 (saved (uiop:getenv "EVO_BABY_EVO")))
+             (unwind-protect
+                  (progn
+                    (setf (uiop:getenv "EVO_BABY_EVO") "0")
+                    (progv '(evo.user::*baby-evo-macos-p*
+                             evo.user::*baby-evo-poster*)
+                        (list t (baby-evo-recorder box))
+                      (check "EVO_BABY_EVO=0 disables it whatever the setting"
+                             (not (evo.user::baby-evo-enabled-p)))
+                      (evo.user::baby-evo-on-idle (make-agent) :stop))
+                    (check "EVO_BABY_EVO=0 means silent" (null (car box)))
+                    (setf (uiop:getenv "EVO_BABY_EVO") "1")
+                    (progv '(evo.user::*baby-evo-macos-p*) '(t)
+                      (check "any other value leaves it to the setting"
+                             (evo.user::baby-evo-enabled-p))))
+               (setf (uiop:getenv "EVO_BABY_EVO") (or saved ""))))
            ;; The real driver announces both ends: an interrupted drive still
            ;; passes :busy and :idle, returns its own outcome, and stays silent.
            (let ((box (list nil))

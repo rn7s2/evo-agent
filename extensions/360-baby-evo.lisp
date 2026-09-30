@@ -44,6 +44,11 @@
 ;;;;
 ;;;; Settings (override in init.lisp):
 ;;;;   :baby-evo            t       master on/off
+;;;;
+;;;; Environment:  EVO_BABY_EVO=0 switches it off for that process whatever
+;;;; the setting says — what a host with notifications of its own (the
+;;;; desktop app, which runs its swarms as `evo-swarm serve`) sets in the
+;;;; environment of the sessions it starts.
 ;;;;   :baby-evo-body-chars 140     how much of the last response to show
 ;;;;   :baby-evo-sound      "Glass"  macOS sound name; NIL for a silent banner
 ;;;;   :baby-evo-reply      t       offer the reply field (interactive sessions
@@ -88,9 +93,19 @@ a new idle banner replaces the previous one instead of stacking.")
 half-working notifier is worse than an honest refusal."
   *baby-evo-macos-p*)
 
+(defun baby-evo-host-off-p ()
+  "True when the process was started with EVO_BABY_EVO=0 (or \"off\"/\"false\"):
+a host that shows its own notifications for the sessions it runs — the
+desktop app — asks for silence here rather than editing the user's config."
+  (let ((v (uiop:getenv "EVO_BABY_EVO")))
+    (and v (member (string-downcase v) '("0" "off" "false" "no") :test #'string=) t)))
+
 (defun baby-evo-enabled-p ()
-  "True when notifications are both possible and switched on."
-  (and (baby-evo-supported-p) (and (evo:setting :baby-evo t) t)))
+  "True when notifications are both possible and switched on (and the host
+did not switch them off with EVO_BABY_EVO=0)."
+  (and (baby-evo-supported-p)
+       (not (baby-evo-host-off-p))
+       (and (evo:setting :baby-evo t) t)))
 
 (defun baby-evo-reply-wanted-p ()
   "Whether to offer the reply field; T by default."
