@@ -76,10 +76,10 @@ evo-agent --goal "make ./test.sh pass"  # goal run; survives its own death
 evo-agent --resume                      # reopen the last session worked in here
 evo-agent --image shot.png -p "what broke?"  # attach an image to the prompt
 evo-agent --list-sessions
-evo-agent serve --token-file ~/.evo/serve.token   # headless single agent, over HTTP
+evo-agent serve --ready-file ~/.evo/serve.json   # headless single agent, over HTTP
 evo                                     # the swarm: coordinator TUI + worker lanes
 evo-swarm --workers 4                   # the same binary, named explicitly
-evo-swarm serve --token-file ~/.evo/serve.token   # the swarm, headless
+evo-swarm serve --ready-file ~/.evo/serve.json   # the swarm, headless
 ```
 
 Invoked plainly, `evo-agent` — like `evo` and `evo-swarm` — is its own
@@ -92,15 +92,18 @@ boot failures with `--no-userspace`. Exit codes: `0` done · `1` error ·
 `--no-supervisor` (or `EVO_NO_SUPERVISOR=1`) runs the session in-process.
 
 `evo-agent serve` runs an agent session with no terminal and hands all of its
-controls to HTTP — prompt (with images), steer, follow-up, interrupt, every
-slash command, `/eval`, the full state, and a live event stream. It binds
-127.0.0.1 and requires a bearer token on every request (see
-[docs/serve.md](docs/serve.md)):
+controls to HTTP — input (with images), interrupt, every slash command,
+`eval`, the whole transcript and state, and a live stream of what changes. It
+binds 127.0.0.1, requires a bearer token on every request, and publishes the
+port and the token in a ready file (see [docs/serve.md](docs/serve.md)):
 
 ```sh
-evo-agent serve --port 8421 --token-file ~/.evo/serve.token
-curl -sN -H "Authorization: Bearer $(cat ~/.evo/serve.token)" \
-     -d '{"text": "summarize the README", "stream": true}' localhost:8421/prompt
+evo-agent serve --port 8421 --ready-file ~/.evo/serve.json
+TOKEN=$(python3 -c 'import json;print(json.load(open("'"$HOME"'/.evo/serve.json"))["token"])')
+curl -s  -H "Authorization: Bearer $TOKEN" 'localhost:8421/snapshot?topics=session'
+curl -s  -H "Authorization: Bearer $TOKEN" \
+     -d '{"rid":"1","op":"input.send","args":{"text":"summarize the README"}}' localhost:8421/ops
+curl -sN -H "Authorization: Bearer $TOKEN" 'localhost:8421/stream?topics=session'
 ```
 
 ## What's inside
@@ -390,27 +393,49 @@ exactly as written (the plist spelling would turn `src/App.jsx` into
 
 ### serve
 
-A headless frontend beside the TUI: one session, controlled over HTTP/1.1
-with JSON bodies — the base a coordinator drives worker evos through. POSTs
-are commands (`/prompt`, `/steer`, `/follow-up`, `/interrupt`, `/command`,
-`/eval`, `/load-extension`, `/shutdown`), each of which can answer with an SSE
-stream of the events it causes until the session settles; GETs read state
-(`/state`, `/transcript`, `/journal`, `/lore`, `/sessions`, `/registry`, no
-secrets); `GET /events` streams every session event with ids and
-`Last-Event-ID` resume. Events are the `--events` plists under one documented
-JSON mapping. Commands run on the session's own thread, so a command that
-needs a quiet session and finds a busy one gets `409` — never a race.
-Loopback only unless `--allow-remote`; a bearer token on every request
-(`--token-file`, written 0600, or `EVO_SERVE_TOKEN`); runs under the
-supervisor like any session. `/eval` is remote code execution by design — the
-token is the gate. `GET /health` carries the server's **identity** — name,
-version and features — so a client can tell what it is talking to (the
-agent's serve names itself `evo-agent` with no features). A program can also run
-its own session on serve: it names itself and adds routes of its own, exact
-paths or a prefix, behind the same token and thread discipline. Those are the
-only two seams, and they
-name no program; `evo-swarm serve` is the one built on them. Full reference:
-[docs/serve.md](docs/serve.md).
+A headless frontend beside the TUI: one session, watched and driven over
+HTTP/1.1 with JSON bodies — the base a coordinator drives worker evos through.
+A client reads a **snapshot** and applies the **ops** that follow it:
+
+- `GET /health` — who is answering, and how the session thread is doing.
+- `GET /snapshot?topics=session,swarm,lane:*&items=200` — each topic's state and
+  newest items, atomic across every topic asked for, with the `seq` they are
+  as of.
+- `GET /stream?topics=…&since=<epoch>.<seq>` — SSE of ops: `item.add`,
+  `item.append` (coalesced over 50 ms), `item.patch`, `item.remove`,
+  `state.patch`, and `topic.reset` / `stream.reset` when a client must
+  re-snapshot instead. The first frame is always `hello`, naming the epoch and
+  where the stream starts; a cursor from another process is answered with
+  `stream.reset`, so a restart is detected in band and pids are never compared.
+- `GET /items`, `GET /items/<id>`, `GET /media/<id>/<n>` — paging, one item
+  whole, image bytes.
+- `POST /ops` — every write, one envelope: `{rid, op, args}` answered with
+  `{ok, seq, result|error}`. `input.send`, `input.cancel`, `run.interrupt`,
+  `goal.*`, `model.set` / `thinking.set` / `language.set`, `session.*`,
+  `context.compact`, `lore.add` / `memory.request`, `command.run` (any slash
+  command), `extension.load`, `eval` (`--no-http-eval` removes it) and
+  `server.shutdown`. `rid` is idempotent, so a retry after a dropped connection
+  never double-sends a prompt; failures are codes in a 200 reply (`busy`,
+  `already_sent`, `unknown_op`, …), never HTTP statuses a client has to guess
+  from. `GET /catalog` is everything a client can offer: models with whether
+  they are usable and why not, providers with `has_key` and never a key, the
+  op table with argument schemas, commands, skills, tools, languages.
+- `GET /sessions`, `GET /debug/context`, `GET /debug/journal` — the resume
+  list, what the model sees, and the raw journal.
+
+Reads never queue behind a run; ops run on the session's own thread, in arrival
+order, with preconditions refused as codes (`busy`, `not_quiescent`). Loopback
+only unless `--allow-remote`; the bearer token reaches a client through
+`--ready-file` (written atomically, 0600, rewritten after every restart, or
+`EVO_SERVE_TOKEN`); `--watch-stdin` means EOF is the parent going away. `/eval`
+is remote code execution by design — the token is the gate. `GET /health`
+carries the server's **identity** — program, version — so a client can tell
+what it is talking to (the agent's serve names itself `evo-agent`). A program
+can also run its own session on serve: it names itself, adds routes of its own
+(exact paths or a prefix), and registers its own **topics** with a provider
+that answers snapshots and pages and publishes through the same op log. Those
+are the seams, and they name no program; `evo-swarm serve` is the one built on
+them. Full reference: [docs/serve.md](docs/serve.md).
 
 ### evo-swarm
 
@@ -452,15 +477,14 @@ lanes from the coordinator's journal. Watch lanes read-only with the status
 line, `/lanes` and `/lane N`.
 
 `evo-swarm serve` runs the same swarm headless, on
-[serve's protocol](docs/serve.md): `/health` names it `evo-swarm` with the
-feature `swarm`; the coordinator is driven exactly as `evo-agent serve` drives
-a session; and the lane panels get their data over HTTP — `GET /lanes`
-(state, current task, goal status, worktree, restarts), a `lane-state` event
-on the coordinator's
-`/events` whenever one changes, and `GET /lanes/N/transcript` and
-`GET /lanes/N/events` for one lane's messages and live events. Those three are
+[serve's protocol](docs/serve.md): `/health` names it `evo-swarm`, the
+coordinator is driven exactly as `evo-agent serve` drives a session, and the
+lanes are **topics** — `swarm` (workers, what each lane is doing, restarts,
+worktrees, lane models) and one `lane:N` per lane, mirrored from that lane's
+own op stream, so `GET /snapshot?topics=swarm,lane:*` and
+`GET /stream?topics=lane:*` are all the lane panels need. Those topics are
 read-only, like the TUI's view: lane control stays the coordinator's, and lane
-tokens and URLs are never handed out. `/shutdown` stops every lane and
+tokens and URLs are never handed out. `server.shutdown` stops every lane and
 `--resume` restores the swarm, as in the TUI.
 
 ### Skills, templates, slash commands
@@ -569,7 +593,10 @@ make integration    # live e2e: tool round-trip, kill -9 + manual resume,
                     #       EVO_TEST_BASE_URL / _API_KEY / _MODEL
                     #       (+ optional _VISION_MODEL for the image test)
 make serve-test     # evo-agent serve end to end over HTTP, no backend: a stub
-                    #       Messages endpoint (python3) stands in for the model
+                    #       Messages endpoint (python3) stands in for the model;
+                    #       ready file, auth, snapshot, a stream and folding its
+                    #       ops onto it, reconnect and stream.reset, the ops and
+                    #       their error codes, idempotency, interrupt, shutdown
 make swarm-test     # evo-swarm end to end, no backend: the coordinator TUI
                     #       under a pty, real lanes, the stub scripting both
 make tui-test       # expect-driven TUI under a pty: image paste
@@ -715,10 +742,14 @@ src/tui/                 EVO.TUI — the interactive frontend (system `evo`);
 
 src/serve/               EVO.SERVE — serve, the HTTP frontend (system
   package.lisp           `evo`; docs/serve.md)
-  json.lisp              the one sexpr <-> JSON mapping for events and state
+  json.lisp              the one sexpr <-> JSON mapping for state and ops
   http.lisp              HTTP/1.1 request parsing, responses, SSE
-  events.lisp            the numbered event log streams replay from
-  server.lisp            session thread, task, host methods, listener
+  server.lisp            session thread, task, host methods, listener, ready file
+  oplog.lisp             the numbered op log streams replay from
+  topics.lisp            topic providers: snapshot, paging, media, publishing
+  view-topic.lisp        the session topic wired to the view (src/view/)
+  ops.lisp               the operation table, argument schemas, idempotency
+  catalog.lisp           GET /catalog and GET /sessions
   routes.lisp            the endpoints, and the route table a program extends
 
 src/cli/                 EVO.CLI (system `evo`)
@@ -745,7 +776,7 @@ extensions/examples/     reference-only example extensions (installed to
 swarm/                   EVO.SWARM — evo-swarm (system `evo-swarm`; docs/swarm.md)
   package.lisp
   state.lisp             the swarm and its lanes, one lock
-  client.lisp            serve's HTTP API, as a client: requests, the event stream
+  client.lisp            serve's HTTP API, as a client: requests, the op stream
   init.lisp              the baseline, in-lanes, swarm.lisp, prompt notes, limits
   lanes.lisp             launch, initialize, watch, recover, stop; the journal record
   tools.lisp             the coordinator's tools
