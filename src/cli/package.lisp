@@ -7,5 +7,6 @@
            ;; serve's pieces, for a second program built on this CLI
            ;; (evo-swarm serve): the same flag, the same token rule, the same
            ;; flags a restarted child keeps.
-           #:parse-port #:*serve-default-port* #:check-serve-token
-           #:serve-restart-flags))
+           #:parse-port #:*serve-default-port* #:check-serve-ready
+           #:serve-restart-flags #:pin-bound-port #:exact-session-args
+           #:set-model-opt #:cmd-catalog))

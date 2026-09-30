@@ -13,8 +13,10 @@ by the swarm's lock: the lane's subscriber thread, the coordinator's tools
 (on its run thread) and the TUI's status segment all read or write it."
   n port token
   process            ; the launch handle: the lane's own supervisor parent
-  pid                ; the serve child's pid, from /health and `hello`
-  dir                ; <swarm dir>/lane-N/: sessions, token, log, url
+  input              ; the write end of the lane's stdin: closing it says goodbye
+  pid                ; the serve child's pid, from its ready file and /health
+  ready              ; the lane's ready-file plist: url, token, epoch, session
+  dir                ; <swarm dir>/lane-N/: sessions, ready file, log
   cwd                ; where the lane works: the swarm's cwd or a worktree
   worktree branch    ; set while the lane is isolated in a git worktree
   (state :starting)  ; :starting :idle :working :compacting :down :stopped
@@ -43,6 +45,11 @@ by the swarm's lock: the lane's subscriber thread, the coordinator's tools
 
 (defstruct (swarm (:constructor %make-swarm))
   id dir cwd workers lanes evo-binary agent
+  ;; How lanes are configured — swarm data, not a file: --lane-model and
+  ;; --lane-thinking, recorded in the swarm record so a resumed swarm keeps
+  ;; them.  NIL means "whatever the coordinator runs", which is what a lane
+  ;; with no configuration of its own gets.
+  lane-model lane-provider lane-thinking
   view               ; where its notices go and how it runs: a VIEW (view.lisp)
   (lock (bt:make-lock "evo-swarm"))
   (stopping nil))
@@ -70,7 +77,3 @@ by the swarm's lock: the lane's subscriber thread, the coordinator's tools
                            (- now (lane-task-started lane)))
             :goal (lane-goal lane)
             :reports (length (lane-reports lane))))))
-
-(defun fresh-token ()
-  "A lane's bearer token: 32 bytes from the OS, as hex."
-  (format nil "~(~{~2,'0x~}~)" (coerce (evo.port:random-octets 32) 'list)))

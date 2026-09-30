@@ -35,6 +35,12 @@ name, \"lane:1\") — as its JSON key."
       key
       (substitute #\_ #\- (string-downcase (symbol-name key)))))
 
+(defun json-key-name (key)
+  "KEY as an object key: a keyword's snake_case name, a string as it stands."
+  (cond ((keywordp key) (keyword->json-key key))
+        ((stringp key) key)
+        (t (string-downcase (symbol-name key)))))
+
 (defun plist-p (value)
   "True for a non-empty list of keyword/value pairs: a plist is an object on
 the wire, anything else (a vector, a list of non-keyword first elements) an
@@ -44,28 +50,36 @@ JSON-OBJECT instead."
        (loop for tail on value by #'cddr
              always (and (keywordp (car tail)) (consp (cdr tail))))))
 
-;;; An object whose keys are not keywords.  A map keyed by topic name cannot
-;;; be a plist (the first element would read as an array), so it says so.
+(defun proper-list-p (value)
+  "True for a list that ends in NIL.  A dotted pair and an improper list are
+both lists to CONSP, and neither can be walked by MAP — which is exactly how
+one `(\"Authorization\" . \"Bearer …\")` in *settings* used to turn /registry
+into a 500."
+  (loop for tail = value then (cdr tail)
+        while (consp tail)
+        finally (return (null tail))))
 
-(defstruct (json-object-value (:constructor %make-json-object-value))
-  (pairs nil))
+(defun object-from-pairs (pairs)
+  "A JSON object from PAIRS, an alist of (key . value)."
+  (let ((object (make-hash-table :test #'equal)))
+    (dolist (pair pairs object)
+      (setf (gethash (json-key-name (car pair)) object)
+            (sexpr->json-value (cdr pair))))))
 
-(defun wire-boolean (value)
-  "VALUE as a boolean on the wire: true, or the :FALSE that encodes as false.
-
-A field that *is* a boolean has to say so — NIL would encode as null, which
-reads as \"unknown\", not as \"no\" (CONTRACT §5.2, §5.5)."
-  (if value t :false))
-
-(defun json-object-value (pairs)
-  "PAIRS — a flat list of (key . value) — as a JSON object.  KEY may be a
-keyword or a string.  Not named JSON-OBJECT: that is EVO.JOURNAL's (a plist
-as JSON text), which a server inherits through its package, and one of the two
-would silently replace the other."
-  (%make-json-object-value :pairs pairs))
+(defun unprintable-string (value)
+  "VALUE as a string, whatever it is.  The last resort of the mapping: a value
+outside the vocabulary must not fail the whole document, and printing it is
+already better than dropping it.  *PRINT-CIRCLE* so a self-referential
+structure terminates."
+  (let ((*print-circle* t))
+    (or (ignore-errors (princ-to-string value)) "#<unprintable>")))
 
 (defun sexpr->json-value (value)
-  "VALUE as the jzon value the mapping above says."
+  "VALUE as the jzon value the mapping above says.  Total: every object has an
+answer, and none of them is a condition — a registry holding an alist of
+strings, a dotted pair or an object this mapping has never seen is a document
+to send, not a request to fail (an error body quotes the value it choked on,
+and a value can be a secret)."
   (cond ((eq value t) t)
         ((null value) 'null)
         ((or (eq value :false) (eq value 'false)) nil)
@@ -83,15 +97,18 @@ would silently replace the other."
                           (sexpr->json-value v)))
            object))
         ((plist-p value)
-         (let ((object (make-hash-table :test #'equal)))
-           (loop for (k v) on value by #'cddr
-                 do (setf (gethash (keyword->json-key k) object)
-                          (sexpr->json-value v)))
-           object))
-        ((listp value) (map 'vector #'sexpr->json-value value))
+         (object-from-pairs (loop for (k v) on value by #'cddr collect (cons k v))))
+        ((consp value)
+         (cond ((proper-list-p value) (map 'vector #'sexpr->json-value value))
+               ;; A dotted pair: an alist entry ("Authorization" . "Bearer …")
+               ;; is one key and its value, and that is what it becomes.
+               ((and (atom (cdr value))
+                     (or (stringp (car value)) (symbolp (car value))))
+                (object-from-pairs (list (cons (car value) (cdr value)))))
+               (t (unprintable-string value))))
         ((vectorp value) (map 'vector #'sexpr->json-value value))
         ((pathnamep value) (namestring value))
-        (t (princ-to-string value))))
+        (t (unprintable-string value))))
 
 (defun json-value->sexpr (value)
   "The reverse direction: EVO:JSON->SEXPR, named here beside its inverse."

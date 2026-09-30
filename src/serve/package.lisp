@@ -7,31 +7,16 @@
 
 (defpackage :evo.serve
   (:use :cl :evo.util :evo.journal :evo.provider :evo.kernel)
-  (:export ;; the server a program runs
-           #:make-server #:serve #:resolve-token #:loopback-host-p
-           #:server #:server-agent #:server-token #:server-host #:server-port
-           #:server-quit #:server-ready-file #:server-eval-enabled
-           #:server-epoch #:server-seq #:server-cursor #:server-oplog
-           #:server-interrupt-hook #:server-shutdown-hook
-           #:server-program #:server-version #:server-identity
-           #:server-task #:task-id #:task-kind #:task-started #:task-step-started
-           ;; topics: how a program adds what it observes (CONTRACT §7)
-           #:register-topic #:unregister-topic #:topic-provider
-           #:topic-provider-names #:expand-topic-names
-           #:topic-snapshot #:topic-items-before #:topic-item #:topic-media
-           #:topic-feed-event #:topic-feed-append #:topic-provider-reset
-           #:topic-provider-sync #:sync-session-topic
-           #:topic-provider-queued-input #:topic-provider-input-cancelled
-           #:topic-reset #:topic-notice #:topic-on-event
-           #:publish-op #:publish-state-patch #:publish-item-add
-           #:op-now-ms
-           ;; the interrupt scopes the program owns (CONTRACT §5.5)
-           #:interrupt-scope
-           ;; the catalog builder (CONTRACT §5.6)
-           #:catalog-plist #:catalog-for-server #:sessions-body
-           ;; ops, for a program that adds its own
-           #:register-op #:find-op #:all-ops #:op-error #:op-error-code
-           #:op-error-message #:op-fail #:dispatch-op #:answer-op
+  (:export #:make-server #:serve #:resolve-token #:loopback-host-p
+           ;; the serving life: its epoch, the ready file it publishes, and
+           ;; the parent death it watches for
+           #:server-epoch #:write-ready-file #:ready-file-value
+           #:delete-ready-file #:write-json-atomically #:mint-epoch
+           #:watch-stdin-eof
+           ;; what this session can use (GET /catalog, and the offline
+           ;; `catalog --json` of evo-agent and evo-swarm)
+           #:catalog-plist #:model-readiness #:model-status #:lane-model-status
+           #:*op-catalog* #:*kernel-apis*
            ;; the seams a program extends: who it is, and the routes it adds
            #:*identity* #:server-routes
            #:add-route #:make-route #:route-path #:route-method #:route-handler

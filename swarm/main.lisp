@@ -24,19 +24,31 @@ Usage:
                                  session, driven over HTTP
       --host <addr>              address to bind (default 127.0.0.1)
       --port <n>                 port to bind (default 8421; 0 picks a free one)
-      --token-file <path>        write the bearer token here (mode 0600)
+      --ready-file <path>        publish url, token, epoch and session here (mode 0600)
+      --watch-stdin              shut down cleanly when stdin reaches end of file
       --allow-remote             permit a non-loopback --host
   evo-swarm --workers <n>        how many lanes (default: the :swarm-workers
                                  setting, else 6)
   evo-swarm --resume [path]      resume the coordinator session (default: the
                                  last one here) and restore its lanes
-  evo-swarm --model <id>         the coordinator's model (lanes default to it)
+  evo-swarm --model <id>[@<provider>]
+                                 the coordinator's model (lanes default to it)
+  evo-swarm --lane-model <id>[@<provider>]
+                                 the model lanes run (recorded in the swarm)
   evo-swarm --thinking <level>   low|medium|high|xhigh|max
+  evo-swarm --lane-thinking <level>
+                                 the thinking level lanes run (recorded too)
   evo-swarm --evo <path>         the evo-agent binary lanes run (default:
                                  EVO_BINARY, then the one beside evo-swarm,
                                  then PATH)
   evo-swarm --no-userspace       no init files, extensions or swarm.lisp
   evo-swarm --no-supervisor      run the coordinator in-process
+  evo-swarm catalog --json [--lane-model <id>] [--workers <n>]
+                                 print what a swarm from here could use — the
+                                 coordinator's catalog plus the models a lane
+                                 can run — and exit
+  evo-swarm check   --json [--model <id>] [--lane-model <id>] [--workers <n>]
+                                 validate a launch (exit 1 when it cannot work)
   evo-swarm --help | --version
 
 serve takes the agent's serve flags and the swarm's own together.  Its bearer
@@ -48,11 +60,21 @@ Config: init.lisp, extensions and post-init.lisp as for evo, then
 settings for the swarm, lane count, tool limits, prompt notes, and
 (evo.swarm:in-lanes ...) — code every lane evaluates.  See docs/swarm.md.")
 
+(defun check-think-level (text what)
+  (let ((level (intern (string-upcase (or text "")) :keyword)))
+    (unless (member level +effort-levels+)
+      (error 'evo.cli:usage-error
+             :text (format nil "~a must be one of low|medium|high|xhigh|max" what)))
+    level))
+
 (defun parse-args (argv)
   (let ((opts nil))
-    (when (equal (first argv) "serve")
-      (pop argv)
-      (setf (getf opts :serve) t))
+    (when (and argv (member (first argv) '("serve" "catalog" "check") :test #'string=))
+      (let ((sub (pop argv)))
+        (setf (getf opts (cond ((string= sub "serve") :serve)
+                               ((string= sub "catalog") :catalog)
+                               (t :check)))
+              t)))
     (loop while argv
           for arg = (pop argv)
           do (cond
@@ -67,16 +89,18 @@ settings for the swarm, lane count, tool limits, prompt notes, and
                           (pop argv)
                           :latest)))
                ((string= arg "--model")
-                (setf (getf opts :model) (or (pop argv) (error 'evo.cli:usage-error :text "--model needs an id"))))
+                (evo.cli:set-model-opt opts (or (pop argv) (error 'evo.cli:usage-error :text "--model needs an id"))))
+               ((string= arg "--lane-model")
+                (setf (getf opts :lane-model) (or (pop argv) (error 'evo.cli:usage-error :text "--lane-model needs an id"))))
                ((string= arg "--thinking")
-                (let ((level (intern (string-upcase (or (pop argv) "")) :keyword)))
-                  (unless (member level +effort-levels+)
-                    (error 'evo.cli:usage-error :text "--thinking must be one of low|medium|high|xhigh|max"))
-                  (setf (getf opts :thinking) level)))
+                (setf (getf opts :thinking) (check-think-level (pop argv) "--thinking")))
+               ((string= arg "--lane-thinking")
+                (setf (getf opts :lane-thinking) (check-think-level (pop argv) "--lane-thinking")))
                ((string= arg "--evo")
                 (setf (getf opts :evo) (or (pop argv) (error 'evo.cli:usage-error :text "--evo needs a path"))))
                ((string= arg "--no-userspace") (setf (getf opts :no-userspace) t))
                ((string= arg "--no-supervisor") (setf (getf opts :no-supervisor) t))
+               ((string= arg "--json") (setf (getf opts :json) t))
                ;; serve's own flags, exactly as the agent's serve takes them
                ;; — a swarm is one session, and this is the flag set that
                ;; opens its door.  Without the subcommand they are unknown, so
@@ -86,9 +110,11 @@ settings for the swarm, lane count, tool limits, prompt notes, and
                       (or (pop argv) (error 'evo.cli:usage-error :text "--host needs an address"))))
                ((and (getf opts :serve) (string= arg "--port"))
                 (setf (getf opts :port) (evo.cli:parse-port (pop argv))))
-               ((and (getf opts :serve) (string= arg "--token-file"))
-                (setf (getf opts :token-file)
-                      (or (pop argv) (error 'evo.cli:usage-error :text "--token-file needs a path"))))
+               ((and (getf opts :serve) (string= arg "--ready-file"))
+                (setf (getf opts :ready-file)
+                      (or (pop argv) (error 'evo.cli:usage-error :text "--ready-file needs a path"))))
+               ((and (getf opts :serve) (string= arg "--watch-stdin"))
+                (setf (getf opts :watch-stdin) t))
                ((and (getf opts :serve) (string= arg "--allow-remote"))
                 (setf (getf opts :allow-remote) t))
                ((member arg '("-h" "--help") :test #'string=) (setf (getf opts :help) t))
@@ -98,35 +124,47 @@ settings for the swarm, lane count, tool limits, prompt notes, and
     (when (getf opts :serve)
       (unless (getf opts :port)
         (setf (getf opts :port) evo.cli:*serve-default-port*)))
+    (when (getf opts :lane-model)
+      ;; ID[@PROVIDER], split once here: the record keeps both halves.
+      (multiple-value-bind (id provider) (split-model-ref (getf opts :lane-model))
+        (setf (getf opts :lane-model) id)
+        (when provider (setf (getf opts :lane-provider) provider))))
     opts))
 
 (defun restart-argv (argv)
-  "A restarted coordinator: its own flags minus the session ones, plus
---resume when it has a session to resume (its journal records the lanes).
+  "A restarted coordinator: the flags that describe the swarm and the server,
+plus --resume naming the session it was on and the port it bound.
 
-serve's flags are kept — where it listens and where its token goes — because
-the child that comes back must open the same door for the clients that hold
-its token.  --model and --thinking are not: the journal already carries the
-session's, and re-passing them would override a /model switch made since."
+serve's flags are kept — where it listens and where its ready file goes —
+because the child that comes back must open the same door for the clients
+that hold its URL and token.  --model and --thinking are not: the journal
+already carries the session's, and re-passing them would override a /model
+switch made since.  --lane-model and --lane-thinking are kept: they describe
+the swarm, not the session, and an unchanged replay only re-records them."
   (let* ((serve (equal (first argv) "serve"))
-         (args (if serve (rest argv) argv)))
+         (args (if serve (rest argv) argv))
+         (kept (loop while args
+                     for arg = (pop args)
+                     when (member arg '("--workers" "--evo" "--lane-model" "--lane-thinking")
+                                 :test #'equal)
+                       append (if args (list arg (pop args)) (list arg))
+                     when (member arg '("--no-userspace") :test #'equal)
+                       collect arg
+                     when (member arg '("--resume" "--model" "--thinking") :test #'equal)
+                       do (when (and args (not (string-prefix-p "-" (first args))))
+                            (pop args))))))
     (append (when serve '("serve"))
-            (loop while args
-                  for arg = (pop args)
-                  when (member arg '("--workers" "--evo") :test #'equal)
-                    append (list arg (pop args))
-                  when (member arg '("--no-userspace") :test #'equal)
-                    collect arg
-                  when (member arg '("--resume" "--model" "--thinking") :test #'equal)
-                    do (when (and args (not (string-prefix-p "-" (first args)))) (pop args)))
-            ;; evo serve's own restart flags: --host, --port, --token-file,
-            ;; --allow-remote.  --no-userspace is already kept above, so the
-            ;; copy serve-restart-flags also returns is dropped.
+            kept
             (when serve
-              (remove "--no-userspace"
-                      (evo.cli:serve-restart-flags (rest argv))
-                      :test #'equal))
-            (when (latest-session) '("--resume")))))
+              ;; --host, --port (the one it bound), --ready-file,
+              ;; --allow-remote, --watch-stdin.  --no-userspace is already
+              ;; kept above, so the copy serve-restart-flags also returns is
+              ;; dropped.
+              (loop for fragment in (evo.cli:pin-bound-port
+                                     (evo.cli:serve-restart-flags (rest argv)))
+                    unless (equal fragment "--no-userspace")
+                      collect fragment))
+            (evo.cli:exact-session-args)))
 
 (defun find-evo-binary (opts)
   "The evo-agent binary lanes run.  A lane is the agent alone — `evo-agent
@@ -160,13 +198,14 @@ same rule, and the same words, as the agent's serve."
 the swarm's own headless view — when asked for one (:serve)."
   (if (getf opts :serve)
       (let ((host (or (getf opts :host) "127.0.0.1")))
-        (evo.cli:check-serve-token opts)
+        (evo.cli:check-serve-ready opts)
         (check-serve-host host opts)
         (let ((server (evo.serve:make-server
                        :host host
                        :port (getf opts :port)
                        :token (evo.serve:resolve-token)
-                       :token-file (getf opts :token-file)
+                       :ready-file (getf opts :ready-file)
+                       :watch-stdin (getf opts :watch-stdin)
                        :identity *swarm-identity*)))
           ;; The swarm's own read-only API, on the same server: GET /lanes and
           ;; a lane's transcript and events.  Never on a lane's serve.
@@ -207,6 +246,13 @@ the TUI gets a status-line segment."
         (setf *swarm* (make-swarm :agent agent :workers workers
                                   :evo-binary evo-binary :record record
                                   :view view))
+        ;; The flags override what a resumed record restored, and are
+        ;; re-recorded: lane configuration is swarm data, not a user file.
+        (when (getf opts :lane-model)
+          (setf (swarm-lane-model *swarm*) (getf opts :lane-model)
+                (swarm-lane-provider *swarm*) (getf opts :lane-provider)))
+        (when (getf opts :lane-thinking)
+          (setf (swarm-lane-thinking *swarm*) (getf opts :lane-thinking)))
         (ensure-directories-exist (swarm-dir *swarm*))
         (record-swarm)
         ;; A journal switch (/new, /fork, /resume): a resumed session gets
@@ -241,11 +287,13 @@ mistyped flag cannot be fixed by trying it again."
         (cond
           ((getf opts :help) (write-line *usage*) 0)
           ((getf opts :version) (write-line "evo-swarm 0.1.0") 0)
+          ((getf opts :catalog) (cmd-catalog opts))
+          ((getf opts :check) (cmd-check opts))
           ((evo.cli:supervised-run-p opts)
            ;; A serve token is minted once per launch, here in the parent, so a
            ;; restarted child keeps the one clients already hold.
            (when (getf opts :serve)
-             (evo.cli:check-serve-token opts)
+             (evo.cli:check-serve-ready opts)
              (evo.port:setenv "EVO_SERVE_TOKEN" (evo.serve:resolve-token)))
            (evo.cli:supervise argv :restart-argv #'restart-argv))
           (t (run-swarm opts)))

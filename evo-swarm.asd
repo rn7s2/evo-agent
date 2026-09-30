@@ -23,6 +23,7 @@
                              (:file "init")
                              (:file "api")
                              (:file "lanes")
+                             (:file "offline")
                              (:file "tools")
                              (:file "routes")
                              (:file "tui")

@@ -17,7 +17,8 @@
            #:argv #:runtime-pathname #:environ #:setenv #:getpid
            #:*program-name*
            #:call-with-timeout #:timeout-error
-           #:launch-child #:process-alive-p #:pid-alive-p #:process-kill #:process-kill-tree
+           #:launch-child #:launch-child-piped #:process-input-stream
+           #:process-alive-p #:pid-alive-p #:process-kill #:process-kill-tree
            #:reap-pid-tree #:process-wait #:process-pid
            #:program-in-path #:windows-p #:path-separator
            #:shell-invocation #:shell-name
@@ -79,7 +80,8 @@
 
 (defpackage :evo.provider
   (:use :cl :evo.util)
-  (:export #:find-model #:all-models #:model-providers
+  (:export #:find-model #:find-model-ref #:split-model-ref #:all-models
+           #:model-providers
            #:model-context-window #:model-max-output #:model-max-input-items
            #:model-effort #:model-thinking-mode #:model-vision-p #:+effort-levels+
            #:normalize-thinking-level
@@ -143,6 +145,11 @@
            #:boot-session #:switch-session
            #:set-session-model #:set-session-thinking #:end-session
            #:record-recovery
+           ;; what a supervised session tells its supervisor
+           #:note-current-session #:note-bound-port
+           #:supervisor-state-directory #:supervisor-current-session
+           #:supervisor-bound-port #:supervisor-pid #:supervisor-restarts
+           #:delete-supervisor-state
            ;; frontend protocol — answered by whichever frontend runs
            #:*frontend* #:frontend-interactive-p #:frontend-request-run
            ;; goal
@@ -218,6 +225,7 @@
   (:export #:cat #:normalize-newlines #:crlf-newlines #:with-proxy
            #:register-tool #:register-command #:on #:on-unload #:spawn-task
            #:load-extension
+           #:note-current-session
            #:register-prompt-note #:register-prompt-language #:set-language
            #:register-model #:register-provider #:set-setting #:setting
            #:set-active-tools #:all-tools #:*agent* #:current-goal
