@@ -8505,7 +8505,9 @@ the stream."
                       (equal "ok" (pget i :status))
                       (equal "file1 file2" (getf (pget i :result) :text))
                       (equal 11 (getf (pget i :result) :chars))
-                      (null (getf (pget i :result) :truncated))
+                      ;; Plastic false, which is what the wire reads as
+                      ;; `false`: NIL would read as `null`.
+                      (eq :false (getf (pget i :result) :truncated))
                       (equal (pget assistant :id) (pget i :parent)))))
         (check "notice item: severity, text, source, durable"
                (let ((i (item "notice")))
@@ -8615,7 +8617,7 @@ whole through VIEW-ITEM."
       (check "VIEW-ITEM is the whole item"
              (let ((whole (evo.view:view-item view "t_c9")))
                (and (= 9000 (length (getf (pget whole :result) :text)))
-                    (null (getf (pget whole :result) :truncated))))))))
+                    (eq :false (getf (pget whole :result) :truncated))))))))
 
 (defun test-view-paging ()
   "VIEW-ITEMS-BEFORE walks backwards through the transcript."

@@ -11,8 +11,11 @@
 ;;;;   ratio, float          -> number (double)
 ;;;;   T                     -> true
 ;;;;   NIL                   -> null (nil is also the empty list: "nothing")
-;;;;   the symbol FALSE      -> false (serve's own replies, where a boolean
-;;;;                            must read as one)
+;;;;   the keyword :FALSE    -> false, and so does the symbol FALSE
+;;;;                            (a keyword is the one spelling every package
+;;;;                            shares, which is why a field that must read as
+;;;;                            false — has_more, truncated, ready — says
+;;;;                            :false rather than the NIL that means null)
 ;;;;   keyword (as a value)  -> string, lowercased: :text-delta -> "text-delta"
 ;;;;
 ;;;; JSON->SEXPR reads it back: objects become plists under the same keys,
@@ -47,6 +50,13 @@ JSON-OBJECT instead."
 (defstruct (json-object-value (:constructor %make-json-object-value))
   (pairs nil))
 
+(defun wire-boolean (value)
+  "VALUE as a boolean on the wire: true, or the :FALSE that encodes as false.
+
+A field that *is* a boolean has to say so — NIL would encode as null, which
+reads as \"unknown\", not as \"no\" (CONTRACT §5.2, §5.5)."
+  (if value t :false))
+
 (defun json-object-value (pairs)
   "PAIRS — a flat list of (key . value) — as a JSON object.  KEY may be a
 keyword or a string.  Not named JSON-OBJECT: that is EVO.JOURNAL's (a plist
@@ -58,7 +68,7 @@ would silently replace the other."
   "VALUE as the jzon value the mapping above says."
   (cond ((eq value t) t)
         ((null value) 'null)
-        ((eq value 'false) nil)
+        ((or (eq value :false) (eq value 'false)) nil)
         ;; Enum values are snake_case too (CONTRACT §4: \"lane-report\" on the
         ;; wire is "lane_report").
         ((keywordp value) (substitute #\_ #\- (string-downcase (symbol-name value))))

@@ -123,7 +123,7 @@ can rely on is worth more than the last few words."
 (defun result-wire (text)
   (list :text (or text "")
         :chars (length (or text ""))
-        :truncated nil))
+        :truncated :false))
 
 ;;; Item construction, one function per kind.
 ;;;
@@ -147,15 +147,18 @@ passes through, NIL stays NIL."
 (defun assistant-item (id ts message provider)
   (let* ((stop (pget message :stop-reason))
          (status (case stop (:error "error") (:aborted "aborted")
-                        (:length "length") (t "final"))))
-    (list :id id :kind "assistant" :ts ts
-          :text (blocks-text (content-blocks message))
-          :thinking (blocks-thinking (content-blocks message))
-          :status status
-          :error (pget message :error-message)
-          :model (pget message :model)
-          :provider provider
-          :usage (usage-wire (pget message :usage)))))
+                        (:length "length") (t "final")))
+         (item (list :id id :kind "assistant" :ts ts
+                     :text (blocks-text (content-blocks message))
+                     :thinking (blocks-thinking (content-blocks message))
+                     :status status
+                     :error (pget message :error-message)
+                     :model (pget message :model)
+                     :provider provider))
+         ;; USAGE is left out when the model reported none: absent says
+         ;; "unknown", where a null reads as zero tokens.
+         (usage (usage-wire (pget message :usage))))
+    (if usage (pput item :usage usage) item)))
 
 (defun tool-item (id ts &key call-id name args status result parent)
   (list :id id :kind "tool" :ts ts

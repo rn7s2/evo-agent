@@ -63,9 +63,20 @@ part (the models a lane can run) — evo-swarm passes it."
                                          (all-models))))
              (default-id (or (and state (evo.journal:state-model state))
                              (setting :model)))
+             ;; The provider is the one the *model* is registered under — the
+             ;; same answer /catalog gives for the model itself — so a client
+             ;; that looks the pair up in MODELS finds it.  A session-level
+             ;; override only decides between registrations of one id.
              (default-provider (and default-id
-                                    (ignore-errors (evo.kernel:effective-model-provider
-                                                    state default-id)))))
+                                    (or (ignore-errors
+                                          (pget (find-model
+                                                 default-id
+                                                 (ignore-errors
+                                                  (evo.kernel:effective-model-provider
+                                                   state default-id)))
+                                                :provider))
+                                        (ignore-errors (evo.kernel:effective-model-provider
+                                                        state default-id))))))
         (list :models (coerce models 'vector)
               :providers (coerce (remove nil
                                          (mapcar (lambda (key)
