@@ -75,7 +75,7 @@
            ;; the session index (~/.evo/sessions/index.jsonl)
            #:session-index-path #:index-session #:read-session-index
            #:scan-sessions #:rebuild-session-index #:session-list
-           #:journal-title #:journal-entry-count #:json-encode))
+           #:journal-title #:journal-entry-count #:json-encode #:json-object))
 
 (defpackage :evo.provider
   (:use :cl :evo.util)

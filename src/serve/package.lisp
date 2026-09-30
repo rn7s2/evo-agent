@@ -42,7 +42,7 @@
            #:stream-ops #:write-sse-reset #:*sse-ping-seconds*
            ;; the mapping between evo's sexprs and JSON
            #:sexpr->json-value #:json-value->sexpr #:encode-json #:decode-json
-           #:plist-p #:json-object
+           #:plist-p #:json-object-value
            ;; HTTP, exposed for the tests
            #:read-request #:request-method #:request-path #:request-query
            #:request-headers #:request-body #:request-header #:request-query-param

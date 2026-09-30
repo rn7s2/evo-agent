@@ -44,13 +44,15 @@ JSON-OBJECT instead."
 ;;; An object whose keys are not keywords.  A map keyed by topic name cannot
 ;;; be a plist (the first element would read as an array), so it says so.
 
-(defstruct (json-object (:constructor %make-json-object))
+(defstruct (json-object-value (:constructor %make-json-object-value))
   (pairs nil))
 
-(defun json-object (pairs)
+(defun json-object-value (pairs)
   "PAIRS — a flat list of (key . value) — as a JSON object.  KEY may be a
-keyword or a string."
-  (%make-json-object :pairs pairs))
+keyword or a string.  Not named JSON-OBJECT: that is EVO.JOURNAL's (a plist
+as JSON text), which a server inherits through its package, and one of the two
+would silently replace the other."
+  (%make-json-object-value :pairs pairs))
 
 (defun sexpr->json-value (value)
   "VALUE as the jzon value the mapping above says."
@@ -64,9 +66,9 @@ keyword or a string."
         ((stringp value) value)
         ((integerp value) value)
         ((realp value) (coerce value 'double-float))
-        ((json-object-p value)
+        ((json-object-value-p value)
          (let ((object (make-hash-table :test #'equal)))
-           (loop for (k . v) in (json-object-pairs value)
+           (loop for (k . v) in (json-object-value-pairs value)
                  do (setf (gethash (keyword->json-key k) object)
                           (sexpr->json-value v)))
            object))
