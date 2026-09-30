@@ -984,10 +984,11 @@ whole state, and every lane transition publishes it."
              (eql 1 (getf (getf (getf (first ops) :patch) :status) :busy))))
     (check "topics: waiting_on_lanes is the coordinator settled with lanes working"
            (progn (setf (evo.swarm::swarm-coordinator-busy *swarm*) nil)
-                  (getf (getf (evo.swarm::swarm-state) :status) :waiting-on-lanes)))
-    (check "topics: ...and off while the coordinator is running"
+                  (eq t (getf (getf (evo.swarm::swarm-state) :status) :waiting-on-lanes))))
+    (check "topics: ...and false, not null, while the coordinator is running"
            (progn (setf (evo.swarm::swarm-coordinator-busy *swarm*) t)
-                  (not (getf (getf (evo.swarm::swarm-state) :status) :waiting-on-lanes))))
+                  (eq :false (getf (getf (evo.swarm::swarm-state) :status)
+                                   :waiting-on-lanes))))
     ;; The hold the VIEW reads to report status `waiting` (§4.2).
     (check "topics: the swarm holds the coordinator while its lanes work"
            (stringp (evo.swarm::coordinator-hold-reason agent)))
