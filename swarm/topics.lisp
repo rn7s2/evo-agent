@@ -98,7 +98,7 @@ state.patch is what turns `working` into `idle`."
 
 ;;; The topic provider for `swarm` itself: state, no items.
 
-(defparameter *swarm-identity* '(:name "evo-swarm" :version "0.1.0" :features ("swarm"))
+(defparameter *swarm-identity* '(:name "evo-swarm" :version "0.1.0")
   "Who the coordinator's program is: GET /health's :program and the ready
 file's :program, so a client can tell a swarm from a bare agent.")
 

@@ -25,8 +25,19 @@ HTTP API ([docs/serve.md](serve.md)).
 ## Lanes are lanes, not roles
 
 A lane is like a CPU core: interchangeable capacity, not a specialist. Each is
-`evo-agent serve --no-userspace` on loopback, started with the swarm and idle
-until given work. The coordinator decides what each one does, task by task.
+an `evo-agent serve` on loopback, started with the swarm and idle until given
+work; the coordinator decides what each one does, task by task. It launches one
+with no supervisor of its own, a port it picks and announces, and stdin a pipe
+the coordinator holds:
+
+```text
+evo-agent serve --no-userspace --no-supervisor --as-lane --port 0
+                --ready-file <lane>/ready.json --watch-stdin
+```
+
+A lane the coordinator brings back adds `--resume <its exact session>` — never a
+bare `--resume` (CONTRACT §8), so a lane continues the session it was on and not
+whatever is newest in its directory.
 
 - **Own process, own token, own journal.** Each lane has a random bearer
   token, its own port, and its own session journal under
@@ -38,13 +49,16 @@ until given work. The coordinator decides what each one does, task by task.
   its session intact, and merges the branch itself when the lane reports done.
 - **Lanes never talk to each other.** They report to the coordinator, which
   relays whatever one lane needs from another.
-- **Supervised.** A lane runs under evo's own supervisor: a crash restarts it
-  with `--resume`. The coordinator notices the new process, re-initializes it
-  (below) and is told: `[lane N] crashed and was restarted …`. A lane whose
-  coordinator dies shuts itself down (`EVO_SERVE_WATCH_PID`), so lanes never
-  outlive the swarm that drives them.
+- **Restarted by the coordinator.** A lane runs `--no-supervisor --as-lane`:
+  the coordinator is what supervises it, because only the coordinator knows what
+  the lane was doing. When a lane's process dies, the coordinator starts a new
+  one `--resume`ing that lane's exact session, re-initializes it (below) and is
+  told: `[lane N] crashed and was restarted …`. A lane whose coordinator dies
+  shuts itself down (stdin is a pipe the coordinator holds), so lanes never
+  outlive the swarm that drives them. `--as-lane` is also what a lane *is*: its
+  journal says `program "lane"`.
 - **Stopped with the swarm.** Quitting the coordinator shuts every lane down
-  cleanly (`POST /shutdown`), killing any that do not stop in time.
+  cleanly (`server.shutdown`), killing any that do not stop in time.
 
 ## The coordinator
 
@@ -67,24 +81,38 @@ Every tool reaches a lane through serve's HTTP API and nothing else.
 
 ### What reaches the coordinator
 
-The coordinator subscribes to every lane's event stream (`GET /events`,
-resuming from its last event id with `?since=` after a reconnect). What it must hear becomes its **input**, exactly like
-a message you type: queued to its next turn boundary when it is working, and
-starting a run — waking it — when it is idle. You see each one in the
-scrollback too.
+The coordinator holds one connection to each lane — that lane's op stream — and
+each lane is mirrored back as a topic of the coordinator's own server
+([below](#serving-the-swarm)). What the coordinator must *hear* becomes its
+**input**, exactly like a message you type: queued to its next turn boundary
+when it is working, and starting a run — waking it — when it is idle. You see
+each one in the scrollback too.
+
+The message carries an `:origin` (§3) naming what it is: that is what a client
+renders instead of prose, and what the model is not shown.
 
 - `[lane N report] done: … evidence: … next: … blocked: … requests: … goal: …` — a
-  lane called its `report` tool (`goal:` is the lane's goal status, when it has one);
-- `[lane N] run ended (stop|error|aborted) — goal: … — task: …` — a lane went
-  idle. `goal: complete` means it is done; `goal: active, but the lane is idle
-  until steered` means it errored or was stopped short of its goal — a lane's
-  active goal keeps it working, so it never settles with one otherwise;
+  lane called its `report` tool (`goal:` is the lane's goal status, when it has
+  one). Origin `:lane-report`, the same fields as data — the `lane_report` item
+  of the `session` topic under serve;
+- `[lane N] run ended (stop|error|aborted) — goal: …` — a lane went idle.
+  `goal: complete` means it is done; `goal: active, but the lane is idle until
+  steered` means it errored or was stopped short of its goal — a lane's active
+  goal keeps it working, so it never settles with one otherwise. Origin
+  `:lane-event`, which carries the task the run was on: the text stays short on
+  purpose, so a lane's whole prompt does not land in the coordinator's context
+  every time a run ends;
 - `[lane N] error: …` — a lane's task failed;
-- `[lane N] crashed and was restarted …` / `[lane N] is down …`.
+- `[lane N] crashed and was restarted …` / `[lane N] is down …` — origin
+  `:lane-event` too.
 
 So the coordinator never polls: it delegates, ends its turn, and is woken.
 A message from you still comes first: the coordinator's note tells it to
 answer you before it turns to lane messages that arrived meanwhile.
+
+Under serve those messages are items of the coordinator's `session` topic
+(`lane_report`, `lane_event`) — which is where a client reads them, so a report
+is one item and not also a notice saying the same thing twice.
 
 ### A lane closes its own goal
 
@@ -115,46 +143,80 @@ Input always goes to the coordinator; lanes are only watched.
 
 `evo-swarm serve` runs the same swarm headless: the coordinator with no
 terminal, driven over HTTP through [serve's protocol](serve.md) — the same
-`/prompt`, `/steer`, `/follow-up`, `/interrupt`, `/command`, `/eval`, `/state`,
-`/transcript`, `/journal`, `/events` and `/shutdown` — plus the panel data a
-GUI needs. It takes the agent's serve flags (`--host`, `--port`, `--token-file`,
-`--allow-remote`) and evo-swarm's (`--workers`, `--evo`, `--resume`, …). The
+`/health`, `/snapshot`, `/stream`, `/ops` and `/items`, and a `/catalog` whose
+`lanes` half is this program's. It takes the agent's serve flags
+(`--host`, `--port`, `--token-file`, `--allow-remote`, `--ready-file`,
+`--watch-stdin`) and evo-swarm's (`--workers`, `--evo`, `--resume`, …). The
 swarm code is the same code either way; only the frontend differs.
 
-`GET /health` says which server it is — its `name`, its `version`, and the
-`features` it serves:
+`GET /health` says which server it is — its `program` and its `version`,
+beside the epoch, pid and session-loop age every server reports:
 
 ```json
-{"ok": true, "pid": 51234, "cursor": 118,
- "name": "evo-swarm", "version": "0.1.0", "features": ["swarm"]}
+{"ok": true, "program": "evo-swarm", "version": "0.1.0", "epoch": "8bdc7c0b",
+ "pid": 51234, "restarts": 0, "session-loop-age-ms": 3}
 ```
 
-so a client can tell it from the agent's serve (name `evo-agent`, no features)
-before it asks for anything. Those fields are the [identity
-seam](serve.md#the-two-seams-a-program-adds); the endpoints below are the
-[route seam](serve.md#the-two-seams-a-program-adds).
+so a client can tell it from the agent's serve (`program` `evo-agent`) before
+it asks for anything. Those fields are the [identity
+seam](serve.md#the-seams-a-program-adds); `GET /catalog` carries the
+[lanes half](serve.md#the-catalog) of that seam too, so a client learns which
+models a lane can run with:
 
-The swarm feature adds three read-only endpoints to the coordinator:
+```json
+{"lanes": {"models": [{"id", "provider", "name", "api", "ready", "reason"}]}}
+```
 
-- **`GET /lanes`** — every lane: state (`starting`, `idle`, `working`,
-  `compacting`, `down`, or `stopped` during shutdown), current task, goal status,
-  worktree and branch, restarts. Enough to draw the lane panels.
-- **`GET /lanes/N/transcript[?limit=N]`** — lane N's messages, as
-  `/transcript` is the coordinator's.
-- **`GET /lanes/N/events`** — lane N's live event stream: a lane's events,
-  relayed while a client watches, resumable with `?since=` / `Last-Event-ID`
-  exactly as [`/events`](serve.md#events) is.
+### The topics a swarm adds
 
-Lane state is also pushed: whenever a lane's state, task or goal status
-changes, `lane-state` arrives on the coordinator's own `/events` stream,
-naming the lane, so a client holding that connection keeps its panels current
-without polling.
+The swarm adds no routes: everything a client needs is a topic, read the same
+way as the session (CONTRACT §4.3, §7). `GET
+/snapshot?topics=swarm,lane:*` is the whole swarm at one `seq`, and
+`GET /stream?topics=swarm,lane:*` keeps it current — the lanes as items and
+states, exactly as the agent's `session` topic is.
 
-**Nothing here acts on a lane.** Lane control stays the coordinator's, and the
-human works through the coordinator — the same rule as the TUI. A lane's token
-and URL are never handed out; a client reads lanes, it does not talk to them.
-`/shutdown` stops every lane, and `--resume` restores the swarm — coordinator
-and lanes — from the coordinator's journal, as it does for the TUI.
+- **`swarm`** — the swarm's own state, and no items: `id`, `workers`,
+  `status` (`busy` — how many lanes are working — and `waiting_on_lanes`, true
+  while the coordinator has settled with lanes still working, which is the
+  `waiting` hold of §4.2), `config` (the lane model and thinking level), and
+  `lanes[]`, one row per lane: `n`, `state` (`starting`, `idle`, `working`,
+  `compacting`, `down`, `stopped`), task and clocks, `restarts`, `pid`,
+  `worktree` and `branch`, the lane's `model`, `context`, `goal`, `todos`, how
+  many `reports` it has made, and its `last_item`. Enough to draw the panels.
+- **`lane:N`** — one per lane: that lane's own topic, mirrored. Its items are
+  the lane's transcript (the same items its own server publishes, oldest to
+  newest) and its state is the lane's own (`status`, `model`, `context`,
+  `goal`, `todos`, `session`), so a client can follow a lane's work, not just
+  its summary. A lane that restarts is a new process: its topic is reset
+  (`topic.reset`, reason `lane_restarted`) and re-snapshotted.
+
+Nothing in the swarm's topics is a control channel: lane control stays the
+coordinator's, and a lane's token and URL are never handed out. A client reads
+lanes; it does not talk to them.
+
+### The one human action on lanes
+
+`run.interrupt` is serve's op, and a swarm answers its two extra scopes
+(CONTRACT §5.5, §6):
+
+```json
+POST /ops {"op": "run.interrupt", "args": {"scope": "swarm"}}
+→ {"ok": true, "result": {"interrupted": ["session", "lane:1", "lane:2"]}}
+```
+
+- `scope: "lane"` with a `lane` number stops that lane's run and nothing else;
+- `scope: "swarm"` stops the coordinator's run and every lane's.
+
+Only what was actually running is named in `interrupted` — an idle lane is not
+something a client can show as stopped. A lane that was running is stopped
+through its own `run.interrupt`, so the lane's own server is the one that ends
+the run. The coordinator is told a person did it: an after-run message with a
+`:human-action` origin, shown in its queue at once and delivered when a run
+next drains the queue — the human's stop is not a reason to spend a
+coordinator turn, but it is not invisible either.
+
+`server.shutdown` stops every lane, and `--resume` restores the swarm —
+coordinator and lanes — from the coordinator's journal, as it does for the TUI.
 
 ## swarm.lisp
 
@@ -295,20 +357,23 @@ terminal; `evo-swarm serve` does not — see
 [Serving the swarm](#serving-the-swarm). For a headless single agent,
 `evo-agent serve` is still the smaller answer.
 
-Files: `~/.evo/swarm/<swarm-id>/` holds each lane's `lane-N/` directory
-(`sessions/`, `token` (0600), `url`, `lane.log`) and `worktrees/lane-N/`.
+Files: `~/.evo/swarm/<swarm-id>/` holds each lane's `lane-N/` directory —
+`sessions/`, `ready.json` (0600: the lane's `port`, `url`, `token`, `epoch`,
+`pid` and `session`, rewritten by every life of the process), `lane.log` — and
+`worktrees/lane-N/`.
 
 ## Design notes
 
 - **Why processes, not threads.** A lane is a whole evo — its own journal,
   context, extensions, crash domain — so a lane that wedges or crashes cannot
   take the coordinator or another lane with it, and everything evo already
-  guarantees (supervision, resume, the journal as truth) holds per lane for
-  free. The price is a process per lane, which is cheap next to the model.
+  guarantees (resume, the journal as truth) holds per lane for free. The price
+  is a process per lane, which is cheap next to the model — and the supervisor
+  is the coordinator, which is the one thing that knows what the lane was doing.
 - **Why only HTTP.** The coordinator uses the same API a person or another
   program would. Nothing about a lane is private to the swarm, so a lane can
-  be inspected with curl (its `url` and `token` files), and serve's API is
-  proven by a second real client.
+  be inspected with curl (its ready file names its `url` and `token`), and
+  serve's API is proven by a second real client.
 - **Why in-lanes binds its variables.** Code for a lane runs in the lane, so
   `in-lanes` is honest about it: a macro that records its body for the lanes,
   not a function that pretends to run here. The lane's number and the lane
@@ -318,14 +383,18 @@ Files: `~/.evo/swarm/<swarm-id>/` holds each lane's `lane-N/` directory
   drives the coordinator's TUI through a pseudo-terminal, against the stub
   Messages endpoint scripting coordinator and lanes: lanes start and
   authenticate, each runs both swarm.lisp files' `in-lanes` forms and gets its
-  baseline with no secret in any journal, delegation, a report waking the idle coordinator, interrupt and re-steer, a
-  bare interrupt, a goal closed by the report that delivers it, an
-  eval reaching one lane only, a worktree lane writing in its worktree, a
-  killed lane restarting with the coordinator told, quit stopping every lane,
-  and `--resume` restoring it all. `make swarm-serve-test`
-  (`tests/swarm-serve-e2e.py`) drives `evo-swarm serve` over HTTP only: the
-  coordinator answering serve's unchanged protocol, a prompt delegated to a
-  lane, `/lanes` and the `lane-state` events tracking that lane working and
-  then idle, a lane's transcript and live events read and resumed, no lane
-  token or URL over HTTP, `/shutdown` stopping every lane, and `--resume`
-  restoring the swarm.
+  baseline with no secret in any journal, delegation, a report waking the idle
+  coordinator, interrupt and re-steer, a bare interrupt, a goal closed by the
+  report that delivers it, an eval reaching one lane only, a worktree lane
+  writing in its worktree, a killed lane restarting with the coordinator told,
+  quit stopping every lane, and `--resume` restoring it all.
+  `make swarm-serve-test` (`tests/swarm-serve-e2e.py`) drives `evo-swarm serve`
+  over HTTP only, through one `/stream` subscription: the coordinator answering
+  serve's protocol, the `swarm` and `lane:N` topics with one row and one item
+  stream per lane, a delegated task streaming on `lane:1` while the swarm topic
+  says `busy` and then `waiting_on_lanes`, a lane whose process is killed
+  restarting with its topic reset and the coordinator told as a `lane_event`
+  item, `run.interrupt` with scope `swarm` stopping the coordinator and every
+  lane and leaving a `human_action` item, a lane's report arriving once as a
+  `lane_report` item, no lane token or URL over HTTP, `server.shutdown`
+  stopping every lane, and `--resume` restoring the swarm.

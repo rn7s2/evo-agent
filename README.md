@@ -470,11 +470,12 @@ note and any tool limit:
   (load "~/.evo/extensions/020-claude-oauth-provider.lisp"))
 ```
 
-(see [docs/examples/swarm.lisp](docs/examples/swarm.lisp)). Lanes
-are supervised (a crash restarts and resumes them, and the coordinator is
-told); quitting stops them all; `evo-swarm --resume` restores coordinator and
-lanes from the coordinator's journal. Watch lanes read-only with the status
-line, `/lanes` and `/lane N`.
+(see [docs/examples/swarm.lisp](docs/examples/swarm.lisp)). A lane runs with no
+supervisor of its own — the coordinator is what supervises it, restarting it on
+its exact session when its process dies, and telling itself: a lane cannot
+outlive the swarm that drives it. Quitting stops them all; `evo-swarm --resume`
+restores coordinator and lanes from the coordinator's journal. Watch lanes
+read-only with the status line, `/lanes` and `/lane N`.
 
 `evo-swarm serve` runs the same swarm headless, on
 [serve's protocol](docs/serve.md): `/health` names it `evo-swarm`, the
@@ -482,9 +483,14 @@ coordinator is driven exactly as `evo-agent serve` drives a session, and the
 lanes are **topics** — `swarm` (workers, what each lane is doing, restarts,
 worktrees, lane models) and one `lane:N` per lane, mirrored from that lane's
 own op stream, so `GET /snapshot?topics=swarm,lane:*` and
-`GET /stream?topics=lane:*` are all the lane panels need. Those topics are
-read-only, like the TUI's view: lane control stays the coordinator's, and lane
-tokens and URLs are never handed out. `server.shutdown` stops every lane and
+`GET /stream?topics=lane:*` are all the lane panels need. `GET /catalog`
+carries the lanes half of serve's program seam, so a client offers the models a
+lane can run before one has booted. Those topics are read-only, like the TUI's
+view: lane control stays the coordinator's, and lane tokens and URLs are never
+handed out. `run.interrupt` takes the two extra scopes `lane` and `swarm` —
+stopping a lane, or the coordinator and every lane — and tells the coordinator
+a person did it, as an after-run message whose origin makes it a `human_action`
+item of its own `session` topic. `server.shutdown` stops every lane and
 `--resume` restores the swarm, as in the TUI.
 
 ### Skills, templates, slash commands
@@ -605,8 +611,9 @@ make tui-test       # expect-driven TUI under a pty: image paste
 ```
 
 `make swarm-serve-test` drives `evo-swarm serve` end to end over HTTP only, no
-backend and no terminal: serve's protocol for the coordinator, `/lanes` and
-the `lane-state` events, a lane's transcript and live events.
+backend and no terminal: serve's protocol for the coordinator, the `swarm` and
+`lane:N` topics through one stream, a delegated task on a lane, a lane killed
+and restarted, `run.interrupt`, and a lane's report arriving once as its item.
 
 `.\make.ps1 test` runs the unit suites on Windows, and CI runs it there too.
 The integration, TUI, serve and swarm end-to-end suites are POSIX-only (shell
