@@ -457,6 +457,13 @@ next run if input queued up meanwhile."
        (setf (server-quit server) t)))))
 
 (defun session-loop (server)
+  "The session thread: drain what arrived, then wait for more.
+
+WAIT-FOR-INBOX blocks on a condition variable — work is announced by POST, never
+noticed by polling — and its timeout is only the heartbeat tick, which is what
+keeps a supervisor from mistaking a long idle stretch for a hang.  Without that
+call this loop is a spin: it would still work, at 100% of a core, which is why
+the e2e measures an idle server's CPU."
   (loop until (server-quit server)
         do (heartbeat-touch)
            (setf (server-loop-tick server) (op-now-ms))
@@ -468,7 +475,13 @@ next run if input queued up meanwhile."
            ;; Sleep until POST announces work; the timeout is only the
            ;; heartbeat tick.  Without this wait the loop spins a core.
            (unless (server-quit server)
-             (wait-for-inbox server 1))))
+             (wait-for-inbox server *heartbeat-tick-seconds*))))
+
+(defparameter *heartbeat-tick-seconds* 1
+  "How long the session thread sleeps between heartbeats.  This is not a poll:
+the loop's work arrives through the inbox's condition variable.  It is the
+supervisor's staleness watchdog that needs the tick — an idle session that
+never woke would look hung after EVO_HANG_TIMEOUT.")
 
 (defun events-callback (server)
   "The agent's events callback: every kernel event into the view, on the
