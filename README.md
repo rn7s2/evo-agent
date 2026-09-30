@@ -145,7 +145,9 @@ point.
   backoff, error normalization on typed codes (not regex), and turn-level retry
   on finished error messages.
 - **Per-message token accounting** — `:input`, `:output`, `:cache-read`,
-  `:cache-write`. No cost tables; prices go stale.
+  `:cache-write`. No cost tables; prices go stale. Folded into a session total,
+  so the status line shows the prompt-cache hit rate (`N% cached`) in every
+  session, extensions or not.
 
 ### Kernel loop + journal
 
@@ -770,7 +772,6 @@ extensions/              vendored user extensions — copied ACTIVE into
   020-claude-oauth-provider.lisp     Claude Pro/Max OAuth provider
   020-kimi-provider.lisp             Kimi Code K3 endpoint + models
   300-latex-math.lisp                LaTeX math rendered as inline images
-  340-cache-stats.lisp               prompt-cache hit rate on the status line
   350-bionic-reader.lisp             bionic reading for agent prose (ASCII)
   360-baby-evo.lisp                  macOS notification when evo goes idle
   400-efficiency.lisp                working/reasoning prompt section

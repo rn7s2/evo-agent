@@ -71,6 +71,7 @@
            #:compaction-entry->messages
            #:add-journal-listener #:remove-journal-listener #:note-journal-append
            #:state-messages #:state-model #:state-model-provider #:state-thinking
+           #:state-cache-stats
            #:state-tools
            #:state-goal #:state-loads #:state-custom #:custom-state
            #:list-sessions #:latest-session #:sessions-directory

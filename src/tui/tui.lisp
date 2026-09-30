@@ -64,6 +64,10 @@ begins, when the clock falls back to STARTED so the wait before turn one
   ;; moves with every message and tool call.
   (context-tokens 0)
   (context-window nil)
+  ;; Prompt-cache totals for this session (EVO.JOURNAL:STATE-CACHE-STATS): the
+  ;; fold's numbers when idle, advanced request by request while a run streams,
+  ;; exactly like CONTEXT-TOKENS above.
+  (cache-stats nil)
   (goal-run-tokens 0)
   (mode :edit)
   select-title select-items select-index select-action
@@ -204,6 +208,7 @@ while the run thread is appending to it."
           (tui-context-window tui) (and model (model-context-window model))
           (tui-context-tokens tui) (evo.kernel:estimate-context-tokens
                                     (evo.journal:state-messages state))
+          (tui-cache-stats tui) (evo.journal:state-cache-stats state)
           (tui-thinking-label tui) (string-downcase
                                     (evo.kernel:effective-thinking
                                      state (agent-thinking-override agent))))
@@ -517,7 +522,18 @@ the activity line has one row."
      (let ((usage (pget event :usage)))
        (when (and usage (plusp (usage-total-tokens usage)))
          (setf (tui-context-tokens tui) (usage-total-tokens usage))
-         (incf (tui-goal-run-tokens tui) (usage-total-tokens usage))))
+         (incf (tui-goal-run-tokens tui) (usage-total-tokens usage))
+         ;; Cache totals move with the request that reported them, the way ctx
+         ;; does; REFRESH-GOAL re-derives them from the fold at the run's end,
+         ;; so this never drifts.
+         (let ((stats (tui-cache-stats tui)))
+           (setf (tui-cache-stats tui)
+                 (list :input (+ (or (getf stats :input) 0)
+                                 (or (pget usage :input) 0))
+                       :cache-read (+ (or (getf stats :cache-read) 0)
+                                      (or (pget usage :cache-read) 0))
+                       :cache-write (+ (or (getf stats :cache-write) 0)
+                                       (or (pget usage :cache-write) 0)))))))
      (let ((err (pget event :error)))
        (when err (scroll tui (red (format nil "✗ ~a" err))))))
     (:todo-changed
@@ -634,6 +650,7 @@ happens constantly, and the run thread is appending to that journal."
         :thinking (tui-thinking-label tui)
         :context-tokens (tui-context-tokens tui)
         :context-window (tui-context-window tui)
+        :cache-stats (tui-cache-stats tui)
         :goal (tui-goal tui)
         :goal-run-tokens (tui-goal-run-tokens tui)
         :jobs (running-jobs-summary)))

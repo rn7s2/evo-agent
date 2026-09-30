@@ -385,7 +385,8 @@ Claim a piece of the line:
 
 The function is called on **every repaint** (and on every view refresh) with a
 context plist — `:model-label`, `:thinking`, `:context-tokens`,
-`:context-window`, `:goal`, `:goal-run-tokens`, `:jobs`, `:status` — and returns
+`:context-window`, `:cache-stats`, `:goal`, `:goal-run-tokens`, `:jobs`,
+`:status` — and returns
 a **plain** display string, or `nil` to show nothing this frame. Styling is
 the frontend's business: declare a `:style` (`:muted`, `:accent`, `:error`,
 `:success`, `:warning`) and the TUI paints it in the terminal's colours while a
@@ -399,8 +400,9 @@ segment that signals is skipped rather than taking the whole line down.
 `:order` counts **inward from that side's edge** — on the left, ascending order
 runs left-to-right; on the right, ascending order runs right-to-left. So the
 sentence is the same on both sides: a lower order sits closer to my edge. The
-core registers `:model` 100, `:thinking` 200, `:context` 300, `:goal` 400 on the
-left, which leaves room to slot in on either side of them. Re-registering an
+core registers `:model` 100, `:thinking` 200, `:context` 300, `:cache-stats` 350
+and `:goal` 400 on the left, which leaves room to slot in on either side of
+them. Re-registering an
 existing name replaces it, so reloading an extension is idempotent, and a
 segment registered while your file loads belongs to its generation: `/reload`
 withdraws it before the file runs again, so deleting the file takes the

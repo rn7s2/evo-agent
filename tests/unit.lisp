@@ -9284,6 +9284,97 @@ entry keeps it (CONTRACT §3)."
                     (not (find "view-boom" after :key (lambda (c) (pget c :name))
                                            :test #'equal)))))))
 
+(defun cache-stats-cell (state)
+  "The topic state's \"N% cached\" segment cell, or NIL when it is not there.
+On the wire a cell's name is snake_case (ENUM-STRING), so the core's
+:cache-stats — the same name the shipped extension registers — reads
+\"cache_stats\"."
+  (find "cache_stats" (pget state :segments)
+        :key (lambda (c) (pget c :name)) :test #'equal))
+
+(defun test-cache-stats-segment ()
+  "The prompt-cache hit rate is a CORE segment, folded out of the session's own
+journal.  It used to come from the userspace 340-cache-stats extension alone,
+which is why a swarm lane — `serve --no-userspace` — published no cache chip at
+all; the design wants one for every session."
+  (flet ((assistant (journal input cache-read cache-write)
+           (append-entry journal
+                         (list :type :message
+                               :message (list :role :assistant :stop-reason :stop
+                                              :model "m"
+                                              :usage (list :input input :output 2
+                                                           :cache-read cache-read
+                                                           :cache-write cache-write)
+                                              :content (list (list :type :text
+                                                                   :text "hi")))))))
+    (let ((journal (view-fixture-journal "evo-cache-stats")))
+      ;; No request yet: the chip reads 0%, it does not vanish.
+      (append-entry journal '(:type :message
+                              :message (:role :user
+                                              :content ((:type :text :text "hi")))))
+      (let ((state (evo.view:journal-state journal)))
+        (check "a fresh session still publishes a cache segment"
+               (cache-stats-cell state))
+        (check "a fresh session reads 0% cached"
+               (equal "0% cached" (pget (cache-stats-cell state) :text)))
+        (check "a fresh session's totals are zero"
+               (equal (list :input 0 :cache-read 0 :cache-write 0)
+                      (pget (cache-stats-cell state) :data)))
+        (check "the totals ride on the topic state as well"
+               (equal (list :input 0 :cache-read 0 :cache-write 0)
+                      (pget state :cache-stats))))
+      ;; Two requests: 10 sent + 90 read, then 40 sent + 60 read of 200 total.
+      (assistant journal 10 90 0)
+      (assistant journal 40 60 0)
+      (let* ((state (evo.view:journal-state journal))
+             (cell (cache-stats-cell state)))
+        (check "the rate is cache reads over all input tokens"
+               (equal "75% cached" (pget cell :text)))
+        (check "the segment carries the three totals"
+               (equal (list :input 50 :cache-read 150 :cache-write 0)
+                      (pget cell :data)))
+        (check "the cell names itself, its side and its order"
+               (and (equal "left" (pget cell :side))
+                    (equal 350 (pget cell :order))))
+        (check "state.segments includes it"
+               (find "cache_stats" (pget state :segments)
+                     :key (lambda (c) (pget c :name)) :test #'equal))
+        ;; Cache writes count as input the session sent, not as cache hits.
+        (assistant journal 0 0 100)
+        (check "a cache write is not a hit"
+               (equal "50% cached"
+                      (pget (cache-stats-cell (evo.view:journal-state journal)) :text))))
+      ;; A compaction drops messages from the model's context; the session
+      ;; still sent them, so the totals are the session's and do not rewind.
+      (append-entry journal '(:type :compaction :summary "" :retained-tail #()))
+      (check "compaction does not rewind the session's totals"
+             (equal (list :input 50 :cache-read 150 :cache-write 100)
+                    (pget (cache-stats-cell (evo.view:journal-state journal)) :data)))
+      ;; The live view publishes the same cell the fold does.
+      (let* ((agent (make-agent :journal journal))
+             (view (evo.view:make-view agent)))
+        (check "the live view's state carries the cache segment"
+               (equal "50% cached"
+                      (pget (cache-stats-cell (pget (evo.view:view-snapshot view) :state))
+                            :text))))
+      ;; The TUI's own context shows the same numbers (EVO.TUI:TUI-STATUS-CONTEXT).
+      (let ((evo.tui::*cols* 80)
+            (tui (evo.tui::make-tui)))
+        (setf (evo.tui::tui-cache-stats tui) '(:input 50 :cache-read 150 :cache-write 100))
+        (check "the TUI paints the same chip"
+               (search "50% cached" (evo.tui::status-line tui))))
+      ;; The shipped extension registers this same name: last one wins, so a
+      ;; session with it loaded replaces the core chip instead of doubling it.
+      (let ((evo.view::*status-segments* (copy-list (evo.view:status-segments))))
+        (evo:define-status-segment :cache-stats
+                                   (lambda (ctx) (declare (ignore ctx)) nil)
+                                   :side :left :order 350 :style :muted)
+        (check "re-registering the name replaces the chip, never doubles it"
+               (= 1 (count :cache-stats (evo.view:status-segments)
+                           :key #'evo.view:status-segment-name :test #'equal)))
+        (check "the replacement is what the state publishes"
+               (null (cache-stats-cell (evo.view:journal-state journal))))))))
+
 (defun test-lifecycle ()
   "The launch contract (CONTRACT §1, §8): one ready file a client watches, a
 port chosen once, stdin as parent death, and a restart that resumes the exact
@@ -9602,6 +9693,7 @@ document, per-entry isolation, and never a key."
     (test-view-public-refresh)
     (test-view-hold)
     (test-view-segments)
+    (test-cache-stats-segment)
     (test-tui-compose)
     (test-resume-picker)
     (test-session-ordering)
