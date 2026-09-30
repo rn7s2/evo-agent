@@ -34,7 +34,7 @@
 
 (defpackage :evo.util
   (:use :cl)
-  (:export #:getenv #:env-proxy #:with-proxy #:*request-proxy*
+  (:export #:getenv #:env-proxy #:with-proxy #:*request-proxy* #:wire-boolean
            #:ensure-winhttp-proxy #:iso8601-now #:iso8601-utc
            #:format-local-timestamp #:local-timezone-name
            #:gen-id #:reseed-ids #:pget #:pput #:plist-merge
@@ -201,7 +201,7 @@
    ;; frontend that builds its own topic out of journal entries)
    #:entry->item #:make-pctx #:journal-state #:user-item #:assistant-item
    #:tool-item #:tool-id #:image-wires #:blocks-text #:content-blocks
-   #:truncate-item #:result-wire #:wire-boolean #:goal-entry-event #:queued-ids
+   #:truncate-item #:result-wire #:goal-entry-event #:queued-ids
    #:*thinking-max-chars* #:*result-max-chars*))
 
 ;; Public API for extensions, config (init.lisp), and userspace code.
