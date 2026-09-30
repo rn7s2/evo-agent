@@ -74,7 +74,8 @@ client drives."))
   ;; :output event — what a client's /events stream carries.  A lane's thread
   ;; has no EVO.SERVE:*REPLY* bound (bindings are per-thread), so a notice
   ;; never lands in a command's reply.
-  (evo.command:host-say (serve-view-server view) text style))
+  (evo.command:host-notice (serve-view-server view) text
+                           :severity (case style (:error :error) (:notice :warn) (t :info))))
 
 (defmethod view-repaint ((view serve-view))
   ;; Nothing to redraw: a client reads the lanes with

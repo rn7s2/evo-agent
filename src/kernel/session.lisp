@@ -86,6 +86,13 @@ note carries the facts only."
     (append-entry journal
                   (list :type :custom-message
                         :key "recovery"
+                        ;; Not the person typing: the supervisor's account of
+                        ;; how the last run ended, in its own words.
+                        :origin (list :kind :recovery
+                                      :status (pget recovery :status)
+                                      :code (pget recovery :code)
+                                      :attempt (pget recovery :attempt)
+                                      :reason (pget recovery :reason))
                         :message (list :role :user
                                        :content (list (list :type :text
                                                             :text (recovery-note-text recovery))))))

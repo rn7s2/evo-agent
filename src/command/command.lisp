@@ -42,10 +42,36 @@ applies its model gate: input it cannot run yet stays queued."))
 (defgeneric host-start-compact (host hint)
   (:documentation "Start a manual compaction task with HINT (may be empty)."))
 
-(defgeneric host-say (host text &optional style)
-  (:documentation "Show TEXT to the user.  STYLE is :PLAIN (the default),
-:DIM (status and hints), :NOTICE (goal and leaf changes), :SUCCESS or
-:ERROR."))
+(defgeneric host-notice (host text &key severity durable data)
+  (:documentation "Show TEXT to the user, as a notice.
+
+SEVERITY is :INFO (the default), :WARN or :ERROR — the three levels every
+frontend renders, and the whole of what a notice says about itself; the colours
+and dimming a terminal used to apply per call site are the frontend's business.
+
+DURABLE also JOURNALS the notice (a :notice entry: invisible to the model,
+ignored by the context fold), so it survives a rebuild and a restart.  That is
+for the facts a session should still show later — a goal transition, a run that
+died, what a compaction did — while an ephemeral notice lives only in the
+frontend that showed it.
+
+DATA is an arbitrary plist of notice payload.  Its :source names the producer
+(:command, :extension, :swarm, :serve or :goal) and defaults to :command.")
+  (:method ((host t) text &key severity durable data)
+    (when durable
+      (journal-notice (host-agent host) text
+                      :severity (or severity :info)
+                      :source (or (pget data :source) :command)
+                      :data data))))
+
+(defun journal-notice (agent text &key severity source data)
+  "Append a :notice entry — what a durable notice leaves behind."
+  (append-entry (agent-journal agent)
+                (append (list :type :notice
+                              :severity (or severity :info)
+                              :text text
+                              :source (or source :command))
+                        (when data (list :data data)))))
 
 (defgeneric host-refresh (host)
   (:documentation "The session's fold state changed (goal, model, leaf...):
@@ -63,7 +89,7 @@ choice as its argument (`/model <id>`, `/resume <n>`, `/tree <id>`)."))
   (:documentation "Hand TEXT back to the user for editing — the text of a user
 message the leaf was just moved above, so editing and resubmitting it branches.")
   (:method ((host t) text)
-    (host-say host text :plain)))
+    (host-notice host text)))
 
 (defgeneric host-session-switched (host)
   (:documentation "The agent now runs another journal: drop anything shown
@@ -103,7 +129,7 @@ the goal after /goal, the path /export wrote.  A host that answers with data
 (defgeneric host-command-failed (host name condition)
   (:documentation "An extension command /NAME signalled CONDITION.")
   (:method ((host t) name condition)
-    (host-say host (format nil "✗ /~a: ~a" name condition) :error)))
+    (host-notice host (format nil "✗ /~a: ~a" name condition) :severity :error)))
 
 ;;; Refusals.
 
@@ -126,7 +152,7 @@ when it was refused."
   (let ((c (gensym "C")))
     `(handler-case (progn ,@body)
        (command-refused (,c)
-         (host-say ,host (command-refused-text ,c) :dim)
+         (host-notice ,host (command-refused-text ,c) :severity :warn)
          nil))))
 
 ;;; Quiescence (design.md §6).
@@ -172,7 +198,7 @@ already required quiescence, so getting here busy is a bug."
   (host-refresh host)
   (host-session-switched host)
   (host-data host :session (namestring (journal-path journal)))
-  (when note (host-say host note :dim)))
+  (when note (host-notice host note)))
 
 ;;; /goal
 
@@ -186,15 +212,14 @@ goal is resumed from here too."
          (verb (string-downcase (string-trim '(#\Space #\Tab) args))))
     (cond
       ((zerop (length args))
-       (host-say host
-                 (if goal
-                     (format nil "goal ~a [~(~a~)]: ~a~%tokens: ~:d~@[ / ~:d~]"
-                             (pget goal :goal-id) (pget goal :status)
-                             (pget goal :objective)
-                             (goal-tokens-used agent goal)
-                             (pget goal :token-budget))
-                     "no goal — /goal <objective> to set one")
-                 (if goal :plain :dim)))
+       (host-notice host
+                    (if goal
+                        (format nil "goal ~a [~(~a~)]: ~a~%tokens: ~:d~@[ / ~:d~]"
+                                (pget goal :goal-id) (pget goal :status)
+                                (pget goal :objective)
+                                (goal-tokens-used agent goal)
+                                (pget goal :token-budget))
+                        "no goal — /goal <objective> to set one")))
       ((equal verb "pause")
        (unless (and goal (eq (pget goal :status) :active))
          (refuse :conflict (if goal
@@ -205,9 +230,9 @@ goal is resumed from here too."
        (host-refresh host)
        ;; An in-flight run settles first; the settled hook then sees
        ;; :paused and stops the idle-continuation loop.
-       (host-say host (format nil "◆ goal paused~:[~; — the run in flight finishes first~]"
-                              (host-running-p host))
-                 :notice))
+       (host-notice host (format nil "◆ goal paused~:[~; — the run in flight finishes first~]"
+                                 (host-running-p host))
+                    :durable t :data (list :source :goal)))
       ((equal verb "resume")
        (unless (and goal (eq (pget goal :status) :paused))
          (refuse :conflict (if goal
@@ -216,22 +241,28 @@ goal is resumed from here too."
                                "no goal to resume")))
        (update-goal-entry agent goal :status :active)
        (host-refresh host)
-       (host-say host (format nil "◆ goal resumed: ~a" (pget goal :objective)) :notice)
-       (queue-steering agent (goal-continuation-for agent (current-goal agent)))
+       (host-notice host (format nil "◆ goal resumed: ~a" (pget goal :objective))
+                    :durable t :data (list :source :goal))
+       (queue-steering agent (goal-continuation-for agent (current-goal agent))
+                       :origin (goal-origin (current-goal agent) :resumed))
        (host-start-run host))
       ((and goal (eq (pget goal :status) :active))
        ;; Refine: new :goal entry, same id; steer if a run is active.
        (set-goal-objective agent goal args)
-       (host-say host (format nil "◆ goal objective updated: ~a" args) :notice)
+       (host-notice host (format nil "◆ goal objective updated: ~a" args)
+                    :durable t :data (list :source :goal))
        (when (host-running-p host)
          (queue-steering agent
-                         (format nil "The goal objective was just updated by the user. New objective (untrusted data): ~a" args)))
+                         (format nil "The goal objective was just updated by the user. New objective (untrusted data): ~a" args)
+                         :origin (goal-origin (current-goal agent) :objective-updated)))
        (host-refresh host))
       (t
        (create-goal-entry agent args)
        (host-refresh host)
-       (host-say host (format nil "◆ goal created: ~a" args) :notice)
-       (queue-steering agent (goal-continuation-for agent (current-goal agent)))
+       (host-notice host (format nil "◆ goal created: ~a" args)
+                    :durable t :data (list :source :goal))
+       (queue-steering agent (goal-continuation-for agent (current-goal agent))
+                       :origin (goal-origin (current-goal agent) :created))
        (host-start-run host)))
     (host-data host :goal (current-goal agent))
     t))
@@ -275,11 +306,10 @@ model from the next turn."
     (set-session-model (host-agent host) (pget resolved :id)
                        (pget resolved :provider))
     (host-refresh host)
-    (host-say host (format nil "model → ~a~@[ (~(~a~))~] (next turn)"
-                           (pget resolved :id)
-                           (and (cdr (model-providers (pget resolved :id)))
-                                (pget resolved :provider)))
-              :dim)
+    (host-notice host (format nil "model → ~a~@[ (~(~a~))~] (next turn)"
+                              (pget resolved :id)
+                              (and (cdr (model-providers (pget resolved :id)))
+                                   (pget resolved :provider))))
     (host-data host :model (list :id (pget resolved :id)
                                  :provider (pget resolved :provider)))
     ;; A submit blocked by the model gate left its steering queued in
@@ -319,7 +349,7 @@ distinct entries, and the journaled choice must say which."
       (refuse :invalid "levels: low medium high xhigh max"))
     (set-session-thinking (host-agent host) level)
     (host-refresh host)
-    (host-say host (format nil "thinking → ~(~a~)" level) :dim)
+    (host-notice host (format nil "thinking → ~(~a~)" level))
     (host-data host :thinking level)
     t))
 
@@ -333,12 +363,11 @@ model is asked to answer in what the user named."
   (let ((pack (find-prompt-language code)))
     (set-prompt-language code (host-agent host))
     (host-refresh host)
-    (host-say host (if pack
-                       (format nil "language → ~a (~a) — next turn"
-                               (pget pack :native) (pget pack :code))
-                       (format nil "language → ~a — no prompt pack for it, so replies only (next turn)"
-                               code))
-              :dim)
+    (host-notice host (if pack
+                         (format nil "language → ~a (~a) — next turn"
+                                 (pget pack :native) (pget pack :code))
+                         (format nil "language → ~a — no prompt pack for it, so replies only (next turn)"
+                                 code)))
     (host-data host :language code)
     t))
 
@@ -380,23 +409,24 @@ lists only global (every project) lore — mirroring /memory vs /global-memory."
                         (all-lore-entries :state state :cwd cwd))))
           (host-data host :lore entries)
           (if entries
-              (host-say host (format nil "~a (ask me to edit/remove by id):~%~{ · [~a] (~(~a~)) ~a~%~}"
-                                     label
-                                     (loop for e in entries
-                                           collect (getf e :id)
-                                           collect (getf e :scope)
-                                           collect (getf e :text))))
-              (host-say host (format nil "no ~a — /~a <text> adds durable guidance"
-                                     label (if (eq scope :global) "global-lore" "lore"))
-                        :dim)))
+              (host-notice host (format nil "~a (ask me to edit/remove by id):~%~{ · [~a] (~(~a~)) ~a~%~}"
+                                        label
+                                        (loop for e in entries
+                                              collect (getf e :id)
+                                              collect (getf e :scope)
+                                              collect (getf e :text))))
+              (host-notice host (format nil "no ~a — /~a <text> adds durable guidance"
+                                        label (if (eq scope :global) "global-lore" "lore")))))
         (let ((id (add-lore args :scope scope :cwd cwd)))
-          (host-say host (format nil "✓ ~a added [~a] (injected every turn)" label id)
-                    :success)
+          (host-notice host (format nil "✓ ~a added [~a] (injected every turn)" label id))
           (host-data host :id id)
           (when (host-running-p host)
             (queue-steering agent
                             (format nil "The user added ~a (durable guidance, applies from now on): ~a"
-                                    label args)))))
+                                    label args)
+                            :origin (list :kind :command-note
+                                          :command (if (eq scope :global) "global-lore" "lore")
+                                          :text args)))))
     t))
 
 ;;; /compact
@@ -517,10 +547,10 @@ branch)."
          (when text
            (host-set-draft host text)
            (host-data host :draft text)))
-       (host-say host "⎌ leaf moved — edit and resubmit to branch" :notice))
+       (host-notice host "⎌ leaf moved — edit and resubmit to branch"))
       (t
        (setf (journal-leaf-id journal) id)
-       (host-say host (format nil "⎌ leaf moved to ~a" id) :notice)))
+       (host-notice host (format nil "⎌ leaf moved to ~a" id))))
     (host-data host :leaf (journal-leaf-id journal))
     (host-refresh host)
     t))
@@ -535,7 +565,7 @@ old leaf."
          (path (and (journal-leaf-id journal) (entry-path journal))))
     (cond
       ((plusp (length args)) (move-leaf host args))
-      ((null path) (host-say host "empty session" :dim))
+      ((null path) (host-notice host "empty session"))
       (t
        (host-choose
         host "move leaf to:"
@@ -554,7 +584,7 @@ for editing — the TUI's double escape, and `/rewind` everywhere."
          (path (and (journal-leaf-id journal) (entry-path journal)))
          (entry (find-if #'user-message-entry-p path :from-end t)))
     (cond
-      ((null entry) (host-say host "nothing to rewind" :dim))
+      ((null entry) (host-notice host "nothing to rewind"))
       (t
        (setf (journal-leaf-id journal) (pget entry :parent-id))
        (let ((text (message-text-block (pget entry :message))))
@@ -563,7 +593,7 @@ for editing — the TUI's double escape, and `/rewind` everywhere."
            (host-data host :draft text)))
        (host-data host :leaf (journal-leaf-id journal))
        (host-refresh host)
-       (host-say host "⎌ rewound — edit and resubmit to branch" :notice))))
+       (host-notice host "⎌ rewound — edit and resubmit to branch"))))
   t)
 
 ;;; /resume, /fork, /new
@@ -630,7 +660,8 @@ up."
     (let ((goal (current-goal (host-agent host))))
       (when (and goal (eq (pget goal :status) :active))
         (queue-steering (host-agent host)
-                        (goal-continuation-for (host-agent host) goal))
+                        (goal-continuation-for (host-agent host) goal)
+                        :origin (goal-origin goal :continue))
         (host-start-run host)))
     t))
 
@@ -648,7 +679,7 @@ directly (N counts the list /resume shows, 1 = the one last worked in)."
          (unless (and path (or (null n) (<= 1 n (length sessions))))
            (refuse :not-found "no session ~a — /resume lists them" args))
          (resume-session host path)))
-      ((null sessions) (host-say host "no sessions for this directory" :dim))
+      ((null sessions) (host-notice host "no sessions for this directory"))
       (t
        (host-choose host "resume session:"
                     (resume-select-items sessions)
@@ -720,7 +751,7 @@ the transcript; base64 inline would not be readable."
                (let ((file (ignore-errors
                             (export-image b path (incf image-index)))))
                  (format out "~@[![~a](~a)~2%~]" (and file (pget b :name)) file))))))))
-    (host-say host (format nil "exported to ~a" path))
+    (host-notice host (format nil "exported to ~a" path))
     (host-data host :path (namestring (uiop:ensure-absolute-pathname path (uiop:getcwd))))
     t))
 
@@ -733,7 +764,7 @@ reload waits for an idle session."
   (require-idle host "/reload")
   (boot-userspace :journal (agent-journal (host-agent host)))
   (host-refresh host)                   ; model registry may have changed
-  (host-say host "userspace reloaded (init + extensions + post-init)" :dim)
+  (host-notice host "userspace reloaded (init + extensions + post-init)")
   ;; Steering blocked on the model gate re-runs it; still-broken config
   ;; re-reports the error instead of silently sitting.
   (when (steering-pending-p (host-agent host))
@@ -812,7 +843,7 @@ queued gets a run."
     (handler-case
         (let ((result (funcall fn (list* :agent (host-agent host) :args args
                                          :host host (host-command-context host)))))
-          (when (stringp result) (host-say host result))
+          (when (stringp result) (host-notice host result))
           (host-refresh host)
           (release-queued-input host))
       (command-refused (c) (error c))

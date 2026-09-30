@@ -225,6 +225,10 @@
                           :key (if (eq scope :global)
                                    "global-memory"
                                    "project-memory")
+                          :origin (list :kind :context
+                                        :key (if (eq scope :global)
+                                                 "global-memory"
+                                                 "project-memory"))
                           :agent (pget event :agent))
       t)))
 
@@ -246,7 +250,11 @@
                    (memory-scope-label scope)
                    (if (eq scope :global) "global_memory" "project_memory")
                    args)
-           (pget context :agent))
+           (pget context :agent)
+           nil
+           :origin (list :kind :command-note
+                         :command (if (eq scope :global) "global-memory" "memory")
+                         :text args))
           (format nil "~@(~a~) memory request queued."
                   (memory-scope-label scope))))))
 

@@ -20,7 +20,13 @@
   (pending nil)   ; entries buffered before first flush (reverse order)
   ;; The run thread appends while a frontend folds state: one lock guards
   ;; entries/index/leaf.
-  (lock (bt:make-lock "journal")))
+  (lock (bt:make-lock "journal"))
+  ;; Folded state memoised per leaf id (design G1): reads between two appends
+  ;; are free, and an append extends the parent's state by one entry instead of
+  ;; re-walking the path.  Its own lock, never held with the one above.
+  (fold-cache (make-hash-table :test #'equal)) ; leaf id -> state
+  (fold-order nil)                             ; leaf ids, oldest first
+  (fold-lock (bt:make-lock "journal-fold")))
 
 (defun sessions-directory (&optional (cwd (uiop:getcwd)))
   "Where CWD's sessions live: ~/.evo/sessions/<encoded cwd>/, unless
@@ -38,8 +44,11 @@ evo-swarm lane runs with one, so its journals stay out of the coordinator's
     (format nil "~4,'0d~2,'0d~2,'0dT~2,'0d~2,'0d~2,'0dZ"
             year month day hour min sec)))
 
-(defun make-session-journal (&optional (cwd (uiop:getcwd)))
-  "Create a fresh (not yet on-disk) session journal for CWD."
+(defun make-session-journal (&optional (cwd (uiop:getcwd)) &key (program "evo-agent") swarm-id)
+  "Create a fresh (not yet on-disk) session journal for CWD.  PROGRAM names the
+frontend the session belongs to (\"evo-agent\", \"evo-swarm\", or \"lane\" for a
+swarm lane); SWARM-ID is recorded for a coordinator, so a session list can say
+which swarm a session drove without opening the file."
   (let* ((id (gen-id 16))
          (file (format nil "~a_~a.sexp" (session-file-timestamp) id))
          (path (merge-pathnames file (sessions-directory cwd))))
@@ -47,8 +56,51 @@ evo-swarm lane runs with one, so its journals stay out of the coordinator's
      :path path
      :header (list :type :session :version 1 :id id
                    :cwd (namestring (uiop:ensure-directory-pathname cwd))
+                   :program program
+                   :swarm-id swarm-id
                    :timestamp (iso8601-now))
      :started-p nil)))
+
+(defun set-session-header (journal &rest fields)
+  "Update the session header's FIELDS (a plist).  Returns the new header.
+Two fields are written after session creation: a coordinator records its
+:swarm-id, and a session created before :program existed is stamped with the
+frontend that opened it."
+  (let ((header (copy-list (journal-header journal))))
+    (loop for (k v) on fields by #'cddr
+          do (setf (getf header k) v))
+    (setf (journal-header journal) header)
+    (when (journal-started-p journal)
+      (rewrite-journal-header journal))
+    header))
+
+(defun rewrite-journal-header (journal)
+  "Rewrite line 1 of the on-disk session file with the journal's current
+header.  The header is the one line that is not an append, so it is rewritten
+whole: a temporary file beside it, then a rename.
+
+Done under the journal lock, and form-by-form rather than line-by-line, because
+an entry may contain a string with newlines — copying lines would truncate it —
+and because an append landing between the copy and the rename would be lost."
+  (let* ((path (journal-path journal))
+         (temporary (merge-pathnames
+                     (format nil "~a.header-~a" (file-namestring path) (gen-id))
+                     (uiop:pathname-directory-pathname path))))
+    (bt:with-lock-held ((journal-lock journal))
+      (unwind-protect
+           (progn
+             (with-open-file (out temporary :direction :output
+                                            :external-format :utf-8
+                                            :if-exists :error
+                                            :if-does-not-exist :create)
+               (write-sexpr-line (journal-header journal) out)
+               (with-open-file (in path :direction :input :external-format :utf-8)
+                 (read-sexpr-stream in)         ; the old header
+                 (loop for entry = (read-sexpr-stream in)
+                       until (eq entry :eof)
+                       do (write-sexpr-line entry out))))
+             (uiop:rename-file-overwriting-target temporary path))
+        (when (probe-file temporary) (ignore-errors (delete-file temporary)))))))
 
 (defun journal-add (journal entry)
   (vector-push-extend entry (journal-entries journal))
@@ -92,13 +144,16 @@ evo-swarm lane runs with one, so its journals stay out of the coordinator's
   (and (eq (pget entry :type) :message)
        (eq (pget (pget entry :message) :role) :assistant)))
 
-(defun append-entry (journal plist &key parent-id)
+(defun append-entry (journal plist &key parent-id id)
   "Append PLIST as a new entry at the leaf (or under PARENT-ID: branching).
-Assigns :id/:parent-id/:timestamp.  Returns the completed entry."
+Assigns :parent-id/:timestamp, and an :id unless the caller pre-minted one —
+a frontend that needs to name an entry before it exists (a streaming message,
+a queued input) mints it with GEN-ID and passes it here.  Returns the completed
+entry."
   (bt:with-lock-held ((journal-lock journal))
-    (let* ((id (loop for candidate = (gen-id)
-                     unless (gethash candidate (journal-index journal))
-                       return candidate))
+    (let* ((id (or id (loop for candidate = (gen-id)
+                            unless (gethash candidate (journal-index journal))
+                              return candidate)))
            (entry (append (list :type (pget plist :type)
                                 :id id
                                 :parent-id (or parent-id (journal-leaf-id journal))
@@ -116,6 +171,7 @@ Assigns :id/:parent-id/:timestamp.  Returns the completed entry."
              ;; Nothing is written until the first assistant message exists.
              (when (assistant-message-entry-p entry)
                (flush-pending journal))))
+      (extend-fold-cache journal entry)
       entry)))
 
 (defun find-entry (journal id)
@@ -143,16 +199,33 @@ Assigns :id/:parent-id/:timestamp.  Returns the completed entry."
 
 ;;; State fold: context, model, thinking, tools, goal — everything is a
 ;;; fold over the root→leaf path.  No mutable fields.
+;;;
+;;; The messages are accumulated newest-first and materialised chronologically
+;;; on the first read, so folding one entry onto a previous state is O(1) and
+;;; two states never share a list that either of them mutates.  That is what
+;;; makes the per-leaf cache (below) an extension rather than a rebuild.
 
 (defstruct state
-  (messages nil)   ; list of message plists, chronological
+  (messages-rev nil)   ; newest-first; STATE-MESSAGES reverses a copy of it
+  (messages-cache nil) ; the chronological list, once somebody asked
   model
   model-provider   ; provider keyword disambiguating MODEL, or nil
   thinking
-  tools            ; list of active tool name strings, nil = default set
+  tools            ; list of active tool names, nil = default set
   goal             ; current goal plist or nil
   (loads nil)      ; list of :load entry plists, chronological
   (custom nil))    ; alist key-string -> data (last :custom entry wins)
+
+(defun state-messages (state)
+  "STATE's messages, chronologically.  Computed from the reverse-order
+accumulator on first use, and cached: the fold touches the accumulator only."
+  (or (state-messages-cache state)
+      (setf (state-messages-cache state)
+            (reverse (copy-list (state-messages-rev state))))))
+
+(defun state-push-message (state message)
+  (push message (state-messages-rev state))
+  (setf (state-messages-cache state) nil))
 
 (defun custom-state (state key)
   "Extension state from :custom entries (invisible to the LLM)."
@@ -172,72 +245,116 @@ user message in <summary> tags, then the retained tail."
                            :cache-read 0 :cache-write 0))
         (coerce (or (pget entry :retained-tail) #()) 'list)))
 
-(defun fold-state (journal &optional (leaf-id (journal-leaf-id journal)))
-  (let ((state (make-state))
-        (path (bt:with-lock-held ((journal-lock journal))
-                (and leaf-id (%entry-path journal leaf-id)))))
-    (dolist (entry path)
-      (let ((type (pget entry :type)))
-        (case type
-          (:message
-           (push (pget entry :message) (state-messages state)))
-          (:custom-message
-           ;; Extension-injected content, visible to the LLM.  Tagged with
-           ;; the entry's :key so a transform-context hook can filter it
-           ;; back out when it stops being relevant.
-           (push (if (pget entry :key)
-                     (pput (pget entry :message) :meta (list :key (pget entry :key)))
-                     (pget entry :message))
-                 (state-messages state)))
-          (:custom                      ; state for extensions; invisible to LLM
-           (let ((key (pget entry :key)))
-             (when key
-               (setf (state-custom state)
-                     (cons (cons key (pget entry :data))
-                           (remove key (state-custom state)
-                                   :key #'car :test #'equal))))))
-          (:model-change
-           (setf (state-model state) (pget entry :model)
-                 (state-model-provider state) (pget entry :provider)))
-          (:thinking-change
-           (setf (state-thinking state) (pget entry :thinking)))
-          (:tools-change
-           (setf (state-tools state) (coerce (pget entry :tools) 'list)))
-          (:goal
-           (setf (state-goal state)
-                 (loop for (k v) on entry by #'cddr
-                       unless (member k '(:type :id :parent-id :timestamp))
-                         append (list k v))))
-          (:recover
-           ;; The supervisor's account of how the previous run ended —
-           ;; appended only by the child booting after a restart; the
-           ;; entries themselves are the history.
-           (setf (state-custom state)
-                 (cons (cons "recovery"
-                             (loop for (k v) on entry by #'cddr
-                                   unless (member k '(:type :id :parent-id :timestamp))
-                                     append (list k v)))
-                       (remove "recovery" (state-custom state)
-                               :key #'car :test #'equal))))
-          (:load
-           (setf (state-loads state)
-                 (append (state-loads state) (list entry))))
-          (:compaction
-           ;; Self-contained checkpoint: context rebuild restarts here as
-           ;; [summary, ...retained-tail]; no walk past the compaction.
-           (setf (state-messages state)
-                 (reverse (compaction-entry->messages entry))))
-          (:branch-summary
-           (when (pget entry :summary)
-             (push (list :role :user
-                         :content (list (list :type :text
-                                              :text (format nil "<abandoned-branch-summary>~%~a~%</abandoned-branch-summary>"
-                                                            (pget entry :summary)))))
-                   (state-messages state))))
-          (:label)
-          (t nil))))
-    (setf (state-messages state) (nreverse (state-messages state)))
+(defun fold-entry (state entry)
+  "Apply one journal ENTRY to STATE.  The single place entry types are
+interpreted: FOLD-STATE walks a path through it, and APPEND-ENTRY extends a
+cached state with exactly one entry, so the two can never disagree."
+  (case (pget entry :type)
+    (:message
+     (state-push-message state (pget entry :message)))
+    (:custom-message
+     ;; Extension-injected content, visible to the LLM.  Tagged with
+     ;; the entry's :key so a transform-context hook can filter it
+     ;; back out when it stops being relevant.
+     (state-push-message state
+                         (if (pget entry :key)
+                             (pput (pget entry :message) :meta (list :key (pget entry :key)))
+                             (pget entry :message))))
+    (:custom                      ; state for extensions; invisible to LLM
+     (let ((key (pget entry :key)))
+       (when key
+         (setf (state-custom state)
+               (cons (cons key (pget entry :data))
+                     (remove key (state-custom state)
+                             :key #'car :test #'equal))))))
+    (:model-change
+     (setf (state-model state) (pget entry :model)
+           (state-model-provider state) (pget entry :provider)))
+    (:thinking-change
+     (setf (state-thinking state) (pget entry :thinking)))
+    (:tools-change
+     (setf (state-tools state) (coerce (pget entry :tools) 'list)))
+    (:goal
+     (setf (state-goal state)
+           (loop for (k v) on entry by #'cddr
+                 unless (member k '(:type :id :parent-id :timestamp))
+                   append (list k v))))
+    (:recover
+     ;; The supervisor's account of how the previous run ended —
+     ;; appended only by the child booting after a restart; the
+     ;; entries themselves are the history.
+     (setf (state-custom state)
+           (cons (cons "recovery"
+                       (loop for (k v) on entry by #'cddr
+                             unless (member k '(:type :id :parent-id :timestamp))
+                               append (list k v)))
+                 (remove "recovery" (state-custom state)
+                         :key #'car :test #'equal))))
+    (:load
+     (setf (state-loads state)
+           (append (state-loads state) (list entry))))
+    (:compaction
+     ;; Self-contained checkpoint: context rebuild restarts here as
+     ;; [summary, ...retained-tail]; no walk past the compaction.
+     (setf (state-messages-rev state)
+           (reverse (compaction-entry->messages entry))
+           (state-messages-cache state) nil))
+    (:branch-summary
+     (when (pget entry :summary)
+       (state-push-message
+        state
+        (list :role :user
+              :content (list (list :type :text
+                                   :text (format nil "<abandoned-branch-summary>~%~a~%</abandoned-branch-summary>"
+                                                 (pget entry :summary))))))))
+    ;; :label and :notice are journal records only — nothing folds out of them.
+    (:label) (:notice)
+    (t nil))
+  state)
+
+;;; The fold cache, keyed by leaf id.  Two callers want the same answer over and
+;;; over — a frontend repainting its status line, and the context estimate —
+;;; and neither may pay for a walk of the whole path each time (design G1).
+
+(defparameter *fold-cache-size* 16
+  "How many folded states to keep.  One leaf's chain of states shares its list
+structure with its parent's, so keeping a few costs little and evicting one only
+costs a re-fold, never correctness.")
+
+(defun cached-fold (journal leaf-id)
+  (bt:with-lock-held ((journal-fold-lock journal))
+    (gethash leaf-id (journal-fold-cache journal))))
+
+(defun cache-fold (journal leaf-id state)
+  (bt:with-lock-held ((journal-fold-lock journal))
+    (setf (gethash leaf-id (journal-fold-cache journal)) state)
+    (pushnew leaf-id (journal-fold-order journal) :test #'equal)
+    (loop while (> (length (journal-fold-order journal)) *fold-cache-size*)
+          for evicted = (car (last (journal-fold-order journal)))
+          do (remhash evicted (journal-fold-cache journal))
+             (setf (journal-fold-order journal)
+                   (remove evicted (journal-fold-order journal) :test #'equal)))
     state))
+
+(defun extend-fold-cache (journal entry)
+  "Cache the state at JOURNAL's new leaf: ENTRY applied to whatever the parent
+leaf's state was, when that state is still known.  A leaf whose parent is not
+cached is simply left to be folded on demand."
+  (let* ((parent-id (pget entry :parent-id))
+         (parent (or (and parent-id (cached-fold journal parent-id))
+                     (and (null parent-id) (make-state)))))
+    (when parent
+      (cache-fold journal (pget entry :id) (fold-entry (copy-state parent) entry)))))
+
+(defun fold-state (journal &optional (leaf-id (journal-leaf-id journal)))
+  "The session state at LEAF-ID: everything is a fold over the root→leaf path.
+Memoised per leaf id (design G1)."
+  (or (cached-fold journal leaf-id)
+      (let ((state (make-state))
+            (path (bt:with-lock-held ((journal-lock journal))
+                    (and leaf-id (%entry-path journal leaf-id)))))
+        (dolist (entry path) (fold-entry state entry))
+        (cache-fold journal leaf-id state))))
 
 ;;; Fork: copy the root→entry path into a new session file.
 
@@ -307,3 +424,234 @@ you were last in, even if you got there through /resume."
 what a bare `--resume` and a supervisor restart should reopen, even when the
 last thing you did was resume an older session."
   (pget (first (list-sessions cwd)) :path))
+
+;;; The session index (~/.evo/sessions/index.jsonl).
+;;;
+;;; One JSON object per line, last line per id wins.  A session appends its own
+;;; row when it starts, when it switches journals, when its header changes and
+;;; when it ends, which is enough for a list to be useful without making every
+;;; append a file write somewhere else.  `sessions --json` reads the index, and
+;;; a row is therefore allowed to be stale (updated-at and entries especially):
+;;; correctness over precision is the trade, and a rescan rebuilds the whole
+;;; file from the journals on disk.
+
+(defun session-index-path ()
+  "The index every session of this home appends its row to."
+  (merge-pathnames "index.jsonl" (merge-pathnames "sessions/" (evo-home))))
+
+(defun one-line (text &key (limit 80))
+  "TEXT as one line of at most LIMIT characters: a session title is read in a
+list, where a newline or a paragraph is all noise."
+  (let ((collapsed (string-join
+                    " "
+                    (remove "" (uiop:split-string (or text "")
+                                                  :separator '(#\Space #\Tab #\Newline #\Return))
+                            :test #'string=))))
+    (cond ((zerop (length collapsed)) nil)
+          ((<= (length collapsed) limit) collapsed)
+          (t (concatenate 'string (subseq collapsed 0 (1- limit)) "…")))))
+
+(defun message-text-block (message)
+  "The text of MESSAGE's first text block."
+  (pget (find :text (pget message :content) :key (lambda (b) (pget b :type))) :text))
+
+(defun journal-title (journal)
+  "What makes JOURNAL recognisable in a list: the first user text on the
+current leaf path, on one line, at most 80 characters."
+  (one-line
+   (loop for entry in (if (journal-leaf-id journal) (entry-path journal) nil)
+         for message = (and (eq (pget entry :type) :message) (pget entry :message))
+         when (and message (eq (pget message :role) :user))
+           return (message-text-block message))))
+
+(defun journal-entry-count (journal)
+  "How many entries JOURNAL holds — the whole file, compactions included."
+  (length (journal-entries journal)))
+
+(defun iso8601->unix-ms (text)
+  "TEXT (an ISO-8601 UTC stamp) in epoch milliseconds, or NIL."
+  (and (stringp text)
+       (ignore-errors
+        (* 1000 (local-time:timestamp-to-unix (local-time:parse-timestring text))))))
+
+(defun universal->unix-ms (universal)
+  "A CL universal time (seconds since 1900) in epoch milliseconds."
+  (and universal (* 1000 (- universal 2208988800))))
+
+(defun session-record (journal &key updated-at)
+  "JOURNAL's index row: the fields CONTRACT §2 names, snake_case on the wire.
+PROGRAM defaults to \"evo-agent\" for a session written before the header had
+one; SWARM-ID is NIL except for a coordinator."
+  (let ((header (journal-header journal)))
+    (list :id (pget header :id)
+          :path (namestring (journal-path journal))
+          :cwd (pget header :cwd)
+          :program (or (pget header :program) "evo-agent")
+          :swarm-id (pget header :swarm-id)
+          :title (journal-title journal)
+          :created-at (or (iso8601->unix-ms (pget header :timestamp))
+                          (universal->unix-ms (get-universal-time)))
+          :updated-at (or updated-at
+                          (universal->unix-ms (ignore-errors
+                                               (file-write-date (journal-path journal))))
+                          (universal->unix-ms (get-universal-time)))
+          :entries (journal-entry-count journal))))
+
+(defun json-object (plist)
+  "PLIST (keyword keys) as one line of JSON: plist -> object, keyword key ->
+snake_case, NIL -> null.  The index is flat strings and numbers, and the core
+cannot reach serve's encoder (a frontend's), so it carries its own."
+  (com.inuoe.jzon:stringify
+   (let ((object (make-hash-table :test #'equal)))
+     (loop for (key value) on plist by #'cddr
+           do (setf (gethash (substitute #\_ #\- (string-downcase (symbol-name key)))
+                             object)
+                    (cond ((null value) 'null)
+                          ((eq value t) t)
+                          ((stringp value) value)
+                          (t value))))
+     object)))
+
+(defun normalize-index-record (record)
+  "RECORD read from the index with its optional fields nil rather than absent,
+so callers see one shape whichever path produced it."
+  (list :id (pget record :id)
+        :path (pget record :path)
+        :cwd (or (pget record :cwd) "")
+        :program (pget record :program)
+        :swarm-id (pget record :swarm-id)
+        :title (pget record :title)
+        :created-at (pget record :created-at)
+        :updated-at (pget record :updated-at)
+        :entries (or (pget record :entries) 0)))
+
+(defun index-session (journal)
+  "Append JOURNAL's row to the session index.  No-op for a session that has
+nothing on disk yet (the index lists sessions, not intents).  Returns the row."
+  (when (journal-started-p journal)
+    (let ((record (session-record journal)))
+      (handler-case
+          (let ((path (session-index-path)))
+            (ensure-directories-exist path)
+            (with-open-file (out path :direction :output :if-exists :append
+                                      :if-does-not-exist :create
+                                      :external-format :utf-8)
+              (write-string (json-object record) out)
+              (terpri out)))
+        (error (e) (warn "Could not write the session index: ~a" e)))
+      record)))
+
+(defun index-line-record (line)
+  "LINE of the index as a record plist, or NIL when it is not one."
+  (let ((object (ignore-errors (com.inuoe.jzon:parse line))))
+    (when (hash-table-p object)
+      (flet ((field (name) (gethash name object)))
+        (let ((id (field "id")) (path (field "path")))
+          (when (and (stringp id) (stringp path))
+            (list :id id
+                  :path path
+                  :cwd (field "cwd")
+                  :program (field "program")
+                  :swarm-id (field "swarm_id")
+                  :title (field "title")
+                  :created-at (let ((v (field "created_at"))) (and (integerp v) v))
+                  :updated-at (let ((v (field "updated_at"))) (and (integerp v) v))
+                  :entries (let ((v (field "entries"))) (and (integerp v) v)))))))))
+
+(defun read-session-index ()
+  "Every row of the index, last line per id winning, newest first."
+  (let ((path (session-index-path))
+        (rows (make-hash-table :test #'equal))
+        (order nil))
+    (when (probe-file path)
+      (with-open-file (in path :direction :input :external-format :utf-8
+                               :if-does-not-exist nil)
+        (loop for line = (read-line in nil nil)
+              while line
+              for record = (index-line-record (string-trim '(#\Return #\Newline) line))
+              when record
+                do (unless (gethash (pget record :id) rows)
+                     (push (pget record :id) order))
+                   (setf (gethash (pget record :id) rows) record))))
+    (sort (loop for id in order
+                for record = (gethash id rows)
+                when record collect (normalize-index-record record))
+          #'session-record-newer-p)))
+
+(defun session-record-newer-p (a b)
+  "Most recently updated first; the path breaks a tie."
+  (let ((ua (or (pget a :updated-at) 0))
+        (ub (or (pget b :updated-at) 0)))
+    (if (= ua ub)
+        (string> (or (pget a :path) "") (or (pget b :path) ""))
+        (> ua ub))))
+
+(defun scan-session-file (path)
+  "One session file read whole for the index: its header, its entry count and
+its opening prompt.  NIL for a file that is not a session."
+  (handler-case
+      (with-open-file (in path :direction :input :external-format :utf-8)
+        (let ((header (read-sexpr-stream in)))
+          (when (and (consp header) (eq (pget header :type) :session))
+            (let ((entries 0) (title nil))
+              (loop for entry = (read-sexpr-stream in)
+                    until (eq entry :eof)
+                    do (incf entries)
+                       (when (and (null title)
+                                  (eq (pget entry :type) :message)
+                                  (eq (pget (pget entry :message) :role) :user))
+                         (setf title (one-line (message-text-block (pget entry :message))))))
+              (list :id (pget header :id)
+                    :path (namestring (pathname path))
+                    :cwd (pget header :cwd)
+                    :program (or (pget header :program) "evo-agent")
+                    :swarm-id (pget header :swarm-id)
+                    :title title
+                    :created-at (or (iso8601->unix-ms (pget header :timestamp))
+                                    (universal->unix-ms (ignore-errors (file-write-date path))))
+                    :updated-at (universal->unix-ms (ignore-errors (file-write-date path)))
+                    :entries entries)))))
+    (error () nil)))
+
+(defun scan-sessions ()
+  "Rebuild the session list from the journals on disk, newest first.  This is
+what `sessions --rescan` prints and what the index falls back to when it is
+missing — every field comes from the files, so it is always right."
+  (sort (loop for directory in (ignore-errors
+                                (directory (merge-pathnames "sessions/*/" (evo-home))))
+              append (loop for file in (ignore-errors
+                                        (directory (merge-pathnames "*.sexp" directory)))
+                           for record = (scan-session-file file)
+                           when record collect (normalize-index-record record)))
+        #'session-record-newer-p))
+
+(defun rebuild-session-index ()
+  "Rewrite the index from the journals on disk.  Returns what was written."
+  (let ((records (scan-sessions))
+        (path (session-index-path)))
+    (ensure-directories-exist path)
+    (with-open-file (out path :direction :output :if-exists :supersede
+                              :if-does-not-exist :create
+                              :external-format :utf-8)
+      (dolist (record records)
+        (write-string (json-object record) out)
+        (terpri out)))
+    records))
+
+(defun session-list (&key rescan cwd program all)
+  "The sessions the index knows, newest first.  Scanned from the journals when
+the index is missing or RESCAN is true.  CWD (default: the working directory)
+restricts the list to one folder unless ALL; PROGRAM restricts it to one
+frontend (\"evo-agent\", \"evo-swarm\", \"lane\")."
+  (let ((records (if (or rescan (not (probe-file (session-index-path))))
+                     (scan-sessions)
+                     (read-session-index))))
+    (remove-if-not
+     (lambda (record)
+       (and (or all
+                (equal (string-right-trim "/" (or (pget record :cwd) ""))
+                       (string-right-trim
+                        "/" (namestring (uiop:ensure-directory-pathname
+                                         (or cwd (uiop:getcwd)))))))
+            (or (null program) (equal (pget record :program) program))))
+     records)))

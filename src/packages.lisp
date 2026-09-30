@@ -64,12 +64,17 @@
   (:use :cl :evo.util)
   (:export #:journal #:make-session-journal #:open-journal #:journal-path
            #:journal-entries #:journal-leaf-id #:journal-header #:journal-started-p
+           #:set-session-header
            #:append-entry #:find-entry #:entry-path #:fold-state #:fork-session
            #:state-messages #:state-model #:state-model-provider #:state-thinking
            #:state-tools
            #:state-goal #:state-loads #:state-custom #:custom-state
            #:list-sessions #:latest-session #:sessions-directory
-           #:session-updated #:sort-sessions))
+           #:session-updated #:sort-sessions
+           ;; the session index (~/.evo/sessions/index.jsonl)
+           #:session-index-path #:index-session #:read-session-index
+           #:scan-sessions #:rebuild-session-index #:session-list
+           #:journal-title #:journal-entry-count #:json-object))
 
 (defpackage :evo.provider
   (:use :cl :evo.util)
@@ -107,7 +112,7 @@
            #:agent-model-override #:agent-thinking-override
            #:request-abort #:reset-agent-run-control #:with-abort-cleanup
            #:*executing-agent*
-           #:queue-steering #:queue-followup #:emit-event #:steering-pending-p
+           #:queue-steering #:queue-followup #:cancel-queued #:emit-event #:steering-pending-p
            #:agent-pending-work-p #:reset-agent-session-state
            #:heartbeat-touch
            ;; prompt, skills, templates
@@ -140,7 +145,8 @@
            ;; frontend protocol — answered by whichever frontend runs
            #:*frontend* #:frontend-interactive-p #:frontend-request-run
            ;; goal
-           #:current-goal #:goal-continuation-message #:goal-continuation-for
+           #:current-goal #:goal-origin
+           #:goal-continuation-message #:goal-continuation-for
            #:register-goal-tools #:create-goal-entry #:goal-tokens-used
            #:update-goal-entry #:set-goal-objective #:complete-goal
            #:*goal-hold-predicates* #:goal-held-p
@@ -220,7 +226,7 @@
   (:use :cl :evo.util :evo.journal :evo.provider :evo.kernel)
   (:export ;; the host protocol a frontend implements
            #:host-agent #:host-running-p #:host-start-run #:host-start-compact
-           #:host-say #:host-refresh #:host-choose #:host-set-draft
+           #:host-notice #:host-refresh #:host-choose #:host-set-draft
            #:host-session-switched #:host-show-history #:host-submit
            #:host-command-context #:host-interrupt-hint #:host-data
            #:host-command-failed

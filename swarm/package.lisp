@@ -20,6 +20,7 @@
            #:*swarm* #:swarm-lanes #:swarm-id #:swarm-dir
            #:lane-n #:lane-state #:lane-task #:lane-cwd #:lane-worktree
            #:find-lane #:lane-eval #:lane-command #:tell-coordinator
+           #:lane-report-origin #:lane-event-origin
            ;; the frontend seam (view.lisp): where notices, machine events and
            ;; the run itself go.  SWARM-VIEW is the swarm's own slot.
            #:view #:tui-view #:serve-view #:serve-view-server

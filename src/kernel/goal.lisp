@@ -56,6 +56,14 @@ budget), a new :goal entry saying what done now means."
              (incf total (usage-total-tokens
                           (pget (pget entry :message) :usage))))))))
 
+(defun goal-origin (goal event)
+  "The :origin a goal-driver injection carries: which goal, what happened to
+it, and what it says to do.  It is journaled beside the steered message and
+never shown to the model — the model sees the same text it always did."
+  (list :kind :goal :event event
+        :goal-id (pget goal :goal-id)
+        :objective (pget goal :objective)))
+
 ;;; Continuation steering.
 
 (defun goal-budget-line (goal used)
@@ -146,11 +154,13 @@ lane works — the lane's report or finished run is the wake-up.")
            (cond
              ((and budget (>= used budget))
               (update-goal-entry agent goal :status :budget-limited :tokens-used used)
-              (queue-steering agent (goal-wrapup-message goal used))
+              (queue-steering agent (goal-wrapup-message goal used)
+                              :origin (goal-origin goal :wrapup))
               t)
              (t
               (update-goal-entry agent goal :tokens-used used)
-              (queue-steering agent (goal-continuation-for agent goal))
+              (queue-steering agent (goal-continuation-for agent goal)
+                              :origin (goal-origin goal :continue))
               t))))))))
 
 (pushnew 'goal-settled-hook *settled-hooks*)

@@ -422,7 +422,8 @@ prompt without the image the user asked for is worse than not running."
         (cond
           (prompt (queue-steering agent prompt :images images :from-user t))
           ((and goal (eq (pget goal :status) :active))
-           (queue-steering agent (evo.kernel:goal-continuation-for agent goal)))
+           (queue-steering agent (evo.kernel:goal-continuation-for agent goal)
+                           :origin (goal-origin goal :continue)))
           (t (error 'usage-error :text "Nothing to do headless: give -p \"prompt\", --goal, or --resume a session with an active goal"))))
       (let* ((outcome (unwind-protect (run-until-settled agent)
                         ;; The session ends here, whatever the outcome.
