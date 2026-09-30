@@ -187,7 +187,7 @@
    #:view-input-queued #:view-input-cancelled
    ;; re-derive the topic state when the fold moved without an append (a
    ;; setting, a model registry change, a hold) — EVO.SERVE's topic sync
-   #:view-refresh-state
+   #:view-refresh
    ;; a client's half of the protocol: ops -> items + state
    #:apply-op #:apply-ops
    ;; the pieces a projector needs (exported for the unit suite and for a

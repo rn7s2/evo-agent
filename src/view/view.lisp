@@ -185,8 +185,8 @@ item itself, not about fields of one it has never seen."
 (defun refresh-state (view)
   "Recompute the topic state from the journal and the view's own run facts, and
 publish the fields that moved.  The view's own paths call this with the lock
-held; VIEW-REFRESH-STATE is the same thing for a frontend that knows the fold
-moved without an append."
+held; VIEW-REFRESH is the same thing for a frontend that knows the fold moved
+without an append."
   (setf (v-held view) (agent-hold-reason (v-agent view)))
   (let* ((agent (v-agent view))
          (journal (agent-journal agent))
@@ -209,8 +209,8 @@ moved without an append."
                                    unless (equal v (pget old k)) append (list k v))))
     state))
 
-(defun view-refresh-state (view)
-  "Re-derive the topic state and publish what moved.  For a change no append
+(defun view-refresh (view)
+  "Re-derive the topic state and publish what moved: for a change no append
 reports — a setting, the provider registry, a hold — which a frontend knows
 about and the journal does not."
   (bt:with-lock-held ((v-lock view))

@@ -9019,6 +9019,7 @@ entry keeps it (CONTRACT §3)."
     (test-view-retry)
     (test-view-queue)
     (test-view-origin-context)
+    (test-view-public-refresh)
     (test-view-hold)
     (test-view-segments)
     (test-tui-compose)
@@ -9132,3 +9133,24 @@ origin, or both."
                                            (null (getf i :key))))
                                     (coerce items 'list))))
                  (and item (equal "<plain>block</plain>" (getf item :text)))))))))
+
+(defun test-view-public-refresh ()
+  "The public names a frontend wires the view with: an op the fold moved
+without an append is a state patch, not a rebuild."
+  (let* ((journal (view-fixture-journal "evo-view-refresh"))
+         (agent (make-agent :journal journal))
+         (log (make-array 8 :adjustable t :fill-pointer 0))
+         (view (evo.view:make-view agent)))
+    (evo.view:view-attach view (lambda (op) (vector-push-extend op log)))
+    (unwind-protect
+         (progn
+           (set-setting :thinking :xhigh)
+           (evo.view:view-refresh view)
+           (check "a state-only refresh publishes a state patch"
+                  (let ((patch (find "state.patch" (coerce log 'list)
+                                     :key (lambda (op) (pget op :op)) :test #'equal)))
+                    (and patch (equal "xhigh" (pget (pget patch :patch) :thinking)))))
+           (check "and does not pretend the topic moved"
+                  (null (find "topic.reset" (coerce log 'list)
+                              :key (lambda (op) (pget op :op)) :test #'equal))))
+      (reset-settings))))
