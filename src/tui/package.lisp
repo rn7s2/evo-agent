@@ -15,12 +15,11 @@
                 #:resume-summary-text #:resume-select-items
                 #:*resume-summary-max-chars* #:export-image #:template-names)
   (:export #:start-tui #:tui-frontend
-           ;; Status line composition — the supported way for an extension to
-           ;; claim a piece of the bottom line (see docs/extension-api.md).
-           ;; A segment returns styled text; DIM is the muted style the core
-           ;; segments wear.
-           #:add-status-segment #:remove-status-segment #:status-segments
-           #:dim #:short-duration
+           ;; Status line composition.  The REGISTRY is the core's
+           ;; (EVO:DEFINE-STATUS-SEGMENT, src/view/status.lisp), because a GUI
+           ;; renders the same segments; what is here is the terminal's part of
+           ;; it — the muted style the core's segments wear.
+           #:dim
            #:request-repaint #:request-run #:tui-live-p #:post-notice
            ;; Math rendering seam — an extension installs a rasterizer here
            ;; (see extensions/300-latex-math.lisp and docs/extension-api.md).

@@ -607,118 +607,48 @@ the activity line has one row."
     (t nil)))
 
 ;;; Region composition.
-
-(defun fmt-ktokens (n)
-  (format nil "~dk" (round n 1000)))
-
-(defun context-label (tui)
-  (let ((used (tui-context-tokens tui))
-        (window (tui-context-window tui)))
-    (if window
-        (format nil "ctx ~a/~a (~d%)"
-                (fmt-ktokens used) (fmt-ktokens window)
-                (min 100 (round (* 100 used) (max 1 window))))
-        (format nil "ctx ~a" (fmt-ktokens used)))))
-
-(defun goal-label (goal live-tokens)
-  (let ((budget (pget goal :token-budget)))
-    (format nil "goal ~a (~(~a~)) ~a~@[/~a~]"
-            (pget goal :goal-id) (pget goal :status)
-            (fmt-ktokens (+ (pget goal :tokens-used 0) live-tokens))
-            (and budget (fmt-ktokens budget)))))
-
-;;; Status segments.
 ;;;
-;;; The status line is composed from named segments rather than formatted in
-;;; one place, because more than one party wants a piece of it: the core shows
-;;; the model and context, and extensions want their own indicators.  The
-;;; obvious alternative — everyone wraps STATUS-LINE and appends to the string
-;;; the previous wrapper returned — looks fine until one of those wrappers
-;;; pads to the full terminal width to right-align itself.  Everything the
-;;; outer wrappers append then lands past the right edge and is truncated away
-;;; by DRAW-REGION, silently.  A registry keeps the layout decision in one
-;;; renderer that can see every claim on the line at once.
-;;;
-;;; ORDER counts inward from the segment's own edge: on the left, ascending
-;;; order runs left-to-right; on the right, ascending order runs right-to-left.
-;;; So a segment's order is "how close to my edge do I sit", the same sentence
-;;; on both sides, and the line degrades by dropping from the middle outward.
+;;; The status line is composed from the segments registered in the CORE
+;;; (EVO:DEFINE-STATUS-SEGMENT, src/view/status.lisp): the registry lives there
+;;; because a GUI renders the same list, and it must not be able to drift from
+;;; what the terminal shows.  What stays here is the part that is a terminal's
+;;; business — painting a segment's style, and laying the cells out across the
+;;; width — exactly as the core's own segments (model, thinking, context, goal,
+;;; jobs) are laid out.
 
-(defstruct (status-segment (:constructor %make-status-segment))
-  (name nil :read-only t)
-  (function nil :read-only t)
-  (side :left :read-only t)
-  (order 500 :read-only t))
+(defun status-segment-paint (style text)
+  "TEXT in the frontend's colours for a segment's semantic STYLE."
+  (case style
+    (:muted (dim text))
+    (:accent (cyan text))
+    (:error (red text))
+    (:success (green text))
+    (:warning (yellow text))
+    (t text)))
 
-(defvar *status-segments* nil
-  "Registered status segments, unordered.  Rebound as a whole list on every
-change so the rendering thread never observes a partially updated list.")
-
-(defparameter *status-separator* " · "
-  "Between adjacent segments on the same side.")
-
-(defun add-status-segment (name function &key (side :left) (order 500))
-  "Register FUNCTION as a status-line segment under NAME.
-
-FUNCTION is called with the TUI on every repaint and returns a display string
-— already styled, since the renderer will not restyle it — or NIL to show
-nothing this frame.  It must be cheap and must not block; cache in a poller
-task (EVO:SPAWN-TASK) if the value is expensive, and have that task call
-REQUEST-REPAINT rather than setting TUI-DIRTY, which the TUI thread owns.
-Errors are swallowed: a segment that signals is skipped, it does not take the
-status line down with it.
-
-SIDE is :LEFT or :RIGHT.  ORDER counts inward from that side's edge, so on the
-right a lower ORDER sits closer to the right edge.  Registering an existing
-NAME replaces it, which makes extension reloads idempotent.
-
-A segment an extension file registers while it loads belongs to that file's
-generation, like its hooks: a reload withdraws it before the file runs again,
-so a file that stops registering it — or is deleted — takes it off the line."
-  (check-type name (or symbol string))
-  (unless (member side '(:left :right))
-    (error "status segment ~s: SIDE must be :LEFT or :RIGHT, got ~s" name side))
-  (setf *status-segments*
-        (append (remove name *status-segments*
-                        :key #'status-segment-name :test #'equal)
-                (list (%make-status-segment :name name :function function
-                                            :side side :order order))))
-  (when *extension-owner*
-    (register-extension-disposer (lambda () (remove-status-segment name))))
-  name)
-
-(defun remove-status-segment (name)
-  "Unregister the status segment called NAME."
-  (setf *status-segments*
-        (remove name *status-segments* :key #'status-segment-name :test #'equal))
-  name)
-
-(defun status-segments (&optional side)
-  "Registered segments, optionally only those on SIDE, in visual left-to-right
-order.  Ties on ORDER keep registration order, so the core segments stay put
-when an extension picks the same number."
-  ;; LOOP COLLECT, not REMOVE-IF-NOT: REMOVE and friends are permitted to share
-  ;; structure with their input, and STABLE-SORT and NREVERSE below are
-  ;; destructive — a shared tail would let a repaint scramble the registry.
-  (let* ((all (loop for segment in *status-segments*
-                    when (or (null side) (eq (status-segment-side segment) side))
-                      collect segment))
-         (sorted (stable-sort all #'< :key #'status-segment-order)))
-    ;; Ascending order runs outward from the edge, so the right side's visual
-    ;; sequence is the reverse of its order.
-    (if (eq side :right) (nreverse sorted) sorted)))
+(defun tui-status-context (tui)
+  "What a status segment may render from, as the core registry wants it.  The
+TUI answers from its own cached slots and never folds the journal: a repaint
+happens constantly, and the run thread is appending to that journal."
+  (list :model-label (tui-model-label tui)
+        :thinking (tui-thinking-label tui)
+        :context-tokens (tui-context-tokens tui)
+        :context-window (tui-context-window tui)
+        :goal (tui-goal tui)
+        :goal-run-tokens (tui-goal-run-tokens tui)
+        :jobs (running-jobs-summary)))
 
 (defun status-cells (tui side)
-  "Evaluate SIDE's segments against TUI.  Returns a list of (ORDER . TEXT) in
-visual left-to-right order, skipping segments that render nothing or signal."
-  (loop for segment in (status-segments side)
-        for text = (ignore-errors (funcall (status-segment-function segment) tui))
-        when (and (stringp text) (plusp (length text)))
-          collect (cons (status-segment-order segment) text)))
+  "SIDE's segments, evaluated and painted, as (ORDER . TEXT) in visual
+left-to-right order."
+  (loop for cell in (evo.view:status-segments-live (tui-status-context tui) side)
+        collect (cons (pget cell :order)
+                      (status-segment-paint (pget cell :style) (pget cell :text)))))
 
 (defun join-status-cells (cells)
   (if cells
-      (reduce (lambda (a b) (concatenate 'string a (dim *status-separator*) b))
+      (reduce (lambda (a b) (concatenate 'string a
+                                         (dim evo.view:*status-separator*) b))
               (mapcar #'cdr cells))
       ""))
 
@@ -768,51 +698,6 @@ dropping segments from the middle outward until the line fits WIDTH."
   (compose-status (status-cells tui :left) (status-cells tui :right)
                   (max 10 (1- *cols*))))
 
-;;; The core's own claims on the line.  Registered like anybody else's, so the
-;;; layout has no privileged path through it.
-
-(add-status-segment :model (lambda (tui) (dim (tui-model-label tui)))
-                    :side :left :order 100)
-(add-status-segment :thinking (lambda (tui) (dim (tui-thinking-label tui)))
-                    :side :left :order 200)
-(add-status-segment :context (lambda (tui) (dim (context-label tui)))
-                    :side :left :order 300)
-(add-status-segment :goal
-                    (lambda (tui)
-                      (let ((goal (tui-goal tui)))
-                        (and goal (dim (goal-label goal (tui-goal-run-tokens tui))))))
-                    :side :left :order 400)
-
-(defun short-duration (seconds)
-  "Compact elapsed clock for the status line: 45s, 3m, 1h2m."
-  (cond ((< seconds 60) (format nil "~ds" seconds))
-        ((< seconds 3600) (format nil "~dm" (floor seconds 60)))
-        (t (multiple-value-bind (h rest) (floor seconds 3600)
-             (format nil "~dh~dm" h (floor rest 60))))))
-
-(defun jobs-status-segment ()
-  "The ▷ background-jobs cell, or NIL when no job is running.  Sits on the
-inner right of the status line (order 200, inward of the model-load cell)."
-  (let ((summary (running-jobs-summary)))
-    (when summary
-      (let* ((n (getf summary :count))
-             (elapsed (max 0 (- (get-universal-time) (getf summary :since))))
-             (clock (short-duration elapsed)))
-        (dim (if (> n 1)
-                 (format nil "▷ ~d jobs · ~a" n clock)
-                 (let* ((cmd (or (getf summary :command) ""))
-                        (line (or (first (uiop:split-string
-                                          cmd :separator '(#\Newline)))
-                                  ""))
-                        (short (if (> (length line) 24)
-                                   (concatenate 'string (subseq line 0 23) "…")
-                                   line)))
-                   (format nil "▷ ~a · ~a" short clock))))))))
-
-(add-status-segment :jobs (lambda (tui) (declare (ignore tui))
-                            (jobs-status-segment))
-                    :side :right :order 200)
-
 (defparameter *working-frames* "|/-\\"
   "Rotating slash while the agent is executing.")
 (defparameter *thinking-frames* "✢✳✶✻✽✻✶✳"
@@ -830,7 +715,7 @@ turns that number says nothing about whether the thing in front of it is
 stuck."
   (let ((task (tui-task tui)))
     (and task
-         (short-duration (max 0 (- (get-universal-time)
+         (evo.view:short-duration (max 0 (- (get-universal-time)
                                    (or (tui-task-step-started task)
                                        (tui-task-started task))))))))
 

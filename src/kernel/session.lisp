@@ -144,6 +144,47 @@ frontend cannot start runs for off-thread input.  Safe from any thread.")
     (declare (ignore text))
     nil))
 
+;;; Holds — why a settled agent is not idle.
+;;;
+;;; A hold is not a task and not a pause: nothing is running, but the agent is
+;;; not free to take new work either.  A swarm coordinator whose lanes are
+;;; working is exactly this — it has settled, and it must not be shown as idle,
+;;; because a person looking at it would think it had stopped.  The holder owns
+;;; the answer; everyone rendering the session's status asks for it.
+
+(in-package :evo.kernel)
+
+(defvar *hold-predicates* nil
+  "Functions (agent) -> a short reason string while the agent is held, or NIL.")
+
+(defun register-hold-predicate (fn)
+  "Register FN as a hold predicate: (lambda (agent) reason-string-or-nil).
+Registering the same function twice is a no-op; it returns FN."
+  (setf *hold-predicates* (append (remove fn *hold-predicates*) (list fn)))
+  fn)
+
+(defun unregister-hold-predicate (fn)
+  "Withdraw FN from the hold predicates."
+  (setf *hold-predicates* (remove fn *hold-predicates*))
+  fn)
+
+(defun agent-hold-reason (agent)
+  "The first reason AGENT is held, or NIL when it is free.  A predicate that
+signals is skipped (and named), never allowed to take a status read down."
+  (loop for fn in *hold-predicates*
+        for reason = (handler-case (funcall fn agent)
+                       (error (e)
+                         (warn "Hold predicate failed: ~a" e)
+                         nil))
+        when reason return reason))
+
+(defun note-hold-changed (agent)
+  "Announce that AGENT's hold may have started or ended, so every reader of its
+status re-reads it.  The holder calls this on each transition — it costs
+nothing when nobody is watching."
+  (run-hooks :hold-changed (list :agent agent))
+  t)
+
 (in-package :evo)
 
 (defun frontend-interactive-p ()

@@ -66,7 +66,7 @@
            #:journal-entries #:journal-leaf-id #:journal-header #:journal-started-p
            #:set-session-header
            #:append-entry #:find-entry #:entry-path #:fold-state #:fork-session
-           #:compaction-entry->messages
+           #:add-journal-listener #:remove-journal-listener #:note-journal-append
            #:state-messages #:state-model #:state-model-provider #:state-thinking
            #:state-tools
            #:state-goal #:state-loads #:state-custom #:custom-state
@@ -157,8 +157,41 @@
            #:compact-now #:compaction-needed-p #:estimate-context-tokens
            #:count-input-items
            #:overflow-error-p #:select-cut
+           ;; holds — why a settled agent is not idle
+           #:register-hold-predicate #:unregister-hold-predicate
+           #:agent-hold-reason #:note-hold-changed
            ;; background jobs
-           #:running-jobs-summary))
+           #:running-jobs-summary #:running-jobs))
+
+;; The display projection of a session (src/view/): the items a frontend draws
+;; and the topic state beside them.  Core, because every frontend reads the
+;; same one — the TUI, the HTTP server, and a coordinator mirroring a lane.
+(defpackage :evo.view
+  (:use :cl :evo.util :evo.journal :evo.provider :evo.kernel :evo.media)
+  (:export
+   ;; the status-segment registry both the TUI status line and a GUI readout
+   ;; render (EVO:DEFINE-STATUS-SEGMENT is the public name).
+   #:status-segment #:status-segment-name #:status-segment-side
+   #:status-segment-order #:status-segment-function #:status-segment-style
+   #:status-segment-data
+   #:define-status-segment #:remove-status-segment #:status-segments
+   #:status-segments-live #:status-segment-text #:status-segment-value
+   #:*status-segments* #:*status-separator*
+   #:model-label-text #:fmt-ktokens #:context-label-text #:goal-label-text
+   #:jobs-label-text #:short-duration #:enum-string #:now-ms #:iso->ms
+   ;; the projection: a pure function of a journal
+   #:project-journal
+   ;; the live view
+   #:view #:make-view #:view-attach #:view-on-event #:view-on-append
+   #:view-reset #:view-snapshot #:view-items-before #:view-item #:view-media
+   #:view-input-queued #:view-input-cancelled
+   #:view-agent #:view-topic
+   ;; the pieces a projector needs (exported for the unit suite and for a
+   ;; frontend that builds its own topic out of journal entries)
+   #:entry->item #:make-pctx #:journal-state #:user-item #:assistant-item
+   #:tool-item #:tool-id #:image-wires #:blocks-text #:content-blocks
+   #:truncate-item #:result-wire #:goal-entry-event #:queued-ids
+   #:*thinking-max-chars* #:*result-max-chars*))
 
 ;; Public API for extensions, config (init.lisp), and userspace code.
 ;;
@@ -168,6 +201,8 @@
 (defpackage :evo
   (:use :cl)
   (:import-from :evo.util #:cat #:normalize-newlines #:crlf-newlines #:with-proxy)
+  (:import-from :evo.view #:define-status-segment #:remove-status-segment
+                #:status-segments)
   (:import-from :evo.provider
                 #:provider-api #:register-api #:find-api #:api-keys
                 #:endpoint-path #:auth-headers #:build-request #:parse-stream
@@ -183,6 +218,12 @@
            #:steer #:inject-context #:custom-state #:set-custom-state
            ;; the frontend this session runs under
            #:frontend-interactive-p #:request-run
+           ;; a hold: why a settled agent is not idle (the swarm holds its
+           ;; coordinator's status while its lanes work)
+           #:register-hold-predicate #:unregister-hold-predicate
+           #:note-hold-changed
+           ;; the status line: one registry, every frontend
+           #:define-status-segment #:remove-status-segment #:status-segments
            ;; provider-API protocol (imported from EVO.PROVIDER above)
            #:provider-api #:register-api #:find-api #:api-keys
            #:endpoint-path #:auth-headers #:build-request #:parse-stream
