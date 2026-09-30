@@ -470,6 +470,10 @@ def first_run(term, stub, home, proj):
     coordinator_quiet(stub)
     term.type('CALL interrupt_lane {"lane":2}')
     stopped = wait_for(lambda: stub.find("coordinator", "[lane 2] run ended (aborted)", t_int), 30)
+    if not stopped:
+        print("DEBUG-STUB", [(r["role"], round(r["time"] - t_int, 2), r["last_user"][:70])
+                             for r in stub.requests() if r["time"] > t_int])
+        print("DEBUG-TUI", [l for l in term.text().splitlines() if "lane 2" in l][-8:])
     check("interrupt_lane alone stops the lane", stopped)
     check("...and leaves it idle, given nothing new",
           lanes[1].state()["status"] == "idle", lanes[1].state()["status"])

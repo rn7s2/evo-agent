@@ -117,8 +117,13 @@ SECONDS."
 (defun interrupt-lane (lane)
   "Stop LANE now.  Returns (values INTERRUPTED IDLE): INTERRUPTED when it was
 running something, IDLE when it has stopped (it already is, if it was not)."
+  ;; The ending this causes is ours: say so before the lane can end the run and
+  ;; its mirror report it, or the report names the ending serve computed — and
+  ;; the coordinator asked for this one.
+  (lane-remember-run-outcome lane "aborted")
   (let* ((result (lane-op lane "run.interrupt" (list :scope "session")))
          (interrupted (getf result :interrupted)))
+    (unless interrupted (lane-take-run-outcome lane))
     (values interrupted (if interrupted (wait-until-idle lane) t))))
 
 (defun tool-interrupt-lane (args)
