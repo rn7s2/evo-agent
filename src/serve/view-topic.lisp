@@ -62,9 +62,7 @@ client is told to re-read the topic."
        (evo.view:view-reset (view-topic-view topic) :leaf-moved))
       ;; Anything else the fold changed (a setting, a model, the provider
       ;; registry) leaves the items alone but can move the state: re-derive it.
-      ;; EVO.VIEW::VIEW-REFRESH-STATE is internal — asked for by name in the
-      ;; report; the exported view interface has no state-only refresh yet.
-      (t (evo.view::view-refresh-state (view-topic-view topic)))))
+      (t (evo.view:view-refresh-state (view-topic-view topic)))))
   t)
 
 (defmethod topic-snapshot ((topic view-topic) &key (items 200))
