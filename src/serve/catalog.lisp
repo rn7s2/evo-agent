@@ -61,6 +61,26 @@ decides for itself when to think."
            (eq (evo.provider:model-thinking-mode model) :adaptive))
        t))
 
+(defun model-readiness (model)
+  "Whether a session could run MODEL now: (values ready reason code).  REASON
+is a short sentence naming what is missing — a provider, its address, or the
+variable its key comes from — and is NIL when nothing is.  CODE is the same
+fact as a machine code (\"provider_unregistered\", \"no_base_url\",
+\"no_api_key\") for a caller that has to branch on it.  Neither ever quotes a
+value out of the configuration."
+  (let ((registration (ignore-errors (provider-registration (pget model :provider)))))
+    (cond
+      ((null registration)
+       (values nil "its provider is not registered" "provider_unregistered"))
+      ((null (getf registration :base-url))
+       (values nil "its provider has no address configured" "no_base_url"))
+      ((and (null (getf registration :api-key))
+            (let ((env (getf registration :api-key-env)))
+              (and env (zerop (length (or (getenv env) ""))))))
+       (values nil (format nil "no API key: set ~a" (getf registration :api-key-env))
+               "no_api_key"))
+      (t (values t nil nil)))))
+
 (defun model-status (model)
   "MODEL as a launch-time verdict: (:id :provider :ok :reason)."
   (multiple-value-bind (ready reason) (model-readiness model)
