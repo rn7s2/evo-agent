@@ -84,10 +84,19 @@ class Server:
         self.baby = baby
 
     def start(self, args=(), stdin_pipe=False):
-        env = dict(os.environ, EVO_HOME=os.path.join(self.work, "home"),
-                   EVO_NO_SUPERVISOR="1")
-        for var in ("EVO_SERVE_TOKEN", "EVO_SESSIONS_DIR", "ANTHROPIC_API_KEY"):
+        env = dict(os.environ, EVO_HOME=os.path.join(self.work, "home"))
+        # A test's child must inherit nothing about who ran the test.  The
+        # supervisor's own markers are the dangerous ones: a child that thinks
+        # it is a supervised child of somebody else, watching somebody else's
+        # pid, in somebody else's sessions directory, with somebody else's
+        # token.  Only what this test made, and the flags it passes.
+        for var in ("EVO_SERVE_TOKEN", "EVO_SESSIONS_DIR", "ANTHROPIC_API_KEY",
+                    "EVO_SUPERVISED_CHILD", "EVO_HEARTBEAT_FILE",
+                    "EVO_SERVE_WATCH_PID", "EVO_RECOVERY", "EVO_PID",
+                    "EVO_NO_SUPERVISOR"):
             env.pop(var, None)
+        # Set (not inherited): this suite drives the session process itself.
+        env["EVO_NO_SUPERVISOR"] = "1"
         if os.path.exists(self.ready):
             os.remove(self.ready)
         log = open(self.log_path, "a")
@@ -402,6 +411,13 @@ def run_all(server, stub_port, work):
           status == 200 and reply["ok"] and reply["result"]["values"] == [":registered"], reply)
     status, reply, _ = server.op("eval", {"code": "(+ 1 2)"})
     check("eval returns the value", reply["result"]["values"] == ["3"], reply)
+    status, reply, _ = server.op("eval", {"code":
+        "(if (some (function evo.util:getenv)"
+        " '(\"EVO_SUPERVISED_CHILD\" \"EVO_HEARTBEAT_FILE\" \"EVO_SERVE_WATCH_PID\""
+        " \"EVO_SESSIONS_DIR\" \"EVO_SERVE_TOKEN\" \"EVO_RECOVERY\" \"EVO_PID\"))"
+        " :leaked :clean)"})
+    check("the server's environment is this test's, not a supervisor's",
+          (reply.get("result") or {}).get("values") == [":clean"], reply)
     status, reply, _ = server.op("model.set", {"id": "stub-a"})
     check("model.set journals the choice", reply["ok"] and reply["result"]["model"]["id"] == "stub-a",
           reply)
