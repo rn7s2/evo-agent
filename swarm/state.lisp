@@ -49,7 +49,8 @@ tools (on its run thread) and the TUI's status segment all read or write it."
   id dir cwd workers lanes evo-binary agent
   view                  ; where its notices go and how it runs: a VIEW (view.lisp)
   server                ; the coordinator's serve server, or NIL (the TUI)
-  lane-model lane-thinking   ; recorded lane defaults (CONTRACT §1), or NIL
+  lane-model lane-provider   ; what the lanes run (CONTRACT §1, §4.3), or NIL
+  lane-thinking
   (coordinator-busy nil)  ; is the coordinator's session running a task right now
   (lock (bt:make-lock "evo-swarm"))
   (stopping nil)

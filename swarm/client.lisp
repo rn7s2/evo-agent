@@ -37,13 +37,14 @@ none of it."
 (defun lane-token (lane) (getf (lane-ready lane) :token))
 
 (defun lane-url (lane path)
-  "LANE's URL for PATH.  The base is the one its ready file published — the
-only place a lane's port is written down, since a lane now picks its own
-(--port 0) instead of being handed one nothing was listening on yet."
-  (let ((base (getf (lane-ready lane) :url)))
+  "LANE's URL for PATH, from the base its ready file published — the only
+place a lane's port is written down, since a lane picks its own (--port 0)."
+  (let ((base (or (getf (lane-ready lane) :url)
+                  (let ((port (lane-port lane)))
+                    (and port (format nil "http://127.0.0.1:~d/" port))))))
     (unless base
-      (error 'lane-error :lane lane :status nil
-                         :text "its ready file has not been read yet"))
+      (error 'lane-error :lane lane :code "not_ready"
+                         :text "the lane has not written its ready file yet"))
     (format nil "~a~a" (string-right-trim "/" base) path)))
 
 (defun lane-headers (lane)

@@ -367,14 +367,13 @@ coordinator's models as well as the swarm's own settings."
   (let* ((agent evo:*agent*)
          (state (and agent (fold-state (agent-journal agent))))
          (configured (swarm-lane-model swarm))
-         (configured-thinking (swarm-lane-thinking swarm))
-         (model-id (or (getf configured :id)
+         (configured-provider (swarm-lane-provider swarm))
+         (model-id (or configured
                        (and state (ignore-errors (effective-model-id state agent)))))
-         (provider (or (and (getf configured :provider)
-                            (provider-key-for (getf configured :provider)))
+         (provider (or (and configured-provider
+                            (provider-key-for configured-provider))
                        (and model-id (effective-model-provider state model-id))))
-         (thinking (if configured-thinking
-                       (intern (string-upcase configured-thinking) :keyword)
+         (thinking (or (swarm-lane-thinking swarm)
                        (and state (effective-thinking state (agent-thinking-override agent)))))
          (limit (lane-tool-limit lane)))
     (append

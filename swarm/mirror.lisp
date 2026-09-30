@@ -300,12 +300,14 @@ snapshot from a lane that is not there any more."
     (when lane
       (with-swarm-lock ()
         (let ((own (lane-state lane)))
+          ;; The lane's own status is authoritative while its process is
+          ;; there: :down and :stopped are the swarm's word that it is not.
           (setf (lane-state lane)
-                (cond ((member own '(:starting :down :stopped)) own)
+                (cond ((member own '(:down :stopped)) own)
                       ((equal status "running") :working)
                       ((equal status "compacting") :compacting)
                       ((equal status "idle") :idle)
-                      (t own))
+                      (t :starting))
                 (lane-task-started lane) (getf task :started-at)
                 (lane-step-started lane) (getf task :step-started-at)))))))
 

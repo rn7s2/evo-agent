@@ -58,12 +58,12 @@ Config: init.lisp, extensions and post-init.lisp as for evo, then
 settings for the swarm, lane count, tool limits, prompt notes, and
 (evo.swarm:in-lanes ...) — code every lane evaluates.  See docs/swarm.md.")
 
-(defun split-model-id (text)
-  "ID@PROVIDER as a plist (:id, :provider), or ID alone as (:id ID)."
-  (let ((at (position #\@ text)))
-    (if at
-        (list :id (subseq text 0 at) :provider (subseq text (1+ at)))
-        (list :id text))))
+(defun check-think-level (text what)
+  (let ((level (intern (string-upcase (or text "")) :keyword)))
+    (unless (member level +effort-levels+)
+      (error 'evo.cli:usage-error
+             :text (format nil "~a must be one of low|medium|high|xhigh|max" what)))
+    level))
 
 (defun parse-args (argv)
   (let ((opts nil))
@@ -91,20 +91,12 @@ settings for the swarm, lane count, tool limits, prompt notes, and
                       (or (pop argv) (error 'evo.cli:usage-error :text "--model needs an id"))))
                ((string= arg "--lane-model")
                 (setf (getf opts :lane-model)
-                      (split-model-id (or (pop argv)
-                                          (error 'evo.cli:usage-error
-                                                 :text "--lane-model needs an id")))))
-               ((string= arg "--lane-thinking")
-                (let ((level (or (pop argv) "")))
-                  (unless (member level '("off" "low" "medium" "high" "xhigh")
-                                  :test #'equal)
-                    (error 'evo.cli:usage-error
-                           :text "--lane-thinking must be one of off|low|medium|high|xhigh"))
-                  (setf (getf opts :lane-thinking) level)))
-               ((string= arg "--thinking")
-                (setf (getf opts :thinking) (check-think-level (pop argv) "--thinking")))
+                      (or (pop argv)
+                          (error 'evo.cli:usage-error :text "--lane-model needs an id"))))
                ((string= arg "--lane-thinking")
                 (setf (getf opts :lane-thinking) (check-think-level (pop argv) "--lane-thinking")))
+               ((string= arg "--thinking")
+                (setf (getf opts :thinking) (check-think-level (pop argv) "--thinking")))
                ((string= arg "--evo")
                 (setf (getf opts :evo) (or (pop argv) (error 'evo.cli:usage-error :text "--evo needs a path"))))
                ((string= arg "--no-userspace") (setf (getf opts :no-userspace) t))
@@ -134,21 +126,24 @@ settings for the swarm, lane count, tool limits, prompt notes, and
       (unless (getf opts :port)
         (setf (getf opts :port) evo.cli:*serve-default-port*)))
     (when (getf opts :lane-model)
-      ;; ID[@PROVIDER], split once here: the record keeps both halves.
+      ;; ID[@PROVIDER], split once here: the record keeps both halves, and
+      ;; CONTRACT §4.3's config wants them as an object.
       (multiple-value-bind (id provider) (split-model-ref (getf opts :lane-model))
         (setf (getf opts :lane-model) id)
         (when provider (setf (getf opts :lane-provider) provider))))
     opts))
 
 (defun restart-argv (argv)
-  "A restarted coordinator: the swarm's own flags plus the serve flags the
-shared layer keeps — the ready file and the pinned port, and, per CONTRACT §8,
---resume <the exact journal path> from the supervisor's current-session file,
-never a bare --resume typed here.
+  "A restarted coordinator: the flags that describe the swarm and the server,
+plus --resume naming the exact session it was on (CONTRACT §8) and the port it
+bound.
 
---model, --thinking and the lane configuration are session state the journal
-already carries (a /model switch since must not be overridden), so they are
-not re-passed."
+serve's flags are kept — where it listens and where its ready file goes —
+because the child that comes back must open the same door for the clients
+that hold its URL and token.  --model and --thinking are not: the journal
+already carries the session's, and re-passing them would override a /model
+switch made since.  --lane-model and --lane-thinking are kept: they describe
+the swarm, not the session, and an unchanged replay only re-records them."
   (let* ((serve (equal (first argv) "serve"))
          (args (if serve (rest argv) argv))
          (kept (loop while args
@@ -156,19 +151,25 @@ not re-passed."
                      when (member arg '("--workers" "--evo" "--lane-model" "--lane-thinking")
                                  :test #'equal)
                        append (if args (list arg (pop args)) (list arg))
-                     when (member arg '("--no-userspace") :test #'equal)
+                     when (equal arg "--no-userspace")
                        collect arg
                      when (member arg '("--resume" "--model" "--thinking") :test #'equal)
                        do (when (and args (not (string-prefix-p "-" (first args))))
-                            (pop args))))))
+                            (pop args)))))
     (append (when serve '("serve"))
-            (loop while args
-                  for arg = (pop args)
-                  when (member arg '("--workers" "--evo") :test #'equal)
-                    append (list arg (pop args))
-                  when (equal arg "--no-userspace")
-                    collect arg)
-            (when serve (evo.cli:serve-restart-flags (rest argv))))))
+            kept
+            (when serve
+              ;; --host, --port (the one it bound), --ready-file,
+              ;; --allow-remote, --watch-stdin.  --no-userspace is already
+              ;; kept above, so the copy the shared layer also returns is
+              ;; dropped.
+              (loop for fragment in (evo.cli:pin-bound-port
+                                     (evo.cli:serve-restart-flags (rest argv)))
+                    unless (equal fragment "--no-userspace")
+                      collect fragment))
+            ;; The exact session path the child reported; never a bare
+            ;; --resume (which means "newest in this folder").
+            (evo.cli:exact-session-args))))
 
 (defun find-evo-binary (opts)
   "The evo-agent binary lanes run.  A lane is the agent alone — `evo-agent
@@ -256,8 +257,11 @@ frontend; only the TUI gets a status-line segment."
         (setf *swarm* (make-swarm :agent agent :workers workers
                                   :evo-binary evo-binary :record record
                                   :view view :server server))
+        ;; The flags override what a resumed record restored, and are
+        ;; re-recorded: lane configuration is swarm data, not a user file.
         (when (getf opts :lane-model)
-          (setf (swarm-lane-model *swarm*) (getf opts :lane-model)))
+          (setf (swarm-lane-model *swarm*) (getf opts :lane-model)
+                (swarm-lane-provider *swarm*) (getf opts :lane-provider)))
         (when (getf opts :lane-thinking)
           (setf (swarm-lane-thinking *swarm*) (getf opts :lane-thinking)))
         (ensure-directories-exist (swarm-dir *swarm*))
