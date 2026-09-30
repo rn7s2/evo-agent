@@ -1022,6 +1022,16 @@ that the clock would put in the same millisecond."
 or as a plist carrying its origin too."
   (if (stringp entry) entry (getf entry :text)))
 
+(defclass recording-session-topic ()
+  ((queued-inputs :initform nil :accessor recorded-queued))
+  (:documentation "A session topic that records what a program queues into it."))
+
+(defmethod evo.serve:topic-provider-queued-input ((topic recording-session-topic)
+                                                  id text images queue)
+  "What serve does with a queued input: the client's transcript gets a row."
+  (declare (ignore images))
+  (push (list id text queue) (recorded-queued topic)))
+
 (defun test-interrupt ()
   "The one human action on lanes (CONTRACT §5.5, design §7.4): run.interrupt
 with scope lane or swarm, mediated through serve's hook."
@@ -1029,9 +1039,14 @@ with scope lane or swarm, mediated through serve's hook."
          (evo.kernel:*frontend* nil)
          (*swarm* (test-swarm :agent agent :workers 2))
          (server (evo.serve:make-server :port 0 :token "t"))
+         (session-topic nil)
          (saved (symbol-function 'evo.swarm::lane-op))
          (ops nil) (interrupted t))
     (setf (evo.swarm::swarm-server *swarm*) server)
+    ;; The session topic a client reads: the note has to show up in the
+    ;; coordinator's queue there, not only in its own mailbox.
+    (setf session-topic (make-instance 'recording-session-topic))
+    (evo.serve:register-topic server "session" session-topic)
     (unwind-protect
          (progn
            (setf (symbol-function 'evo.swarm::lane-op)
@@ -1047,6 +1062,24 @@ with scope lane or swarm, mediated through serve's hook."
                   (let ((queued (evo.kernel::agent-followups agent)))
                     (and queued (search "[human] stopped lane 1"
                                         (followup-text (first queued))))))
+           ;; It reaches the coordinator, but it is not a reason to spend a
+           ;; turn now: the note is after-run input, with the origin that
+           ;; says a person's stop caused it (CONTRACT §3).
+           (check "interrupt: ...as after-run input, not as steering now"
+                  (and (first (evo.kernel::agent-followups agent))
+                       (null (evo.kernel::agent-steering agent))))
+           (check "interrupt: ...carrying the human action that caused it"
+                  (equalp '(:kind :human-action :action :interrupt :lanes #(1))
+                          (getf (first (evo.kernel::agent-followups agent)) :origin)))
+           ;; A client reading the session sees the note waiting, as a queued
+           ;; row under the same id the journal will carry (§3).
+           (check "interrupt: ...and shown in the session's queue for a client"
+                  (let ((queued (first (recorded-queued session-topic))))
+                    (and queued
+                         (equal (third queued) "after_run")
+                         (search "[human] stopped lane 1" (second queued))
+                         (equal (first queued)
+                                (getf (first (evo.kernel::agent-followups agent)) :id)))))
            (setf ops nil)
            (check "interrupt: scope swarm stops the coordinator and every lane"
                   (progn (setf (evo.swarm::swarm-coordinator-busy *swarm*) t)

@@ -149,21 +149,36 @@ reports status `waiting` for a settled agent any hold predicate claims
 ;;; dispatches first on the server, so a method that only specialised on the
 ;;; scope would lose to serve's default and never run.
 
-(defun human-interrupt-note (lanes)
+(defun human-interrupt-note-text (lanes)
+  "What the coordinator reads when a human stops LANE work."
+  (format nil "[human] stopped lane~p ~{~d~^, ~} (interrupt).~@[ Lane~p ~{~d~^, ~} will report or settle; the rest keep working.~]"
+          (length lanes) lanes
+          (length lanes) lanes))
+
+(defun human-interrupt-note (server lanes)
   "Tell the coordinator a human stopped lane work: a queued input with a
 :human-action origin (§3), so it hears it at its next turn rather than now —
 the human's stop is not a reason to spend a coordinator turn.  Queued as
 after_run input: delivered when a run next starts, or at the settle of one
-already going."
+already going.
+
+The queue is the coordinator's own transcript, so the note is shown in it at
+once, as a queued row that keeps the id the kernel minted: the same call
+serve's QUEUE-SESSION-INPUT makes for a client's own after-run input.  A
+client reading /snapshot sees why the lanes stopped, and when a run next
+drains the queue the row becomes the journaled message — and the human-action
+item (§3) — under that same id."
   (let ((agent (and *swarm* (swarm-agent *swarm*))))
     (when agent
       (ignore-errors
-        (queue-followup
-         agent
-         (format nil "[human] stopped lane~p ~{~d~^, ~} (interrupt).~@[ Lane~p ~{~d~^, ~} will report or settle; the rest keep working.~]"
-                 (length lanes) lanes
-                 (length lanes) lanes)
-         :origin (list :kind :human-action :action :interrupt :lanes (coerce lanes 'vector)))))))
+        (let ((text (human-interrupt-note-text lanes))
+              (origin (list :kind :human-action :action :interrupt
+                            :lanes (coerce lanes 'vector))))
+          (let ((id (queue-followup agent text :origin origin)))
+            (let ((provider (and server (evo.serve:topic-provider server "session"))))
+              (when provider
+                (evo.serve:topic-provider-queued-input provider id text nil "after_run")))
+            id))))))
 
 (defun interrupt-lane-now (lane)
   "Stop LANE's run through its own run.interrupt.  Returns T when it was
@@ -183,13 +198,12 @@ rather than the failed op this file's own method would raise looking it up."
   "One lane, stopped now; the coordinator is told, queued after its current
 run.  No other lane is touched.  A lane that was not running anything is not
 reported as interrupted."
-  (declare (ignore server))
   (let ((n (and lane (ignore-errors (parse-integer (princ-to-string lane))))))
     (unless (and n (find-lane n))
       (error "no lane ~a" (or lane "given")))
     (let ((lane (find-lane n)))
       (when (interrupt-lane-now lane)
-        (human-interrupt-note (list n))
+        (human-interrupt-note server (list n))
         (list (lane-topic lane))))))
 
 (defmethod evo.serve:interrupt-scope ((server evo.serve::server) (scope (eql :swarm)) lane)
@@ -207,7 +221,7 @@ reported as interrupted."
         (when stopped
           ;; The lanes are stopped; the coordinator is told, after its run.
           (setf stopped (sort stopped #'<))
-          (human-interrupt-note stopped)
+          (human-interrupt-note server stopped)
           (dolist (n stopped)
             (push (format nil "lane:~d" n) interrupted))))
       (nreverse interrupted))))

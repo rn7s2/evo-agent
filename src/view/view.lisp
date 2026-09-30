@@ -306,12 +306,22 @@ so this is the same row, now sent; anything else is a new item."
   (let* ((id (pget entry :id))
          (existing (gethash id (v-index view))))
     (cache-media view entry id)
-    (if existing
-        ;; The entry is authoritative, its timestamp included: a row that
-        ;; waited is dated by when it was journaled, not by when it was typed
-        ;; into a queue (which is the same second, to the millisecond).
-        (patch-item-fields view id :status "sent" :ts (entry-ms entry))
-        (patch-item view (entry->item entry (v-ctx view))))))
+    (cond
+      ((null existing) (patch-item view (entry->item entry (v-ctx view))))
+      ;; A message that names its own kind (§3) is not the user row it waited
+      ;; as: an after-run input a program queued — a human's stop, say — is a
+      ;; human_action item once it is journaled, and a client that re-reads the
+      ;; journal would see that.  The row the client is watching becomes it,
+      ;; rather than staying a plain user row nothing else agrees with.
+      ((pget entry :origin)
+       (patch-item view (or (entry->item entry (v-ctx view))
+                            (user-item id (entry-ms entry)
+                                       :text (message-text (pget entry :message))))))
+      (t
+       ;; The entry is authoritative, its timestamp included: a row that
+       ;; waited is dated by when it was journaled, not by when it was typed
+       ;; into a queue (which is the same second, to the millisecond).
+       (patch-item-fields view id :status "sent" :ts (entry-ms entry))))))
 
 (defun handle-assistant-append (view entry)
   "The message is journaled.  Its id is the one the stream announced, so this

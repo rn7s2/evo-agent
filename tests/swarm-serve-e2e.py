@@ -593,6 +593,19 @@ def run_checks(swarm, stub, home, work, proj):
     check("...while the swarm says it is no longer busy",
           wait_for(lambda: not client.topic_state("swarm")["status"].get("busy"), 30)
           is not None)
+    # The coordinator is told a human stopped the lanes — in its own
+    # transcript, as after-run input, so a client sees why they stopped even
+    # though the run that would have read a notice was the one interrupted.
+    note = wait_for(lambda: collector.view.find("human_action", topic="session",
+                                                action="interrupt"), 30)
+    check("...and the human's stop reaches the coordinator's transcript",
+          note is not None, [i for i in collector.view.topics["session"].items
+                             if i.get("kind") == "user"][-3:])
+    check("...as a human_action item naming the lanes that were stopped",
+          note is not None and 1 in (note.get("lanes") or [])
+          and 2 in (note.get("lanes") or []), note)
+    check("...which was queued as after-run input, not steered into a run",
+          note is not None and note.get("queue") == "after_run", note)
 
     collector.stop.set()
 
