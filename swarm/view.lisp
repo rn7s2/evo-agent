@@ -1,14 +1,17 @@
 ;;;; view.lisp — how the coordinator is shown and run: the swarm's frontend
 ;;;; seam.
 ;;;;
-;;;; The swarm needs four things from whatever frontend the coordinator runs
-;;;; under, and nothing else: somewhere to put a notice, a nudge to redraw,
-;;;; somewhere to publish an event only a machine reads, and the call that runs
-;;;; the session until it quits.  Both frontends answer them — the TUI, and
-;;;; `evo serve` for a headless coordinator — so nothing below this file names
-;;;; one: the rest of the swarm reaches the frontend only through SWARM-SAY,
-;;;; SWARM-REPAINT, SWARM-PUBLISH and SWARM-RUN.  That is what keeps the swarm
-;;;; the same program over HTTP as in a terminal.
+;;;; The swarm needs three things from whatever frontend the coordinator runs
+;;;; under, and nothing else: somewhere to put a notice, a nudge to redraw, and
+;;;; the call that runs the session until it quits.  Both frontends answer
+;;;; them — the TUI, and `evo serve` for a headless coordinator — so nothing
+;;;; below this file names one: the rest of the swarm reaches the frontend only
+;;;; through SWARM-SAY, SWARM-REPAINT and SWARM-RUN.
+;;;;
+;;;; What a machine reads no longer travels through here at all: the swarm
+;;;; publishes it as topics (`swarm`, `lane:N`) into the coordinator's own op
+;;;; log (mirror.lisp, topics.lisp), which is what CONTRACT §4.3 and §6 make
+;;;; every client's only source.
 ;;;;
 ;;;; A view is not the kernel's frontend object (EVO.KERNEL:*FRONTEND*): that
 ;;;; one answers "is a human here, and who starts a run for off-thread input",
@@ -28,15 +31,14 @@ instance per swarm, in the SWARM's VIEW slot."))
 (defgeneric view-repaint (view)
   (:documentation "The lanes changed: let VIEW redraw, if it has a screen."))
 
-(defgeneric view-publish (view event)
-  (:documentation "Publish EVENT (a plist with :type) on VIEW's event stream,
-when it has one.  What only a machine reads — lane state — travels this way
-rather than as a notice; a view with no stream ignores it."))
-
 (defgeneric view-run (view agent resumed-p)
   (:documentation "Run AGENT's session under VIEW until it quits, RESUMEed-P
 telling it whether the session was already started.  Returns the process's
 exit code."))
+
+(defun style-severity (style)
+  "The notice severity a command-layer STYLE means (CONTRACT §3)."
+  (if (eq style :error) :error :info))
 
 ;;; The TUI.  Stateless: EVO.TUI's own dynamic default finds the live TUI, so
 ;;; a view made before the terminal comes up still reaches it.
@@ -52,17 +54,12 @@ exit code."))
   (declare (ignore view))
   (evo.tui:request-repaint))
 
-(defmethod view-publish ((view tui-view) event)
-  ;; The TUI has no event stream: its screen is the whole of it.
-  (declare (ignore view event))
-  nil)
-
 (defmethod view-run ((view tui-view) agent resumed-p)
   (declare (ignore view))
   (evo.tui:start-tui agent :resumed-p resumed-p))
 
-;;; serve.  The coordinator is a session on a socket: what it says is an event
-;;; on its log, and running it is serving it.
+;;; serve.  The coordinator is a session on a socket: what it says is a notice
+;;; on its view, and running it is serving it.
 
 (defclass serve-view (view)
   ((server :initarg :server :reader serve-view-server))
@@ -70,24 +67,16 @@ exit code."))
 client drives."))
 
 (defmethod view-say ((view serve-view) text &key (style :dim))
-  ;; Through the command layer's host protocol, which publishes it as an
-  ;; :output event — what a client's /events stream carries.  A lane's thread
-  ;; has no EVO.SERVE:*REPLY* bound (bindings are per-thread), so a notice
-  ;; never lands in a command's reply.
+  ;; Through the command layer's host protocol, which publishes it as a notice
+  ;; the client's stream carries.  A lane's thread has no command reply bound
+  ;; (bindings are per-thread), so a notice never lands in a command's reply.
   (evo.command:host-notice (serve-view-server view) text
-                           :severity (case style (:error :error) (:notice :warn) (t :info))))
+                           :severity (style-severity style)))
 
 (defmethod view-repaint ((view serve-view))
-  ;; Nothing to redraw: a client reads the lanes with
-  ;; POST /command {"text": "/lanes"}.
+  ;; Nothing to redraw: a client reads the lanes from the swarm and lane topics.
   (declare (ignore view))
   nil)
-
-(defmethod view-publish ((view serve-view) event)
-  ;; A kernel event reaches a client through the server's topics now, not
-  ;; through an event log: hand it to every provider and let the view publish
-  ;; the ops it projects (CONTRACT §7).
-  (evo.serve:topic-on-event (serve-view-server view) event))
 
 (defmethod view-run ((view serve-view) agent resumed-p)
   (evo.serve:serve (serve-view-server view) agent :resumed-p resumed-p))
@@ -104,13 +93,6 @@ client drives."))
   "The lanes changed: let the coordinator's frontend redraw, if it can."
   (let ((view (and *swarm* (swarm-view *swarm*))))
     (when view (view-repaint view))))
-
-(defun swarm-publish (event)
-  "Publish EVENT (a plist with :type) on the coordinator's frontend, when it
-has an event stream.  A no-op in the TUI, so lane-state code can announce
-itself without asking which frontend is up."
-  (let ((view (and *swarm* (swarm-view *swarm*))))
-    (when view (view-publish view event))))
 
 (defun swarm-run (agent resumed-p)
   "Run the coordinator's session under the swarm's view.  Returns the

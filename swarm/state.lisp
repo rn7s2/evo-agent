@@ -1,58 +1,59 @@
 ;;;; state.lisp — the swarm and its lanes, as data.
 ;;;;
-;;;; One lock guards all of it (design.md §6): a lane's subscriber thread,
-;;;; the coordinator's tools on its run thread, and the TUI's status line
-;;;; each take it for the few slots they touch, and nobody holds it across
-;;;; I/O.
+;;;; One lock guards all of it (design.md §6): a lane's mirror thread, the
+;;;; coordinator's tools on its run thread, and the TUI's status line each take
+;;;; it for the few slots they touch, and nobody holds it across I/O.
+;;;;
+;;;; Times are absolute epoch milliseconds (CONTRACT §4.3): a client renders
+;;;; clocks itself, so the swarm never publishes an age.
 
 (in-package :evo.swarm)
 
+(defun now-ms ()
+  "Wall-clock milliseconds since the Unix epoch — the only clock on the wire."
+  (* 1000 (- (get-universal-time) 2208988800)))
+
 (defstruct (lane (:constructor %make-lane))
-  "One worker lane — a supervised `evo-agent serve` process.  Every slot is guarded
-by the swarm's lock: the lane's subscriber thread, the coordinator's tools
-(on its run thread) and the TUI's status segment all read or write it."
-  n port token
-  process            ; the launch handle: the lane's own supervisor parent
-  input              ; the write end of the lane's stdin: closing it says goodbye
-  pid                ; the serve child's pid, from its ready file and /health
-  ready              ; the lane's ready-file plist: url, token, epoch, session
-  dir                ; <swarm dir>/lane-N/: sessions, ready file, log
-  cwd                ; where the lane works: the swarm's cwd or a worktree
-  worktree branch    ; set while the lane is isolated in a git worktree
-  (state :starting)  ; :starting :idle :working :compacting :down :stopped
-  task               ; the task it was last given
-  task-started step-started
-  (reports nil)      ; report plists, newest first
-  (extra-forms nil)  ; code the coordinator evaluated into it, oldest first
-  (cursor 0)         ; last event id seen from this process
-  subscriber         ; the thread reading its events
+  "One worker lane — an `evo-agent serve` process the coordinator owns.  Every
+slot is guarded by the swarm's lock: the lane's mirror thread, the coordinator's
+tools (on its run thread) and the TUI's status segment all read or write it."
+  n dir                 ; <swarm dir>/lane-N/: ready file, sessions, log
+  cwd                   ; where the lane works: the swarm's cwd or a worktree
+  worktree branch       ; set while the lane is isolated in a git worktree
+  process               ; the launch handle for the lane's process
+  stdin                 ; the pipe that holds it open (--watch-stdin: EOF stops it)
+  ready                 ; its ready-file plist: port, token, epoch, pid, session
+  (state :starting)     ; :starting :idle :working :compacting :down :stopped
+  task task-started step-started
+  (reports 0)           ; how many reports it has sent
+  (extra-forms nil)     ; code the coordinator evaluated into it, oldest first
+  subscriber            ; the thread mirroring its snapshot and stream
+  mirror                ; the lane:N mirror (mirror.lisp)
+  epoch                 ; the process epoch its stream is on
+  session-path          ; its exact current journal path (--resume for a restart)
   (restarts 0)
-  (stopping nil)     ; set while the swarm itself stops or restarts it
-  (watched nil)      ; the TUI is showing its live transcript
-  (partial "")       ; streamed text not yet shown as a whole line
-  goal               ; cached goal plist from the lane's /state, or nil
-  goal-at            ; when GOAL was last refreshed
-  published)         ; (state task goal-status) last published as lane-state
+  (stopping nil)        ; set while the swarm itself stops or restarts it
+  (watched nil)         ; the TUI is showing its live items
+  watch-cursor)         ; the last item the TUI printed for it
 
 (define-condition lane-error (error)
   ((lane :initarg :lane :reader lane-error-lane)
-   (status :initarg :status :reader lane-error-status)
+   (code :initarg :code :initform nil :reader lane-error-code)
    (text :initarg :text :reader lane-error-text))
   (:report (lambda (c s)
-             (format s "lane ~a: ~@[HTTP ~a: ~]~a"
-                     (lane-n (lane-error-lane c)) (lane-error-status c)
+             (format s "lane ~a: ~@[~a: ~]~a"
+                     (lane-n (lane-error-lane c)) (lane-error-code c)
                      (lane-error-text c)))))
 
 (defstruct (swarm (:constructor %make-swarm))
   id dir cwd workers lanes evo-binary agent
-  ;; How lanes are configured — swarm data, not a file: --lane-model and
-  ;; --lane-thinking, recorded in the swarm record so a resumed swarm keeps
-  ;; them.  NIL means "whatever the coordinator runs", which is what a lane
-  ;; with no configuration of its own gets.
-  lane-model lane-provider lane-thinking
-  view               ; where its notices go and how it runs: a VIEW (view.lisp)
+  view                  ; where its notices go and how it runs: a VIEW (view.lisp)
+  server                ; the coordinator's serve server, or NIL (the TUI)
+  lane-model lane-thinking   ; recorded lane defaults (CONTRACT §1), or NIL
+  (coordinator-busy nil)  ; is the coordinator's session running a task right now
   (lock (bt:make-lock "evo-swarm"))
-  (stopping nil))
+  (stopping nil)
+  published)            ; the swarm topic state last published, for diffing
 
 (defvar *swarm* nil "The running swarm.")
 
@@ -62,18 +63,18 @@ by the swarm's lock: the lane's subscriber thread, the coordinator's tools
 (defun find-lane (n &optional (swarm *swarm*))
   (and swarm (find n (swarm-lanes swarm) :key #'lane-n)))
 
+(defun lane-topic (lane)
+  "The topic name a lane is published under (CONTRACT §4.3)."
+  (format nil "lane:~d" (lane-n lane)))
+
 (defun lane-snapshot (lane)
   "LANE's status as a plist, read under the lock."
   (with-swarm-lock ()
-    (let ((now (get-universal-time)))
+    (let ((state (and (lane-mirror lane) (mirror-lane-state (lane-mirror lane)))))
       (list :n (lane-n lane) :state (lane-state lane) :task (lane-task lane)
-            :pid (lane-pid lane) :port (lane-port lane)
+            :pid (getf (lane-ready lane) :pid)
             :worktree (lane-worktree lane) :branch (lane-branch lane)
             :restarts (lane-restarts lane)
-            :step-age (and (lane-step-started lane)
-                           (member (lane-state lane) '(:working :compacting))
-                           (- now (lane-step-started lane)))
-            :task-age (and (lane-task-started lane)
-                           (- now (lane-task-started lane)))
-            :goal (lane-goal lane)
-            :reports (length (lane-reports lane))))))
+            :model (getf state :model)
+            :goal (getf state :goal)
+            :reports (lane-reports lane)))))
