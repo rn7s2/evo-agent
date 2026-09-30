@@ -31,71 +31,70 @@
 (defun check-problem (code message)
   (list :code code :message message))
 
-(defun check-model-entry (ref agent problems)
+(defun check-model-entry (ref agent)
   "One half of `check`: REF (ID[@PROVIDER]) when the launch names a model, else
-the session's own.  Returns {:id :provider :ok :reason} and pushes what is
-wrong into PROBLEMS."
+the session's own.  Returns the entry {:id :provider :ok :reason} as its value
+and the problem it found — a plist, or NIL — as a second one.  Two values, not
+a list the caller pushes onto: PUSH only ever grew this function's own
+binding, so every problem a check found was thrown away by the caller that
+asked for it."
   (multiple-value-bind (model reason code)
       (if ref
           (handler-case (values (find-model-ref ref) nil nil)
             (error () (values nil "no registered model matches it" "model_unresolved")))
           (session-model-entry agent))
     (if (null model)
-        (progn
-          (push (check-problem (or code "model_unresolved")
+        (values (list :id ref :provider nil :ok nil :reason reason)
+                (check-problem (or code "model_unresolved")
                                (format nil "the model ~@[~a ~]the swarm would run is not usable: ~a"
-                                       ref reason))
-                problems)
-          (list :id ref :provider nil :ok nil :reason reason))
+                                       ref reason)))
         (multiple-value-bind (ready why why-code) (evo.serve:model-readiness model)
-          (unless ready
-            (push (check-problem (or why-code "model_unready")
-                                 (format nil "the model ~a cannot run: ~a"
-                                         (getf model :id) why))
-                  problems))
-          (list :id (getf model :id) :provider (getf model :provider)
-                :ok ready :reason why)))))
+          (values (list :id (getf model :id) :provider (getf model :provider)
+                        :ok ready :reason why)
+                  (unless ready
+                    (check-problem (or why-code "model_unready")
+                                   (format nil "the model ~a cannot run: ~a"
+                                           (getf model :id) why))))))))
 
-(defun check-lane-entry (ref agent problems)
+(defun check-lane-entry (ref agent)
   "The models a lane would start with: REF (--lane-model), else the
 coordinator's own — and, either way, whether that model's API is one a lane
-has (evo.serve:*kernel-apis*) before it is asked whether the model is usable."
+has (evo.serve:*kernel-apis*) before it is asked whether the model is usable.
+The entry and the problem, as CHECK-MODEL-ENTRY returns them."
   (multiple-value-bind (model reason code)
       (if ref
           (handler-case (values (find-model-ref ref) nil nil)
             (error () (values nil "no registered model matches it" "lane_model_unresolved")))
           (session-model-entry agent))
     (if (null model)
-        (progn
-          (push (check-problem (or code "lane_model_unresolved")
+        (values (list :id ref :provider nil :ok nil :reason reason)
+                (check-problem (or code "lane_model_unresolved")
                                (format nil "the model the lanes would run ~@[~a ~]is not usable: ~a"
-                                       ref reason))
-                problems)
-          (list :id ref :provider nil :ok nil :reason reason))
+                                       ref reason)))
         (let* ((status (evo.serve:lane-model-status model))
                (ok (getf status :ok))
                (why (getf status :reason)))
-          (unless ok
-            (push (check-problem (if (member (getf model :api) evo.serve:*kernel-apis*)
-                                     "lane_model_unready"
-                                     "lane_api_missing")
-                                 (format nil "a lane cannot run ~a: ~a"
-                                         (getf model :id) why))
-                  problems))
-          (list :id (getf model :id) :provider (getf model :provider)
-                :ok ok :reason why)))))
+          (values (list :id (getf model :id) :provider (getf model :provider)
+                        :ok ok :reason why)
+                  (unless ok
+                    (check-problem
+                     (if (member (getf model :api) evo.serve:*kernel-apis*)
+                         "lane_model_unready"
+                         "lane_api_missing")
+                     (format nil "a lane cannot run ~a: ~a" (getf model :id) why))))))))
 
-(defun check-workers (opts problems)
+(defun check-workers (opts)
+  "How many lanes OPTS asks for, and the problem with that number, if any."
   (let ((n (getf opts :workers)))
     (cond
-      ((null n) (or (let ((setting (setting :swarm-workers)))
-                      (and (integerp setting) setting))
-                    6))
-      ((and (integerp n) (<= 1 n 64)) n)
-      (t (push (check-problem "invalid_workers"
-                              (format nil "--workers must be a number from 1 to 64, got ~a" n))
-               problems)
-         n))))
+      ((null n) (values (or (let ((setting (setting :swarm-workers)))
+                              (and (integerp setting) setting))
+                          6)
+                        nil))
+      ((and (integerp n) (<= 1 n 64)) (values n nil))
+      (t (values n
+                 (check-problem "invalid_workers"
+                                (format nil "--workers must be a number from 1 to 64, got ~a" n)))))))
 
 ;;; The two commands.
 
@@ -126,13 +125,18 @@ computed without running one (EVO.SERVE:CATALOG-PLIST)."
   (install-coordinator nil)
   (multiple-value-bind (agent resumed-p) (evo.cli:setup-agent opts)
     (declare (ignore resumed-p))
-    (let ((problems nil)
-          (model (check-model-entry (getf opts :model) agent problems))
-          (lane (check-lane-entry (getf opts :lane-model) agent problems)))
-      (check-workers opts problems)
-      (let ((ok (null problems)))
-        (write-json-line (list :ok ok
-                               :model model
-                               :lane-model lane
-                               :problems (coerce (reverse problems) 'vector)))
-        (if ok 0 1)))))
+    (let ((problems nil))
+      (multiple-value-bind (model problem) (check-model-entry (getf opts :model) agent)
+        (when problem (push problem problems))
+        (multiple-value-bind (lane lane-problem)
+            (check-lane-entry (getf opts :lane-model) agent)
+          (when lane-problem (push lane-problem problems))
+          (multiple-value-bind (workers workers-problem) (check-workers opts)
+            (declare (ignore workers))
+            (when workers-problem (push workers-problem problems))
+            (let ((ok (null problems)))
+              (write-json-line (list :ok ok
+                                     :model model
+                                     :lane-model lane
+                                     :problems (coerce (reverse problems) 'vector)))
+              (if ok 0 1))))))))
