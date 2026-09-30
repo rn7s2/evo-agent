@@ -466,7 +466,6 @@ goal, and only from the state that move makes sense in."
       (error (e) (op-fail "op_failed" "the extension could not be loaded: ~a" e)))))
 
 (defun op-eval (server args)
-  (declare (ignore server))
   (let ((code (op-arg args :code :required t)))
     (multiple-value-bind (form reason)
         (handler-case
@@ -477,6 +476,12 @@ goal, and only from the state that move makes sense in."
           (serious-condition (e) (values nil (format nil "unreadable code — ~a" e))))
       (when reason (op-fail "invalid_args" "~a" reason))
       (multiple-value-bind (values output condition) (evo.eval:eval-form form)
+        ;; Code a client evaluates changes the fold without appending to it:
+        ;; a setting, a model, a tool, the provider registry.  The state a
+        ;; snapshot answers has to move with it, or a lane initialized by
+        ;; evals reports the model and the thinking level it was launched
+        ;; without until something else happens to journal an entry.
+        (evo.command:host-refresh server)
         (list :value (evo.eval::format-result values output condition)
               :values (mapcar #'evo.eval::print-value values)
               :output output)))))
