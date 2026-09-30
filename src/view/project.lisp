@@ -316,7 +316,8 @@ CTX carries what the walk has to remember between entries."
                          :parent (pctx-assistant ctx))))
            (t nil))))
       (:custom-message
-       (let ((key (pget entry :key)))
+       (let ((key (pget entry :key))
+             (origin (pget entry :origin)))
          (cond
            ((equal key "recovery")
             (let ((recovery (pctx-recover ctx)))
@@ -325,6 +326,9 @@ CTX carries what the walk has to remember between entries."
                     :code (pget recovery :code)
                     :attempt (pget recovery :attempt)
                     :reason (pget recovery :reason))))
+           ;; An injection may carry its own kind (EVO:INJECT-CONTEXT takes an
+           ;; :origin); anything else is a context item keyed by its entry.
+           ((and origin (origin-item entry origin)))
            (t (list :id (pget entry :id) :kind "context" :ts (entry-ms entry)
                     :key key
                     :text (message-text (pget entry :message)))))))

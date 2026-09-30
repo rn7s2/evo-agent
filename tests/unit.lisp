@@ -9018,6 +9018,7 @@ entry keeps it (CONTRACT §3)."
     (test-view-incremental)
     (test-view-retry)
     (test-view-queue)
+    (test-view-origin-context)
     (test-view-hold)
     (test-view-segments)
     (test-tui-compose)
@@ -9102,3 +9103,32 @@ entry keeps it (CONTRACT §3)."
     (test-serve-event-log)
     (format t "~%~d passed, ~d failed~%" *pass* *fail*)
     (if (zerop *fail*) 0 1)))
+
+(defun test-view-origin-context ()
+  "An injected block is a context item, whether it says so with a key, with an
+origin, or both."
+  (let* ((journal (view-fixture-journal "evo-view-ctx"))
+         (agent (make-agent :journal journal)))
+    (evo:inject-context "<ide-context>…</ide-context>" :key "ide-context" :agent agent)
+    (evo:inject-context "<mode>plan</mode>"
+                        :origin (list :kind :context :key "mode" :text "<mode>plan</mode>")
+                        :agent agent)
+    (evo:inject-context "<plain>block</plain>" :agent agent)
+    (multiple-value-bind (items ignored) (evo.view:project-journal journal)
+      (declare (ignore ignored))
+      (flet ((item-with (key)
+               (find key (coerce items 'list)
+                     :key (lambda (i) (getf i :key)) :test #'equal)))
+        (check "a keyed injection is a context item"
+               (let ((item (item-with "ide-context")))
+                 (and item (equal "context" (getf item :kind))
+                      (equal "<ide-context>…</ide-context>" (getf item :text)))))
+        (check "an origin's key and text name the item"
+               (let ((item (item-with "mode")))
+                 (and item (equal "<mode>plan</mode>" (getf item :text)))))
+        (check "an unkeyed injection is still a context item"
+               (let ((item (find-if (lambda (i)
+                                      (and (equal "context" (getf i :kind))
+                                           (null (getf i :key))))
+                                    (coerce items 'list))))
+                 (and item (equal "<plain>block</plain>" (getf item :text)))))))))
