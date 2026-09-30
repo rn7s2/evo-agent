@@ -495,6 +495,18 @@ parsed anywhere."
                   (let ((text (getf (first (evo.kernel::agent-steering agent)) :text)))
                     (and (search "[lane 1] run ended (stop)" text)
                          (not (search "goal:" text))))))
+    ;; A status tick of a run that is still going (its step clock moved) is
+    ;; not an ending: the status has to leave "running".
+    (evo.kernel::drain-steering agent)
+    (check "input: a running lane's status tick is not a run ending"
+           (let ((mirror (evo.swarm::lane-mirror lane)))
+             (evo.swarm::with-swarm-lock () (setf (evo.swarm::mirror-ended-at mirror) -1000000))
+             (evo.swarm::mirror-state-set mirror '(:status "running" :task (:started-at 4000)))
+             (evo.swarm::mirror-note-lane-state mirror)
+             (evo.swarm::mirror-state-set mirror '(:status "running"
+                                                   :task (:started-at 4000 :step-started-at 4100)))
+             (evo.swarm::mirror-note-lane-state mirror)
+             (not (steering-pending-p agent))))
     ;; ...and an idle lane that is still idle says nothing at all.
     (evo.kernel::drain-steering agent)
     (check "input: a lane still idle after a snapshot is not a run ending"

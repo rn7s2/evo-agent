@@ -403,7 +403,11 @@ moving back to idle is the one signal every ending gives."
         ;; not.  The swarm's own record of the lane is not the signal — the
         ;; coordinator sets it optimistically when it delegates, so a lane
         ;; whose run has not started yet would read as having just finished.
-        ((and (equal before "running") (mirror-run-end-is-news-p mirror))
+        ((and (equal before "running")
+              ;; a status tick of the same run (a step, a task clock) is
+              ;; not an ending: the status must have LEFT running.
+              (not (equal status "running"))
+              (mirror-run-end-is-news-p mirror))
          ;; The goal first: a lane that has just delivered its objective ends
          ;; the run that delivered it, and "goal: complete" is the ending the
          ;; coordinator is waiting to hear.
