@@ -459,10 +459,10 @@ parsed anywhere."
                        '(:id "t1" :kind "tool" :name "report" :args (:done "built it")))
     (check "input: a re-patched report is not reported twice"
            (and (not (steering-pending-p agent)) (= 1 (evo.swarm::lane-reports lane))))
-    ;; A finished run.
-    (evo.swarm::mirror-state-set (evo.swarm::lane-mirror lane) '(:status "idle" :goal (:status "complete")))
-    (evo.swarm::mirror-note-item (evo.swarm::lane-mirror lane)
-                       '(:id "r1" :kind "run_outcome" :outcome "stop"))
+    ;; A finished run: the lane moves back to idle, which is the one signal
+    ;; every ending gives — serve appends a run_outcome item only for an
+    ;; ending that went wrong (aborted, error, length).
+    (run-ends lane '(:status "idle" :goal (:status "complete")) nil 1000)
     (check "input: a finished run says which goal status the lane settled with"
            (search "[lane 1] run ended (stop) — goal: complete"
                    (getf (first (evo.kernel::agent-steering agent)) :text)))
@@ -471,23 +471,29 @@ parsed anywhere."
                     :goal-status :complete :severity :info)
                   (getf (first (evo.kernel::agent-steering agent)) :origin)))
     (evo.kernel::drain-steering agent)
-    (evo.swarm::mirror-state-set (evo.swarm::lane-mirror lane) '(:status "idle" :goal (:status "active")))
-    (evo.swarm::mirror-note-item (evo.swarm::lane-mirror lane) '(:id "r2" :kind "run_outcome" :outcome "aborted"))
+    ;; An ending that went wrong left an item naming it.
+    (run-ends lane '(:status "idle" :goal (:status "active"))
+                        '(:id "r2" :kind "run_outcome" :outcome "aborted") 2000)
     (check "input: a stopped lane with an active goal waits to be steered"
-           (search "goal: active, but the lane is idle until steered"
-                   (getf (first (evo.kernel::agent-steering agent)) :text)))
+           (and (search "[lane 1] run ended (aborted)"
+                        (getf (first (evo.kernel::agent-steering agent)) :text))
+                (search "goal: active, but the lane is idle until steered"
+                        (getf (first (evo.kernel::agent-steering agent)) :text))))
     (evo.kernel::drain-steering agent)
     ;; Nothing else is news.
     (evo.swarm::mirror-note-item (evo.swarm::lane-mirror lane) '(:id "a1" :kind "assistant" :text "hi"))
     (check "input: streamed text is not coordinator input"
            (not (steering-pending-p agent)))
     (check "input: a run that simply stopped says no goal it never had"
-           (progn (evo.swarm::mirror-state-set (evo.swarm::lane-mirror lane) '(:status "idle"))
-                  (evo.swarm::mirror-note-item (evo.swarm::lane-mirror lane)
-                                     '(:id "r3" :kind "run_outcome" :outcome "stop"))
+           (progn (run-ends lane '(:status "idle") nil 3000)
                   (let ((text (getf (first (evo.kernel::agent-steering agent)) :text)))
                     (and (search "[lane 1] run ended (stop)" text)
-                         (not (search "goal:" text))))))))
+                         (not (search "goal:" text))))))
+    ;; ...and an idle lane that is still idle says nothing at all.
+    (evo.kernel::drain-steering agent)
+    (check "input: a lane still idle after a snapshot is not a run ending"
+           (progn (evo.swarm::mirror-note-lane-state (evo.swarm::lane-mirror lane))
+                  (not (steering-pending-p agent))))))
 
 ;;; The frontend seam (view.lisp).  What the swarm calls to be seen or run: a
 ;;; notice, a repaint, a machine event, the run itself — each routed to the
@@ -982,6 +988,24 @@ whole state, and every lane transition publishes it."
     (check "topics: ...and holds nobody else"
            (null (evo.swarm::coordinator-hold-reason (fresh-agent))))))
 
+(defun run-ends (lane state &optional item started)
+  "LANE was working since STARTED (epoch ms) and STATE (its own topic's state)
+says it is not any more, with ITEM as the newest item of its topic — how a
+run's ending reaches the swarm.  STARTED is explicit so a test can order runs
+that the clock would put in the same millisecond."
+  (let ((mirror (evo.swarm::lane-mirror lane)))
+    (evo.swarm::with-swarm-lock ()
+      (setf (lane-state lane) :working
+            ;; The run started then: only items from it belong to it.
+            (evo.swarm::lane-task-started lane) started))
+    (evo.swarm::mirror-state-set mirror state)
+    ;; The item goes in as the stream puts it there, so the state moving back
+    ;; to idle finds it (that is what names an ending that went wrong).
+    (when item
+      (evo.swarm::mirror-apply mirror (list :op "item.add"
+                                            :item (append item (list :ts started)))))
+    (evo.swarm::mirror-note-lane-state mirror)))
+
 (defun followup-text (entry)
   "A queued follow-up's text, whether the kernel stores the entry as a string
 or as a plist carrying its origin too."
@@ -1043,6 +1067,44 @@ with scope lane or swarm, mediated through serve's hook."
                   (null (evo.serve:interrupt-scope (evo.serve:make-server :port 0 :token "u")
                                                    :swarm nil))))
       (setf (symbol-function 'evo.swarm::lane-op) saved))))
+
+(defun test-tools ()
+  "What the coordinator's model is told about its lanes (tools.lisp): one line
+per lane, and a refusal it can act on rather than a crash."
+  (let* ((*swarm* (test-swarm :workers 2))
+         (idle (first (swarm-lanes *swarm*)))
+         (busy (second (swarm-lanes *swarm*))))
+    (evo.swarm::with-swarm-lock ()
+      (setf (lane-state idle) :idle
+            (evo.swarm::lane-ready idle) '(:pid 4242)
+            (lane-state busy) :working
+            (lane-task busy) "write the thing"
+            (lane-worktree busy) "/tmp/wt"
+            (evo.swarm::lane-restarts busy) 2))
+    (let ((text (evo.swarm::tool-lanes nil)))
+      (check "tools: /lanes lists every lane, idle and working"
+             (and (search "lane 1  idle" text) (search "lane 2  working" text)))
+      (check "tools: ...with its pid, its task and its worktree"
+             (and (search "pid 4242" text) (search "write the thing" text)
+                  (search "/tmp/wt" text)))
+      (check "tools: ...and how often it has been restarted"
+             (search "2 restarts" text))
+      ;; A lane with nothing filled in — down, no process, no step clock — is
+      ;; rendered, not signalled: this is the shape that reads NIL as a number.
+      (evo.swarm::with-swarm-lock ()
+        (setf (lane-state idle) :down (evo.swarm::lane-ready idle) nil
+              (lane-task busy) nil (lane-worktree busy) nil
+              (evo.swarm::lane-restarts busy) 0))
+      (check "tools: a down lane with no process still renders"
+             (and (search "lane 1  down" (evo.swarm::tool-lanes nil))
+                  (search "0 reports" (evo.swarm::tool-lanes nil)))))
+    ;; Delegation refuses with a sentence when every lane is busy — the model
+    ;; is told what to do, and nothing is sent to a lane.
+    (evo.swarm::with-swarm-lock ()
+      (setf (lane-state idle) :working (lane-state busy) :working))
+    (check "tools: delegating to nothing busy says what to do instead"
+           (handler-case (progn (evo.swarm::tool-delegate '(:task "x")) nil)
+             (error (e) (search "every lane is busy" (format nil "~a" e)))))))
 
 (defun test-lane-launch-args ()
   "How a lane is launched (CONTRACT §1, §6): its own port, its own ready file,
@@ -1163,6 +1225,7 @@ why not — the answer a GUI's chooser needs before it spawns anything."
     (test-mirror-rebuild)
     (test-topics)
     (test-interrupt)
+    (test-tools)
     (test-lane-launch-args)
     (test-view)
     (test-serve-view)

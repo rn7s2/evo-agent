@@ -30,7 +30,7 @@ tools (on its run thread) and the TUI's status segment all read or write it."
   (restarts 0)
   (stopping nil)        ; set while the swarm itself stops or restarts it
   (watched nil)         ; the TUI is showing its live items
-  watch-cursor)         ; the last item the TUI printed for it
+  (watch-printed (make-hash-table :test #'equal))) ; item id -> how much was shown
 
 (define-condition lane-error (error)
   ((lane :initarg :lane :reader lane-error-lane)
@@ -64,8 +64,10 @@ tools (on its run thread) and the TUI's status segment all read or write it."
   "The topic name a lane is published under (CONTRACT §4.3)."
   (format nil "lane:~d" (lane-n lane)))
 
-(defun lane-snapshot (lane)
-  "LANE's status as a plist, read under the lock."
+(defun lane-status-plist (lane)
+  "LANE's status as a plist, read under the lock: what the swarm's own tools
+and status line show (the LANE:SNAPSHOT name belongs to the protocol call in
+client.lisp, which answers a lane's own /snapshot)."
   (with-swarm-lock ()
     (let ((state (and (lane-mirror lane) (mirror-lane-state (lane-mirror lane)))))
       (list :n (lane-n lane) :state (lane-state lane) :task (lane-task lane)
