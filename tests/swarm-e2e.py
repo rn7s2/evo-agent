@@ -158,20 +158,25 @@ class Terminal:
 
 
 class Lane:
-    """A lane, reached through its own HTTP API."""
+    """A lane, reached the way the coordinator reaches it: through the ready
+    file the lane wrote, speaking CONTRACT.md's protocol (§4.3, §5, §6)."""
 
     def __init__(self, directory):
         self.dir = directory
         self.n = int(directory.rstrip("/").rsplit("-", 1)[1])
+        self.rid = 0
+
+    def ready(self):
+        return json.load(open(os.path.join(self.dir, "ready.json")))
 
     def url(self):
-        return open(os.path.join(self.dir, "url")).read().strip()
+        return self.ready()["url"]
 
     def token(self):
-        return open(os.path.join(self.dir, "token")).read().strip()
+        return self.ready()["token"]
 
     def request(self, method, path, body=None, token=None, timeout=30):
-        port = int(self.url().rsplit(":", 1)[1])
+        port = self.ready()["port"]
         conn = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
         headers = {}
         tok = self.token() if token is None else token
@@ -190,20 +195,50 @@ class Lane:
     def get(self, path, **kw):
         return self.request("GET", path, **kw)
 
-    def pid(self):
-        status, health = self.get("/health", timeout=5)
-        return health["pid"] if status == 200 else None
+    def op(self, name, args=None):
+        self.rid += 1
+        return self.request("POST", "/ops",
+                            {"rid": f"lane-{self.n}-{self.rid}", "op": name,
+                             "args": args or {}})
 
-    def tools(self):
-        status, reg = self.get("/registry")
-        return [t["name"] for t in reg["tools"]] if status == 200 else []
+    def snapshot(self, topics="session", items=200):
+        status, snap = self.get(f"/snapshot?topics={topics}&items={items}")
+        return snap if status == 200 else None
 
-    def eval(self, form):
-        return self.request("POST", "/eval", {"form": form})
+    def state(self):
+        snap = self.snapshot() or {}
+        return (snap.get("topics") or {}).get("session", {}).get("state") or {}
+
+    def items(self):
+        snap = self.snapshot(items=200) or {}
+        return (snap.get("topics") or {}).get("session", {}).get("items") or []
 
     def transcript_text(self):
-        status, tr = self.get("/transcript")
-        return json.dumps(tr["messages"]) if status == 200 else ""
+        return json.dumps(self.items())
+
+    def pid(self):
+        try:
+            return self.ready()["pid"]
+        except (OSError, ValueError, KeyError):
+            return None
+
+    def catalog(self):
+        status, cat = self.get("/catalog")
+        return cat if status == 200 else {}
+
+    def tools(self):
+        return [t["name"] for t in self.catalog().get("tools") or []]
+
+    def eval(self, form):
+        return self.op("eval", {"code": form})
+
+    def eval_value(self, form):
+        """The first value of FORM, as the eval op prints it."""
+        status, reply = self.eval(form)
+        if status != 200 or not reply.get("ok"):
+            return None
+        values = (reply.get("result") or {}).get("values") or []
+        return values[0] if values else None
 
 
 def lanes_of(home, swarm="*"):
@@ -214,7 +249,7 @@ def lanes_of(home, swarm="*"):
 
 def lane_ready(lane):
     """Up, authenticated, and initialized (the report tool is its baseline)."""
-    return os.path.exists(os.path.join(lane.dir, "token")) and "report" in lane.tools()
+    return os.path.exists(os.path.join(lane.dir, "ready.json")) and "report" in lane.tools()
 
 
 def pid_alive(pid):
@@ -339,29 +374,34 @@ def first_run(term, stub, home, proj):
     for lane in lanes:
         check(f"lane {lane.n} refuses a missing token", lane.get("/health", token="")[0] == 401)
         check(f"lane {lane.n} refuses a wrong token", lane.get("/health", token="nope")[0] == 401)
-        status, reg = lane.get("/registry")
-        check(f"lane {lane.n} accepts its token", status == 200)
-        stub_provider = [p for p in reg["providers"] if p["key"] == "stub"]
+        cat = lane.catalog()
+        check(f"lane {lane.n} accepts its token", bool(cat))
+        check(f"lane {lane.n} wrote its own ready file, mode 0600",
+              os.stat(os.path.join(lane.dir, "ready.json")).st_mode & 0o777 == 0o600)
+        check(f"lane {lane.n} is a session of its own: the journal says lane",
+              lane.state()["session"]["program"] == "lane",
+              (lane.state()["session"], lane.ready().get("program")))
+        stub_provider = [p for p in cat["providers"] if p["name"] == "stub"]
         check(f"lane {lane.n} baseline: the coordinator's provider, key by env var",
-              stub_provider and stub_provider[0]["has_api_key"] is True
-              and stub_provider[0]["api_key_env"] == "EVO_SWARM_STUB_API_KEY", stub_provider)
+              stub_provider and stub_provider[0]["has_key"] is True
+              and stub_provider[0]["key_env"] == "EVO_SWARM_STUB_API_KEY", stub_provider)
         check(f"lane {lane.n} baseline: a coordinator model on an API the lane lacks is skipped",
-              "stub-ext" not in [m["id"] for m in reg["models"]], reg["models"])
+              "stub-ext" not in [m["id"] for m in cat["models"]], cat["models"])
         check(f"lane {lane.n} baseline: the coordinator's models, and its default from swarm.lisp",
-              [m["id"] for m in reg["models"]] == ["stub-a", "stub-swarm"]
-              and reg["settings"].get("model") == "stub-swarm", (reg["models"], reg["settings"]))
+              [m["id"] for m in cat["models"]] == ["stub-a", "stub-swarm"]
+              and cat["default_model"]["id"] == "stub-swarm",
+              (cat["models"], cat["default_model"]))
         check(f"lane {lane.n} baseline: core tools and the report tool",
-              {"read", "write", "edit", "bash", "report"} <= set(t["name"] for t in reg["tools"]))
-        names = [t["name"] for t in reg["tools"]]
+              {"read", "write", "edit", "bash", "report"} <= set(lane.tools()))
+        names = lane.tools()
         check(f"lane {lane.n} in-lanes: ~/.evo/swarm.lisp's ran", "e2e_global_lane_tool" in names)
         check(f"lane {lane.n} in-lanes: the project's loaded a file beside its swarm.lisp",
               "e2e_baseline_tool" in names)
         check(f"lane {lane.n} in-lanes: a later form used that file's package, with lane and lanes",
               f"e2e_lane_{lane.n}_of_{LANES}" in names, names)
         check(f"lane {lane.n} in-lanes: overrides the coordinator's defaults",
-              (reg["settings"].get("thinking") == "low") == (lane.n == 1), reg["settings"])
-        status, state = lane.get("/state")
-        check(f"lane {lane.n} starts idle", state["status"] == "idle", state["status"])
+              (lane.state().get("thinking") == "low") == (lane.n == 1), lane.state())
+        check(f"lane {lane.n} starts idle", lane.state()["status"] == "idle", lane.state()["status"])
     pids = [l.pid() for l in lanes]
     check("lanes are separate processes", len(set(pids)) == LANES, pids)
     wait_for(lambda: "lanes ○○○○" in term.text(), timeout=20)
@@ -396,8 +436,7 @@ def first_run(term, stub, home, proj):
     term.type('CALL delegate {"lane":2,"task":"SLOW long work"}')
     check("lane 2 starts its slow task", wait_for(lambda: stub.find("lane 2", "SLOW long work", t1), 30))
     time.sleep(1)
-    status, state = lanes[1].get("/state")
-    check("lane 2 is busy", state["status"] == "running", state["status"])
+    check("lane 2 is busy", lanes[1].state()["status"] == "running", lanes[1].state()["status"])
     coordinator_quiet(stub)
     term.type('CALL interrupt_lane {"lane":2,"text":"resteered now"}')
     check("lane 2 gets the new instructions",
@@ -425,8 +464,8 @@ def first_run(term, stub, home, proj):
     term.type('CALL interrupt_lane {"lane":2}')
     stopped = wait_for(lambda: stub.find("coordinator", "[lane 2] run ended (aborted)", t_int), 30)
     check("interrupt_lane alone stops the lane", stopped)
-    status, state = lanes[1].get("/state")
-    check("...and leaves it idle, given nothing new", state["status"] == "idle", state["status"])
+    check("...and leaves it idle, given nothing new",
+          lanes[1].state()["status"] == "idle", lanes[1].state()["status"])
     check("...and sends it no new prompt",
           not any(r["role"] == "lane 2" and r["time"] > (stopped or {}).get("time", t_int)
                   for r in stub.requests()))
@@ -445,10 +484,10 @@ def first_run(term, stub, home, proj):
     coordinator_quiet(stub)
     term.type('CALL delegate {"lane":3,"task":"start on the goal","objective":'
               '"reach the e2e goal FINISH"}')
-    done = wait_for(lambda: (lambda st: st[1]["goal"] and st[1]["goal"]["status"] == "complete"
-                             and st[1]["status"] == "idle")(lanes[2].get("/state")), 60)
+    done = wait_for(lambda: (lambda st: st.get("goal") and st["goal"]["status"] == "complete"
+                             and st["status"] == "idle")(lanes[2].state()), 60)
     check("a delegated goal runs on the lane until it completes", done)
-    status, state = lanes[2].get("/state")
+    state = lanes[2].state()
     check("the lane's goal carries the objective",
           state["goal"] and state["goal"]["objective"] == "reach the e2e goal FINISH",
           state["goal"])
@@ -462,10 +501,10 @@ def first_run(term, stub, home, proj):
     coordinator_quiet(stub)
     term.type('CALL delegate {"lane":3,"task":"CALL report {\\"done\\":\\"objective delivered\\",'
               '\\"goal\\":\\"complete\\"}","objective":"deliver it by report"}')
-    done = wait_for(lambda: (lambda st: st[1]["goal"]
-                             and st[1]["goal"]["objective"] == "deliver it by report"
-                             and st[1]["goal"]["status"] == "complete"
-                             and st[1]["status"] == "idle")(lanes[2].get("/state")), 60)
+    done = wait_for(lambda: (lambda st: st.get("goal")
+                             and st["goal"]["objective"] == "deliver it by report"
+                             and st["goal"]["status"] == "complete"
+                             and st["status"] == "idle")(lanes[2].state()), 60)
     check("a report with goal complete closes the lane's goal", done)
     rep = wait_for(lambda: stub.find("coordinator", "[lane 3 report] done: objective delivered", t_rep), 30)
     check("the report tells the coordinator the goal is complete",
@@ -484,8 +523,7 @@ def first_run(term, stub, home, proj):
     term.type('CALL lane_worktree {"lane":4,"action":"create"}')
     moved = wait_for(lambda: lanes[3].pid() not in (None, old_pid) and lane_ready(lanes[3]), 60)
     check("lane 4 restarts in its worktree", moved)
-    status, reply = lanes[3].eval("(namestring (uiop:getcwd))")
-    cwd = json.loads(reply["data"]["values"][0]) if status == 200 else ""
+    cwd = lane_cwd(lanes[3])
     check("lane 4's working directory is the worktree", "/worktrees/lane-4" in cwd, cwd)
     branches = subprocess.run(["git", "branch", "--list", "swarm/*"], cwd=proj,
                               capture_output=True, text=True).stdout
@@ -504,8 +542,10 @@ def first_run(term, stub, home, proj):
     old = victim.pid()
     t3 = time.time()
     os.kill(old, signal.SIGKILL)
-    told = wait_for(lambda: stub.find("coordinator", "[lane 1] crashed and was restarted", t3), 90)
-    check("the coordinator is told lane 1 crashed and restarted", told)
+    told = wait_for(lambda: stub.find("coordinator", "[lane 1] crashed", t3), 90)
+    check("the coordinator is told lane 1 crashed", told)
+    check("...and that it came back on its session",
+          wait_for(lambda: stub.find("coordinator", "[lane 1] restarted", t3), 60))
     check("lane 1 runs again under a new pid", victim.pid() not in (None, old))
     check("and was re-initialized", "report" in victim.tools())
     check("its session survived the crash", "lane one finished" in victim.transcript_text())
@@ -529,6 +569,15 @@ def first_run(term, stub, home, proj):
           len(coordinator_sessions) == 1, coordinator_sessions)
 
 
+def lane_cwd(lane):
+    """The lane's working directory, asked of the lane itself (its eval op)."""
+    printed = lane.eval_value("(namestring (uiop:getcwd))")
+    try:
+        return json.loads(printed) if printed else ""
+    except ValueError:
+        return printed or ""
+
+
 def safe_pid(lane):
     try:
         return lane.pid()
@@ -548,8 +597,7 @@ def resumed_run(term, stub, home, proj):
           all("e2e_baseline_tool" in l.tools() and f"e2e_lane_{l.n}_of_{LANES}" in l.tools()
               for l in lanes))
     check("lane 4 still lacks it", "probe_three" not in lanes[3].tools())
-    status, reply = lanes[3].eval("(namestring (uiop:getcwd))")
-    cwd = json.loads(reply["data"]["values"][0]) if status == 200 else ""
+    cwd = lane_cwd(lanes[3])
     check("lane 4 is back in its worktree", "/worktrees/lane-4" in cwd, cwd)
     t = time.time()
     coordinator_quiet(stub)
@@ -601,8 +649,7 @@ def resume_in_session(term, home):
           "resteered now" in old_lanes[1].transcript_text())
     check("/resume: lane 1's too", "lane one finished" in old_lanes[0].transcript_text())
     check("/resume: lane 3 got its eval back", "probe_three" in old_lanes[2].tools())
-    status, reply = old_lanes[3].eval("(namestring (uiop:getcwd))")
-    cwd = json.loads(reply["data"]["values"][0]) if status == 200 else ""
+    cwd = lane_cwd(old_lanes[3])
     check("/resume: lane 4 is back in its worktree", "/worktrees/lane-4" in cwd, cwd)
     pids = [l.pid() for l in old_lanes]
     term.type("/quit")
