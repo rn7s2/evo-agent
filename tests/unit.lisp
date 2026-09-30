@@ -1275,6 +1275,41 @@ that is how a human's next keystroke differs from a paste's last chunk."
                                 nil)
              (error () t)))))
 
+(defun test-token-labels ()
+  "The ctx and goal cells' token format (FMT-KTOKENS): thousands while that
+fits, whole millions from a million up, so a 1M context window reads \"1M\" —
+the way the model menus and the design spell it — instead of \"1000k\"."
+  (check "tokens: a small count is thousands" (equal "34k" (evo.view:fmt-ktokens 34000)))
+  (check "tokens: a count below a million stays thousands"
+         (equal "999k" (evo.view:fmt-ktokens 999499)))
+  (check "tokens: rounding to thousands is where a million starts"
+         (equal "1M" (evo.view:fmt-ktokens 999500)))
+  (check "tokens: a 1M context window is 1M, not 1000k"
+         (equal "1M" (evo.view:fmt-ktokens 1048576)))
+  (check "tokens: whole millions, rounded half to even"
+         (equal "2M" (evo.view:fmt-ktokens 1500000)))
+  (check "tokens: many millions keep counting"
+         (equal "12M" (evo.view:fmt-ktokens 12345678)))
+  (check "tokens: nothing reads as 0k" (equal "0k" (evo.view:fmt-ktokens 0)))
+  (check "tokens: no count at all reads as 0k" (equal "0k" (evo.view:fmt-ktokens nil)))
+  ;; The two labels it feeds, TUI and state.segments both: the ctx cell with
+  ;; and without a window, and the goal cell's budget.
+  (check "tokens: the ctx cell reads in both units"
+         (equal "ctx 12k/1M (1%)" (evo.view:context-label-text 12000 1000000)))
+  (check "tokens: ...and with no window it names the count alone"
+         (equal "ctx 34k" (evo.view:context-label-text 34000 nil)))
+  (check "tokens: the goal cell spends in millions too"
+         (equal "goal g (active) 12M/1M"
+                (evo.view:goal-label-text (list :goal-id "g" :status :active
+                                                :tokens-used 12345678
+                                                :token-budget 1000000)
+                                          0)))
+  (check "tokens: a goal with no budget has no slash"
+         (equal "goal g (active) 500k"
+                (evo.view:goal-label-text (list :goal-id "g" :status :active
+                                                :tokens-used 500000)
+                                          0))))
+
 ;;; TUI region layout + live context accounting
 
 (defun test-tui-compose ()
@@ -1294,6 +1329,12 @@ that is how a human's next keystroke differs from a paste's last chunk."
         (check "bottom rule below editbox" (search "─" (fifth lines)))
         (check "status line under editbox" (search "ctx 34k/200k" (sixth lines)))
         (check "cursor on editor row" (and (= crow 3) (= ccol 2))))
+      ;; A 1M window is the case the number format exists for: the chip reads
+      ;; "1M", the way the model menus do.
+      (setf (evo.tui::tui-context-window tui) 1000000)
+      (check "the ctx chip uses the model menus' units"
+             (search "ctx 34k/1M" (sixth (evo.tui::compose-region tui))))
+      (setf (evo.tui::tui-context-window tui) 200000)
       ;; Activity animation: rotating slash working/compacting, pulsing star thinking,
       ;; static idle glyph.
       (check "idle glyph" (search "○ idle" (evo.tui::activity-line tui)))
@@ -9775,6 +9816,7 @@ document, per-entry isolation, and never a key."
     (test-input)
     (test-paste)
     (test-status-segments)
+    (test-token-labels)
     (test-view-projection)
     (test-view-images)
     (test-view-truncation)
