@@ -555,11 +555,14 @@ def run_checks(swarm, stub, home, work, proj):
           wait_for(lambda: any(t == "lane:1" and r == "lane_restarted"
                                for t, r in collector.view.resets), 60) is not None,
           collector.view.resets)
-    event = wait_for(lambda: collector.view.find("lane_event", topic="session"), 30)
+    event = wait_for(lambda: collector.view.find("lane_event", topic="session",
+                                                 lane=1, event="crashed"), 30)
     check("...and the coordinator is told, as a lane_event item",
-          event is not None and pick(event, "lane") == 1, event)
-    check("...naming the crash and the restart",
-          event and pick(event, "event") in ("crashed", "restarted"), event)
+          event is not None, [i for i in collector.view.topics["session"].items
+                              if i.get("kind") == "lane_event"][-3:])
+    check("...naming the crash and the restart that followed it",
+          event and collector.view.find("lane_event", topic="session",
+                                        lane=1, event="restarted"), event)
     check("...which it hears as a message with a :lane-event origin",
           _lane_event_origins(client), _lane_event_origins(client)[:1])
 
@@ -569,6 +572,14 @@ def run_checks(swarm, stub, home, work, proj):
     check("a second task is delegated to lane 2", reply.get("ok"), reply)
     check("...and lane 2 starts working",
           wait_for(lambda: _lane_row(client, 2).get("state") == "working", 60) is not None)
+    # The coordinator takes a slow task of its own too: run.interrupt answers
+    # what it actually stopped, and an idle session is not something a client
+    # can show as stopped (CONTRACT §5.5).
+    status, reply = client.op("input.send", {"text": "SLOW coordinator work"})
+    check("the coordinator takes work of its own", reply.get("ok"), reply)
+    check("...and is running when the swarm is interrupted",
+          wait_for(lambda: client.topic_state("session").get("status") == "running",
+                   30) is not None, client.topic_state("session").get("status"))
     status, reply = client.op("run.interrupt", {"scope": "swarm"})
     check("run.interrupt scope swarm is answered",
           status == 200 and reply.get("ok"), reply)

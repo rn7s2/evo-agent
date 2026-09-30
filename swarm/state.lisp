@@ -28,6 +28,7 @@ tools (on its run thread) and the TUI's status segment all read or write it."
   epoch                 ; the process epoch its stream is on
   session-path          ; its exact current journal path (--resume for a restart)
   (restarts 0)
+  run-outcome          ; the ending of its last run, until the coordinator hears it
   (stopping nil)        ; set while the swarm itself stops or restarts it
   (watched nil)         ; the TUI is showing its live items
   (watch-printed (make-hash-table :test #'equal))) ; item id -> how much was shown

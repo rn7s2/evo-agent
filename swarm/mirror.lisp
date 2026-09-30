@@ -24,6 +24,10 @@
   lane
   topic                 ; "lane:N"
   state                 ; the lane's topic state (§4.2), or NIL before its first snapshot
+  status                ; the status word that state last carried ("running"…):
+                        ; the lane's own word, which the swarm's optimistic
+                        ; :working does not enter — a run's end is read here
+  (ended-at 0)          ; when this lane's last run end was reported (epoch ms)
   (items nil)           ; chronological, oldest first, at most *MIRROR-ITEMS*
   (dropped 0)           ; items evicted from the front — "there is more below"
   (has-more nil)        ; the lane's own snapshot said so
@@ -287,6 +291,64 @@ lane, which still has them."
        (bt:with-lock-held ((mirror-lock mirror))
          (mirror-state mirror))))
 
+(defparameter *run-end-quiet-ms* 500
+  "How soon after reporting one ending the same lane may report another.  A
+lane that has just been stopped can flick its status back to running as it
+unwinds; the coordinator hears one ending for the run, not one per flick.")
+
+(defun mirror-run-end-is-news-p (mirror)
+  "Whether an ending seen now is news: not the tail of one just reported.
+Sets the clock when it is."
+  (bt:with-lock-held ((mirror-lock mirror))
+    (let ((now (evo.view:now-ms)))
+      (when (> (- now (mirror-ended-at mirror)) *run-end-quiet-ms*)
+        (setf (mirror-ended-at mirror) now)
+        t))))
+
+(defparameter *run-outcome-wait-ms* 250
+  "How long to wait for the run_outcome item that names an ending.  serve
+appends one only when the ending went wrong (:aborted, :error, :length), and
+it reaches this mirror as its own op: the state that ends the run can arrive
+just before it.")
+
+(defparameter *goal-settle-ms* 400
+  "How long to give a goal to settle after the run it was working on ends.
+Completing a goal and ending the run are one event, and the patch that says
+``goal: complete'' can trail the one that says the run ended.")
+
+(defun mirror-wait-for-goal (mirror)
+  "Wait, briefly, for an active goal to settle, and answer the status now.
+
+A lane that ends a run with its goal still active has stopped rather than
+finished, and the coordinator is told so; only a goal that has just moved —
+``the objective is delivered'' — is worth the wait, and only here."
+  (let ((deadline (+ (evo.view:now-ms) *goal-settle-ms*)))
+    (loop
+      (let ((status (lane-goal-status (mirror-lane mirror))))
+        (unless (equal status "active") (return status))
+        (when (>= (evo.view:now-ms) deadline) (return status))
+        (sleep 0.05)))))
+
+(defun mirror-run-outcome-since (mirror since &key wait)
+  "MIRROR's newest `run_outcome` item newer than SINCE (epoch ms), or NIL.
+
+serve appends one only for an ending that went wrong (:aborted, :error,
+:length), so this is what names the ending of the run that just finished
+rather than the one before it — and items published after it (a notice, the
+next prompt) do not hide it.  With WAIT, give it a moment to arrive: the state
+that ends the run can reach this mirror first."
+  (flet ((find-it ()
+           (and mirror
+                (bt:with-lock-held ((mirror-lock mirror))
+                  (loop for item in (reverse (mirror-items mirror))
+                        when (and (equal (getf item :kind) "run_outcome")
+                                  (or (null since) (>= (or (getf item :ts) 0) since)))
+                          return item)))))
+    (or (find-it)
+        (when wait
+          (loop repeat (ceiling *run-outcome-wait-ms* 25)
+                thereis (progn (sleep 0.025) (find-it)))))))
+
 (defun mirror-note-lane-state (mirror)
   "Copy what the lane says about itself into the swarm's record of it: its
 status (so `starting → idle` and `working → idle` are the lane's own words),
@@ -302,9 +364,14 @@ moving back to idle is the one signal every ending gives."
          (state (mirror-lane-state mirror))
          (status (getf state :status))
          (task (getf state :task))
+         (before nil)
          (was nil)
          (now nil)
          (started nil))
+    (when mirror
+      (bt:with-lock-held ((mirror-lock mirror))
+        (setf before (mirror-status mirror)
+              (mirror-status mirror) status)))
     (when lane
       (with-swarm-lock ()
         (let ((own (lane-state lane)))
@@ -321,18 +388,22 @@ moving back to idle is the one signal every ending gives."
                 now (lane-state lane)
                 (lane-task-started lane) (getf task :started-at)
                 (lane-step-started lane) (getf task :step-started-at))))
-      ;; Outside the lock: the coordinator is woken, and telling it is the
-      ;; run thread's business, not the lock's.
-      (when (and (eq was :working) (eq now :idle))
-        (lane-run-ended lane (mirror-item-since mirror started)))
+      (cond
+        ;; A new run — not a status tick of one already running: an ending
+        ;; remembered from the last one is not news any more.
+        ((and (equal status "running") (not (equal before "running")))
+         (lane-take-run-outcome lane))
+        ;; A run ended when the lane says so: it was running and now it is
+        ;; not.  The swarm's own record of the lane is not the signal — the
+        ;; coordinator sets it optimistically when it delegates, so a lane
+        ;; whose run has not started yet would read as having just finished.
+        ((and (equal before "running") (mirror-run-end-is-news-p mirror))
+         ;; The goal first: a lane that has just delivered its objective ends
+         ;; the run that delivered it, and "goal: complete" is the ending the
+         ;; coordinator is waiting to hear.
+         (mirror-wait-for-goal mirror)
+         (lane-run-ended lane (mirror-run-outcome-since mirror started :wait t))))
       now)))
-
-(defun mirror-item-since (mirror since)
-  "The newest item MIRROR holds, when it is newer than SINCE (epoch ms) — the
-item of the run that just ended, not the debris of one before it."
-  (let ((item (mirror-newest-item mirror)))
-    (when (and item (or (null since) (>= (or (getf item :ts) 0) since)))
-      item)))
 
 (defun mirror-newest-item (mirror)
   "The newest item MIRROR holds, whole, or NIL."

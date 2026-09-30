@@ -65,12 +65,14 @@ settles with its goal still active is not done: it errored or was stopped."
     (and (stringp (getf goal :status)) (getf goal :status))))
 
 (defun run-ended-text (lane outcome)
-  (format nil "[lane ~d] run ended (~a)~@[ — goal: ~a~]~@[ — task: ~a~]"
+  "What the coordinator's model reads when LANE's run ends: the outcome, and
+the goal status that says whether \"done\" is done.  The task it was running
+travels in the origin beside it (§3) — repeating it here puts a lane's whole
+prompt in the coordinator's context every time a run ends, and a prompt can
+say anything, including things the coordinator would take as instructions."
+  (format nil "[lane ~d] run ended (~a)~@[ — goal: ~a~]"
           (lane-n lane) outcome
-          (goal-disposition (lane-goal-status lane))
-          (with-swarm-lock ()
-            (and (lane-task lane)
-                 (truncate-string (lane-task lane) 80 "…")))))
+          (goal-disposition (lane-goal-status lane))))
 
 ;;; The two items that are news.
 
@@ -91,16 +93,31 @@ run finished as asked otherwise."
       (or (getf item :outcome) "stop")
       "stop"))
 
+(defun lane-remember-run-outcome (lane outcome)
+  "Remember the outcome of the run that just ended in LANE.  serve publishes
+it as an item of the lane's topic, which reaches the mirror as its own op: the
+state that ends the run may arrive just before or just after it, so the
+outcome is kept here rather than looked up at the transition."
+  (with-swarm-lock () (setf (lane-run-outcome lane) outcome)))
+
+(defun lane-take-run-outcome (lane)
+  "LANE's remembered run-ending outcome, and forget it: one ending, one use."
+  (with-swarm-lock ()
+    (let ((outcome (lane-run-outcome lane)))
+      (setf (lane-run-outcome lane) nil)
+      outcome)))
+
 (defun lane-run-ended (lane item)
   "LANE's run finished: the coordinator hears it as a :lane-event message —
 which goal status it settled with is what says whether \"done\" is done."
-  (let ((outcome (run-ended-outcome item))
+  (let ((outcome (or (lane-take-run-outcome lane) (run-ended-outcome item)))
         (goal (lane-goal-status lane)))
     (tell-coordinator (run-ended-text lane outcome)
                       :style (if (member outcome '("error") :test #'equal) :error :notice)
                       :origin (list :kind :lane-event :lane (lane-n lane)
                                     :event :run-ended :outcome outcome
                                     :goal-status (and goal (intern (string-upcase goal) :keyword))
+                                    :task (with-swarm-lock () (lane-task lane))
                                     :severity (if (equal outcome "error") :error :info)))
     (swarm-lane-changed)))
 
@@ -112,6 +129,9 @@ ending reports and a normal one reports no other way."
   (let ((lane (mirror-lane mirror))
         (kind (getf item :kind)))
     (when lane
-      (when (and (equal kind "tool") (equal (getf item :name) "report")
-                 (getf item :args))
-        (lane-reported lane (getf item :args))))))
+      (cond
+        ((and (equal kind "tool") (equal (getf item :name) "report")
+              (getf item :args))
+         (lane-reported lane (getf item :args)))
+        ((equal kind "run_outcome")
+         (lane-remember-run-outcome lane (or (getf item :outcome) "stop")))))))

@@ -56,6 +56,10 @@ computes and journals, without anything running."
     (with-input-from-string (in code)
       (loop for form = (read in nil :eof) until (eq form :eof) collect form))))
 
+(defun plist-without (plist keys)
+  "PLIST without the KEYS in it, in order."
+  (loop for (k v) on plist by #'cddr unless (member k keys) append (list k v)))
+
 (defun plist-keys (value)
   "Every keyword key anywhere in VALUE — plists, lists, vectors."
   (cond ((and (consp value) (keywordp (car value)))
@@ -466,10 +470,12 @@ parsed anywhere."
     (check "input: a finished run says which goal status the lane settled with"
            (search "[lane 1] run ended (stop) — goal: complete"
                    (getf (first (evo.kernel::agent-steering agent)) :text)))
-    (check "input: ...and carries it as a lane-event origin"
-           (equal '(:kind :lane-event :lane 1 :event :run-ended :outcome "stop"
-                    :goal-status :complete :severity :info)
-                  (getf (first (evo.kernel::agent-steering agent)) :origin)))
+    (check "input: ...and carries it, task included, as a lane-event origin"
+           (let ((origin (getf (first (evo.kernel::agent-steering agent)) :origin)))
+             (and (equal '(:kind :lane-event :lane 1 :event :run-ended :outcome "stop"
+                           :goal-status :complete)
+                         (plist-without origin '(:task :severity)))
+                  (member :task (plist-keys origin)))))
     (evo.kernel::drain-steering agent)
     ;; An ending that went wrong left an item naming it.
     (run-ends lane '(:status "idle" :goal (:status "active"))
@@ -994,10 +1000,14 @@ says it is not any more, with ITEM as the newest item of its topic — how a
 run's ending reaches the swarm.  STARTED is explicit so a test can order runs
 that the clock would put in the same millisecond."
   (let ((mirror (evo.swarm::lane-mirror lane)))
+    ;; The lane says it is running (its own word, not the coordinator's
+    ;; optimistic one), then that it is not.
+    (evo.swarm::with-swarm-lock () (setf (evo.swarm::mirror-ended-at mirror) -1000000))
+    (evo.swarm::mirror-state-set mirror (list :status "running"
+                                              :task (list :started-at started)))
+    (evo.swarm::mirror-note-lane-state mirror)
     (evo.swarm::with-swarm-lock ()
-      (setf (lane-state lane) :working
-            ;; The run started then: only items from it belong to it.
-            (evo.swarm::lane-task-started lane) started))
+      (setf (evo.swarm::lane-task-started lane) started))
     (evo.swarm::mirror-state-set mirror state)
     ;; The item goes in as the stream puts it there, so the state moving back
     ;; to idle finds it (that is what names an ending that went wrong).
