@@ -464,7 +464,11 @@ next run if input queued up meanwhile."
              (handler-case (handle-message server message)
                (serious-condition (e)
                  (ignore-errors
-                   (say-event server (format nil "✗ serve error: ~a" e) :error)))))))
+                   (say-event server (format nil "✗ serve error: ~a" e) :error)))))
+           ;; Sleep until POST announces work; the timeout is only the
+           ;; heartbeat tick.  Without this wait the loop spins a core.
+           (unless (server-quit server)
+             (wait-for-inbox server 1))))
 
 (defun events-callback (server)
   "The agent's events callback: every kernel event into the view, on the
