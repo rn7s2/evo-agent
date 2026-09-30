@@ -1,24 +1,49 @@
 ;;;; server.lisp — `evo serve`: one session, controlled over HTTP.
 ;;;;
-;;;; Threads, and who owns what (design.md §6, §16.2):
+;;;; Threads, and who owns what:
 ;;;;
 ;;;;   session thread  the process's main thread.  Owns the task (the one run
 ;;;;                   or compaction), the agent's mailbox writes that start
-;;;;                   work, every journal switch, every command.  It drains
-;;;;                   an inbox; nothing else touches what it owns.
+;;;;                   work, every journal switch, every operation.  It blocks
+;;;;                   on a condition variable until a message arrives;
+;;;;                   nothing else touches what it owns.
 ;;;;   listener        accepts connections, starts one thread per connection.
-;;;;   connection      parses a request, checks the token, and hands the work
-;;;;                   to the session thread as a closure in the inbox, then
-;;;;                   waits for the answer — or streams the event log.
-;;;;   run worker      the task's thread, as in the TUI: run-until-settled or
-;;;;                   a manual compaction.  Its events go to the event log;
-;;;;                   its completion goes to the inbox.
+;;;;   connection      checks the token, reads one request and answers it: a
+;;;;                   snapshot from the published view, or an op queued for
+;;;;                   the session thread — or, for /stream, a thread that
+;;;;                   writes the op log from its own cursor.
+;;;;   op flusher      writes out coalesced item.append ops when their 50 ms
+;;;;                   window closes.
+;;;;   run worker      the task's thread.  Its events go to the view; its
+;;;;                   completion goes to the inbox.
 ;;;;
-;;;; So every command runs on the session thread, in arrival order, exactly as
-;;;; the TUI runs typed commands on its own thread — and a command that needs a
-;;;; quiet session and finds a busy one is refused with 409, never raced.
+;;;; Every operation runs on the session thread, in arrival order, exactly as
+;;;; the TUI runs typed commands on its own thread — and one that needs a
+;;;; quiet session and finds a busy one is refused with `busy`, never raced.
+;;;;
+;;;; Reads never queue behind a run: /health answers from its own slot,
+;;;; /snapshot and /items read the published view under a lock, /stream reads
+;;;; the op log.  Nothing in this server polls with a sleep.
 
 (in-package :evo.serve)
+
+;; The route table lives with the routes (routes.lisp), which loads after this
+;; file; SERVER-ROUTES reads it at dispatch time.
+(declaim (special *routes* *routes-lock*))
+
+;;; Errors: an op's failure is data in a 200 reply (CONTRACT §5.5), never an
+;;; HTTP status, so a client branches on the code alone.
+
+(define-condition op-error (error)
+  ((code :initarg :code :reader op-error-code)
+   (message :initarg :message :reader op-error-message)
+   (detail :initarg :detail :initform nil :reader op-error-detail))
+  (:report (lambda (c s) (format s "~a: ~a" (op-error-code c) (op-error-message c)))))
+
+(defun op-fail (code control &rest args)
+  "Refuse the running op with CODE and a fixed MESSAGE.  Messages never quote
+a value the caller supplied: an error cannot leak a secret that way."
+  (error 'op-error :code code :message (apply #'format nil control args)))
 
 ;;; Tokens and binding.
 
@@ -50,58 +75,88 @@ a guess was right."
 ;;; The server.
 
 (defstruct (task (:constructor make-task (&key id kind)))
-  "The session's one task (see the TUI's TUI-TASK): a run or a compaction.
-Owned by the session thread; forgotten only after its thread is joined."
-  id kind thread (started (get-universal-time)) (step-started nil))
+  "The session's one task (a run or a compaction).  Owned by the session
+thread; forgotten only after its thread is joined.  Times are epoch
+milliseconds, as the protocol reports them."
+  id kind thread (started (op-now-ms)) (step-started nil))
 
 (defparameter *identity* (list :name "evo-agent" :version "0.1.0" :features nil)
-  "Who this program is, as GET /health reports it: :NAME and :VERSION strings
-and :FEATURES, a list of capability names a client may negotiate on.  The
+  "Who this program is, as GET /health and GET /catalog report it.  The
 default names the agent, the base program; a program built on this server sets
 it — or passes :IDENTITY to MAKE-SERVER — so a client can tell which program
 answered (evo-swarm names itself \"evo-swarm\").")
 
 (defstruct (server (:constructor %make-server))
-  host port token token-file
+  host port token
   ;; Who serves this session, and the extra routes it serves.  NIL means only
-  ;; the program-wide defaults — *IDENTITY* and *ROUTES*.  Extra routes are
-  ;; considered before the defaults, so one server can extend (or deliberately
-  ;; override) the protocol without losing its built-ins.
+  ;; the program-wide defaults — *IDENTITY* and *ROUTES*.
   identity-override routes-override
   agent
-  (log (make-event-log))
-  ;; Messages to the session thread, guarded by INBOX-LOCK.  STOPPING is
-  ;; written once, under the same lock, when the session thread shuts down.
-  (inbox nil) (inbox-lock (bt:make-lock "serve-inbox")) (stopping nil)
+  ;; The op log: the protocol's one source of ordering (oplog.lisp).
+  (oplog (make-op-log))
+  ;; Topic providers, by name ("session", "swarm", "lane:1").
+  (topics (make-hash-table :test #'equal))
+  (topics-lock (bt:make-lock "serve-topics"))
+  ;; Messages to the session thread.  STOPPING is written once, under the
+  ;; same lock, when the server shuts down; the condition variable is what
+  ;; the session thread waits on (never a sleep).
+  (inbox nil) (inbox-lock (bt:make-lock "serve-inbox"))
+  (inbox-cv (bt:make-condition-variable :name "serve-inbox"))
+  (stopping nil)
   ;; Session-thread state.
-  task (quit nil)
+  task quit (loop-tick (op-now-ms))
+  ;; Queued input serve minted an id for: id -> (:text … :queue …).  The
+  ;; kernel's own ids replace this the day CANCEL-QUEUED lands (CONTRACT §3).
+  (queued (make-hash-table :test #'equal)) (queued-lock (bt:make-lock "serve-queued"))
+  ;; Idempotency: the last 256 op replies by rid (CONTRACT §5.5).
+  (rid-lock (bt:make-lock "serve-rid"))
+  (rid-replies (make-hash-table :test #'equal))
+  (rid-order nil)
+  ;; Capabilities and hooks a program on top of this server fills.
+  (eval-enabled t)
+  ;; (lambda (server scope lane) -> list of topic names) — evo-swarm's swarm
+  ;; and lane interrupt scopes; INTERRUPT-SCOPE's default only knows :session.
+  interrupt-hook
+  ;; (lambda (server)) — run on shutdown, before the session ends (a swarm
+  ;; stops its lanes and supervisor here).
+  shutdown-hook
+  ;; Launch plumbing (CONTRACT §1): where the ready file goes, and whether
+  ;; stdin EOF means the parent is gone.
+  ready-file watch-stdin
+  (started-at (op-now-ms))
+  flusher-thread
   ;; Listener state: the socket, its thread, and the connection threads it
   ;; started (guarded by CONNECTIONS-LOCK).
   listener listener-thread
-  (connections nil) (connections-lock (bt:make-lock "serve-connections"))
-  (wrote-token-file nil))
+  (connections nil) (connections-lock (bt:make-lock "serve-connections")))
 
-;; The default route table lives with the routes (routes.lisp), which loads
-;; after this file; SERVER-ROUTES reads it at dispatch time.
-(declaim (special *routes*))
-
-(defvar *routes-lock* (bt:make-lock "serve-routes")
-  "Guards replacement and snapshots of the program-wide route table.")
-
-(defun make-server (&key (host "127.0.0.1") (port 8421) token token-file
-                         identity routes)
+(defun make-server (&key (host "127.0.0.1") (port 8421) token ready-file
+                         (watch-stdin nil) identity routes (eval-enabled t))
   "A server.  IDENTITY says who this program is (see *IDENTITY*); ROUTES are
-additional routes considered before the built-ins (see *ROUTES*, ADD-ROUTE).
-Program-wide routes added later are still seen."
+additional routes considered before the built-ins.  READY-FILE is where the
+serving process publishes its port and token (CONTRACT §1); WATCH-STDIN makes
+EOF on stdin a clean shutdown.  EVAL-ENABLED is the --no-http-eval gate."
   (%make-server :host host :port port :token (or token (resolve-token))
                 :identity-override identity
                 :routes-override routes
-                :token-file token-file))
+                :ready-file ready-file
+                :watch-stdin watch-stdin
+                :eval-enabled eval-enabled))
 
 (defun server-identity (server)
   "Who the program serving this session says it is: the server's own identity,
 or the program-wide *IDENTITY*."
   (or (server-identity-override server) *identity*))
+
+(defun server-program (server)
+  (or (getf (server-identity server) :name) evo.port:*program-name*))
+
+(defun server-version (server)
+  (or (getf (server-identity server) :version) "0.1.0"))
+
+(defun server-epoch (server) (op-log-epoch (server-oplog server)))
+(defun server-seq (server) (op-log-last-seq (server-oplog server)))
+(defun server-cursor (server) (format-cursor (server-oplog server)))
 
 (defun server-routes (server)
   "A snapshot of the server's additional routes followed by the program-wide
@@ -116,43 +171,53 @@ defaults.  A same path/method in the server's routes overrides the default."
   (bt:with-lock-held ((server-inbox-lock server))
     (server-stopping server)))
 
+;;; The inbox: messages for the session thread, and the condition variable
+;;; that replaces the 20 ms sleep it used to poll with.
+
 (defun post (server message)
-  "Queue MESSAGE for the session thread.  Any thread.  NIL once stopping."
+  "Queue MESSAGE for the session thread and wake it.  Any thread.  NIL once
+stopping."
   (bt:with-lock-held ((server-inbox-lock server))
     (unless (server-stopping server)
       (setf (server-inbox server) (append (server-inbox server) (list message)))
+      (bt:condition-notify (server-inbox-cv server))
       t)))
 
 (defun drain-inbox (server)
   (bt:with-lock-held ((server-inbox-lock server))
     (shiftf (server-inbox server) nil)))
 
-(defun say-event (server text style)
-  (publish (server-log server) (list :type :output :style style :text text)))
+(defun wait-for-inbox (server timeout)
+  "Block until the session thread has something to do.  TIMEOUT is the
+heartbeat tick — it is not a poll of anything: the loop's work is announced by
+POST, and the tick only keeps the supervisor's staleness watchdog honest."
+  (bt:with-lock-held ((server-inbox-lock server))
+    (unless (or (server-inbox server) (server-stopping server))
+      (bt:condition-wait (server-inbox-cv server) (server-inbox-lock server)
+                         :timeout timeout))))
 
-(defun server-publish (server event)
-  "Append EVENT — a plist with :type, like the kernel's own events — to this
-server's event log.  Every /events stream (and every client that reconnects
-with Last-Event-ID) sees it exactly as it sees a session event: numbered, once,
-in order.  Any thread.  Returns the event's id."
-  (publish (server-log server) event))
-
-(defun server-cursor (server)
-  "The id of the newest event in this server's log: the cursor a client resumes
-from — GET /events?since=<cursor> — and what a reply that starts work should
-hand back with it."
-  (last-event-id (server-log server)))
+(defun wake-session (server)
+  (bt:with-lock-held ((server-inbox-lock server))
+    (bt:condition-notify (server-inbox-cv server))))
 
 ;;; Calls into the session thread.
 
 (defstruct (promise (:constructor make-promise ()))
-  (lock (bt:make-lock "serve-promise")) done value condition)
+  (lock (bt:make-lock "serve-promise"))
+  (cv (bt:make-condition-variable :name "serve-promise"))
+  done value condition)
 
 (defun fulfill (promise value &optional condition)
   (bt:with-lock-held ((promise-lock promise))
     (setf (promise-value promise) value
           (promise-condition promise) condition
-          (promise-done promise) t)))
+          (promise-done promise) t)
+    (bt:condition-notify (promise-cv promise))))
+
+(defparameter *call-timeout* 600
+  "Seconds a caller waits for the session thread before giving up.  Long
+enough for any op that is not itself a turn; a wedged session thread answers
+503 rather than hanging a connection for ever.")
 
 (defun call-on-session (server fn)
   "Run FN on the session thread and return its value here.  A condition FN
@@ -160,13 +225,36 @@ signals is re-signalled in the caller.  503 once the server is stopping."
   (let ((promise (make-promise)))
     (unless (post server (list :call fn promise))
       (http-fail 503 "server is shutting down"))
-    (loop
-      (bt:with-lock-held ((promise-lock promise))
-        (when (promise-done promise)
-          (when (promise-condition promise)
-            (error (promise-condition promise)))
-          (return (promise-value promise))))
-      (sleep 0.005))))
+    (bt:with-lock-held ((promise-lock promise))
+      (loop until (or (promise-done promise)
+                      (stopping-p server))
+            do (bt:condition-wait (promise-cv promise) (promise-lock promise)
+                                  :timeout *call-timeout*)
+               (unless (promise-done promise)
+                 (http-fail 503 "the session thread did not answer")))
+      (when (promise-condition promise)
+        (error (promise-condition promise)))
+      (promise-value promise))))
+
+;;; Idempotency: a retried rid gets the reply it already got, and nothing else
+;;; happens.
+
+(defparameter *rid-cache-size* 256)
+
+(defun rid-lookup (server rid)
+  (bt:with-lock-held ((server-rid-lock server))
+    (gethash rid (server-rid-replies server))))
+
+(defun rid-remember (server rid reply)
+  (bt:with-lock-held ((server-rid-lock server))
+    (unless (gethash rid (server-rid-replies server))
+      (push rid (server-rid-order server)))
+    (setf (gethash rid (server-rid-replies server)) reply)
+    (loop while (> (length (server-rid-order server)) *rid-cache-size*)
+          for oldest = (car (last (server-rid-order server)))
+          do (remhash oldest (server-rid-replies server))
+             (setf (server-rid-order server)
+                   (butlast (server-rid-order server))))))
 
 ;;; The reply a command builds while it runs on the session thread.
 
@@ -175,21 +263,24 @@ signals is re-signalled in the caller.  503 once the server is stopping."
 
 (defvar *reply* nil
   "The reply of the command running on the session thread, or NIL — output
-produced outside a command (a task finishing) goes to the event log only.")
+produced outside a command (a task finishing) goes to the view only.")
 
 (defun reply-add-data (key value)
   (when *reply*
     (setf (getf (reply-data *reply*) key) value)))
 
-(defun task-plist (task)
-  (when task
-    (let ((now (get-universal-time)))
-      (list :id (task-id task) :kind (task-kind task)
-            :started (task-started task)
-            :age (- now (task-started task))
-            ;; The step clock (design.md §16): the current turn or compaction,
-            ;; not the whole task — how a slow step is told from a wedged one.
-            :step-age (- now (or (task-step-started task) (task-started task)))))))
+(defun task-state (server)
+  "The session's task as the protocol's state carries it, epoch milliseconds
+and never an age: the client's clock and ours may differ, and a client that
+gets a start time can compute an age better than a server can (CONTRACT §4.2)."
+  (let ((task (server-task server)))
+    (when task
+      (list :id (task-id task)
+            :kind (task-kind task)
+            :turn (evo.kernel::agent-turn-index (server-agent server))
+            :started-at (task-started task)
+            :step-started-at (or (task-step-started task)
+                                 (task-started task))))))
 
 ;;; The server as the command layer's host.
 
@@ -199,14 +290,13 @@ produced outside a command (a task finishing) goes to the event log only.")
 (defmethod evo.command:host-start-compact ((server server) hint)
   (start-compact server hint))
 
-(defmethod evo.command:host-notice ((server server) text &key severity durable data)
-  ;; The reply a command builds keeps its :style field (its clients are being
-  ;; rewritten against the view model, which carries severity instead).
-  (call-next-method)
-  (let ((style (case severity (:warn :notice) (:error :error) (t :plain))))
-    (when *reply*
-      (push (list :style style :text text) (reply-output *reply*)))
-    (say-event server text style)))
+(defmethod evo.command:host-say ((server server) text &optional (style :plain))
+  (when *reply*
+    (push (list :style style :text text) (reply-output *reply*)))
+  (server-notice server text :source :command :severity (case style
+                                                          (:error :error)
+                                                          (:notice :info)
+                                                          (t :info))))
 
 (defmethod evo.command:host-choose ((server server) title items action &key (index 0))
   "No picker over HTTP: the choices come back as data, and the same command
@@ -232,12 +322,12 @@ takes one as its argument."
   nil)
 
 (defmethod evo.command:host-session-switched ((server server))
-  (publish (server-log server)
-           (list :type :session-switched
-                 :session (namestring (journal-path (agent-journal (server-agent server)))))))
+  "A journal switch is not an append: the topic is reset and the client
+re-reads its snapshot (CONTRACT §5.3)."
+  (topic-reset server "session" "session_switched"))
 
 (defmethod evo.command:host-command-context ((server server)) (list :server server))
-(defmethod evo.command:host-interrupt-hint ((server server)) "POST /interrupt")
+(defmethod evo.command:host-interrupt-hint ((server server)) "interrupt it first")
 (defmethod evo.command:host-data ((server server) key value) (reply-add-data key value))
 
 (defmethod evo.command:host-command-failed ((server server) name condition)
@@ -246,6 +336,10 @@ takes one as its argument."
           (reply-error *reply*) (format nil "/~a: ~a" name condition)))
   (evo.command:host-notice server (format nil "✗ /~a: ~a" name condition) :severity :error))
 
+(defmethod evo.command:host-refresh ((server server))
+  "The fold state changed under the session: republish the topic state."
+  (refresh-topic-state server "session"))
+
 ;;; The server as the session's frontend.
 
 (defmethod frontend-interactive-p ((server server)) nil)
@@ -253,16 +347,25 @@ takes one as its argument."
 (defmethod frontend-request-run ((server server) &key text)
   (post server (list :run-requested text)))
 
+;;; Notices.  A notice is an item in the view (CONTRACT §4.1), not a line in a
+;;; log a client would have to parse: durable notices are journaled by the
+;;; kernel, and every notice is published to the view.
+
+(defun server-notice (server text &key (severity :info) (source :serve) durable (data nil))
+  (when (and (stringp text) (plusp (length text)))
+    (topic-notice server (or (topic-name-for-notice server) "session")
+                  text :severity severity :source source :durable durable :data data)))
+
 ;;; Tasks (session thread only).
 
 (defun model-ready-p (server)
   "The model gate, as the TUI has it: T when the effective model resolves;
-otherwise say why and how to recover, and leave queued input queued."
+otherwise say why, and leave queued input queued."
   (let ((agent (server-agent server)))
     (handler-case (progn (effective-model (fold-state (agent-journal agent)) agent) t)
       (error (e)
-        (evo.command:host-notice server (format nil "✗ ~a" e) :severity :error)
-        (evo.command:host-notice server "recover with /model <id> (a registered model) or register one: POST /eval (evo:register-model ...)")
+        (evo.command:host-say server (format nil "✗ ~a" e) :error)
+        (evo.command:host-say server "recover with /model <id> (a registered model)" :dim)
         (when (steering-pending-p agent)
           (evo.command:host-notice server "input stays queued — it runs once the model resolves"))
         nil))))
@@ -272,11 +375,11 @@ otherwise say why and how to recover, and leave queued input queued."
 of no arguments returning (values outcome text).  :WORKER-DONE always
 arrives, whatever BODY does."
   (let* ((agent (server-agent server))
-         (task (make-task :id (gen-id) :kind kind))
+         (task (make-task :id (format nil "task_~a" (gen-id 4)) :kind kind))
          (id (task-id task)))
     (reset-agent-run-control agent)
     (setf (server-task server) task)
-    (publish (server-log server) (list :type :task-start :task-id id :kind kind))
+    (topic-task-state-changed server)
     (setf (task-thread task)
           (bt:make-thread
            (lambda ()
@@ -290,7 +393,7 @@ arrives, whatever BODY does."
     task))
 
 (defun start-run (server)
-  "Start a run for the queued steering unless a task is already running."
+  "Start a run for the queued input unless a task is already running."
   (unless (server-task server)
     (when (model-ready-p server)
       (let ((agent (server-agent server)))
@@ -315,7 +418,7 @@ arrives, whatever BODY does."
 
 (defun finish-task (server id outcome text)
   "A task's thread is done: join it, forget the task, report, and start the
-next run if input queued up meanwhile — or announce the session settled."
+next run if input queued up meanwhile."
   (let ((task (server-task server))
         (agent (server-agent server)))
     (when (and task (equal id (task-id task)))
@@ -333,12 +436,8 @@ next run if input queued up meanwhile — or announce the session settled."
                                       :severity :error
                                       :durable t :data (list :source :serve)))))
       (when (and (eq (task-kind task) :run) text)
-        (evo.command:host-notice server (format nil "✗ internal error in run: ~a" text)
-                                 :severity :error
-                                 :durable t :data (list :source :serve)))
-      (publish (server-log server)
-               (list :type :task-end :task-id id :kind (task-kind task)
-                     :outcome outcome :error text))
+        (evo.command:host-say server (format nil "✗ internal error in run: ~a" text) :error))
+      (topic-run-outcome server outcome text)
       (let ((goal (current-goal agent)))
         (when (and goal (member (pget goal :status) '(:complete :budget-limited :paused)))
           (evo.command:host-notice server (format nil "◆ goal ~a: ~(~a~)"
@@ -346,13 +445,7 @@ next run if input queued up meanwhile — or announce the session settled."
                                    :durable t :data (list :source :goal))))
       (when (and (steering-pending-p agent) (not (server-quit server)))
         (start-run server))
-      (unless (server-task server)
-        ;; The goal's status rides along: a settled lane whose goal is still
-        ;; :active is not done — it errored or was stopped, and stays idle.
-        (let ((goal (current-goal agent)))
-          (publish (server-log server)
-                   (list :type :settled :outcome outcome
-                         :goal (and goal (pget goal :status)))))))))
+      (topic-task-state-changed server))))
 
 ;;; The session thread.
 
@@ -366,70 +459,40 @@ next run if input queued up meanwhile — or announce the session settled."
       (:worker-done (apply #'finish-task server args))
       (:step
        (let ((task (server-task server)))
-         (when task (setf (task-step-started task) (get-universal-time)))))
+         (when task (setf (task-step-started task) (op-now-ms)))))
       (:run-requested
        (let ((text (first args)))
          (when text
-           (publish (server-log server) (list :type :user-input :text text)))
-         (start-run server))))))
-
-(defun events-callback (server)
-  "The agent's events callback: every kernel event into the log, on the
-worker's own thread; a step boundary also tells the session thread, which
-owns the task's step clock."
-  (let ((log (server-log server)))
-    (lambda (event)
-      (publish log event)
-      (when (member (getf event :type) '(:turn-start :compaction-start :compaction-end))
-        (post server (list :step))))))
-
-(defparameter *watch-interval* 2
-  "Seconds between checks that the watched process (EVO_SERVE_WATCH_PID) is
-still alive.")
-
-(defun watched-pid ()
-  "The pid in EVO_SERVE_WATCH_PID, or NIL.  A process that started this
-server to drive it — an evo-swarm coordinator — names itself here, so a
-server whose driver died shuts itself down instead of idling forever."
-  (let ((text (getenv "EVO_SERVE_WATCH_PID")))
-    (and (plusp (length text)) (ignore-errors (parse-integer text)))))
+           (log-user-input server text))
+         (start-run server)))
+      (:stdin-eof
+       (server-notice server "stdin closed — shutting down" :severity :info
+                                                        :source :serve)
+       (setf (server-quit server) t)))))
 
 (defun session-loop (server)
-  (loop with watched = (watched-pid)
-        with next-watch = (+ (get-universal-time) *watch-interval*)
-        until (server-quit server)
+  (loop until (server-quit server)
         do (heartbeat-touch)
-           (when (and watched (>= (get-universal-time) next-watch))
-             (setf next-watch (+ (get-universal-time) *watch-interval*))
-             (unless (evo.port:pid-alive-p watched)
-               (say-event server (format nil "the driving process ~d is gone — shutting down"
-                                         watched)
-                          :dim)
-               (setf (server-quit server) t)))
+           (setf (server-loop-tick server) (op-now-ms))
            (dolist (message (drain-inbox server))
              (handler-case (handle-message server message)
                (serious-condition (e)
                  (ignore-errors
-                   (say-event server (format nil "✗ serve error: ~a" e) :error)))))
-           (sleep 0.02)))
+                   (say-event server (format nil "✗ serve error: ~a" e) :error)))))))
 
-(defun shutdown-task (server &key (seconds 5))
-  "Abort the task and reap it, draining the inbox for its :worker-done; any
-call still waiting is answered 503.  T once no task is left."
-  (let ((deadline (+ (get-internal-real-time)
-                     (* seconds internal-time-units-per-second))))
-    (when (server-task server)
-      (request-abort (server-agent server)))
-    (loop while (and (server-task server)
-                     (< (get-internal-real-time) deadline))
-          do (dolist (message (drain-inbox server))
-               (case (first message)
-                 (:worker-done (ignore-errors (apply #'finish-task server (rest message))))
-                 (:call (fulfill (third message) nil
-                                 (make-condition 'http-error :status 503
-                                                             :text "server is shutting down")))))
-             (sleep 0.02))
-    (not (server-task server))))
+(defun events-callback (server)
+  "The agent's events callback: every kernel event into the view, on the
+worker's own thread; a step boundary also tells the session thread, which
+owns the task's step clock."
+  (lambda (event)
+    (topic-on-event server event)
+    (when (member (getf event :type) '(:turn-start :compaction-start :compaction-end))
+      (post server (list :step)))))
+
+(defun say-event (server text style)
+  "A line the session says outside any command: a notice in the view."
+  (server-notice server text :severity (if (eq style :error) :error :info)
+                             :source :serve))
 
 ;;; Serving.
 
@@ -467,8 +530,8 @@ call still waiting is answered 503.  T once no task is left."
     (loop until (stopping-p server)
           do (handler-case
                  (when (usocket:wait-for-input listener :timeout 0.5 :ready-only t)
-                   (let ((socket (usocket:socket-accept listener
-                                                        :element-type '(unsigned-byte 8))))
+                   (let ((socket (usocket:socket-accept
+                                  listener :element-type '(unsigned-byte 8))))
                      (register-connection
                       server
                       (bt:make-thread (lambda () (handle-connection server socket))
@@ -476,8 +539,7 @@ call still waiting is answered 503.  T once no task is left."
                (error (e)
                  (unless (stopping-p server)
                    (ignore-errors
-                     (say-event server (format nil "✗ accept: ~a" e) :error))
-                   (sleep 0.1)))))))
+                     (say-event server (format nil "✗ accept: ~a" e) :error))))))))
 
 (defun open-listener (server)
   "Bind the listening socket; record the port actually bound (--port 0)."
@@ -490,69 +552,156 @@ call still waiting is answered 503.  T once no task is left."
 
 (defun announce-startup (server resumed-p)
   "What the TUI does when it comes up: an active goal picks itself back up,
-and a model that does not resolve is said now rather than at the first prompt."
+and a model that does not resolve is said now rather than at the first op."
   (let* ((agent (server-agent server))
          (goal (current-goal agent)))
     (cond ((and goal (eq (pget goal :status) :active))
            (queue-steering agent (goal-continuation-for agent goal)
                            :origin (goal-origin goal :continue))
            (start-run server))
-          (t (model-ready-p server))))
-  (publish (server-log server)
-           (list :type :ready :resumed (and resumed-p t))))
+          (t (model-ready-p server)))
+    (server-notice server (if resumed-p "session resumed" "session ready")
+                   :severity :info :source :serve)))
 
-(defun stop-listening (server)
-  (bt:with-lock-held ((server-inbox-lock server))
-    (setf (server-stopping server) t))
-  ;; Nothing will run what is still queued: answer every waiting call.
-  (dolist (message (drain-inbox server))
-    (when (eq (first message) :call)
-      (fulfill (third message) nil
-               (make-condition 'http-error :status 503 :text "server is shutting down"))))
-  (ignore-errors (usocket:socket-close (server-listener server)))
-  (when (server-listener-thread server)
-    (ignore-errors (bt:join-thread (server-listener-thread server))))
-  ;; Streams see STOPPING, flush what is left and close; give them a moment.
-  (loop repeat 100
+;;; The ready file (CONTRACT §1): the one place a client learns the port and
+;;; the token, written atomically so a reader never sees half of it.
+
+(defun ready-file-body (server)
+  "What the ready file says.  SUPERVISOR_PID and RESTARTS come from the
+supervisor's environment, and are absent when this process is its own
+parent."
+  (let* ((agent (server-agent server))
+         (journal (and agent (agent-journal agent))))
+    (list :epoch (server-epoch server)
+          :pid (evo.port:getpid)
+          :supervisor-pid (ignore-errors
+                            (parse-integer (getenv "EVO_SUPERVISOR_PID")))
+          :port (server-port server)
+          :url (format nil "http://~a:~d/" (server-host server) (server-port server))
+          :token (server-token server)
+          :session (and journal
+                        (list :id (pget (journal-header journal) :id)
+                              :path (namestring (journal-path journal))))
+          :program (server-program server)
+          :version (server-version server)
+          :restarts (or (ignore-errors
+                          (parse-integer (getenv "EVO_RESTARTS") :junk-allowed t))
+                        0))))
+
+(defun write-ready-file (server)
+  "Write the ready file atomically: a temp file in the same directory, mode
+0600, then a rename — which is atomic, so a reader either sees the old file
+or the complete new one."
+  (let* ((path (merge-pathnames (server-ready-file server)))
+         (tmp (make-pathname :name (format nil ".~a.tmp~a" (pathname-name path)
+                                           (gen-id 4))
+                             :defaults path)))
+    (ensure-directories-exist path)
+    (evo.port:write-private-file tmp (encode-json (ready-file-body server)))
+    (rename-file tmp path)
+    path))
+
+(defun delete-ready-file (server)
+  (when (server-ready-file server)
+    (ignore-errors (delete-file (merge-pathnames (server-ready-file server))))))
+
+;;; stdin: EOF means the parent that started us is gone (CONTRACT §1).
+
+(defun watch-stdin-loop (server)
+  (loop for char = (read-char *standard-input* nil :eof)
+        until (eq char :eof))
+  (post server (list :stdin-eof)))
+
+;;; The op flusher: one thread, which waits for the next coalescing deadline
+;;; instead of polling for it.
+
+(defun op-flusher-loop (server)
+  (let ((log (server-oplog server)))
+    (loop until (stopping-p server)
+          do (bt:with-lock-held ((op-log-lock log))
+               (when (op-log-flush-expired log)
+                 (bt:condition-notify (op-log-cv log)))
+               (bt:condition-wait (op-log-cv log) (op-log-lock log)
+                                  :timeout (op-log-wait-seconds log))))))
+
+(defun shutdown-task (server &key (seconds 5))
+  "Abort the task and reap it, draining the inbox for its :worker-done; any
+call still waiting is answered 503.  T once no task is left."
+  (let ((deadline (+ (get-internal-real-time)
+                     (* seconds internal-time-units-per-second))))
+    (when (server-task server)
+      (request-abort (server-agent server)))
+    (loop while (and (server-task server)
+                     (< (get-internal-real-time) deadline))
+          do (dolist (message (drain-inbox server))
+               (case (first message)
+                 (:worker-done (ignore-errors (apply #'finish-task server (rest message))))
+                 (:call (fulfill (third message) nil
+                                 (make-condition 'http-error :status 503
+                                                             :text "server is shutting down")))))
+             (sleep 0.02))
+    (not (server-task server))))
+
+(defun close-connection-threads (server)
+  "Streams see STOPPING, flush what is left and close; give them a moment."
+  (loop repeat 50
         while (bt:with-lock-held ((server-connections-lock server))
                 (some #'bt:thread-alive-p (server-connections server)))
         do (sleep 0.02)))
 
+(defun stop-listening (server)
+  (bt:with-lock-held ((server-inbox-lock server))
+    (setf (server-stopping server) t))
+  ;; Nothing will run what is still queued: answer every waiting call, wake
+  ;; the session thread and every op waiter.
+  (dolist (message (drain-inbox server))
+    (when (eq (first message) :call)
+      (fulfill (third message) nil
+               (make-condition 'http-error :status 503 :text "server is shutting down"))))
+  (wake-session server)
+  (op-log-wake (server-oplog server))
+  (ignore-errors (usocket:socket-close (server-listener server)))
+  (when (server-listener-thread server)
+    (ignore-errors (bt:join-thread (server-listener-thread server))))
+  (when (server-flusher-thread server)
+    (ignore-errors (bt:join-thread (server-flusher-thread server))))
+  (close-connection-threads server)
+  (delete-ready-file server))
+
 (defun serve (server agent &key resumed-p)
-  "Serve AGENT's session over HTTP until POST /shutdown.  Returns the exit
-code: 0 after a clean shutdown, 64 when the address cannot be bound (a
-usage error — restarting would not free the port)."
+  "Serve AGENT's session over HTTP until POST /ops server.shutdown — or, with
+--watch-stdin, until stdin closes.  Returns the exit code: 0 after a clean
+shutdown, 64 when the address cannot be bound (a usage error — restarting
+would not free the port)."
   (setf (server-agent server) agent
         (agent-events-cb agent) (events-callback server))
   (handler-case (open-listener server)
     (error (e)
       (format *error-output* "~&~a serve: cannot listen on ~a:~a — ~a~%"
-              (getf (server-identity server) :name)
-              (server-host server) (server-port server) e)
+              (server-program server) (server-host server) (server-port server) e)
       (return-from serve 64)))
-  (when (server-token-file server)
-    (evo.port:write-private-file (server-token-file server) (server-token server))
-    (setf (server-wrote-token-file server) t))
-  (publish (server-log server)
-           (list :type :hello :pid (evo.port:getpid) :port (server-port server)
-                 :session (namestring (journal-path (agent-journal agent)))))
+  (install-session-topic server agent)
+  (when (server-ready-file server) (write-ready-file server))
   (setf (server-listener-thread server)
-        (bt:make-thread (lambda () (accept-loop server)) :name "evo-serve-listener"))
-  (format t "~&~a serve: listening on http://~a:~d/~@[ (token in ~a)~]~%"
-          (getf (server-identity server) :name)
-          (server-host server) (server-port server) (server-token-file server))
+        (bt:make-thread (lambda () (accept-loop server)) :name "evo-serve-listener")
+        (server-flusher-thread server)
+        (bt:make-thread (lambda () (op-flusher-loop server)) :name "evo-serve-flusher"))
+  (when (server-watch-stdin server)
+    (bt:make-thread (lambda () (watch-stdin-loop server)) :name "evo-serve-stdin"))
+  (format t "~&~a serve: listening on http://~a:~d/~@[ (ready file ~a)~]~%"
+          (server-program server) (server-host server) (server-port server)
+          (server-ready-file server))
   (finish-output)
   (unwind-protect
        (progn
          (announce-startup server resumed-p)
          (session-loop server))
     ;; The session is going away: extensions first, while it still owns what
-    ;; they hold; then the task; then the doors.
-    (publish (server-log server) (list :type :shutdown))
+    ;; they hold; then whatever the program on top of this server owns (a
+    ;; swarm's lanes); then the task; then the doors.
+    (when (server-shutdown-hook server)
+      (ignore-errors (funcall (server-shutdown-hook server) server)))
     (ignore-errors (end-session agent))
     (ignore-errors (shutdown-task server))
-    (publish (server-log server) (list :type :bye))
-    (stop-listening server)
-    (when (server-wrote-token-file server)
-      (ignore-errors (delete-file (server-token-file server)))))
+    (stop-listening server))
   0)

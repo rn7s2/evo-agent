@@ -23,19 +23,24 @@
   (- (get-universal-time)
      (or (ignore-errors (file-write-date path)) start-time)))
 
-(defparameter *serve-restart-flags* '("--host" "--port" "--token-file")
-  "serve flags a restarted child keeps, each with its value.")
+(defparameter *serve-restart-flags* '("--host" "--port" "--ready-file")
+  "serve flags a restarted child keeps, each with its value.
+
+The bound port is substituted for --port 0 once the child has published it
+(CONTRACT §1): the ready file is where this process learns it.")
 
 (defun serve-restart-flags (argv)
   "The serve flags in ARGV that describe the server rather than the session:
-where it listens and where its token goes.  --model, --thinking and --resume
-are session state, which the journal already carries — re-passing --model
-would re-journal the launch model over a /model switch made since."
+where it listens and where it publishes itself.  --model, --thinking and
+--resume are session state, which the journal already carries — re-passing
+--model would re-journal the launch model over a /model switch made since."
   (loop while argv
         for arg = (pop argv)
         when (member arg *serve-restart-flags* :test #'equal)
           append (list arg (pop argv))
-        when (member arg '("--allow-remote" "--no-userspace") :test #'equal)
+        when (member arg '("--allow-remote" "--no-userspace" "--watch-stdin"
+                           "--no-http-eval")
+                     :test #'equal)
           collect arg))
 
 (defun restart-argv (argv)

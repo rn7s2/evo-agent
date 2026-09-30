@@ -99,13 +99,21 @@
                                            (:file "markdown")
                                            (:file "tui")
                                            (:file "commands")))
+                             ;; The HTTP protocol: the op log, the topic
+                             ;; providers, the ops, and the routes that
+                             ;; publish them (CONTRACT.md §5, §7).
                              (:module "serve"
                               :serial t
                               :components ((:file "package")
                                            (:file "json")
                                            (:file "http")
-                                           (:file "events")
                                            (:file "server")
+                                           (:file "oplog")
+                                           (:file "topics")
+                                           (:file "view-fallback")
+                                           (:file "view-topic")
+                                           (:file "ops")
+                                           (:file "catalog")
                                            (:file "routes")))
                              (:module "cli"
                               :serial t
