@@ -102,7 +102,11 @@ argument spec the catalog publishes (a plist of keyword -> plist with :type,
 ;;; Replies.
 
 (defun op-reply (server rid result)
-  (list :rid rid :ok t :seq (op-log-last-seq (server-oplog server)) :result result))
+  "The reply for a successful op.  RESULT is the op's own object — an op with
+nothing to report answers `{}`, never `null`: a client should be able to read
+`result` as an object whatever the op was."
+  (list :rid rid :ok t :seq (op-log-last-seq (server-oplog server))
+        :result (or result (json-object-value nil))))
 
 (defun op-error-reply (server rid code message &optional detail)
   (list :rid rid :ok 'false
@@ -135,45 +139,25 @@ argument spec the catalog publishes (a plist of keyword -> plist with :type,
 ;;; Queued input: the id an item gets when it is accepted, and how the view is
 ;;; told about it.
 
-(defun kernel-queue-ids-p ()
-  "Whether the kernel mints a queued input's entry id at queue time
-(CONTRACT §3).  Until that lands, serve mints the id and keeps the record
-that lets a cancel find the queue entry again."
-  (let ((symbol (find-symbol "CANCEL-QUEUED" :evo.kernel)))
-    (and symbol (fboundp symbol))))
+(defun queue-session-input (server text images queue later)
+  "Queue TEXT as the user's own turn and return the item id it will keep.
 
-(defun mint-item-id ()
-  (format nil "e_~a" (gen-id 4)))
-
-(defun remember-queued-input (server id text queue)
-  (bt:with-lock-held ((server-queued-lock server))
-    (setf (gethash id (server-queued server)) (list :text text :queue queue))))
-
-(defun forget-completed-input (server text)
-  "A steering turn was drained: whatever queued record matches it is finished,
-so a late cancel of that id is `already_sent`, not a removal of somebody
-else's input."
-  (bt:with-lock-held ((server-queued-lock server))
-    (let ((id (loop for key being the hash-keys of (server-queued server)
-                    when (equal (getf (gethash key (server-queued server)) :text) text)
-                      return key)))
-      (when id (remhash id (server-queued server))))))
-
-(defun queue-session-input (server text images queue)
-  "Queue TEXT as the user's own turn.  QUEUE is \"now\" or \"after_run\".
-Returns (values ITEM-ID QUEUED-P)."
+The kernel mints the id at queue time and the journaled entry reuses it, so the
+row the user is looking at keeps its identity when it is sent (CONTRACT §3).
+IMAGES are the :image blocks themselves: the view draws the item (and /media
+serves its bytes) before anything runs.  QUEUE is what the client asked for (it
+is what the item says); LATER is whether it really goes to the follow-up queue,
+which is what a task in flight makes true."
   (let* ((agent (server-agent server))
-         (id (mint-item-id)))
-    (if (equal queue "after_run")
-        (queue-followup agent text)
-        (queue-steering agent text :images images :from-user t))
-    (remember-queued-input server id text queue)
+         (id (if later
+                 (queue-followup agent text)
+                 (queue-steering agent text :images images :from-user t))))
     (let ((provider (topic-provider server "session")))
       (when provider
         ;; The blocks, not just a count: the view needs them for the item's
         ;; images (and /media serves their bytes).
         (topic-provider-queued-input provider id text images queue)))
-    (values id (and (steering-pending-p agent) t))))
+    id))
 
 (defun cancel-queue-entry (agent text queue)
   "Remove the queue entry whose text is TEXT.  T when one was there.  This is
@@ -237,13 +221,12 @@ the turn without the picture it asked about is worse than not running it."
 one in flight (CONTRACT §5.5)."
   (let* ((text (or (op-arg args :text) ""))
          (images (serve-images args))
-         ;; "after_run" with nothing running is simply "now": a follow-up
-         ;; queue nobody drains would be a dropped prompt.
-         (queue (let ((asked (op-arg-enum args :queue '("now" "after_run")
-                                         :default "now")))
-                  (if (and (equal asked "after_run") (server-task server))
-                      "after_run"
-                      "now"))))
+         (queue (op-arg-enum args :queue '("now" "after_run") :default "now"))
+         ;; What the client asked for, which is what the item says.  "now"
+         ;; while the model does not resolve still waits — that is what
+         ;; BLOCKED reports — and "after_run" with nothing running is simply
+         ;; now, because a follow-up queue nobody drains is a dropped prompt.
+         (later (and (equal queue "after_run") (server-task server) t)))
     (when (getf args :topic)
       (unless (equal (getf args :topic) "session")
         (op-fail "not_found" "no such topic on this server")))
@@ -253,13 +236,21 @@ one in flight (CONTRACT §5.5)."
            (ready (handler-case (progn (effective-model (fold-state (agent-journal agent))
                                                          agent)
                                        t)
-                    (error () nil))))
-      (multiple-value-bind (id queued) (queue-session-input server text images queue)
-        (cond ((and ready (equal queue "now")) (start-run server))
+                    (error () nil)))
+           ;; Was anything already going?  That is what decides whether this
+           ;; input waits: a task in flight, or a model that does not resolve.
+           (busy (and (server-task server) t)))
+      (let ((id (queue-session-input server text images queue later)))
+        (cond ((and ready (not later)) (start-run server))
               ((not ready)
                (server-notice server "the model does not resolve — input stays queued"
                               :severity :warn :source :serve)))
-        (list :item-id id :queued (and queued t)
+        ;; QUEUED is the truth about the input, not about the reply: input that
+        ;; starts a run now has been *sent* (the client's row becomes the user
+        ;; message), and input waiting on a turn boundary or on the model has
+        ;; not.
+        (list :item-id id
+              :queued (wire-boolean (or busy (not ready)))
               :blocked (unless ready "model_not_ready"))))))
 
 (defun op-input-cancel (server args)

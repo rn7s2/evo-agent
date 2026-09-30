@@ -23,6 +23,10 @@ Covers the redesign's protocol (CONTRACT §5):
   * stream.reset after a restart: the epoch changed, so a cursor from the old
     process gets hello then stream.reset{restarted}
   * server.shutdown: exit 0, ready file removed
+  * an idle server spends no CPU, and --watch-stdin ends it when its input does
+    — before a turn and after one, with a stream open
+  * the small truths: `queued`, has_more, result {}, truncated, usage,
+    the default model's provider
 
 Usage: tests/serve-e2e.py [path/to/evo-agent]    (exit 0 on success)
 """
@@ -72,7 +76,7 @@ class Server:
         self.log_path = os.path.join(work, "evo.log")
         self.baby = baby
 
-    def start(self, args=()):
+    def start(self, args=(), stdin_pipe=False):
         env = dict(os.environ, EVO_HOME=os.path.join(self.work, "home"),
                    EVO_NO_SUPERVISOR="1")
         for var in ("EVO_SERVE_TOKEN", "EVO_SESSIONS_DIR", "ANTHROPIC_API_KEY"):
@@ -80,11 +84,15 @@ class Server:
         if os.path.exists(self.ready):
             os.remove(self.ready)
         log = open(self.log_path, "a")
+        # A pipe the test can close is how --watch-stdin is driven: the server
+        # is told to end when its input does.
         self.proc = subprocess.Popen(
             [EVO, "serve", "--no-userspace", "--port", "0",
              "--ready-file", self.ready, *args],
             cwd=os.path.join(self.work, "proj"), env=env,
+            stdin=subprocess.PIPE if stdin_pipe else None,
             stdout=log, stderr=subprocess.STDOUT)
+        self.piped_stdin = stdin_pipe
         deadline = time.time() + 60
         while not os.path.exists(self.ready) and time.time() < deadline:
             if self.proc.poll() is not None:
@@ -197,6 +205,13 @@ class Server:
             pass
         return frames
 
+    def close_stdin(self):
+        """The other end of the pipe goes away, as it does when a terminal
+        closes or a GUI that spawned the server exits."""
+        if self.proc.stdin:
+            self.proc.stdin.close()
+            self.proc.stdin = None
+
     def wait_exit(self, timeout=30):
         try:
             return self.proc.wait(timeout=timeout)
@@ -207,6 +222,32 @@ class Server:
     def stop(self):
         if self.proc.poll() is None:
             self.proc.kill()
+
+
+def cpu_seconds(pid):
+    """CPU time the process has burned, in seconds (`ps -o time=`)."""
+    out = subprocess.run(["ps", "-o", "time=", "-p", str(pid)],
+                         capture_output=True, text=True).stdout.strip()
+    total = 0.0
+    for part in out.split(":"):
+        try:
+            total = total * 60 + float(part)
+        except ValueError:
+            return None
+    return total
+
+
+def register_stub_model(server, stub_port):
+    """tests/stub-messages.py, registered as a provider and a model through the
+    eval op — the one op that can do this and the reason it is on by default."""
+    form = ("(progn"
+            f" (evo:register-provider :stub :base-url \"http://127.0.0.1:{stub_port}\""
+            "   :api-key \"e2e-secret\")"
+            " (evo:register-model \"stub-a\" :provider :stub :context-window 200000"
+            "   :max-output 8000 :effort t)"
+            " (evo:set-setting :model \"stub-a\")"
+            " :registered)")
+    return server.op("eval", {"code": form})
 
 
 def stub_requests(stub_port):
@@ -247,6 +288,17 @@ def apply_ops(items, state, ops):
         elif kind == "state.patch":
             state.update(op["patch"])
     return items, state
+
+
+def wait_idle(server, timeout=45):
+    """Wait for the session to be idle with no task: a turn's end."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        state = server.snapshot("session")["topics"]["session"]["state"]
+        if state["status"] == "idle" and not state["task"]:
+            return True
+        time.sleep(0.1)
+    return False
 
 
 def item_text(items, kind, i=-1):
@@ -303,14 +355,7 @@ def run_all(server, stub_port, work):
           and isinstance(health["session_loop_age_ms"], int), health)
 
     # --- the model, registered through the eval op ----------------------------
-    form = ("(progn"
-            f" (evo:register-provider :stub :base-url \"http://127.0.0.1:{stub_port}\""
-            "   :api-key \"e2e-secret\")"
-            " (evo:register-model \"stub-a\" :provider :stub :context-window 200000"
-            "   :max-output 8000 :effort t)"
-            " (evo:set-setting :model \"stub-a\")"
-            " :registered)")
-    status, reply, _ = server.op("eval", {"code": form})
+    status, reply, _ = register_stub_model(server, stub_port)
     check("the eval op registers a provider and a model",
           status == 200 and reply["ok"] and reply["result"]["values"] == [":registered"], reply)
     status, reply, _ = server.op("eval", {"code": "(+ 1 2)"})
@@ -330,6 +375,12 @@ def run_all(server, stub_port, work):
           <= {o["name"] for o in catalog["ops"]}
           and any(c["name"] == "compact" for c in catalog["commands"]),
           sorted(catalog))
+    default = catalog["default_model"]
+    check("catalog: the default model's provider is the model's own",
+          default["id"] == "stub-a"
+          and default["provider"] == next(m for m in catalog["models"]
+                                          if m["id"] == default["id"])["provider"],
+          (default, catalog["models"]))
     check("catalog carries no secret", "e2e-secret" not in text)
     check("catalog: thinking levels and languages",
           catalog["thinking_levels"][0] == "off" and catalog["languages"], catalog["languages"])
@@ -351,6 +402,9 @@ def run_all(server, stub_port, work):
     check("snapshot reports the model the catalog does",
           snap["topics"]["session"]["state"]["model"]["id"] == "stub-a",
           snap["topics"]["session"]["state"])
+    check("snapshot: has_more is a boolean, not the null NIL would send",
+          snap["topics"]["session"]["has_more"] is False,
+          snap["topics"]["session"].get("has_more"))
     check("state carries the shape the GUI draws (CONTRACT §4.2)",
           {"status", "task", "model", "thinking", "language", "context", "goal",
            "todos", "queue", "jobs", "segments", "session"}
@@ -382,9 +436,12 @@ def run_all(server, stub_port, work):
     reading = in_thread(stream_turn)
     time.sleep(0.3)
     status, reply, _ = server.op("input.send", {"text": "hello e2e"})
+    # Idle, and asking for "now": the input starts the run, so it is *sent*,
+    # not queued — `queued` is the truth about the input (CONTRACT §5.5).
     check("input.send answers with the item id and its queue state",
           status == 200 and reply["ok"] and reply["result"]["item_id"]
-          and reply["result"]["queued"] and reply["result"]["blocked"] is None, reply)
+          and reply["result"]["queued"] is False
+          and reply["result"]["blocked"] is None, reply)
     sent_id = reply["result"]["item_id"]
     join(reading, 45)
     ops = collected.get("ops") or []
@@ -414,6 +471,15 @@ def run_all(server, stub_port, work):
           all(isinstance(o.get("seq"), int) and isinstance(o.get("ts"), int)
               and o.get("topic") == "session" for o in ops
               if o["op"] not in ("hello", "stream.reset")), ops[:2])
+    check("an assistant item's usage is absent or an object, never null",
+          not [o for o in ops if o["op"] == "item.add"
+               and o["item"].get("kind") == "assistant" and "usage" in o["item"]
+               and o["item"]["usage"] is None]
+          and not [o for o in ops if o["op"] == "item.patch" and "usage" in o["patch"]
+                   and o["patch"]["usage"] is None], ops)
+    check("the queued item says which queue was asked for",
+          [o for o in ops if o["op"] == "item.add" and o["item"].get("id") == sent_id
+           and o["item"].get("queue") == "now"], ops[:3])
     check("appends are coalesced, not one op per delta",
           len([o for o in ops if o["op"] == "item.append" and o["field"] == "text"]) <= 3,
           [o for o in ops if o["op"] == "item.append"])
@@ -480,9 +546,10 @@ def run_all(server, stub_port, work):
     status, reply, _ = server.op("input.send", {"text": "cancel this one"})
     item_id = reply["result"]["item_id"]
     check("input.send while running queues, and says so",
-          reply["ok"] and item_id != first_id, reply)
+          reply["ok"] and item_id != first_id and reply["result"]["queued"] is True, reply)
     status, reply, _ = server.op("input.cancel", {"item_id": item_id})
     check("a queued input can be cancelled", status == 200 and reply["ok"], reply)
+    check("input.cancel answers an object, not null", reply["result"] == {}, reply)
     status, reply, _ = server.op("input.cancel", {"item_id": item_id})
     check("cancelling it again -> already_sent",
           reply["ok"] is False and reply["error"]["code"] == "already_sent", reply)
@@ -519,6 +586,18 @@ def run_all(server, stub_port, work):
     status, reply, _ = server.op("run.interrupt", {"scope": "session"})
     check("interrupting an idle session reports nothing interrupted",
           reply["ok"] and reply["result"]["interrupted"] == [], reply)
+
+    # --- after_run with nothing running is simply now -------------------------------
+    status, reply, _ = server.op("input.send", {"text": "after_run and idle",
+                                                "queue": "after_run"})
+    check("input.send(after_run) while idle: sent now, so not queued",
+          reply["ok"] and reply["result"]["queued"] is False, reply)
+    after_run_id = reply["result"]["item_id"]
+    wait_idle(server)
+    asked = next((i for i in server.snapshot("session")["topics"]["session"]["items"]
+                  if i["id"] == after_run_id), None)
+    check("the item still says after_run, which is what was asked",
+          asked and asked.get("queue") == "after_run" and asked["status"] != "queued", asked)
 
     # --- ops idempotency ---------------------------------------------------------
     before = len(stub_requests(stub_port))
@@ -588,8 +667,23 @@ def run_all(server, stub_port, work):
           status == 200 and len(page["items"]) == 1 and page["has_more"] is True, page)
     older = page["items"][0]["id"]
     status, page2 = server.get(f"/items?topic=session&before={older}&limit=100")
+    status, page_wide = server.get("/items?topic=session&limit=1000")
+    check("items: has_more is false (not null) when there is nothing more",
+          page_wide["has_more"] is False, page_wide.get("has_more"))
     check("items: `before` pages back from an id",
           status == 200 and all(i["id"] != older for i in page2["items"]), page2)
+
+    # --- a tool call: the result's flags are booleans, not null ------------------------
+    status, reply, _ = server.op("input.send",
+                                 {"text": 'CALL bash {"command": "echo hi"}'})
+    check("a tool-calling turn starts", reply["ok"], reply)
+    check("the tool turn finishes", wait_idle(server))
+    snap = server.snapshot("session")
+    tools = [i for i in snap["topics"]["session"]["items"] if i["kind"] == "tool"]
+    check("the tool call is an item carrying its result object",
+          tools and isinstance(tools[-1].get("result"), dict), tools[-1:])
+    check("tool result.truncated is false, not null",
+          tools and tools[-1]["result"]["truncated"] is False, tools[-1:])
 
     # --- preconditions and the debug reads --------------------------------------------
     status, reply, _ = server.op("input.send", {"text": "SLOW while switching"})
@@ -654,6 +748,73 @@ def run_all(server, stub_port, work):
     check("eval is offered when it is not disabled", reply["ok"], reply)
     status, reply, _ = server.op("server.shutdown", {})
     check("server.shutdown is answered", status == 200 and reply["ok"], reply)
+
+
+def idle_cpu_check(server):
+    """An idle server waits for work; it does not burn a core waiting.
+
+    The session loop sleeps on its inbox, so an idle process should spend
+    essentially no CPU.  (It used to spend a whole core: the loop polled.)"""
+    server.start()
+    pid = server.info["pid"]
+    time.sleep(1)                              # let boot and the first sweep go
+    before = cpu_seconds(pid)
+    time.sleep(3)
+    after = cpu_seconds(pid)
+    used = None if before is None or after is None else after - before
+    check("an idle server spends no measurable CPU",
+          used is not None and used < 0.5, f"{used}s of CPU in 3s idle")
+    check("the idle server is still answering", server.get("/health")[0] == 200)
+    server.op("server.shutdown", {})
+    check("an idle server shuts down cleanly", server.wait_exit() == 0)
+
+
+def stdin_eof_check(server, stub_port):
+    """--watch-stdin: the server ends when its input does.
+
+    Before a turn, and after one.  The turn matters because a server that has
+    answered is still a server whose stdin closed — and because a stream is
+    open while it happens, which is what a client looks like (the GUI's
+    t08_quit_on_eof drives exactly this)."""
+    server.start(args=("--watch-stdin",), stdin_pipe=True)
+    server.close_stdin()
+    check("watch-stdin: closing stdin ends an idle server",
+          server.wait_exit(timeout=15) == 0,
+          "still running 15s after its stdin closed")
+
+    server.start(args=("--watch-stdin",), stdin_pipe=True)
+    register_stub_model(server, stub_port)
+    reading = in_thread(lambda: server.probe_stream(seconds=30))
+    time.sleep(0.3)
+    status, reply, _ = server.op("input.send", {"text": "one turn before eof"})
+    check("watch-stdin: the turn before the eof runs",
+          reply["ok"] and wait_idle(server), reply)
+    server.close_stdin()
+    check("watch-stdin: closing stdin ends a server that has answered",
+          server.wait_exit(timeout=15) == 0,
+          "still running 15s after its stdin closed")
+    join(reading, 5)
+
+
+def shutdown_with_stream_check(server, stub_port):
+    """server.shutdown after a turn, with a client connected.
+
+    The shutdown path wakes the log, closes the listener, joins the flusher and
+    then the connection threads.  Each of those waits has to come back with a
+    stream open — when it did not, the server kept running for ever."""
+    server.start(args=("--watch-stdin",), stdin_pipe=True)
+    register_stub_model(server, stub_port)
+    reading = in_thread(lambda: server.probe_stream(seconds=30))
+    time.sleep(0.3)
+    status, reply, _ = server.op("input.send", {"text": "a turn, then shutdown"})
+    check("a turn with a stream open finishes", reply["ok"] and wait_idle(server), reply)
+    status, reply, _ = server.op("server.shutdown", {})
+    check("server.shutdown after a turn is answered",
+          status == 200 and reply["ok"], reply)
+    check("server.shutdown after a turn exits 0",
+          server.wait_exit(timeout=20) == 0, "still running 20s after shutdown")
+    check("the ready file is removed on that exit too", not os.path.exists(server.ready))
+    join(reading, 5)
 
 
 def eval_gate_check(server):
@@ -722,6 +883,9 @@ def main():
         restart_check(server)
         server.op("server.shutdown", {})
         server.wait_exit()
+        idle_cpu_check(server)
+        stdin_eof_check(server, stub_port)
+        shutdown_with_stream_check(server, stub_port)
         eval_gate_check(server)
     except BaseException as e:
         failed += 1

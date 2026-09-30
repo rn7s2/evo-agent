@@ -148,6 +148,11 @@ body that is not an object."
     (unless provider (http-fail 404 "no such topic"))
     (values provider name)))
 
+(defun wire-has-more (snapshot)
+  "SNAPSHOT with its HAS-MORE key made a boolean."
+  (setf (getf snapshot :has-more) (wire-boolean (getf snapshot :has-more)))
+  snapshot)
+
 ;;; Reads.
 
 (defun handle-health (server request body stream)
@@ -183,8 +188,9 @@ thread, which may be inside a long operation (CONTRACT §5.1)."
     (multiple-value-bind (epoch seq snaps) (topics-snapshot server names items)
       (write-json stream 200
                   (list :epoch epoch :seq seq
-                        :topics (json-object-value (loop for (name . snap) in snaps
-                                                   collect (cons name snap))))))))
+                        :topics (json-object-value
+                                 (loop for (name . snap) in snaps
+                                       collect (cons name (wire-has-more snap)))))))))
 
 (defun handle-items (server request body stream)
   "Older items of one topic, newest first among themselves (CONTRACT §5.4)."
@@ -193,7 +199,8 @@ thread, which may be inside a long operation (CONTRACT §5.1)."
     (let ((before (request-query-param request "before"))
           (limit (query-integer request "limit" :default 100 :min 1 :max 1000)))
       (multiple-value-bind (items more) (topic-items-before provider before limit)
-        (write-json stream 200 (list :items items :has-more (and more t) :topic name))))))
+        (write-json stream 200 (list :items items :has-more (wire-boolean more)
+                                     :topic name))))))
 
 (defun handle-item (server request body stream)
   "One item, whole — the thinking and the tool result as they were, not as the

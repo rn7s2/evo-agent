@@ -375,8 +375,7 @@ with; the entry still arrives when it is appended."
                          :text "" :thinking "" :status "streaming"
                          :error nil
                          :model (pget model :id)
-                         :provider (pget model :provider)
-                         :usage nil)))
+                         :provider (pget model :provider))))
         ;; A retried attempt announces the same id again: the item is the
         ;; attempt, not a second one.
         (unless (gethash id (v-index view)) (append-item view item))
@@ -400,12 +399,16 @@ with; the entry still arrives when it is appended."
       (let* ((stop (pget event :stop-reason))
              (status (case stop (:error "error") (:aborted "aborted")
                             (:length "length") (t "final"))))
-        (patch-item-fields view id
-                           :status status
-                           :error (pget event :error)
-                           :model (or (pget event :model) (pget item :model))
-                           :usage (or (usage-wire (pget event :usage))
-                                      (pget item :usage))))))
+        (apply #'patch-item-fields
+               view id
+               (append (list :status status
+                             :error (pget event :error)
+                             :model (or (pget event :model) (pget item :model)))
+                       ;; No usage reported stays no usage: the patch does not
+                       ;; say "zero", it says nothing at all.
+                       (let ((usage (or (usage-wire (pget event :usage))
+                                        (pget item :usage))))
+                         (when usage (list :usage usage))))))))
   (let ((usage (pget event :usage)))
     (when (and usage (plusp (usage-total-tokens usage)))
       (incf (v-run-tokens view) (usage-total-tokens usage))
