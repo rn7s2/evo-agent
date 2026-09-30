@@ -120,15 +120,6 @@ can rely on is worth more than the last few words."
     ("tool" (truncate-result item))
     (t item)))
 
-(defun wire-boolean (value)
-  "VALUE as the boolean this wire carries: T, or :FALSE for anything else.
-
-A field the contract calls a bool has to be one — NIL is how the encoder says
-null, and a client parsing a boolean cannot read null.  Only the documents
-convert: a Lisp-side verdict (MODEL-STATUS, a fold's :manual) stays T/NIL, so
-no Lisp has to know about a symbol that is true to IF."
-  (if value t :false))
-
 (defun result-wire (text)
   (list :text (or text "")
         :chars (length (or text ""))

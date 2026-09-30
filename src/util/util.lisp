@@ -208,6 +208,16 @@ own :toplevel and ECL with our own :epilogue-code."
     (setf (getf copy key) value)
     copy))
 
+(defun wire-boolean (value)
+  "VALUE as the boolean the wire carries: T, or :FALSE for anything else.
+
+A field the contract calls a bool has to be one: NIL is how the JSON encoder
+says null, and a client parsing a boolean cannot read null.  The conversion
+belongs to whatever builds a *document* (an item, a topic state, a catalog, a
+reply), so the Lisp-side verdicts — MODEL-READINESS, a fold's :manual — stay
+T/NIL and no Lisp has to know about a symbol that is true to IF."
+  (if value t :false))
+
 (defun plist-merge (base override)
   "Shallow merge: keys in OVERRIDE win."
   (let ((result (copy-list base)))
