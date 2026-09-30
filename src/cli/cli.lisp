@@ -102,7 +102,10 @@ flags."
                       (append (getf opts :images)
                               (list (or (pop argv) (error "--image needs a path"))))))
                ((string= arg "--model")
-                (set-model-opt opts (or (pop argv) (error "--model needs an id"))))
+                ;; SET-MODEL-OPT returns the plist: SETF GETF on a key that is
+                ;; not there yet prepends, and a prepend cannot be seen by the
+                ;; caller unless it takes the result back.
+                (setf opts (set-model-opt opts (or (pop argv) (error "--model needs an id")))))
                ((string= arg "--thinking")
                 (let ((level (intern (string-upcase
                                       (or (pop argv) (error "--thinking needs a level")))
@@ -150,12 +153,15 @@ flags."
     opts))
 
 (defun set-model-opt (opts text)
-  "Set OPTS's model from TEXT — ID, or ID@PROVIDER.  The provider is only
-there when the id is registered under several (or when the bare id's first
-registration is not the wanted one), so a plain id keeps working unchanged."
+  "OPTS with its model set from TEXT — ID, or ID@PROVIDER.  The provider is
+only there when the id is registered under several (or when the bare id's
+first registration is not the wanted one), so a plain id keeps working
+unchanged.  Returns the plist: the caller must take it back, because adding a
+key prepends a cons the caller's own variable does not see."
   (multiple-value-bind (id provider) (split-model-ref text)
     (setf (getf opts :model) id)
-    (when provider (setf (getf opts :model-provider) provider))))
+    (when provider (setf (getf opts :model-provider) provider))
+    opts))
 
 ;;; Print-mode rendering.
 

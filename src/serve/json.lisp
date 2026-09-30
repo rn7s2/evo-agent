@@ -59,20 +59,15 @@ into a 500."
         while (consp tail)
         finally (return (null tail))))
 
-(defun object-from-pairs (pairs)
-  "A JSON object from PAIRS, an alist of (key . value)."
-  (let ((object (make-hash-table :test #'equal)))
-    (dolist (pair pairs object)
-      (setf (gethash (json-key-name (car pair)) object)
-            (sexpr->json-value (cdr pair))))))
+(defstruct (json-object-value (:constructor %make-json-object-value))
+  (pairs nil))
 
-(defun unprintable-string (value)
-  "VALUE as a string, whatever it is.  The last resort of the mapping: a value
-outside the vocabulary must not fail the whole document, and printing it is
-already better than dropping it.  *PRINT-CIRCLE* so a self-referential
-structure terminates."
-  (let ((*print-circle* t))
-    (or (ignore-errors (princ-to-string value)) "#<unprintable>")))
+(defun json-object-value (pairs)
+  "PAIRS — a flat list of (key . value) — as a JSON object.  KEY may be a
+keyword or a string.  Not named JSON-OBJECT: that is EVO.JOURNAL's (a plist
+as JSON text), which a server inherits through its package, and one of the two
+would silently replace the other."
+  (%make-json-object-value :pairs pairs))
 
 (defun sexpr->json-value (value)
   "VALUE as the jzon value the mapping above says.  Total: every object has an

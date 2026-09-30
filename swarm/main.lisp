@@ -87,8 +87,13 @@ settings for the swarm, lane count, tool limits, prompt notes, and
                           (pop argv)
                           :latest)))
                ((string= arg "--model")
-                (setf (getf opts :model)
-                      (or (pop argv) (error 'evo.cli:usage-error :text "--model needs an id"))))
+                ;; ID[@PROVIDER], split once: the provider picks between
+                ;; several registrations of the same id (CONTRACT §1).
+                (setf opts (evo.cli:set-model-opt
+                            opts
+                            (or (pop argv)
+                                (error 'evo.cli:usage-error
+                                       :text "--model needs an id")))))
                ((string= arg "--lane-model")
                 (setf (getf opts :lane-model)
                       (or (pop argv)
