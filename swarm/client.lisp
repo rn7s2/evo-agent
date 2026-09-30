@@ -93,6 +93,11 @@ lane that cannot be reached or has no ready file yet signals LANE-ERROR."
                                             (getf (getf reply :error) :message)))))
     reply))
 
+;; NOTINLINE: the unit suite replaces this (and LANE-SNAPSHOT below) to
+;; drive a swarm with no processes behind it; ECL inlines a same-file
+;; call and would leave the suite talking to the real one.
+(declaim (notinline lane-op lane-snapshot))
+
 (defun lane-op (lane op args &key (timeout 60))
   "Run OP in LANE through POST /ops and return its result plist.  A refusal
 signals LANE-ERROR carrying serve's error code and message."

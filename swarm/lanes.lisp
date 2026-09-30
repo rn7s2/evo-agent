@@ -469,6 +469,10 @@ and run (view.lisp); SERVER is its op log, when the coordinator is served."
       (decode-universal-time (get-universal-time) 0)
     (format nil "~4,'0d~2,'0d~2,'0dT~2,'0d~2,'0d~2,'0d" year month day hour min sec)))
 
+;; NOTINLINE: replaced by the unit suite, which starts a swarm without
+;; spawning anything (see the note in client.lisp).
+(declaim (notinline start-lanes stop-swarm))
+
 (defun start-lanes (swarm &key resume)
   "Bring every lane up in parallel, each on its own thread; the coordinator
 does not wait for them."
