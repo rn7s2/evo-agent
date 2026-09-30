@@ -404,6 +404,13 @@ did not register it; a lane whose default model is missing says why."
              (and queued (search "[lane 1 report] done: built it"
                                  (getf (first queued) :text))
                   (search "evidence: make ok" (getf (first queued) :text)))))
+    (check "events: a report carries its structure beside the prose"
+           (let ((origin (getf (first (evo.kernel::agent-steering agent)) :origin)))
+             (and (eq :lane-report (pget origin :kind))
+                  (eql 1 (pget origin :lane))
+                  (equal "built it" (pget origin :done))
+                  (equal "make ok" (pget origin :evidence))
+                  (null (pget origin :next)))))
     (check "events: the report is shown through the swarm's view, not the TUI"
            (let ((said (slot-value recording 'said)))
              (and said (search "[lane 1 report] done: built it" (caar said))
@@ -413,6 +420,9 @@ did not register it; a lane whose default model is missing says why."
                                   '(:type "report" :done "all of it" :goal "complete"))
     (check "events: a report says the lane's goal status"
            (search "goal: complete" (getf (first (evo.kernel::agent-steering agent)) :text)))
+    (check "events: ...as a keyword, not a word to parse out"
+           (eq :complete (pget (getf (first (evo.kernel::agent-steering agent)) :origin)
+                               :goal)))
     (evo.kernel::drain-steering agent)
     (evo.swarm::handle-lane-event lane "settled" '(:type "settled" :outcome "stop"))
     (check "events: settling makes the lane idle" (eq :idle (lane-state lane)))
@@ -420,12 +430,21 @@ did not register it; a lane whose default model is missing says why."
            (let ((text (getf (first (evo.kernel::agent-steering agent)) :text)))
              (and (search "[lane 1] run ended (stop)" text)
                   (not (search "goal:" text)))))
+    (check "events: a finished run is a :lane-event with its outcome"
+           (let ((origin (getf (first (evo.kernel::agent-steering agent)) :origin)))
+             (and (eq :lane-event (pget origin :kind))
+                  (eq :run-ended (pget origin :event))
+                  (equal "stop" (pget origin :outcome))
+                  (null (pget origin :goal-status)))))
     (evo.kernel::drain-steering agent)
     (evo.swarm::handle-lane-event lane "settled"
                                   '(:type "settled" :outcome "stop" :goal "complete"))
     (check "events: a run end says a lane's goal is complete"
            (search "[lane 1] run ended (stop) — goal: complete"
                    (getf (first (evo.kernel::agent-steering agent)) :text)))
+    (check "events: ...and the origin names that goal status"
+           (eq :complete (pget (getf (first (evo.kernel::agent-steering agent)) :origin)
+                               :goal-status)))
     (evo.kernel::drain-steering agent)
     (evo.swarm::handle-lane-event lane "settled"
                                   '(:type "settled" :outcome "aborted" :goal "active"))
@@ -437,6 +456,12 @@ did not register it; a lane whose default model is missing says why."
     (check "events: an error in a lane reaches the coordinator"
            (search "[lane 1] error: boom"
                    (getf (first (evo.kernel::agent-steering agent)) :text)))
+    (check "events: ...with its severity and detail as structure"
+           (let ((origin (getf (first (evo.kernel::agent-steering agent)) :origin)))
+             (and (eq :lane-event (pget origin :kind))
+                  (eq :error (pget origin :event))
+                  (eq :error (pget origin :severity))
+                  (equal "boom" (pget origin :detail)))))
     (evo.kernel::drain-steering agent)
     (evo.swarm::handle-lane-event lane "text-delta" '(:type "text-delta" :text "hi"))
     (check "events: streamed text is not coordinator input"
