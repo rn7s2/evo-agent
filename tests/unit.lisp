@@ -6602,7 +6602,54 @@ five identical restarts, each reporting a different error than the real one."
                     (check "and --events still rides along"
                            (equal (list "--resume" path "--events")
                                   (evo.cli::restart-argv '("--events")))))
-               (evo.port:setenv "EVO_SUPERVISOR_STATE_DIR" (or saved-state "")))))
+               (evo.port:setenv "EVO_SUPERVISOR_STATE_DIR" (or saved-state ""))))
+           ;; F4: an idle server — one that has answered nothing, so its
+           ;; journal was never written — must still come back to its own
+           ;; session.  Asking whether the file exists here is what moved a
+           ;; client to a brand-new journal mid-restart.
+           (let ((id (gen-id 16))
+                 (saved-state (getenv "EVO_SUPERVISOR_STATE_DIR"))
+                 (saved-restarts (getenv "EVO_SUPERVISOR_RESTARTS")))
+             (unwind-protect
+                  (let* ((path (namestring (merge-pathnames
+                                            (format nil "~a_~a.sexp"
+                                                    (evo.journal::session-file-timestamp) id)
+                                            (sessions-directory)))))
+                    (check "F4: the idle session is not on disk" (not (probe-file path)))
+                    (evo.cli::supervisor-state-directory*)
+                    (evo:note-current-session path)
+                    (check "F4: restart resumes a session that never reached disk"
+                           (equal (list "--resume" path) (evo.cli::restart-argv nil)))
+                    ;; A person who mistypes a path is a usage error...
+                    (check "F4: a mistyped --resume path is a usage error"
+                           (handler-case
+                               (progn (evo.cli::resolve-journal (list :resume path)) nil)
+                             (evo.cli::usage-error () t)
+                             (error () nil)))
+                    ;; ...but a supervised restart comes back at that path.
+                    (evo.port:setenv "EVO_SUPERVISOR_RESTARTS" "1")
+                    (let ((journal (evo.cli::resolve-journal (list :resume path))))
+                      (check "F4: a restarted idle session opens at its own path"
+                             (equal path (namestring (journal-path journal))))
+                      (check "F4: and keeps the id its file name carries"
+                             (equal id (pget (journal-header journal) :id)))
+                      (check "F4: nothing is written until something is journalled"
+                             (not (probe-file path))))))
+               (evo.port:setenv "EVO_SUPERVISOR_STATE_DIR" (or saved-state ""))
+               (evo.port:setenv "EVO_SUPERVISOR_RESTARTS" (or saved-restarts "")))
+           ;; T1: the token is the parent's to mint, once, and a child that
+           ;; already has one keeps it — a client holding the URL and token
+           ;; cannot be handed a different token by a restart.
+           (let ((saved (getenv "EVO_SERVE_TOKEN")))
+             (unwind-protect
+                  (progn
+                    (evo.port:setenv "EVO_SERVE_TOKEN" "held-by-the-client")
+                    (check "T1: a token already in the environment is the token"
+                           (string= "held-by-the-client" (evo.serve:resolve-token)))
+                    (evo.port:setenv "EVO_SERVE_TOKEN" "")
+                    (check "T1: with none, the parent mints one"
+                           (plusp (length (evo.serve:resolve-token)))))
+               (evo.port:setenv "EVO_SERVE_TOKEN" (or saved "")))))
       (evo.port:setenv "EVO_HOME" (or saved "")))))
 
 (defun test-recovery-entry ()
@@ -9325,10 +9372,18 @@ session the child was on rather than the newest one in the folder (E1)."
                                (namestring (journal-path
                                             (evo.cli:resolve-journal
                                              (list :resume (namestring (journal-path first-journal)))))))))))
-           ;; A child that never reported a session restarts fresh: no
-           ;; --resume at all, rather than a guess.
+           ;; A child that has reported a session keeps it across a restart
+           ;; even before the file is on disk: an idle server has journalled
+           ;; nothing yet, and sending it to another journal sends the client
+           ;; there too (CONTRACT §1, F4).
            (evo:note-current-session "/nonexistent/never-written.sexp")
-           (check "e1: nothing to resume means no --resume"
+           (check "F4: a reported session is resumed before its file exists"
+                  (equal '("--resume" "/nonexistent/never-written.sexp")
+                         (member "--resume" (evo.cli::restart-argv '("serve")) :test #'equal)))
+           ;; A child that reported nothing at all restarts fresh: no
+           ;; --resume at all, rather than a guess.
+           (evo.kernel:delete-supervisor-state)
+           (check "e1: nothing reported at all means no --resume"
                   (null (member "--resume" (evo.cli::restart-argv '("serve")) :test #'equal)))
            ;; The supervisor takes its state with it when it gives up.
            (evo:note-current-session "/tmp/whatever.sexp")

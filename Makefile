@@ -32,7 +32,7 @@ STDIN_GUARD =
 endif
 
 # All targets are actions, not files — declare them phony so they always run.
-.PHONY: build test integration tui-test tui-test-offline serve-test swarm-test swarm-serve-test clean install install-home
+.PHONY: build test integration tui-test tui-test-offline serve-test swarm-test swarm-serve-test supervisor-test clean install install-home
 
 # Compile both binaries — build/evo-agent (the agent alone) and
 # build/evo-swarm (its own system on top of evo — evo-swarm.asd,
@@ -127,6 +127,13 @@ swarm-test: build
 # python3).  Needs the evo-agent and evo-swarm binaries.
 swarm-serve-test: build
 	tests/swarm-serve-e2e.py build
+
+# The supervisor, live: a supervised server comes back on its exact session
+# and port (S3/S4), an idle one comes back on the session it never wrote to
+# disk (F4), and the token a client holds survives the restart (T1).  Both
+# binaries (tests/supervisor-e2e.py; python3).
+supervisor-test: build
+	tests/supervisor-e2e.py build/evo-agent
 
 # Seed corpus: docs + example extensions into the global evo home.
 # Everything installed under docs/ is reference-only — nothing ships active in
