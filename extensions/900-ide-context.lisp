@@ -203,15 +203,16 @@ block lands immediately ahead of the message, never inside a turn in flight."
   ":user-message — the user said something; put the editor's context first."
   (ide-context-inject (evo.util:pget payload :agent)))
 
-(defun ide-context-label (&optional tui)
-  "Status segment text: shown only while a selection exists.  No separator of
-its own — EVO.TUI:ADD-STATUS-SEGMENT's renderer owns the punctuation between
+(defun ide-context-label (&optional ctx)
+  "Status segment text: shown only while a selection exists.  Plain text — the
+segment declares its style (:muted) and the frontend paints it.  No separator
+of its own: EVO:DEFINE-STATUS-SEGMENT's renderer owns the punctuation between
 segments, so a segment that renders nothing leaves no dangling \" · \"."
-  (declare (ignore tui))
+  (declare (ignore ctx))
   (let* ((state (ignore-errors (ide-context-state)))
          (lines (and state (ide-context-selection-lines state))))
     (when (and (integerp lines) (plusp lines))
-      (evo.tui:dim (format nil "⧉ ~a line~:p selected" lines)))))
+      (format nil "⧉ ~a line~:p selected" lines))))
 
 ;;; Installation: a hook and a status segment, both registrations the kernel
 ;;; sees — so a reload withdraws them with this file's generation.
@@ -221,9 +222,10 @@ segments, so a segment that renders nothing leaves no dangling \" · \"."
   (evo:on :user-message #'ide-context-user-message :name :ide-context)
   ;; The status line is a registry, not a function to wrap: several parties
   ;; want a piece of that line and only the renderer can see them all at once.
-  ;; Order 600 puts this just inboard of the core segments (100-400).
-  (evo.tui:add-status-segment :ide-selection #'ide-context-label
-                              :side :left :order 600))
+  ;; Order 600 puts this just inboard of the core segments (100-400).  The
+  ;; registry is the CORE's, so the same selection indicator reaches a GUI.
+  (evo:define-status-segment :ide-selection #'ide-context-label
+                             :side :left :order 600 :style :muted))
 
 (defun ide-context-poller-loop ()
   "Ask the TUI to repaint when the selection changes.  The TUI only repaints

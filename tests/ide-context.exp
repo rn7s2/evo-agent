@@ -28,9 +28,9 @@ file copy "$repo/extensions/900-ide-context.lisp" "$env(EVO_HOME)/extensions/900
 # green while the feature was dead on every machine that had both.
 set f [open "$env(EVO_HOME)/extensions/500-right-segment.lisp" w]
 puts $f {(in-package :evo.user)}
-puts $f {(evo.tui:add-status-segment :test-right}
-puts $f {  (lambda (tui) (declare (ignore tui)) (evo.tui:dim "load 42"))}
-puts $f {  :side :right :order 100)}
+puts $f {(evo:define-status-segment :test-right}
+puts $f {  (lambda (ctx) (declare (ignore ctx)) "load 42")}
+puts $f {  :side :right :order 100 :style :muted)}
 close $f
 
 # A model must exist for the TUI to start; it is never reached (the endpoint
