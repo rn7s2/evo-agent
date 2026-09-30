@@ -292,24 +292,53 @@ lane, which still has them."
 status (so `starting → idle` and `working → idle` are the lane's own words),
 its task and step clocks, and the goal it cached.  The swarm's own states —
 :starting while it comes up, :down, :stopped — are not overwritten by a
-snapshot from a lane that is not there any more."
+snapshot from a lane that is not there any more.
+
+A lane that was working and is idle again has finished a run, and that is
+where the coordinator hears about it: serve appends an item for a run only
+when the ending went wrong (`:aborted`, `:error`, `:length`), so the state
+moving back to idle is the one signal every ending gives."
   (let* ((lane (mirror-lane mirror))
          (state (mirror-lane-state mirror))
          (status (getf state :status))
-         (task (getf state :task)))
+         (task (getf state :task))
+         (was nil)
+         (now nil)
+         (started nil))
     (when lane
       (with-swarm-lock ()
         (let ((own (lane-state lane)))
+          (setf started (lane-task-started lane))
           ;; The lane's own status is authoritative while its process is
           ;; there: :down and :stopped are the swarm's word that it is not.
-          (setf (lane-state lane)
+          (setf was own
+                (lane-state lane)
                 (cond ((member own '(:down :stopped)) own)
                       ((equal status "running") :working)
                       ((equal status "compacting") :compacting)
                       ((equal status "idle") :idle)
                       (t :starting))
+                now (lane-state lane)
                 (lane-task-started lane) (getf task :started-at)
-                (lane-step-started lane) (getf task :step-started-at)))))))
+                (lane-step-started lane) (getf task :step-started-at))))
+      ;; Outside the lock: the coordinator is woken, and telling it is the
+      ;; run thread's business, not the lock's.
+      (when (and (eq was :working) (eq now :idle))
+        (lane-run-ended lane (mirror-item-since mirror started)))
+      now)))
+
+(defun mirror-item-since (mirror since)
+  "The newest item MIRROR holds, when it is newer than SINCE (epoch ms) — the
+item of the run that just ended, not the debris of one before it."
+  (let ((item (mirror-newest-item mirror)))
+    (when (and item (or (null since) (>= (or (getf item :ts) 0) since)))
+      item)))
+
+(defun mirror-newest-item (mirror)
+  "The newest item MIRROR holds, whole, or NIL."
+  (and mirror
+       (bt:with-lock-held ((mirror-lock mirror))
+         (car (last (mirror-items mirror))))))
 
 (defun mirror-last-item (mirror)
   "The newest item the mirror holds, as a short (kind summary) row (§4.3)."

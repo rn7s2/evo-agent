@@ -104,6 +104,13 @@ class Stub:
         return None
 
 
+def was_told(stub, needle, after=0.0):
+    """Every request the coordinator made after AFTER whose newest user text
+carries NEEDLE — what it was told, rather than what it was sent."""
+    return [r for r in stub.requests()
+            if r["role"] == "coordinator" and r["time"] >= after and needle in r["last_user"]]
+
+
 def coordinator_quiet(stub, seconds=1.5, timeout=60):
     """Wait until the coordinator has sent the model nothing for SECONDS: its
     last turn is over.  Typed input that lands mid-turn joins lane notices at
@@ -491,10 +498,10 @@ def first_run(term, stub, home, proj):
     check("the lane's goal carries the objective",
           state["goal"] and state["goal"]["objective"] == "reach the e2e goal FINISH",
           state["goal"])
-    ended = wait_for(lambda: stub.find("coordinator", "[lane 3] run ended", t_goal), 30)
+    ended = wait_for(lambda: was_told(stub,
+                                   "[lane 3] run ended (stop) — goal: complete", t_goal), 30)
     check("the run end tells the coordinator the goal is complete",
-          ended and "[lane 3] run ended (stop) — goal: complete" in ended["last_user"],
-          ended and ended["last_user"][-300:])
+          ended, [r["last_user"][-200:] for r in was_told(stub, "run ended", t_goal)][-2:])
 
     # --- a report that delivers the objective closes the goal ----------------------
     t_rep = time.time()
@@ -509,9 +516,10 @@ def first_run(term, stub, home, proj):
     rep = wait_for(lambda: stub.find("coordinator", "[lane 3 report] done: objective delivered", t_rep), 30)
     check("the report tells the coordinator the goal is complete",
           rep and "goal: complete" in rep["last_user"], rep and rep["last_user"][-300:])
-    ended = wait_for(lambda: stub.find("coordinator", "[lane 3] run ended", t_rep), 30)
-    check("the lane settles once, its goal complete",
-          ended and "goal: complete" in ended["last_user"], ended and ended["last_user"][-300:])
+    settled = wait_for(lambda: (lambda ends: ends and "goal: complete" in ends[-1]["last_user"])
+                       (was_told(stub, "[lane 3] run ended", t_rep)), 30)
+    check("the lane settles once, its goal complete", settled,
+          [r["last_user"][-200:] for r in was_told(stub, "[lane 3] run ended", t_rep)])
     check("no continuation sent the lane back to work it had delivered",
           not any(r["role"] == "lane 3" and r["time"] >= t_rep
                   and "You are idle but your goal is still active" in r["last_user"]

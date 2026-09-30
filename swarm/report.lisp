@@ -82,10 +82,19 @@ data."
   (swarm-lane-changed)
   (tell-coordinator (report-text lane report) :origin (report-origin lane report)))
 
+(defun run-ended-outcome (item)
+  "The outcome word for a run that just ended, from the newest item of the
+lane's topic: ITEM is serve's run_outcome item when it appended one (an
+aborted, error or length ending is the only kind that leaves one), and the
+run finished as asked otherwise."
+  (if (and item (equal (getf item :kind) "run_outcome"))
+      (or (getf item :outcome) "stop")
+      "stop"))
+
 (defun lane-run-ended (lane item)
   "LANE's run finished: the coordinator hears it as a :lane-event message —
 which goal status it settled with is what says whether \"done\" is done."
-  (let ((outcome (getf item :outcome))
+  (let ((outcome (run-ended-outcome item))
         (goal (lane-goal-status lane)))
     (tell-coordinator (run-ended-text lane outcome)
                       :style (if (member outcome '("error") :test #'equal) :error :notice)
@@ -96,15 +105,13 @@ which goal status it settled with is what says whether \"done\" is done."
     (swarm-lane-changed)))
 
 (defun lane-item-arrived (mirror item)
-  "An item of MIRROR's lane just arrived, once.  Reports and finished runs are
-the two that mean something to the coordinator; everything else it can read in
-the lane's topic."
+  "An item of MIRROR's lane just arrived, once.  A report is the one item that
+means something the coordinator cannot read off the lane's topic; a run ending
+is heard from the lane's state moving back to idle (mirror.lisp), which every
+ending reports and a normal one reports no other way."
   (let ((lane (mirror-lane mirror))
         (kind (getf item :kind)))
     (when lane
-      (cond
-        ((and (equal kind "tool") (equal (getf item :name) "report")
-              (getf item :args))
-         (lane-reported lane (getf item :args)))
-        ((equal kind "run_outcome")
-         (lane-run-ended lane item))))))
+      (when (and (equal kind "tool") (equal (getf item :name) "report")
+                 (getf item :args))
+        (lane-reported lane (getf item :args))))))

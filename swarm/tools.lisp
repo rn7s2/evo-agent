@@ -28,7 +28,7 @@
 
 (defun lane-status-line (lane)
   (destructuring-bind (&key n state task pid worktree branch restarts reports model &allow-other-keys)
-      (lane-snapshot lane)
+      (lane-status-plist lane)
     (format nil "lane ~d  ~(~a~)~@[ · step ~a~]~@[ · task: ~a~]~@[ · ~a~]~@[ · worktree ~a~]~@[ (~a)~] · ~d report~:p~@[ · ~a~]~@[ · pid ~a~]"
             n state
             (lane-aged (with-swarm-lock () (lane-step-started lane)))
@@ -38,14 +38,19 @@
             (and (plusp restarts) (format nil "~d restart~:p" restarts))
             pid)))
 
-(defun lane-status (lane)
-  "LANE's own status word, from its mirror: what its topic says."
-  (getf (mirror-lane-state (lane-mirror lane)) :status))
+(defun lane-live-status (lane)
+  "LANE's own status word, from its /snapshot, or NIL when it cannot be asked:
+what the lane says now, rather than what the coordinator last mirrored of it."
+  (ignore-errors
+    (getf (getf (lane-topic-snapshot lane) :state) :status)))
 
 (defun wait-until-idle (lane &key (seconds 30))
-  "Wait for LANE to report no task.  T when it did within SECONDS."
+  "Wait for LANE to report no task — asking the lane itself, because the
+mirror follows the lane's op stream and can still show the state a change the
+lane has already made is about to replace.  T when it became idle within
+SECONDS."
   (loop repeat (* seconds 10)
-        when (equal (lane-status lane) "idle")
+        when (equal (lane-live-status lane) "idle")
           do (with-swarm-lock () (setf (lane-state lane) :idle))
              (return t)
         do (sleep 0.1)))
@@ -110,10 +115,11 @@
                        (lane-n lane))))))
 
 (defun interrupt-lane (lane)
-  "Stop LANE now.  Returns (values INTERRUPTED IDLE)."
+  "Stop LANE now.  Returns (values INTERRUPTED IDLE): INTERRUPTED when it was
+running something, IDLE when it has stopped (it already is, if it was not)."
   (let* ((result (lane-op lane "run.interrupt" (list :scope "session")))
          (interrupted (getf result :interrupted)))
-    (values interrupted (wait-until-idle lane))))
+    (values interrupted (if interrupted (wait-until-idle lane) t))))
 
 (defun tool-interrupt-lane (args)
   "Stop LANE now; with a text, then give it that text as its new instructions."

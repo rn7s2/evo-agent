@@ -60,30 +60,57 @@ to say there."
     (when (and text (plusp (length text)))
       (truncate-string (substitute #\Space #\Newline text) 400 "…"))))
 
+(defvar *watch-print-limit* 400
+  "How much of one item the scrollback shows: what ITEM-LINE truncates to.")
+
+(defun watch-print (lane line)
+  (when line (evo.tui:post-notice line :style :dim)))
+
 (defun watch-lane-items (mirror)
-  "The TUI is following MIRROR's lane (or is not): print the items that
-arrived since the last one printed.  Called from the lane's own thread."
+  "The TUI is following MIRROR's lane (or is not): show what has arrived since
+the last look.  An item whose text grows (a message being written) shows only
+the part that is new, so a delta is never the whole message again; every other
+item shows once."
   (let ((lane (mirror-lane mirror)))
-    (when lane
-      (let ((cursor (with-swarm-lock ()
-                      (and (lane-watched lane) (lane-watch-cursor lane)))))
-        (when (or cursor (with-swarm-lock () (lane-watched lane)))
-          (let ((items (mirror-items-after mirror cursor)))
-            (dolist (item items)
-              (let ((line (item-line (lane-n lane) item)))
-                (when line (evo.tui:post-notice line :style :dim))))
-            (when items
-              (with-swarm-lock ()
-                (setf (lane-watch-cursor lane) (getf (car (last items)) :id))))))))))
+    (when (and lane (with-swarm-lock () (lane-watched lane)))
+      (dolist (item (mirror-items-after mirror nil))
+        (let* ((id (getf item :id))
+               (kind (getf item :kind))
+               (text (getf item :text))
+               (shown (with-swarm-lock () (gethash id (lane-watch-printed lane)))))
+          (cond
+            ;; Text that grows: the new part only, up to the limit ITEM-LINE
+            ;; truncates to.
+            ((and (stringp text) (member kind '("assistant" "thinking") :test #'equal))
+             (let* ((shown (or shown 0))
+                    (upto (min (length text) *watch-print-limit*)))
+               (when (> upto shown)
+                 (watch-print lane (format nil "  [lane ~d] ~a"
+                                           (lane-n lane)
+                                           (substitute #\Space #\Newline
+                                                       (subseq text shown upto))))
+                 (with-swarm-lock ()
+                   (setf (gethash id (lane-watch-printed lane)) upto)))))
+            ;; Everything else is one line, once.
+            ((null shown)
+             (let ((line (item-line (lane-n lane) item)))
+               (when line
+                 (watch-print lane line)
+                 (with-swarm-lock ()
+                   (setf (gethash id (lane-watch-printed lane))
+                         (if (stringp text) (length text) 0))))))))))))
 
 (defun show-lane-tail (lane &key (items 8))
   "Print the newest ITEMS of LANE's mirror, as /lane N starts following it."
-  (let ((recent (mirror-last-items (lane-mirror lane) items)))
-    (dolist (item recent)
-      (let ((line (item-line (lane-n lane) item)))
-        (when line (evo.tui:post-notice line :style :dim))))
-    (with-swarm-lock ()
-      (setf (lane-watch-cursor lane) (and recent (getf (car (last recent)) :id))))))
+  (dolist (item (mirror-last-items (lane-mirror lane) items))
+    (let ((line (item-line (lane-n lane) item)))
+      (when line (watch-print lane line))
+      (with-swarm-lock ()
+        (setf (gethash (getf item :id) (lane-watch-printed lane))
+              (let ((text (getf item :text)))
+                (if (stringp text)
+                    (min (length text) *watch-print-limit*)
+                    0)))))))
 
 (defun lane-view-command (ctx)
   "/lane N — follow lane N's items live (read-only); /lane off stops."
