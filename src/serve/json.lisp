@@ -41,23 +41,54 @@ name, \"lane:1\") — as its JSON key."
         ((stringp key) key)
         (t (string-downcase (symbol-name key)))))
 
+(defun list-shape (value)
+  "How VALUE walks as a list: :PROPER, :DOTTED, or :CIRCULAR.  Walking it must
+end for every value, a cycle included: a journal holds whatever a session put
+there, and an encoder that hangs on one is not total (CONTRACT §5.6, R1).
+Two steps against one, so a cycle is found instead of followed."
+  (let ((slow value) (fast value))
+    (loop
+      (cond ((null fast) (return :proper))
+            ((atom fast) (return :dotted))
+            ((null (cdr fast)) (return :proper))
+            ((atom (cdr fast)) (return :dotted)))
+      (setf slow (cdr slow) fast (cddr fast))
+      (when (eq slow fast) (return :circular)))))
+
+(defun proper-list-p (value)
+  "True for a list that ends in NIL.  A dotted pair, an improper list and a
+circular one are all lists to CONSP, and none can be walked by MAP — which is
+exactly how one `(\"Authorization\" . \"Bearer …\")` in *settings* used to turn
+/registry into a 500."
+  (eq (list-shape value) :proper))
+
 (defun plist-p (value)
   "True for a non-empty list of keyword/value pairs: a plist is an object on
 the wire, anything else (a vector, a list of non-keyword first elements) an
 array.  A name that is not an identifier — a topic, \"lane:1\" — needs
-JSON-OBJECT instead."
+JSON-OBJECT-VALUE instead."
   (and (consp value)
+       (eq (list-shape value) :proper)
        (loop for tail on value by #'cddr
              always (and (keywordp (car tail)) (consp (cdr tail))))))
 
-(defun proper-list-p (value)
-  "True for a list that ends in NIL.  A dotted pair and an improper list are
-both lists to CONSP, and neither can be walked by MAP — which is exactly how
-one `(\"Authorization\" . \"Bearer …\")` in *settings* used to turn /registry
-into a 500."
-  (loop for tail = value then (cdr tail)
-        while (consp tail)
-        finally (return (null tail))))
+(defun object-from-pairs (pairs)
+  "A JSON object from PAIRS, an alist of (key . value)."
+  (let ((object (make-hash-table :test #'equal)))
+    (dolist (pair pairs object)
+      (setf (gethash (json-key-name (car pair)) object)
+            (sexpr->json-value (cdr pair))))))
+
+(defun unprintable-string (value)
+  "VALUE as a string, whatever it is.  The last resort of the mapping: a value
+outside the vocabulary must not fail the whole document, and printing it is
+already better than dropping it.  *PRINT-CIRCLE* so a self-referential
+structure terminates."
+  (let ((*print-circle* t))
+    (or (ignore-errors (princ-to-string value)) "#<unprintable>")))
+
+;;; An object whose keys are not keywords.  A map keyed by topic name cannot
+;;; be a plist (the first element would read as an array), so it says so.
 
 (defstruct (json-object-value (:constructor %make-json-object-value))
   (pairs nil))
