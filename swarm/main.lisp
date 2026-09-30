@@ -2,9 +2,8 @@
 ;;;;
 ;;;; evo-swarm invoked plainly is its own supervisor, exactly as evo is (the
 ;;;; same supervisor, evo.cli:supervise): the coordinator runs as its child
-;;;; and a crash restarts it with --resume — and a resumed coordinator
-;;;; restores its lanes from its journal.  Its lanes watch its pid, so lanes
-;;;; never outlive the coordinator that drove them.
+;;;; and a crash restarts it resuming its exact session (CONTRACT §8) — and a
+;;;; resumed coordinator restores its swarm from its journal.
 ;;;;
 ;;;; The coordinator has two frontends, and the command line picks one: the
 ;;;; TUI plainly, or `serve` — the same session, controlled over HTTP.  A VIEW
@@ -24,20 +23,18 @@ Usage:
                                  session, driven over HTTP
       --host <addr>              address to bind (default 127.0.0.1)
       --port <n>                 port to bind (default 8421; 0 picks a free one)
-      --ready-file <path>        publish url, token, epoch and session here (mode 0600)
-      --watch-stdin              shut down cleanly when stdin reaches end of file
+      --ready-file <path>        write the ready file (port, token, session) here
+      --watch-stdin              shut down when stdin reaches EOF
       --allow-remote             permit a non-loopback --host
   evo-swarm --workers <n>        how many lanes (default: the :swarm-workers
                                  setting, else 6)
   evo-swarm --resume [path]      resume the coordinator session (default: the
                                  last one here) and restore its lanes
-  evo-swarm --model <id>[@<provider>]
-                                 the coordinator's model (lanes default to it)
-  evo-swarm --lane-model <id>[@<provider>]
-                                 the model lanes run (recorded in the swarm)
+  evo-swarm --model <id[@provider]>        the coordinator's model
   evo-swarm --thinking <level>   low|medium|high|xhigh|max
-  evo-swarm --lane-thinking <level>
-                                 the thinking level lanes run (recorded too)
+  evo-swarm --lane-model <id[@provider]>   the lanes' model (default: the
+                                 coordinator's)
+  evo-swarm --lane-thinking <l>  the lanes' thinking level
   evo-swarm --evo <path>         the evo-agent binary lanes run (default:
                                  EVO_BINARY, then the one beside evo-swarm,
                                  then PATH)
@@ -51,21 +48,22 @@ Usage:
                                  validate a launch (exit 1 when it cannot work)
   evo-swarm --help | --version
 
-serve takes the agent's serve flags and the swarm's own together.  Its bearer
-token is minted once per launch, in the supervisor parent, so a restarted
-coordinator keeps the one clients already hold.
+serve takes the agent's serve flags and the swarm's own together.  Its port
+and token are minted once per launch, in the supervising parent, and written
+to the ready file — a restarted coordinator opens the same door for the
+clients that already hold them.
 
 Config: init.lisp, extensions and post-init.lisp as for evo, then
 ~/.evo/swarm.lisp and <cwd>/.evo/swarm.lisp: the coordinator's models and
 settings for the swarm, lane count, tool limits, prompt notes, and
 (evo.swarm:in-lanes ...) — code every lane evaluates.  See docs/swarm.md.")
 
-(defun check-think-level (text what)
-  (let ((level (intern (string-upcase (or text "")) :keyword)))
-    (unless (member level +effort-levels+)
-      (error 'evo.cli:usage-error
-             :text (format nil "~a must be one of low|medium|high|xhigh|max" what)))
-    level))
+(defun split-model-id (text)
+  "ID@PROVIDER as a plist (:id, :provider), or ID alone as (:id ID)."
+  (let ((at (position #\@ text)))
+    (if at
+        (list :id (subseq text 0 at) :provider (subseq text (1+ at)))
+        (list :id text))))
 
 (defun parse-args (argv)
   (let ((opts nil))
@@ -89,9 +87,20 @@ settings for the swarm, lane count, tool limits, prompt notes, and
                           (pop argv)
                           :latest)))
                ((string= arg "--model")
-                (evo.cli:set-model-opt opts (or (pop argv) (error 'evo.cli:usage-error :text "--model needs an id"))))
+                (setf (getf opts :model)
+                      (or (pop argv) (error 'evo.cli:usage-error :text "--model needs an id"))))
                ((string= arg "--lane-model")
-                (setf (getf opts :lane-model) (or (pop argv) (error 'evo.cli:usage-error :text "--lane-model needs an id"))))
+                (setf (getf opts :lane-model)
+                      (split-model-id (or (pop argv)
+                                          (error 'evo.cli:usage-error
+                                                 :text "--lane-model needs an id")))))
+               ((string= arg "--lane-thinking")
+                (let ((level (or (pop argv) "")))
+                  (unless (member level '("off" "low" "medium" "high" "xhigh")
+                                  :test #'equal)
+                    (error 'evo.cli:usage-error
+                           :text "--lane-thinking must be one of off|low|medium|high|xhigh"))
+                  (setf (getf opts :lane-thinking) level)))
                ((string= arg "--thinking")
                 (setf (getf opts :thinking) (check-think-level (pop argv) "--thinking")))
                ((string= arg "--lane-thinking")
@@ -132,15 +141,14 @@ settings for the swarm, lane count, tool limits, prompt notes, and
     opts))
 
 (defun restart-argv (argv)
-  "A restarted coordinator: the flags that describe the swarm and the server,
-plus --resume naming the session it was on and the port it bound.
+  "A restarted coordinator: the swarm's own flags plus the serve flags the
+shared layer keeps — the ready file and the pinned port, and, per CONTRACT §8,
+--resume <the exact journal path> from the supervisor's current-session file,
+never a bare --resume typed here.
 
-serve's flags are kept — where it listens and where its ready file goes —
-because the child that comes back must open the same door for the clients
-that hold its URL and token.  --model and --thinking are not: the journal
-already carries the session's, and re-passing them would override a /model
-switch made since.  --lane-model and --lane-thinking are kept: they describe
-the swarm, not the session, and an unchanged replay only re-records them."
+--model, --thinking and the lane configuration are session state the journal
+already carries (a /model switch since must not be overridden), so they are
+not re-passed."
   (let* ((serve (equal (first argv) "serve"))
          (args (if serve (rest argv) argv))
          (kept (loop while args
@@ -154,17 +162,13 @@ the swarm, not the session, and an unchanged replay only re-records them."
                        do (when (and args (not (string-prefix-p "-" (first args))))
                             (pop args))))))
     (append (when serve '("serve"))
-            kept
-            (when serve
-              ;; --host, --port (the one it bound), --ready-file,
-              ;; --allow-remote, --watch-stdin.  --no-userspace is already
-              ;; kept above, so the copy serve-restart-flags also returns is
-              ;; dropped.
-              (loop for fragment in (evo.cli:pin-bound-port
-                                     (evo.cli:serve-restart-flags (rest argv)))
-                    unless (equal fragment "--no-userspace")
-                      collect fragment))
-            (evo.cli:exact-session-args)))
+            (loop while args
+                  for arg = (pop args)
+                  when (member arg '("--workers" "--evo") :test #'equal)
+                    append (list arg (pop args))
+                  when (equal arg "--no-userspace")
+                    collect arg)
+            (when serve (evo.cli:serve-restart-flags (rest argv))))))
 
 (defun find-evo-binary (opts)
   "The evo-agent binary lanes run.  A lane is the agent alone — `evo-agent
@@ -198,18 +202,12 @@ same rule, and the same words, as the agent's serve."
 the swarm's own headless view — when asked for one (:serve)."
   (if (getf opts :serve)
       (let ((host (or (getf opts :host) "127.0.0.1")))
-        (evo.cli:check-serve-ready opts)
         (check-serve-host host opts)
         (let ((server (evo.serve:make-server
                        :host host
                        :port (getf opts :port)
-                       :token (evo.serve:resolve-token)
                        :ready-file (getf opts :ready-file)
-                       :watch-stdin (getf opts :watch-stdin)
-                       :identity *swarm-identity*)))
-          ;; The swarm's own read-only API, on the same server: GET /lanes and
-          ;; a lane's transcript and events.  Never on a lane's serve.
-          (register-swarm-routes)
+                       :watch-stdin (getf opts :watch-stdin))))
           (make-instance 'serve-view :server server)))
       (progn
         (unless (evo.port:tty-p)
@@ -217,13 +215,26 @@ the swarm's own headless view — when asked for one (:serve)."
                  :text "evo-swarm's coordinator is a TUI: run it in a terminal, or `evo-swarm serve` for a headless swarm driven over HTTP"))
         (make-instance 'tui-view))))
 
+(defun coordinator-busy-changed (agent busy)
+  "The coordinator started or finished a task (:busy / :idle): `waiting` turns
+on and off, so every client's swarm status stays true (§4.3)."
+  (let ((swarm (and *swarm* (eq agent (swarm-agent *swarm*)) *swarm*)))
+    (when swarm
+      (bt:with-lock-held ((swarm-lock swarm))
+        (setf (swarm-coordinator-busy swarm) busy))
+      (publish-swarm-state swarm))))
+
 (defun install-coordinator (view)
-  "Install the swarm tools, commands and prompt note for either frontend; only
-the TUI gets a status-line segment."
+  "Install the swarm tools, commands, holds and prompt note for either
+frontend; only the TUI gets a status-line segment."
   (register-swarm-tools)
-  (pushnew 'hold-goal-while-lanes-work *goal-hold-predicates*)
+  (register-swarm-holds)
   (pushnew 'load-swarm-config *post-init-hooks*)
   (register-swarm-commands)
+  (evo:on :busy (lambda (event) (coordinator-busy-changed (getf event :agent) t))
+          :name :evo-swarm-busy)
+  (evo:on :idle (lambda (event) (coordinator-busy-changed (getf event :agent) nil))
+          :name :evo-swarm-idle)
   (when (typep view 'tui-view)
     (install-tui-observation))
   (evo:register-prompt-note "swarm-coordinator"
@@ -232,9 +243,8 @@ the TUI gets a status-line segment."
 (defun run-swarm (opts)
   (let* ((view (coordinator-view opts))
          (evo-binary (find-evo-binary opts))
-         (frontend (if (getf opts :serve)
-                       (serve-view-server view)
-                       (make-instance 'evo.tui:tui-frontend))))
+         (server (and (typep view 'serve-view) (serve-view-server view)))
+         (frontend (if server server (make-instance 'evo.tui:tui-frontend))))
     (install-coordinator view)
     (multiple-value-bind (agent resumed-p)
         (evo.cli:setup-agent opts :frontend frontend)
@@ -245,16 +255,14 @@ the TUI gets a status-line segment."
                           6)))
         (setf *swarm* (make-swarm :agent agent :workers workers
                                   :evo-binary evo-binary :record record
-                                  :view view))
-        ;; The flags override what a resumed record restored, and are
-        ;; re-recorded: lane configuration is swarm data, not a user file.
+                                  :view view :server server))
         (when (getf opts :lane-model)
-          (setf (swarm-lane-model *swarm*) (getf opts :lane-model)
-                (swarm-lane-provider *swarm*) (getf opts :lane-provider)))
+          (setf (swarm-lane-model *swarm*) (getf opts :lane-model)))
         (when (getf opts :lane-thinking)
           (setf (swarm-lane-thinking *swarm*) (getf opts :lane-thinking)))
         (ensure-directories-exist (swarm-dir *swarm*))
         (record-swarm)
+        (when server (register-swarm-topics server *swarm*))
         ;; A journal switch (/new, /fork, /resume): a resumed session gets
         ;; its own recorded swarm back; any other takes the running one along.
         (evo:on :session-start (lambda (event)
@@ -266,6 +274,7 @@ the TUI gets a status-line segment."
         ;; stops, as :session-end promises.
         (evo:on :session-end (lambda (event) (declare (ignore event)) (stop-swarm))
                 :name :evo-swarm-stop)
+        (publish-swarm-state *swarm* t)
         (start-lanes *swarm* :resume (and record t))
         (unwind-protect (swarm-run agent resumed-p)
           (stop-swarm))))))
@@ -290,11 +299,6 @@ mistyped flag cannot be fixed by trying it again."
           ((getf opts :catalog) (cmd-catalog opts))
           ((getf opts :check) (cmd-check opts))
           ((evo.cli:supervised-run-p opts)
-           ;; A serve token is minted once per launch, here in the parent, so a
-           ;; restarted child keeps the one clients already hold.
-           (when (getf opts :serve)
-             (evo.cli:check-serve-ready opts)
-             (evo.port:setenv "EVO_SERVE_TOKEN" (evo.serve:resolve-token)))
            (evo.cli:supervise argv :restart-argv #'restart-argv))
           (t (run-swarm opts)))
       (evo.cli:usage-error (e)

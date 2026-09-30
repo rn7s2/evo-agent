@@ -165,6 +165,14 @@ NAMES NIL give them every tool again.  The report tool is always kept."
   (format nil "EVO_SWARM_~a_API_KEY"
           (substitute #\_ #\- (string-upcase (symbol-name provider)))))
 
+(defun provider-key-for (name)
+  "The registered provider NAME names, as it was registered — a keyword or a
+string.  NIL when nothing is registered under it."
+  (and name
+       (find name (provider-keys)
+             :key (lambda (key) (string key))
+             :test #'string-equal)))
+
 (defun provider-env-var (provider)
   "The environment variable PROVIDER's key is read from in a lane: its own
 :api-key-env, or the swarm-private one for a literal key; NIL for none."
@@ -344,9 +352,10 @@ coordinator's models as well as the swarm's own settings."
 
 (defun baseline-forms (lane swarm)
   "Everything a lane is given, in order:
- 1. the coordinator's providers (keys by variable name only), and the model
-    and thinking level a lane runs with — --lane-model / --lane-thinking when
-    the swarm was configured with them, else the coordinator's own defaults;
+ 1. the coordinator's providers (keys by variable name only), and its model
+    and thinking level as the lane's defaults — the swarm's --lane-model /
+    --lane-thinking when given (CONTRACT §1, §4.3), else the coordinator's —
+    which IN-LANES may override;
  2. every IN-LANES form from swarm.lisp;
  3. the coordinator's models those forms did not register and whose API the
     lane has (only now: a model whose API an extension defines needs IN-LANES
@@ -357,16 +366,16 @@ coordinator's models as well as the swarm's own settings."
  5. a run for any goal continuation its resumed session left queued."
   (let* ((agent evo:*agent*)
          (state (and agent (fold-state (agent-journal agent))))
-         (coordinator-model (and state (ignore-errors (effective-model-id state agent))))
-         (coordinator-provider (and coordinator-model
-                                     (effective-model-provider state coordinator-model)))
-         (model-id (or (swarm-lane-model swarm) coordinator-model))
-         (provider (if (swarm-lane-model swarm)
-                       (swarm-lane-provider swarm)
-                       coordinator-provider))
-         (thinking (or (swarm-lane-thinking swarm)
-                       (and state (effective-thinking
-                                   state (agent-thinking-override agent)))))
+         (configured (swarm-lane-model swarm))
+         (configured-thinking (swarm-lane-thinking swarm))
+         (model-id (or (getf configured :id)
+                       (and state (ignore-errors (effective-model-id state agent)))))
+         (provider (or (and (getf configured :provider)
+                            (provider-key-for (getf configured :provider)))
+                       (and model-id (effective-model-provider state model-id))))
+         (thinking (if configured-thinking
+                       (intern (string-upcase configured-thinking) :keyword)
+                       (and state (effective-thinking state (agent-thinking-override agent)))))
          (limit (lane-tool-limit lane)))
     (append
      (mapcar #'provider-registration-form (provider-keys))

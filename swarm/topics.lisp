@@ -1,0 +1,180 @@
+;;;; topics.lisp — the swarm as one observable thing: topic `swarm` (CONTRACT
+;;;; §4.3), the coordinator's hold, and the one human action on lanes.
+;;;;
+;;;; The swarm's own topic is state-only: every lane transition publishes a
+;;;; state.patch carrying the whole state, so a client that applied the ops in
+;;;; order holds exactly what a snapshot would have given it.  Where a lane's
+;;;; own state lives is the lane's mirror (mirror.lisp), republished as
+;;;; `lane:N`; this file only flattens it into that lane's row.
+
+(in-package :evo.swarm)
+
+;;; The swarm's state.
+
+(defun lanes-busy-locked (swarm)
+  "SWARM's working or compacting lanes.  The swarm lock is held."
+  (remove-if-not (lambda (lane) (member (lane-state lane) '(:working :compacting)))
+                 (swarm-lanes swarm)))
+
+(defun lanes-busy (&optional (swarm *swarm*))
+  "Every lane of SWARM that is working or compacting."
+  (and swarm
+       (bt:with-lock-held ((swarm-lock swarm))
+         (lanes-busy-locked swarm))))
+
+(defun lanes-busy-p (&optional (swarm *swarm*))
+  (and (lanes-busy swarm) t))
+
+(defun lane-row (lane)
+  "One lane of the swarm topic (§4.3), with what its own mirror knows."
+  (let* ((mirror (lane-mirror lane))
+         (state (mirror-lane-state mirror)))
+    (list :n (lane-n lane)
+          :state (lane-state lane)
+          :task (lane-task lane)
+          :task-started-at (lane-task-started lane)
+          :step-started-at (lane-step-started lane)
+          :restarts (lane-restarts lane)
+          :pid (getf (lane-ready lane) :pid)
+          :worktree (lane-worktree lane)
+          :branch (lane-branch lane)
+          :model (getf state :model)
+          :context (getf state :context)
+          :goal (getf state :goal)
+          :todos (getf state :todos)
+          :reports (lane-reports lane)
+          :last-item (mirror-last-item mirror))))
+
+(defun swarm-state (&optional (swarm *swarm*))
+  "The swarm topic's state (§4.3), read under the swarm lock."
+  (when swarm
+    (bt:with-lock-held ((swarm-lock swarm))
+      (list :id (swarm-id swarm)
+            :workers (swarm-workers swarm)
+            :status (list :busy (length (lanes-busy-locked swarm))
+                          :waiting-on-lanes (and (not (swarm-coordinator-busy swarm))
+                                                 (lanes-busy-locked swarm)
+                                                 t))
+            :config (list :lane-model (swarm-lane-model swarm)
+                          :lane-thinking (swarm-lane-thinking swarm))
+            :lanes (coerce (mapcar #'lane-row (swarm-lanes swarm)) 'vector)))))
+
+(defun publish-swarm-state (&optional (swarm *swarm*) force)
+  "Publish the swarm topic when its state changed (or FORCE).  Every lane
+transition lands here, including starting→idle (CONTRACT §4.3)."
+  (when swarm
+    (let* ((state (swarm-state swarm))
+           (changed (or force (not (equal state (swarm-published swarm))))))
+      (when changed
+        (bt:with-lock-held ((swarm-lock swarm))
+          (setf (swarm-published swarm) state))
+        (publish-op (list :op "state.patch" :topic "swarm" :patch state))))))
+
+(defun swarm-lane-changed (&optional mirror)
+  "A lane changed (its own state patch, or a transition the swarm made):
+refresh the swarm topic and the TUI.  MIRROR is the lane's, when that is how
+we heard; it is not needed — the whole state is recomputed."
+  (declare (ignore mirror))
+  (publish-swarm-state)
+  (swarm-repaint))
+
+;;; The topic provider for `swarm` itself: state, no items.
+
+(defclass swarm-topic () ()
+  (:documentation "The coordinator's view of its lanes as one topic (§4.3)."))
+
+(defmethod evo.serve:topic-snapshot ((topic swarm-topic) &key (items 200))
+  (declare (ignore items))
+  (list :state (swarm-state) :items #() :has-more nil))
+
+(defmethod evo.serve:topic-items-before ((topic swarm-topic) before limit)
+  (declare (ignore topic before limit))
+  (values nil nil))
+
+(defmethod evo.serve:topic-item ((topic swarm-topic) id)
+  (declare (ignore topic id))
+  nil)
+
+(defmethod evo.serve:topic-media ((topic swarm-topic) id n)
+  (declare (ignore topic id n))
+  (values nil nil))
+
+(defun register-swarm-topics (server swarm)
+  "Register the swarm topic and one topic per lane on SERVER (§7), so the
+coordinator's own op log is where every client reads the swarm from."
+  (evo.serve:register-topic server "swarm" (make-instance 'swarm-topic))
+  (dolist (lane (swarm-lanes swarm))
+    (evo.serve:register-topic server (lane-topic lane) (lane-mirror lane))))
+
+;;; The hold: why the coordinator is `waiting` while its lanes work.
+
+(defun coordinator-hold-reason (agent)
+  "The swarm's hold predicate (a core hook): a reason string while AGENT's
+coordinator has nothing to do but its lanes are working, else NIL.  The VIEW
+reports status `waiting` for a settled agent any hold predicate claims
+(CONTRACT §4.2)."
+  (when (and *swarm* (eq agent (swarm-agent *swarm*)))
+    (let ((busy (lanes-busy)))
+      (when busy (format nil "~d lane~:p working" (length busy))))))
+
+;;; The one human action on lanes: run.interrupt with scope lane or swarm
+;;; (CONTRACT §6, design §7.4).  A human may stop work, never redirect it.
+;;;
+;;; The methods specialise on the SERVER's own class rather than on T: serve
+;;; dispatches first on the server, so a method that only specialised on the
+;;; scope would lose to serve's default and never run.
+
+(defun human-interrupt-note (lanes)
+  "Tell the coordinator a human stopped lane work: a queued input with a
+:human-action origin (§3), so it hears it at its next turn rather than now —
+the human's stop is not a reason to spend a coordinator turn.  Queued as
+after_run input: delivered when a run next starts, or at the settle of one
+already going."
+  (let ((agent (and *swarm* (swarm-agent *swarm*))))
+    (when agent
+      (ignore-errors
+        (queue-followup
+         agent
+         (format nil "[human] stopped lane~p ~{~d~^, ~} (interrupt).~@[ Lane~p ~{~d~^, ~} will report or settle; the rest keep working.~]"
+                 (length lanes) lanes
+                 (length lanes) lanes)
+         :origin (list :kind :human-action :action :interrupt :lanes (coerce lanes 'vector)))))))
+
+(defun interrupt-lane-now (lane)
+  "Stop LANE's run through its own run.interrupt.  Returns T when it was
+running something."
+  (let ((result (ignore-errors (lane-op lane "run.interrupt" (list :scope "session")))))
+    (and (getf result :interrupted) t)))
+
+(defmethod evo.serve:interrupt-scope ((server evo.serve::server) (scope (eql :lane)) lane)
+  "One lane, stopped now; the coordinator is told, queued after its current
+run.  No other lane is touched.  A lane that was not running anything is not
+reported as interrupted."
+  (declare (ignore server))
+  (let ((n (and lane (ignore-errors (parse-integer (princ-to-string lane))))))
+    (unless (and n (find-lane n))
+      (error "no lane ~a" (or lane "given")))
+    (let ((lane (find-lane n)))
+      (when (interrupt-lane-now lane)
+        (human-interrupt-note (list n))
+        (list (lane-topic lane))))))
+
+(defmethod evo.serve:interrupt-scope ((server evo.serve::server) (scope (eql :swarm)) lane)
+  "The coordinator and every lane, stopped now — what `Stop swarm` means."
+  (declare (ignore lane))
+  (let ((swarm (and (eq server (swarm-server *swarm*)) *swarm*))
+        (interrupted nil))
+    (when swarm
+      (when (swarm-coordinator-busy swarm)
+        (ignore-errors (request-abort (swarm-agent swarm)))
+        (push "session" interrupted))
+      (let ((stopped nil))
+        (dolist (lane (swarm-lanes swarm))
+          (when (interrupt-lane-now lane) (push (lane-n lane) stopped)))
+        (when stopped
+          ;; The lanes are stopped; the coordinator is told, after its run.
+          (setf stopped (sort stopped #'<))
+          (human-interrupt-note stopped)
+          (dolist (n stopped)
+            (push (format nil "lane:~d" n) interrupted))))
+      (nreverse interrupted))))
