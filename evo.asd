@@ -110,6 +110,10 @@
                                            (:file "lifecycle")
                                            (:file "http")
                                            (:file "server")
+                                           (:file "oplog")
+                                           (:file "topics")
+                                           (:file "view-topic")
+                                           (:file "ops")
                                            (:file "catalog")
                                            (:file "routes")))
                              (:module "cli"

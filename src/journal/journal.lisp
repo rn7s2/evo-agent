@@ -178,7 +178,10 @@ is journalled (CONTRACT §1, F4)."
 
 (defun append-entry (journal plist &key parent-id id)
   "Append PLIST as a new entry at the leaf (or under PARENT-ID: branching).
-Assigns :id/:parent-id/:timestamp.  Returns the completed entry.
+Assigns :parent-id/:timestamp, and an :id unless the caller pre-minted one —
+a frontend that needs to name an entry before it exists (a streaming message,
+a queued input) mints it with GEN-ID and passes it here.  Returns the completed
+entry.
 
 Registered listeners are notified after the entry is part of the journal, with
 the journal lock RELEASED — a listener that folds state (the view model does)
@@ -212,17 +215,21 @@ must be able to read the journal it was told about."
     ;; Outside the lock: a listener folds the journal it was told about, and
     ;; the session index reads the path back — both need the lock themselves.
     (note-journal-append journal entry)
+    ;; The file exists now, so the session is one the index can name:
+    ;; `sessions` lists it from here on, not only once it ends.
+    (when flushed (index-session journal))
     entry))
 
 (defun add-journal-listener (journal fn)
-  "Call FN (journal entry) after every entry is appended to JOURNAL.  The
-view model subscribes this way; nothing else watches a journal for appends."
+  "Call FN (journal entry) after every entry is appended to JOURNAL.  The view
+model subscribes this way; nothing else watches a journal for appends."
   (bt:with-lock-held ((journal-lock journal))
     (setf (journal-listeners journal)
           (append (remove fn (journal-listeners journal) :test #'eq) (list fn))))
   fn)
 
 (defun remove-journal-listener (journal fn)
+  "Withdraw FN from JOURNAL's append notifications."
   (bt:with-lock-held ((journal-lock journal))
     (setf (journal-listeners journal)
           (remove fn (journal-listeners journal) :test #'eq)))

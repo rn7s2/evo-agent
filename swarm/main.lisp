@@ -104,7 +104,6 @@ settings for the swarm, lane count, tool limits, prompt notes, and
                 (setf (getf opts :evo) (or (pop argv) (error 'evo.cli:usage-error :text "--evo needs a path"))))
                ((string= arg "--no-userspace") (setf (getf opts :no-userspace) t))
                ((string= arg "--no-supervisor") (setf (getf opts :no-supervisor) t))
-               ((string= arg "--json") (setf (getf opts :json) t))
                ;; serve's own flags, exactly as the agent's serve takes them
                ;; — a swarm is one session, and this is the flag set that
                ;; opens its door.  Without the subcommand they are unknown, so

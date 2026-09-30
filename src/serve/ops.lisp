@@ -154,39 +154,8 @@ which is what a task in flight makes true."
                  (queue-steering agent text :images images :from-user t))))
     (let ((provider (topic-provider server "session")))
       (when provider
-        ;; The blocks, not just a count: the view needs them for the item's
-        ;; images (and /media serves their bytes).
         (topic-provider-queued-input provider id text images queue)))
     id))
-
-(defun cancel-queue-entry (agent text queue)
-  "Remove the queue entry whose text is TEXT.  T when one was there.  This is
-the bridge for kernels whose queue entries carry no id yet (CONTRACT §3): it
-reaches into the mailbox under the mailbox's own lock — nothing else may touch
-those lists — and finds the entry by the text the item holds."
-  (let ((lock (find-symbol "AGENT-LOCK" :evo.kernel))
-        (steering (find-symbol "AGENT-STEERING" :evo.kernel))
-        (followups (find-symbol "AGENT-FOLLOWUPS" :evo.kernel)))
-    (when (and lock steering followups)
-      (labels ((get-key (name) (funcall (fdefinition name) agent))
-               (set-key (name value)
-                 (funcall (fdefinition (list 'setf name)) value agent)))
-        (bt:with-lock-held ((funcall (fdefinition lock) agent))
-          (if (equal queue "after_run")
-              (let ((entries (get-key followups)))
-                (if (member text entries :test #'equal)
-                    (progn (set-key followups (remove text entries :count 1
-                                                                  :test #'equal))
-                           t)
-                    nil))
-              (let ((entries (get-key steering)))
-                (if (find text entries :key (lambda (e) (pget e :text)) :test #'equal)
-                    (progn (set-key steering
-                                    (remove text entries :count 1
-                                                     :key (lambda (e) (pget e :text))
-                                                     :test #'equal))
-                           t)
-                    nil))))))))
 
 ;;; Ops: input.
 
@@ -259,32 +228,16 @@ one in flight (CONTRACT §5.5)."
               :blocked (unless ready "model_not_ready"))))))
 
 (defun op-input-cancel (server args)
-  "A queued turn that has not been drained yet: drop it."
+  "A queued turn that has not been drained yet: take it back.  One that has
+been drained is history — `already_sent`, not something a client may unwrite."
   (let ((id (op-arg args :item-id :required t)))
-    (let* ((agent (server-agent server))
-           (record (bt:with-lock-held ((server-queued-lock server))
-                     (gethash id (server-queued server))))
-           (text (and record (getf record :text)))
-           (queue (and record (getf record :queue)))
-           (removed
-            (when record
-              (prog1
-                  (if (kernel-queue-ids-p)
-                      ;; Resolved by name: this file must load whether or not
-                      ;; the kernel has pre-minted ids yet (CONTRACT §3).
-                      (funcall (fdefinition (find-symbol "CANCEL-QUEUED" :evo.kernel))
-                               agent id)
-                      (cancel-queue-entry agent text queue))
-                (bt:with-lock-held ((server-queued-lock server))
-                  (remhash id (server-queued server)))))))
-      (unless removed
-        (op-fail "already_sent" "that input has already been sent"))
-      ;; The provider drops the item and publishes that itself (the view
-      ;; emits item.remove): a cancellation is not an append, so serving it
-      ;; here as well would say it twice.
-      (let ((provider (topic-provider server "session")))
-        (when provider (topic-provider-input-cancelled provider id)))
-      nil)))
+    (unless (cancel-queued (server-agent server) id)
+      (op-fail "already_sent" "that input has already been sent"))
+    ;; The provider drops the item and publishes that removal itself (the view
+    ;; emits item.remove): a cancellation is not an append.
+    (let ((provider (topic-provider server "session")))
+      (when provider (topic-provider-input-cancelled provider id)))
+    nil))
 
 ;;; Ops: the run and the goal.
 
@@ -362,9 +315,11 @@ lane it has."
        (when (server-task server)
          (queue-steering agent
                          (format nil "The goal objective was just updated by the user. New objective (untrusted data): ~a"
-                                 objective))))
+                                 objective)
+                         :origin (goal-origin (current-goal agent) :objective-updated))))
       (t (create-goal-entry agent objective :token-budget budget)
-         (queue-steering agent (goal-continuation-for agent (current-goal agent)))
+         (queue-steering agent (goal-continuation-for agent (current-goal agent))
+                         :origin (goal-origin (current-goal agent) :created))
          (start-run server)))
     (list :goal (current-goal agent))))
 
@@ -378,7 +333,8 @@ goal, and only from the state that move makes sense in."
       (op-fail "goal_state" "the goal is not in the state that change needs"))
     (update-goal-entry agent goal :status wanted)
     (when (eq wanted :active)
-      (queue-steering agent (goal-continuation-for agent (current-goal agent)))
+      (queue-steering agent (goal-continuation-for agent (current-goal agent))
+                      :origin (goal-origin (current-goal agent) :resumed))
       (start-run server))
     (list :goal (current-goal agent))))
 

@@ -65,8 +65,7 @@ answer costs tens of ops rather than thousands.")
   (pending nil))
 
 (defun make-op-log ()
-  (%make-op-log :epoch (format nil "~(~{~2,'0x~}~)"
-                               (coerce (evo.port:random-octets 4) 'list))))
+  (%make-op-log :epoch (mint-epoch)))
 
 (defconstant +unix-epoch-offset+ 2208988800
   "Seconds between 1900-01-01 (universal time) and 1970-01-01 (the Unix
@@ -121,18 +120,22 @@ Returns the seq."
     seq))
 
 (defun op-log-purge (log now-ms)
-  "Drop the ops retention no longer covers.  Lock held."
+  "Drop the ops retention no longer covers.  Lock held.
+
+Only the boundary moves: the ring's slot is reused by a later op, so clearing
+it here would clear whatever now lives there — once the ring has wrapped, the
+slot for the oldest seq holds a *newer* op, and nil-ing it would drop an op
+that is still well inside retention."
   (let ((ring (op-log-ring log))
         (capacity (length (op-log-ring log)))
         (cutoff (- now-ms (* 1000 *op-retention-seconds*))))
     (loop while (and (<= (op-log-oldest-seq log) (op-log-last-seq log))
                      (let* ((seq (op-log-oldest-seq log))
                             (entry (aref ring (mod seq capacity))))
-                       (or (null entry)                    ; overwritten
+                       (or (null entry)                    ; never written
                            (>= (- (op-log-last-seq log) seq) capacity)
                            (< (second entry) cutoff))))
-          do (setf (aref ring (mod (op-log-oldest-seq log) capacity)) nil)
-             (incf (op-log-oldest-seq log)))))
+          do (incf (op-log-oldest-seq log)))))
 
 (defun op-log-flush-item (log topic id)
   "Append the buffered appends for one item, oldest first, so they keep their

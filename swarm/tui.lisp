@@ -14,18 +14,17 @@
     (:working "●") (:compacting "◐") (:idle "○") (:starting "◌")
     (t "✗")))
 
-(defun lanes-segment (ctx)
+(defun lanes-segment (tui)
   "Status line: one glyph per lane (● working, ◐ compacting, ○ idle,
-◌ starting, ✗ down or stopped), and how many are busy.  Plain text — the
-segment declares its style and each frontend paints it."
-  (declare (ignore ctx))
+◌ starting, ✗ down or stopped), and how many are busy."
+  (declare (ignore tui))
   (when *swarm*
     (let ((states (with-swarm-lock ()
                     (mapcar #'lane-state (swarm-lanes *swarm*)))))
-      (format nil "lanes ~{~a~} ~d/~d busy"
-              (mapcar #'lane-glyph states)
-              (count-if (lambda (s) (member s '(:working :compacting))) states)
-              (length states)))))
+      (evo.tui:dim (format nil "lanes ~{~a~} ~d/~d busy"
+                           (mapcar #'lane-glyph states)
+                           (count-if (lambda (s) (member s '(:working :compacting))) states)
+                           (length states))))))
 
 (defun lanes-command (ctx)
   (declare (ignore ctx))
