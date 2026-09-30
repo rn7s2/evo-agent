@@ -253,35 +253,44 @@ otherwise the last estimate advanced by what the events added."
 ;;; kernel minted when it queued the input (CONTRACT §3: pre-minted ids), so
 ;;; the same id names the item before and after it becomes a journal entry.
 
-(defun view-input-queued (view &key id text images queue)
-  "Show input that is queued but not yet sent.  IMAGES is a list of :image
-content blocks (EVO.MEDIA:MAKE-IMAGE-BLOCK) — the same blocks the message will
-carry when it is journaled.  Returns the item id."
-  (bt:with-lock-held ((v-lock view))
-    (let* ((id (or id (format nil "q_~a" (gen-id))))
-           (blocks (coerce (or images #()) 'list))
-           (item (user-item id (now-ms)
-                            :text (or text "")
-                            :images (image-wires id blocks)
-                            :status "queued"
-                            :queue (enum-string (or queue :now)))))
-      (when blocks (setf (gethash id (v-media view)) (coerce blocks 'vector)))
-      ;; Queueing the same id twice (a retried op, a replayed event) is the
-      ;; same item, not a second one.
-      (patch-item view item)
+(defun queue-input (view &key id text images queue)
+  "VIEW-INPUT-QUEUED with the lock held."
+  (let* ((id (or id (format nil "q_~a" (gen-id))))
+         (blocks (coerce (or images #()) 'list))
+         (item (user-item id (now-ms)
+                          :text (or text "")
+                          :images (image-wires id blocks)
+                          :status "queued"
+                          :queue (enum-string (or queue :now)))))
+    (when blocks (setf (gethash id (v-media view)) (coerce blocks 'vector)))
+    ;; Queueing the same id twice (a retried op, a replayed event) is the same
+    ;; item, not a second one.
+    (patch-item view item)
+    (refresh-state view)
+    id))
+
+(defun cancel-input (view id)
+  "VIEW-INPUT-CANCELLED with the lock held."
+  (let ((item (gethash id (v-index view))))
+    (when (and item (equal (pget item :status) "queued"))
+      (drop-item view id)
       (refresh-state view)
-      id)))
+      t)))
+
+(defun view-input-queued (view &key id text images queue)
+  "Show input that is queued but not yet sent.  ID is the entry id the kernel
+minted when it queued the input (CONTRACT §3), so the item a client draws is
+the row the journal will carry; IMAGES is a list of :image content blocks
+(EVO.MEDIA:MAKE-IMAGE-BLOCK).  Returns the item id."
+  (bt:with-lock-held ((v-lock view))
+    (queue-input view :id id :text text :images images :queue queue)))
 
 (defun view-input-cancelled (view id)
   "The queued input ID was withdrawn before it was sent, so it leaves the
 transcript — which is also what a re-projection of the journal says, since a
 cancelled input is never journaled.  Returns T when there was one."
   (bt:with-lock-held ((v-lock view))
-    (let ((item (gethash id (v-index view))))
-      (when (and item (equal (pget item :status) "queued"))
-        (drop-item view id)
-        (refresh-state view)
-        t))))
+    (cancel-input view id)))
 
 ;;; Journal appends.
 
@@ -313,10 +322,9 @@ announced (a rebuild, or a frontend that missed the start) is added here."
     (setf (v-assistant-item view) id)))
 
 (defun handle-tool-append (view entry)
-  (let* ((item (entry->item entry (v-ctx view)))
-         (id (and item (pget item :id))))
-    (when item
-      (if (gethash id (v-index view)) (patch-item view item) (append-item view item)))))
+  "The tool's result is journaled: the item the call opened is finished with
+the entry's text (the event only carried a 500-character copy of it)."
+  (patch-item view (entry->item entry (v-ctx view))))
 
 (defun handle-append (view entry)
   (let ((type (pget entry :type)))
@@ -523,11 +531,14 @@ with; the entry still arrives when it is appended."
        (when (and id (gethash id (v-index view)))
          (patch-item-fields view id :status "sent")
          (refresh-state view))))
+    ;; The event forms of the two functions above: they arrive inside the
+    ;; lock, so they call the lock-held halves (a recursive lock would wedge
+    ;; the session thread on the first queued input).
     (:input-queued
-     (view-input-queued view :id (pget event :id) :text (pget event :text)
-                              :images (pget event :images)
-                              :queue (pget event :queue)))
-    (:input-cancelled (view-input-cancelled view (pget event :id)))
+     (queue-input view :id (pget event :id) :text (pget event :text)
+                       :images (pget event :images)
+                       :queue (pget event :queue)))
+    (:input-cancelled (cancel-input view (pget event :id)))
     (t nil)))
 
 (defun view-on-event (view event)

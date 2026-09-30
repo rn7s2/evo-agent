@@ -8883,6 +8883,22 @@ entry keeps it (CONTRACT §3)."
              (null (evo.view:view-item view id)))
       (check "and out of the queue"
              (equalp #() (pget (pget (evo.view:view-snapshot view) :state) :queue)))
+      ;; The same two changes as EVENTS (the callback form serve may use
+      ;; instead of the direct calls), which arrive inside the view's lock.
+      (let ((id3 (queue-steering agent "by event" :from-user t)))
+        (evo.view:view-on-event view (list :type :input-queued :id id3
+                                                :text "by event" :queue :now))
+        (check "queued input arrives as an event too"
+               (equal "queued" (pget (evo.view:view-item view id3) :status)))
+        (evo.view:view-on-event view (list :type :input-cancelled :id id3))
+        (check "and is cancelled as an event too"
+               (null (evo.view:view-item view id3)))
+        (check "the kernel had it too" (cancel-queued agent id3)))
+      (let ((gone (queue-steering agent "gone" :from-user t)))
+        (check "the kernel takes a queued input back" (cancel-queued agent gone))
+        (check "a cancelled input is out of the mailbox, not just reported so"
+               (not (steering-pending-p agent)))
+        (check "and a second try is not a removal" (null (cancel-queued agent gone))))
       ;; The same input, sent: the drained entry keeps the id the item has.
       (let ((id2 (queue-steering agent "sent text" :from-user t)))
         (evo.view:view-input-queued view :id id2 :text "sent text")
