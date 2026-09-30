@@ -8132,7 +8132,37 @@ the stream."
            (equalp '(:path "a.lisp" :count 3) (getf back :args))))
   (check "serve json: a value the encoder cannot express degrades, never kills a stream"
          (search "unprintable" (evo.serve::op-log-encode (list :op "x" :seq 1 :ts 0
-                                                               :bad (cons 1 2))))))
+                                                               :bad (cons 1 2)))))
+  ;; R1: one dotted pair in *settings* — an alist entry with a header in it —
+  ;; used to make the encoder signal, and the 500 body then quoted the value.
+  (let* ((settings (list :mcp-servers (list (cons "Authorization" "Bearer sk-secret-1"))))
+         (json (evo.serve:encode-json settings)))
+    (check "serve json: an alist entry (a dotted pair) is an object"
+           (search "{\"Authorization\":\"Bearer sk-secret-1\"}" json)))
+  (check "serve json: a bare dotted pair is an object, not a condition"
+         (equal "{\"a\":1}" (evo.serve:encode-json (cons :a 1))))
+  (check "serve json: an improper list is its printed form, never a condition"
+         (search "B . C" (evo.serve:encode-json (list* :a :b :c))))
+  (check "serve json: an object outside the vocabulary still encodes"
+         (stringp (evo.serve:encode-json (make-hash-table))))
+  (check "serve json: a self-referential structure terminates"
+         (let ((ring (list :a 1)))
+           (setf (cdr (cdr ring)) ring)
+           (stringp (evo.serve:encode-json ring))))
+  ;; The other half of R1: an unclassified failure answers with a generic
+  ;; message.  A condition's text can quote what it was working on, and that
+  ;; value can be a secret.
+  (let ((out (flexi-streams:make-in-memory-output-stream))
+        (*error-output* (make-broadcast-stream)))
+    (evo.serve::server-error-reply
+     out (make-condition 'simple-error
+                         :format-control "~a"
+                         :format-arguments (list "Bearer sk-secret-2")))
+    (let ((text (response-text out)))
+      (check "serve 500: the client gets a generic message"
+             (search "\"error\":\"internal server error\"" text))
+      (check "serve 500: and never the value that caused it"
+             (not (search "sk-secret-2" text))))))
 
 (defun test-serve-http ()
   "The transport: request parsing, response framing, SSE, routing, auth."
