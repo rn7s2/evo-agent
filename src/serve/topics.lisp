@@ -173,7 +173,7 @@ put it in."
                     (list :id (format nil "n_~a" (gen-id 4))
                           :kind :notice :ts (op-now-ms)
                           :severity severity :text text :source source
-                          :durable (and durable t) :data data)))
+                          :durable (wire-boolean durable) :data data)))
 
 (defun topic-notice (server topic text &key (severity :info) (source :serve)
                                             durable data)

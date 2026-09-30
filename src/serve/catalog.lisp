@@ -95,33 +95,27 @@ and never quotes anything but the entry's own name."
                       (format nil "a ~a entry could not be read and was left out" what))
                   warnings)))))))
 
-(defun model-catalog (warnings)
-  (catalog-entries
-   (all-models)
-   (lambda (m) (pget m :id))
-   (lambda (model)
-     (multiple-value-bind (ready reason) (model-readiness model)
-       (list :id (pget model :id)
-             :provider (pget model :provider)
-             ;; The registry has no separate display name: the id is what a
-             ;; person types and what a picker shows.
-             :name (pget model :id)
-             :api (pget model :api)
-             :context-window (pget model :context-window)
-             :reasoning (model-reasoning-p model)
-             :images (evo.provider:model-vision-p model)
-             :ready ready
-             :reason reason)))
-   warnings "model"))
+(defun catalog-model (model)
+  (multiple-value-bind (ready reason) (model-readiness model)
+    (list :id (pget model :id)
+          :provider (pget model :provider)
+          ;; The registry has no separate display name: the id is what a person
+          ;; types and what a picker shows.
+          :name (or (pget model :name) (pget model :id))
+          :api (provider-api (pget model :provider))
+          :context-window (pget model :context-window)
+          ;; The verdicts are Lisp booleans; the document's are JSON ones.
+          :reasoning (wire-boolean (model-reasoning-p model))
+          :images (wire-boolean (ignore-errors (evo.provider:model-vision-p model)))
+          :ready (wire-boolean ready)
+          :reason reason)))
 
-(defun provider-api (key)
-  "The API provider KEY belongs to: the one that seeds it, else the API of a
-model registered under it, else NIL."
-  (or (loop for api-key in (api-keys)
-            for api = (ignore-errors (find-api api-key))
-            when (and api (eq (default-provider-key api) key)) return api-key)
-      (loop for model in (all-models)
-            when (eq (pget model :provider) key) return (pget model :api))))
+(defun catalog-provider (key)
+  (let ((registration (provider-registration key)))
+    (list :name (string-downcase (symbol-name key))
+          :api (provider-api key)
+          :has-key (wire-boolean (provider-has-key-p registration))
+          :key-env (getf registration :api-key-env))))
 
 (defun provider-catalog (warnings)
   (catalog-entries
@@ -184,7 +178,8 @@ configuration as a plist (:lane-model :lane-provider :lane-thinking :workers)."
                  (lambda (model)
                    (let ((status (lane-model-status model)))
                      (list :id (getf status :id) :provider (getf status :provider)
-                           :ok (getf status :ok) :reason (getf status :reason))))
+                           :ok (wire-boolean (getf status :ok))
+                           :reason (getf status :reason))))
                  warnings "lane model")))
 
 (defun catalog-plist (agent &key swarm ops)

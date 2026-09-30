@@ -27,6 +27,8 @@ Covers the redesign's protocol (CONTRACT §5):
     — before a turn and after one, with a stream open
   * the small truths: `queued`, has_more, result {}, truncated, usage,
     the default model's provider
+  * every documented boolean is a boolean (notice.durable, compaction.manual,
+    tool result.truncated, state.model.ready, the catalog's flags, ok/queued)
 
 Usage: tests/serve-e2e.py [path/to/evo-agent]    (exit 0 on success)
 """
@@ -49,6 +51,7 @@ EVO = os.path.abspath(sys.argv[1]) if len(sys.argv) > 1 else os.path.join(ROOT, 
 
 passed = 0
 failed = 0
+REPLIES = []            # every op reply the run saw, for the boolean sweep
 
 
 def check(name, ok, detail=""):
@@ -131,6 +134,8 @@ class Server:
         rid = rid or uuid.uuid4().hex
         status, reply = self.request("POST", "/ops",
                                      {"rid": rid, "op": name, "args": args or {}}, **kw)
+        if isinstance(reply, dict):
+            REPLIES.append((name, reply))
         return status, reply, rid
 
     def snapshot(self, topics="session", items=200):
@@ -290,6 +295,39 @@ def apply_ops(items, state, ops):
     return items, state
 
 
+def non_bools(items=(), state=None, catalog=None):
+    """The documented boolean fields that are not JSON booleans.
+
+    CONTRACT §4.1 (items), §4.2 (topic state) and §5.6 (catalog) call these
+    fields bool.  NIL encodes as null, and a client parsing a flag cannot read
+    null — so a null here is a bug, not a missing value."""
+    bad = []
+    for item in items:
+        kind = item.get("kind")
+        if kind == "notice" and not isinstance(item.get("durable"), bool):
+            bad.append(f"notice.durable={item.get('durable')!r}")
+        if kind == "compaction" and not isinstance(item.get("manual"), bool):
+            bad.append(f"compaction.manual={item.get('manual')!r}")
+        if kind == "tool" and not isinstance((item.get("result") or {}).get("truncated"), bool):
+            bad.append(f"tool.result.truncated={(item.get('result') or {}).get('truncated')!r}")
+    if state is not None and not isinstance((state.get("model") or {}).get("ready"), bool):
+        bad.append(f"state.model.ready={(state.get('model') or {}).get('ready')!r}")
+    if catalog is not None:
+        for model in catalog["models"]:
+            for field in ("reasoning", "images", "ready"):
+                if not isinstance(model.get(field), bool):
+                    bad.append(f"models[{model.get('id')}].{field}={model.get(field)!r}")
+        for provider in catalog["providers"]:
+            if not isinstance(provider.get("has_key"), bool):
+                bad.append(f"providers[{provider.get('name')}].has_key={provider.get('has_key')!r}")
+        lanes = catalog.get("lanes")
+        if isinstance(lanes, dict):
+            for model in lanes["models"]:
+                if not isinstance(model.get("ok"), bool):
+                    bad.append(f"lanes.models[{model.get('id')}].ok={model.get('ok')!r}")
+    return bad
+
+
 def wait_idle(server, timeout=45):
     """Wait for the session to be idle with no task: a turn's end."""
     deadline = time.time() + timeout
@@ -381,6 +419,8 @@ def run_all(server, stub_port, work):
           and default["provider"] == next(m for m in catalog["models"]
                                           if m["id"] == default["id"])["provider"],
           (default, catalog["models"]))
+    check("catalog: every documented boolean is a boolean",
+          not non_bools(catalog=catalog), non_bools(catalog=catalog))
     check("catalog carries no secret", "e2e-secret" not in text)
     check("catalog: thinking levels and languages",
           catalog["thinking_levels"][0] == "off" and catalog["languages"], catalog["languages"])
@@ -480,6 +520,8 @@ def run_all(server, stub_port, work):
     check("the queued item says which queue was asked for",
           [o for o in ops if o["op"] == "item.add" and o["item"].get("id") == sent_id
            and o["item"].get("queue") == "now"], ops[:3])
+    check("a turn: every documented boolean is a boolean",
+          not non_bools(items=items, state=state), non_bools(items=items, state=state))
     check("appends are coalesced, not one op per delta",
           len([o for o in ops if o["op"] == "item.append" and o["field"] == "text"]) <= 3,
           [o for o in ops if o["op"] == "item.append"])
@@ -729,6 +771,11 @@ def run_all(server, stub_port, work):
                if i["kind"] == "notice" and (i.get("text") or "").startswith("✓ compacted")]
     check("a durable notice is one item, not a live copy beside the journaled one",
           len(notices) == 1, notices)
+    check("a compaction: every documented boolean is a boolean",
+          not non_bools(items=snap["topics"]["session"]["items"],
+                        state=snap["topics"]["session"]["state"]),
+          non_bools(items=snap["topics"]["session"]["items"],
+                    state=snap["topics"]["session"]["state"]))
     check("the compaction is an item on the path too",
           any(i["kind"] == "compaction" for i in snap["topics"]["session"]["items"]),
           [(i["kind"], (i.get("text") or "")[:40]) for i in snap["topics"]["session"]["items"]][-5:])
@@ -748,6 +795,15 @@ def run_all(server, stub_port, work):
     check("eval is offered when it is not disabled", reply["ok"], reply)
     status, reply, _ = server.op("server.shutdown", {})
     check("server.shutdown is answered", status == 200 and reply["ok"], reply)
+
+    # --- the booleans of a reply ------------------------------------------------
+    bad = [f"{name}.ok={reply.get('ok')!r}" for name, reply in REPLIES
+           if not isinstance(reply.get("ok"), bool)]
+    bad += [f"{name}.result.queued={(reply.get('result') or {}).get('queued')!r}"
+            for name, reply in REPLIES
+            if name == "input.send" and reply.get("ok")
+            and not isinstance((reply.get("result") or {}).get("queued"), bool)]
+    check("every reply's ok — and input.send's queued — is a boolean", not bad, bad[:4])
 
 
 def idle_cpu_check(server):
@@ -827,6 +883,21 @@ def eval_gate_check(server):
     status, reply, _ = server.op("eval", {"code": "(+ 1 1)"})
     check("--no-http-eval answers unknown_op",
           reply["ok"] is False and reply["error"]["code"] == "unknown_op", reply)
+    # This server resumed the session but no model is registered in it (the
+    # registration was this process's), so the model gate says so and the
+    # notice it leaves is the ephemeral one.
+    status, reply, _ = server.op("input.send", {"text": "no model here"})
+    check("input stays queued while the model does not resolve",
+          reply["ok"] and reply["result"]["blocked"] == "model_not_ready"
+          and reply["result"]["queued"] is True, reply)
+    snap = server.snapshot("session")
+    items = snap["topics"]["session"]["items"]
+    check("a live notice is ephemeral, so durable reads false",
+          any(i["kind"] == "notice" and i["durable"] is False for i in items),
+          [i for i in items if i["kind"] == "notice"][-1:])
+    check("a notice without a model: every documented boolean is a boolean",
+          not non_bools(items=items, state=snap["topics"]["session"]["state"]),
+          non_bools(items=items, state=snap["topics"]["session"]["state"]))
     server.op("server.shutdown", {})
     check("the gated server still shuts down cleanly", server.wait_exit() == 0)
 
