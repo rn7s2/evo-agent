@@ -619,12 +619,19 @@ or the complete new one."
 ;;; instead of polling for it.
 
 (defun op-flusher-loop (server)
+  "Write coalesced appends out when their window closes.
+
+The wait is unbounded while nothing is buffered — a publish notifies this
+thread's own condition variable when something is — and a shutdown notifies it
+too, so STOP-LISTENING can join this thread and actually get it.  (Waiting on
+the log's shared variable instead is how the server used to hang: the shutdown
+notify woke a stream, and the flusher slept through the join for ever.)"
   (let ((log (server-oplog server)))
-    (loop until (stopping-p server)
+    (loop until (or (stopping-p server) (op-log-stopping log))
           do (bt:with-lock-held ((op-log-lock log))
                (when (op-log-flush-expired log)
                  (bt:condition-notify (op-log-cv log)))
-               (bt:condition-wait (op-log-cv log) (op-log-lock log)
+               (bt:condition-wait (op-log-flusher-cv log) (op-log-lock log)
                                   :timeout (op-log-wait-seconds log))))))
 
 (defun shutdown-task (server &key (seconds 5))
