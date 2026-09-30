@@ -8576,92 +8576,185 @@ session the child was on rather than the newest one in the folder (E1)."
                  '("--port" "9" "--model" "m" "--ready-file" "/t" "--resume" "--allow-remote"
                    "--watch-stdin" "--thinking" "high")))))
 
-(defun test-catalog ()
-  "GET /catalog and the offline `catalog --json` (CONTRACT §5.6): one
-document, per-entry isolation, and never a key."
-  (let* ((dir (uiop:ensure-directory-pathname
-               (format nil "~a/evo-catalog-~a/" (tmp-dir) (gen-id))))
-         (journal (progn (ensure-directories-exist dir) (make-session-journal dir)))
-         (agent (make-agent :journal journal))
-         (saved-models evo.provider::*models*)
-         (saved-providers (copy-alist evo.provider::*providers*))
-         (saved-settings (evo.util:capture-settings)))
-    (unwind-protect
-         (progn
-           (register-provider* :fixture
-                               :base-url "http://127.0.0.1:1/v1"
-                               :api-key-env "EVO_TEST_FIXTURE_KEY")
-           (evo.port:setenv "EVO_TEST_FIXTURE_KEY" "")
-           (register-model* "fixture-model" :provider :fixture :api :anthropic-messages
-                            :context-window 200000 :max-output 8000 :effort t)
-           (let ((catalog (evo.serve:catalog-plist agent)))
-             (let ((model (find "fixture-model" (getf catalog :models)
-                                :key (lambda (m) (getf m :id)) :test #'equal)))
-               (check "catalog: a model entry says what the chooser needs"
-                      (and model
-                           (eq :fixture (getf model :provider))
-                           (equal 200000 (getf model :context-window))
-                           (eq t (getf model :reasoning))
-                           (eq t (getf model :images))))
-               (check "catalog: a model whose key is missing is not ready, and says why"
-                      (and (not (getf model :ready))
-                           (search "EVO_TEST_FIXTURE_KEY" (getf model :reason))))
-               (check "catalog: a model entry carries no key"
-                      (null (member "EVO_TEST_FIXTURE_KEY"
-                                    (loop for (k v) on model by #'cddr
-                                          when (stringp v) collect v)
-                                    :test (lambda (a b) (and (stringp b) (search a b)))))))
-             (let ((provider (find "fixture" (getf catalog :providers)
-                                   :key (lambda (p) (getf p :name)) :test #'equal)))
-               (check "catalog: a provider says whether it has a key, never the key"
-                      (and provider
-                           (equal "EVO_TEST_FIXTURE_KEY" (getf provider :key-env))
-                           (null (getf provider :has-key))
-                           (eq :anthropic-messages (getf provider :api)))))
-             (check "catalog: the thinking ladder is the one the session accepts"
-                    (equalp #("off" "low" "medium" "high" "xhigh" "max")
-                            (getf catalog :thinking-levels)))
-             (check "catalog: the default language pack is listed first"
-                    (equal "en" (getf (aref (getf catalog :languages) 0) :code)))
-             (check "catalog: the ops carry their argument schema and precondition"
-                    (let ((op (find "input.send" (getf catalog :ops)
-                                    :key (lambda (o) (getf o :name)) :test #'equal)))
-                      (and op (hash-table-p (getf op :args))
-                           (stringp (getf op :precondition)))))
-             (check "catalog: commands, skills and tools are listed"
-                    (and (plusp (length (getf catalog :commands)))
-                         (vectorp (getf catalog :skills))
-                         (plusp (length (getf catalog :tools)))))
-             (check "catalog: an evo-agent catalog has no lane half"
-                    (null (getf catalog :lanes)))
-             (check "catalog: nothing failed to read"
-                    (equalp #() (getf catalog :warnings))))
-           ;; The swarm's half: computed from the kernel API set, without a lane.
-           (let* ((catalog (evo.serve:catalog-plist agent :swarm (list :workers 2)))
-                  (lanes (getf catalog :lanes))
-                  (model (find "fixture-model" (getf lanes :models)
-                               :key (lambda (m) (getf m :id)) :test #'equal)))
-             (check "catalog: a swarm's catalog lists the lanes' models"
-                    (and lanes (vectorp (getf lanes :models))))
-             (check "catalog: a model the kernel API set has is offered to lanes"
-                    (and model (null (getf model :ok))
-                         (search "EVO_TEST_FIXTURE_KEY" (getf model :reason)))))
-           ;; A model whose API an extension defined is not one a lane can run
-           ;; until that extension is loaded into it.
-           (evo.provider:register-api :fixture-api
-                                      (make-instance 'evo.provider:provider-api))
-           (register-model* "extension-model" :provider :fixture :api :fixture-api
-                            :context-window 1000 :max-output 100)
-           (let* ((catalog (evo.serve:catalog-plist agent :swarm (list :workers 1)))
-                  (model (find "extension-model" (getf (getf catalog :lanes) :models)
-                               :key (lambda (m) (getf m :id)) :test #'equal)))
-             (check "catalog: a model from an extension's API is not a lane's by default"
-                    (and model (null (getf model :ok))
-                         (search "in-lanes" (getf model :reason))))))
-      (setf evo.provider::*models* saved-models
-            evo.provider::*providers* saved-providers)
-      (evo.util:restore-settings saved-settings)
-      (evo.port:setenv "EVO_TEST_FIXTURE_KEY" ""))))
+;;; The op log.
+
+(defun test-serve-oplog ()
+  (let ((log (evo.serve::make-op-log)))
+    (check "oplog: the epoch is 8 hex characters"
+           (and (= 8 (length (evo.serve::op-log-epoch log)))
+                (every (lambda (c) (digit-char-p c 16)) (evo.serve::op-log-epoch log))))
+    (check "oplog: a cursor round-trips through text"
+           (multiple-value-bind (epoch seq) (evo.serve::parse-cursor "7f3a91c2.1042")
+             (and (equal "7f3a91c2" epoch) (eql 1042 seq))))
+    (check "oplog: a cursor that is not one is NIL, not a guess"
+           (and (null (evo.serve::parse-cursor "1042"))
+                (null (evo.serve::parse-cursor "7f3a91c2."))
+                (null (evo.serve::parse-cursor ""))
+                (null (evo.serve::parse-cursor ".5"))
+                (null (evo.serve::parse-cursor "7f3a.xy"))))
+    (check "oplog: seq starts at 1 and a cursor is epoch.seq"
+           (let ((seq (evo.serve::op-log-publish log '(:op "state.patch" :topic "session"
+                                                       :patch (:status "idle")))))
+             (and (eql 1 seq)
+                  (equal (format nil "~a.1" (evo.serve::op-log-epoch log))
+                         (evo.serve::format-cursor log)))))
+    (let ((ops (evo.serve::op-log-ops-after log 0)))
+      (check "oplog: an op is stored encoded, with its topic and seq"
+             (and (= 1 (length ops))
+                  (eql 1 (first (first ops)))
+                  (equal "session" (third (first ops)))
+                  (search "\"seq\":1" (second (first ops)))
+                  (search "\"ts\":" (second (first ops)))))
+      (check "oplog: a cursor at the end gets nothing"
+             (null (evo.serve::op-log-ops-after log 1)))))
+  ;; Retention: the ring drops what is older than the count, and a cursor into
+  ;; what is gone is told so rather than handed a hole.
+  (let ((evo.serve::*op-retention-count* 4))
+    (let ((log (evo.serve::make-op-log)))
+      (dotimes (i 6) (evo.serve::op-log-publish log (list :op "state.patch" :topic "session"
+                                                          :patch (list :n i))))
+      (multiple-value-bind (ops missed) (evo.serve::op-log-ops-after log 0)
+        (check "oplog: at most the retained count is kept"
+               (and (= 4 (length ops)) (eql 3 (first (first ops)))))
+        (check "oplog: a cursor older than retention is told what it missed"
+               (eql 1 missed)))
+      (multiple-value-bind (ops missed) (evo.serve::op-log-ops-after log 2)
+        (check "oplog: a cursor right at the edge still replays"
+               (and (= 4 (length ops)) (null missed))))))
+  ;; Coalescing: appends for one item are merged inside the window, and a
+  ;; different op for the same item goes out after them.
+  (let ((log (evo.serve::make-op-log)))
+    (evo.serve::op-log-publish log (list :op "item.add" :topic "session"
+                                         :item (list :id "e_1" :kind :assistant :text "")))
+    (evo.serve::op-log-publish log (list :op "item.append" :topic "session"
+                                         :id "e_1" :field :text :text "hel"))
+    (evo.serve::op-log-publish log (list :op "item.append" :topic "session"
+                                         :id "e_1" :field :text :text "lo"))
+    (check "oplog: buffered appends are not in the log yet"
+           (and (eql 1 (evo.serve::op-log-last-seq log))
+                (equal "e_1" (getf (first (evo.serve::op-log-pending log)) :id))))
+    (check "oplog: flushing writes them as one op, in order"
+           (progn (evo.serve::op-log-flush-all log)
+                  (let ((ops (evo.serve::op-log-ops-after log 1)))
+                    (and (= 1 (length ops))
+                         (search "\"text\":\"hello\"" (second (first ops)))))))
+    (evo.serve::op-log-publish log (list :op "item.append" :topic "session"
+                                         :id "e_1" :field :text :text "!"))
+    (evo.serve::op-log-publish log (list :op "item.patch" :topic "session" :id "e_1"
+                                         :patch (list :status :final)))
+    (let ((ops (evo.serve::op-log-ops-after log 2)))
+      (check "oplog: an append is flushed before another op for the same item"
+             (and (= 2 (length ops))
+                  (search "\"item.append\"" (second (first ops)))
+                  (search "\"item.patch\"" (second (second ops)))))))
+  ;; A provider's own ops for another topic never overtake an item's text.
+  (let ((log (evo.serve::make-op-log)))
+    (evo.serve::op-log-publish log (list :op "item.append" :topic "lane:1"
+                                         :id "t_1" :field :text :text "a"))
+    (evo.serve::op-log-publish log (list :op "item.patch" :topic "lane:1" :id "t_1"
+                                         :patch (list :status :ok)))
+    (check "oplog: an append and its patch reach the log in that order"
+           (let ((ops (evo.serve::op-log-ops-after log 0)))
+             (and (= 2 (length ops))
+                  (search "item.append" (second (first ops)))
+                  (search "item.patch" (second (second ops))))))))
+
+;;; Topics.
+
+(defstruct probe-topic
+  (items-asked nil))
+
+(defmethod evo.serve:topic-snapshot ((provider probe-topic) &key (items 200))
+  (push items (probe-topic-items-asked provider))
+  (list :state (list :status "probe") :items #() :has-more nil))
+
+(defmethod evo.serve:topic-items-before ((provider probe-topic) before-id limit)
+  (declare (ignore provider before-id limit))
+  (values #() nil))
+
+(defstruct probe-topic
+  (items-asked nil))
+
+(defmethod evo.serve:topic-snapshot ((provider probe-topic) &key (items 200))
+  (push items (probe-topic-items-asked provider))
+  (list :state (list :status "probe") :items #() :has-more nil))
+
+(defmethod evo.serve:topic-items-before ((provider probe-topic) before-id limit)
+  (declare (ignore provider before-id limit))
+  (values #() nil))
+
+(defun test-serve-topics ()
+  (check "topic: a wildcard matches only its prefix"
+         (and (evo.serve::topic-name-matches-p "lane:*" "lane:1")
+              (evo.serve::topic-name-matches-p "lane:*" "lane:12")
+              (not (evo.serve::topic-name-matches-p "lane:*" "lane"))
+              (not (evo.serve::topic-name-matches-p "lane:*" "swarm"))
+              (not (evo.serve::topic-name-matches-p "lane:1" "lane:12"))
+              (evo.serve::topic-name-matches-p "session" "session")))
+  (let ((server (evo.serve:make-server :token "t")))
+    (evo.serve:register-topic server "session" :session-provider)
+    (evo.serve:register-topic server "swarm" :swarm-provider)
+    (evo.serve:register-topic server "lane:1" :lane-one)
+    (evo.serve:register-topic server "lane:2" :lane-two)
+    (check "topic: a wildcard expands to every registered lane, in order"
+           (equal '("lane:1" "lane:2") (evo.serve:expand-topic-names server "lane:*")))
+    (check "topic: a request may mix names and wildcards"
+           (equal '("session" "lane:1" "lane:2")
+                  (evo.serve:expand-topic-names server "session,lane:*")))
+    (check "topic: a name nobody registered is dropped"
+           (equal '() (evo.serve:expand-topic-names server "nope")))
+    (check "topic: a wildcard with no match is empty, not an error"
+           (equal '() (evo.serve:expand-topic-names server "lane:9*")))
+    (check "topic: a topic provider is found by name"
+           (eq :lane-one (evo.serve:topic-provider server "lane:1")))
+    (check "topic: the default provider answers nothing, never signals"
+           (let ((snap (evo.serve:topic-snapshot :anything :items 10)))
+             (and (null (getf snap :state)) (equalp #() (getf snap :items)))))
+    (check "topic: the default interrupt scope stops the session"
+           (let ((server (evo.serve:make-server :token "t")))
+             (equal '() (evo.serve:interrupt-scope server :session nil))))
+    (check "topic: another scope is refused unless the program brings it"
+           (eq :refused
+               (handler-case (progn (evo.serve:interrupt-scope server :swarm nil) nil)
+                 (evo.serve::op-error (e) (if (equal "invalid_args" (evo.serve::op-error-code e))
+                                              :refused
+                                              :wrong-code)))))
+    (setf (evo.serve:server-interrupt-hook server)
+          (lambda (srv scope lane)
+            (declare (ignore srv))
+            (list (format nil "lane:~a" (or lane 1)) (symbol-name scope))))
+    (check "topic: a program's interrupt hook answers the scopes it owns"
+           (equal '("lane:3" "SWARM") (evo.serve:interrupt-scope server :swarm 3))))
+  ;; A provider answers the reads the protocol needs, and serve asks it for
+  ;; what the request named.
+  (let* ((server (evo.serve:make-server :token "t"))
+         (provider (make-probe-topic)))
+    (evo.serve:register-topic server "session" provider)
+    (check "topic: a provider is asked for the items the request named"
+           (let ((snap (evo.serve:topic-snapshot (evo.serve:topic-provider server "session")
+                                                 :items 7)))
+             (and (equal '(7) (probe-topic-items-asked provider))
+                  (equal "probe" (getf (getf snap :state) :status)))))
+    (check "topic: a snapshot walks every requested topic"
+           (multiple-value-bind (epoch seq snaps) (evo.serve::topics-snapshot server '("session") 5)
+             (declare (ignore epoch))
+             (and (integerp seq) (equal '("session") (mapcar #'car snaps))))))
+  (check "catalog: an op's schema names its arguments and their types"
+         (let* ((op (evo.serve:find-op "input.cancel"))
+                (schema (evo.serve::op-arg-schema op)))
+           (and (equal "object" (getf schema :type))
+                (equal "string" (getf (getf (getf schema :properties) :item-id) :type))
+                (equalp #("item_id") (getf schema :required)))))
+  (check "catalog: an op's precondition is published"
+         (eq :quiescent (evo.serve::op-precondition (evo.serve:find-op "session.new"))))
+  (check "catalog: the eval op disappears when it is disabled"
+         (let ((server (evo.serve:make-server :token "t" :eval-enabled nil)))
+           (and (evo.serve::op-available-p server "input.send")
+                (not (evo.serve::op-available-p server "eval"))))))
+
+(defun getf-call (calls)
+  "The arguments the fallback provider was called with, for the message above."
+  (getf (second (first calls)) :items))
 
 ;;; The view model (src/view/).
 ;;;
