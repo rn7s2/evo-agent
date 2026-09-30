@@ -182,9 +182,11 @@ item itself, not about fields of one it has never seen."
         ((v-held view) "waiting")
         (t "idle")))
 
-(defun view-refresh-state (view)
+(defun refresh-state (view)
   "Recompute the topic state from the journal and the view's own run facts, and
-publish the fields that moved."
+publish the fields that moved.  The view's own paths call this with the lock
+held; VIEW-REFRESH-STATE is the same thing for a frontend that knows the fold
+moved without an append."
   (setf (v-held view) (agent-hold-reason (v-agent view)))
   (let* ((agent (v-agent view))
          (journal (agent-journal agent))
@@ -206,6 +208,13 @@ publish the fields that moved."
       (emit-state-patch view (loop for (k v) on state by #'cddr
                                    unless (equal v (pget old k)) append (list k v))))
     state))
+
+(defun view-refresh-state (view)
+  "Re-derive the topic state and publish what moved.  For a change no append
+reports — a setting, the provider registry, a hold — which a frontend knows
+about and the journal does not."
+  (bt:with-lock-held ((v-lock view))
+    (refresh-state view)))
 
 ;;; The task clock: epoch ms, and it counts the STEP, not the task.  A spinner
 ;;; says only that something is alive; the clock is what tells a slow step from
@@ -260,7 +269,7 @@ carry when it is journaled.  Returns the item id."
       ;; Queueing the same id twice (a retried op, a replayed event) is the
       ;; same item, not a second one.
       (patch-item view item)
-      (view-refresh-state view)
+      (refresh-state view)
       id)))
 
 (defun view-input-cancelled (view id)
@@ -271,7 +280,7 @@ cancelled input is never journaled.  Returns T when there was one."
     (let ((item (gethash id (v-index view))))
       (when (and item (equal (pget item :status) "queued"))
         (drop-item view id)
-        (view-refresh-state view)
+        (refresh-state view)
         t))))
 
 ;;; Journal appends.
@@ -318,23 +327,23 @@ announced (a rebuild, or a frontend that missed the start) is added here."
          (:assistant (handle-assistant-append view entry))
          (:tool-result (handle-tool-append view entry))
          (t nil))
-       (view-refresh-state view))
+       (refresh-state view))
       ((:custom-message :notice :compaction :branch-summary)
        (let ((item (entry->item entry (v-ctx view))))
          (when item
            (if (gethash (pget item :id) (v-index view))
                (patch-item view item)
                (append-item view item))))
-       (view-refresh-state view))
+       (refresh-state view))
       (:goal
        (let ((item (entry->item entry (v-ctx view))))
          (when item (append-item view item)))
-       (view-refresh-state view))
+       (refresh-state view))
       (:recover
        (entry->item entry (v-ctx view))  ; remembered for the note that follows
-       (view-refresh-state view))
+       (refresh-state view))
       ((:model-change :thinking-change :tools-change :load :custom :label)
-       (view-refresh-state view))
+       (refresh-state view))
       (t nil))))
 
 (defun view-on-append (view entry)
@@ -393,7 +402,7 @@ with; the entry still arrives when it is appended."
     (when (and usage (plusp (usage-total-tokens usage)))
       (incf (v-run-tokens view) (usage-total-tokens usage))
       (view-live-context view :tokens (usage-total-tokens usage) :source "usage")))
-  (view-refresh-state view))
+  (refresh-state view))
 
 (defun handle-tool-call-start (view event)
   (let* ((call-id (pget event :id))
@@ -471,14 +480,14 @@ with; the entry still arrives when it is appended."
   (case (pget event :type)
     (:run-start
      (view-begin-task view :run (or (pget event :run-id) (gen-id)))
-     (view-refresh-state view))
+     (refresh-state view))
     (:turn-start
      (view-step view)
      (let ((task (v-task view)))
        (when task
          (setf (v-task view) (pput (pput task :turn (pget event :turn))
                                    :step-started-at (now-ms)))))
-     (view-refresh-state view))
+     (refresh-state view))
     (:message-start (handle-message-start view event))
     (:text-delta (handle-text-delta view event))
     (:thinking-delta (handle-thinking-delta view event))
@@ -490,30 +499,30 @@ with; the entry still arrives when it is appended."
        (view-begin-task view :compact (format nil "c_~a" (gen-id))))
      (setf (v-compacting view) t)
      (view-step view)
-     (view-refresh-state view))
+     (refresh-state view))
     (:compaction-end
      (setf (v-compacting view) nil)
      (when (and (v-task view) (equal (v-task-kind view) "compact"))
        (view-end-task view))
      (view-step view)
-     (view-refresh-state view))
+     (refresh-state view))
     (:run-end
      (handle-run-outcome view event)
      (view-end-task view)
-     (view-refresh-state view))
+     (refresh-state view))
     (:settled
      ;; A frontend-level settle: nothing is running any more, so the hold is
      ;; what decides between idle and waiting.
      (setf (v-held view) (agent-hold-reason (v-agent view)))
-     (view-refresh-state view))
+     (refresh-state view))
     (:provider-retry (handle-provider-retry view event))
     (:notice (handle-notice view event))
-    (:todo-changed (view-refresh-state view))
+    (:todo-changed (refresh-state view))
     (:steering
      (let ((id (pget event :entry-id)))
        (when (and id (gethash id (v-index view)))
          (patch-item-fields view id :status "sent")
-         (view-refresh-state view))))
+         (refresh-state view))))
     (:input-queued
      (view-input-queued view :id (pget event :id) :text (pget event :text)
                               :images (pget event :images)
@@ -533,7 +542,7 @@ with; the entry still arrives when it is appended."
     (let ((reason (agent-hold-reason (v-agent view))))
       (unless (equal reason (v-held view))
         (setf (v-held view) reason)
-        (view-refresh-state view)))))
+        (refresh-state view)))))
 
 (defun view-hold-changed (payload)
   (let ((agent (pget payload :agent)))
@@ -625,7 +634,7 @@ is why only the append path has to be incremental."
                  :reason (or (cdr (assoc reason *reset-reasons*))
                              (enum-string reason)
                              "session_switched"))))
-    (view-refresh-state view)))
+    (refresh-state view)))
 
 (defun cache-media-from-journal (view journal)
   "Re-index the image blocks of every user message on the path, so a client can
