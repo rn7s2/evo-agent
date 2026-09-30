@@ -142,6 +142,12 @@ there is replaced where it stands — a replayed op never duplicates a row."
 
 ;;; Publishing into the coordinator's op log.
 
+;; NOTINLINE: the unit suite replaces this function to capture what a client
+;; would have received.  A compiler that inlines a same-file call — ECL does,
+;; and only this declaration stops it — makes that replacement invisible, and
+;; the tests would be reading a publisher nobody calls.
+(declaim (notinline publish-op))
+
 (defun publish-op (op-plist)
   "Publish OP-PLIST on the coordinator's server, when it has one (the TUI has
 no op log).  Returns T when it went out."
