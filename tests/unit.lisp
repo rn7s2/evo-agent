@@ -9588,7 +9588,9 @@ document, per-entry isolation, and never a key."
                            (eq :false (getf provider :has-key))
                            (eq :anthropic-messages (getf provider :api)))))
              (check "catalog: the thinking ladder is the one the session accepts"
-                    (equalp #("off" "low" "medium" "high" "xhigh" "max")
+                    ;; Exactly the levels the session accepts — there is no
+                    ;; off rung to offer (a retired :off normalizes onto low).
+                    (equalp #("low" "medium" "high" "xhigh" "max")
                             (getf catalog :thinking-levels)))
              (check "catalog: the default language pack is listed first"
                     (equal "en" (getf (aref (getf catalog :languages) 0) :code)))

@@ -478,8 +478,11 @@ def run_all(server, stub_port, work):
     check("catalog: unregistering the hook takes the key back out",
           "lanes" not in back, sorted(back))
     check("catalog carries no secret", "e2e-secret" not in text)
+    # Exactly what the session accepts: the ladder has no off rung, and the
+    # CLI, /thinking and evo-swarm all refuse one.
     check("catalog: thinking levels and languages",
-          catalog["thinking_levels"][0] == "off" and catalog["languages"], catalog["languages"])
+          catalog["thinking_levels"] == ["low", "medium", "high", "xhigh", "max"]
+          and catalog["languages"], catalog["thinking_levels"])
     op_schema = next(o for o in catalog["ops"] if o["name"] == "input.send")
     check("catalog: an op carries its argument schema",
           op_schema["args"]["properties"]["text"]["type"] == "string"

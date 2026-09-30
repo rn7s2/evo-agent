@@ -8,7 +8,11 @@
 ;;;;             kernel API set (evo.serve:*kernel-apis*) instead of by running
 ;;;;             a lane and asking it.
 ;;;;   check     whether a launch would work: are the models resolvable, is
-;;;;             each model's API present where it runs, are the keys there.
+;;;;             each model's API present where it runs, are the keys there —
+;;;;             and what the launch would resolve with no flags: the
+;;;;             coordinator's effort and the lanes' (EVO's own chains), and
+;;;;             the lane count, so a client's controls open on the truth
+;;;;             instead of on medium and six (CONTRACT §2).
 ;;;;
 ;;;; The userspace is booted in-process first (init files, extensions,
 ;;;; swarm.lisp), because that is what registers the models and providers these
@@ -83,6 +87,29 @@ The entry and the problem, as CHECK-MODEL-ENTRY returns them."
                          "lane_api_missing")
                      (format nil "a lane cannot run ~a: ~a" (getf model :id) why))))))))
 
+(defun check-thinking (opts agent resumed-p)
+  "The effort a launch from these OPTS would resolve, as two names: the
+coordinator's and the lanes'.
+
+The coordinator's is evo's own chain — the journaled /thinking choice, the
+--thinking flag, the :thinking setting, then medium (EFFECTIVE-THINKING, which
+normalizes anything retired onto a live rung).  A lane's is --lane-thinking,
+then what a resumed record restored, then the coordinator's, which is the
+order the launch itself applies them in (CONTRACT §1, §4.3)."
+  (let* ((state (ignore-errors (fold-state (agent-journal agent))))
+         ;; The launch's --thinking is where setup-agent would have put it (the
+         ;; journal), so it belongs in the chain as the override too.
+         (coordinator (effective-thinking state (or (getf opts :thinking)
+                                                    (agent-thinking-override agent))))
+         (record (and resumed-p (ignore-errors (evo:custom-state "swarm" agent))))
+         ;; A level retired from the ladder — an :off left in a record or a
+         ;; setting — is normalized onto a live rung, as the launch does.
+         (lane (or (normalize-thinking-level (getf opts :lane-thinking))
+                   (normalize-thinking-level (and record (getf record :lane-thinking)))
+                   coordinator)))
+    (values (string-downcase (symbol-name coordinator))
+            (string-downcase (symbol-name lane)))))
+
 (defun check-workers (opts)
   "How many lanes OPTS asks for, and the problem with that number, if any."
   (let ((n (getf opts :workers)))
@@ -119,12 +146,16 @@ computed without running one (EVO.SERVE:CATALOG-PLIST)."
     (write-json-line (evo.serve:catalog-plist agent :swarm (swarm-config-plist opts)))
     0))
 
+(defun check-entry-wire (entry)
+  "ENTRY as the check document carries it: `ok` is a bool on the wire, where
+NIL would encode as null — and a client parsing a flag cannot read null."
+  (pput entry :ok (wire-boolean (getf entry :ok))))
+
 (defun cmd-check (opts)
   "Print whether a launch from here would work, and exit 1 when it would not
 (CONTRACT §2)."
   (install-coordinator nil)
   (multiple-value-bind (agent resumed-p) (evo.cli:setup-agent opts)
-    (declare (ignore resumed-p))
     (let ((problems nil))
       (multiple-value-bind (model problem) (check-model-entry (getf opts :model) agent)
         (when problem (push problem problems))
@@ -132,11 +163,18 @@ computed without running one (EVO.SERVE:CATALOG-PLIST)."
             (check-lane-entry (getf opts :lane-model) agent)
           (when lane-problem (push lane-problem problems))
           (multiple-value-bind (workers workers-problem) (check-workers opts)
-            (declare (ignore workers))
             (when workers-problem (push workers-problem problems))
-            (let ((ok (null problems)))
-              (write-json-line (list :ok ok
-                                     :model model
-                                     :lane-model lane
-                                     :problems (coerce (reverse problems) 'vector)))
-              (if ok 0 1))))))))
+            (multiple-value-bind (thinking lane-thinking) (check-thinking opts agent resumed-p)
+              (let ((ok (null problems)))
+                (write-json-line (list :ok (wire-boolean ok)
+                                       :model (check-entry-wire model)
+                                       :lane-model (check-entry-wire lane)
+                                       ;; What evo itself resolves for a launch
+                                       ;; with no flags, so a client's controls
+                                       ;; open on these instead of hard-coding
+                                       ;; medium and six.
+                                       :thinking thinking
+                                       :lane-thinking lane-thinking
+                                       :workers workers
+                                       :problems (coerce (reverse problems) 'vector)))
+                (if ok 0 1)))))))))

@@ -1211,6 +1211,7 @@ whole, and it splits into the epoch and the seq at the dot."
 why not — the answer a GUI's chooser needs before it spawns anything."
   (let ((saved-models evo.provider::*models*)
         (saved-providers (copy-alist evo.provider::*providers*))
+        (saved-settings (evo.util:capture-settings))
         (journal (make-session-journal))
         (agent nil))
     (unwind-protect
@@ -1253,9 +1254,56 @@ why not — the answer a GUI's chooser needs before it spawns anything."
                          (getf (nth-value 1 (evo.swarm::check-workers '(:workers 999)))
                                :code)))
            (check "check: --workers in range is not"
-                  (null (nth-value 1 (evo.swarm::check-workers '(:workers 3))))))
+                  (null (nth-value 1 (evo.swarm::check-workers '(:workers 3)))))
+           ;; What a launch with no flags resolves, so a GUI's controls open
+           ;; on the truth instead of on medium and six (CONTRACT §2).
+           (check "check: the effort is evo's own chain — medium by default"
+                  (equal '("medium" "medium")
+                         (multiple-value-list
+                          (evo.swarm::check-thinking nil agent nil))))
+           (check "check: ...--lane-thinking names the lanes' own"
+                  (equal '("medium" "max")
+                         (multiple-value-list
+                          (evo.swarm::check-thinking '(:lane-thinking :max) agent nil))))
+           ;; The :thinking setting and the flags, in the order the launch
+           ;; applies them.
+           (evo.util:set-setting :thinking :high)
+           (check "check: the :thinking setting moves both"
+                  (equal '("high" "high")
+                         (multiple-value-list
+                          (evo.swarm::check-thinking nil agent nil))))
+           (check "check: --thinking and --lane-thinking win over the setting"
+                  (equal '("low" "max")
+                         (multiple-value-list
+                          (evo.swarm::check-thinking '(:thinking :low :lane-thinking :max)
+                                                     agent nil))))
+           (check "check: a retired :off normalizes onto the weakest live rung"
+                  (equal '("low" "low")
+                         (multiple-value-list
+                          (evo.swarm::check-thinking '(:thinking :off :lane-thinking :off)
+                                                     agent nil))))
+           ;; A resumed swarm restored its own lane thinking; the flags, when
+           ;; given, still win over it (as run-swarm applies them).
+           (evo:set-custom-state "swarm" (list :lane-thinking :xhigh) agent)
+           (check "check: a resumed swarm's lane thinking beats the coordinator's"
+                  (equal '("high" "xhigh")
+                         (multiple-value-list
+                          (evo.swarm::check-thinking nil agent t))))
+           (check "check: ...unless the launch names one"
+                  (equal '("high" "low")
+                         (multiple-value-list
+                          (evo.swarm::check-thinking '(:lane-thinking :low) agent t))))
+           (check "check: the document's bools are bools, not nulls"
+                  (let ((wire (evo.swarm::check-entry-wire
+                               (list :id "m" :provider "p" :ok nil :reason "why"))))
+                    (and (eq :false (getf wire :ok))
+                         (equal "why" (getf wire :reason))
+                         (eq t (getf (evo.swarm::check-entry-wire
+                                      (list :id "m" :ok t))
+                                     :ok))))))
       (setf evo.provider::*models* saved-models
             evo.provider::*providers* saved-providers)
+      (evo.util:restore-settings saved-settings)
       (evo.port:setenv "EVO_TEST_FIXTURE_KEY" ""))))
 
 (defun run-all ()
