@@ -8063,49 +8063,42 @@ became zero after the first reload."
   (handler-case (progn (funcall thunk) nil)
     (evo.serve::http-error (e) (evo.serve::http-error-status e))))
 
-(defun test-serve-event-encoding ()
-  (let ((samples
-          (list '(:type :text-delta :text "hé \"quoted\"" :run-id "r1" :turn 0)
-                '(:type :tool-call-start :name "edit" :id "tc_1"
-                  :arguments (:path "a.lisp" :old-string "x" :count 3)
-                  :arguments-json nil :run-id "r1" :turn 2)
-                '(:type :tool-result :name "bash" :is-error t :content-chars 12
-                  :content "ok" :run-id "r1" :turn 2)
-                '(:type :message-end :stop-reason :tool-use
-                  :usage (:input 10 :output 5 :cache-read 0 :cache-write 0)
-                  :error nil)
-                (list :type :todo-changed
-                      :todos (vector '(:text "a" :status :done) '(:text "b" :status :pending)))
-                '(:type :provider-retry :attempt 1 :max 4 :delay 1/2 :reason "503")
-                '(:type :run-end :outcome :aborted))))
-    (dolist (event samples)
-      (let* ((json (evo.serve:event->json event))
-             (back (evo:json->sexpr (com.inuoe.jzon:parse json))))
-        ;; Object key order is not part of a JSON value, and neither SBCL nor
-        ;; ECL promises one for a hash table: compare values, and key sets.
-        (check (format nil "serve json: ~(~a~) re-encodes to the same JSON value"
-                       (getf event :type))
-               (equalp (com.inuoe.jzon:parse json)
-                       (com.inuoe.jzon:parse (evo.serve:encode-json back))))
-        (check (format nil "serve json: ~(~a~) keys come back as the same keywords"
-                       (getf event :type))
-               (null (set-exclusive-or (loop for k in event by #'cddr collect k)
-                                       (loop for k in back by #'cddr collect k))))))
-    (let ((obj (com.inuoe.jzon:parse (evo.serve:event->json (second samples)))))
-      (check "serve json: keys are snake_case"
-             (and (gethash "run_id" obj) (gethash "arguments_json" obj :missing)))
-      (check "serve json: a nested plist is an object"
-             (equal "x" (gethash "old_string" (gethash "arguments" obj))))
-      (check "serve json: a keyword value is its lowercase name"
-             (equal "tool-call-start" (gethash "type" obj)))
-      (check "serve json: nil is null" (eq 'null (gethash "arguments_json" obj))))
-    (check "serve json: t is true, a ratio a number"
-           (search "\"delay\":0.5" (evo.serve:event->json (sixth samples))))
-    (check "serve json: 'false is false"
-           (equal "{\"ok\":false}" (evo.serve:encode-json (list :ok 'evo.serve::false))))
-    (check "serve json: an unencodable event degrades, never kills the stream"
-           (search "unprintable-event"
-                   (evo.serve:event->json (list :type :odd :value (cons 1 2)))))))
+(defun test-serve-json ()
+  "The encoder is the wire: snake_case keys and values, plists as objects,
+vectors as arrays, and a value it cannot express degrades instead of killing
+the stream."
+  (check "serve json: a plist is an object, a vector an array"
+         (and (search "\"tool_name\"" (evo.serve:encode-json (list :tool-name "edit")))
+              (equal "[1,2]" (evo.serve:encode-json (vector 1 2)))
+              (equal "[\"a\",\"b\"]" (evo.serve:encode-json (list "a" "b")))))
+  (check "serve json: a keyword value is its snake_case name"
+         (equal "{\"kind\":\"lane_report\"}"
+                (evo.serve:encode-json (list :kind :lane-report))))
+  (check "serve json: an object keyed by a topic name needs json-object-value"
+         (and (equal "{\"lane:1\":2}"
+                     (evo.serve:encode-json
+                      (evo.serve:json-object-value '(("lane:1" . 2)))))
+              ;; ... while a list that is not a plist is an array.
+              (equal "[[\"a\",1]]" (evo.serve:encode-json (list (list "a" 1))))))
+  (check "serve json: t is true, nil null, 'false false"
+         (and (equal "{\"ok\":true}" (evo.serve:encode-json (list :ok t)))
+              (equal "{\"a\":null}" (evo.serve:encode-json (list :a nil)))
+              (equal "{\"ok\":false}" (evo.serve:encode-json (list :ok 'evo.serve::false)))))
+  (check "serve json: a ratio is a number"
+         (search "\"delay\":0.5" (evo.serve:encode-json (list :delay 1/2))))
+  ;; An item and a state round-trip through the wire exactly.
+  (let* ((item (list :id "e_1" :kind :tool :ts 1759000000000
+                     :call-id "tc_1" :name "edit" :args (list :path "a.lisp" :count 3)
+                     :status :running :result (list :text "ok" :chars 2 :truncated nil)))
+         (back (evo.serve:decode-json (evo.serve:encode-json item))))
+    (check "serve json: an item round-trips to the same JSON value"
+           (equalp (com.inuoe.jzon:parse (evo.serve:encode-json back))
+                   (com.inuoe.jzon:parse (evo.serve:encode-json item))))
+    (check "serve json: nested plists are objects, nested vectors arrays"
+           (equalp '(:path "a.lisp" :count 3) (getf back :args))))
+  (check "serve json: a value the encoder cannot express degrades, never kills a stream"
+         (search "unprintable" (evo.serve::op-log-encode (list :op "x" :seq 1 :ts 0
+                                                               :bad (cons 1 2))))))
 
 (defun test-serve-http ()
   (let ((req (request-from (crlf "POST /command?x=1&name=a%20b+c HTTP/1.1"

@@ -554,11 +554,6 @@ numbers and null, so this carries its own."
     (vector (map 'vector #'json-value value))
     (t (princ-to-string value))))
 
-;;; An object builder, internal on purpose: a frontend that maps sexprs to
-;;; JSON has one of these too (serve's json-object takes key/value pairs), and
-;;; an exported name would be inherited by a package that USEs this one —
-;;; DEFSTRUCT/DEFUN would then define over this function rather than beside it.
-
 (defun json-object (plist)
   "PLIST (keyword keys) as one line of JSON."
   (json-encode plist))
