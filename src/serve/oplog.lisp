@@ -46,7 +46,14 @@ answer costs tens of ops rather than thousands.")
 
 (defstruct (op-log (:constructor %make-op-log))
   (lock (bt:make-lock "serve-ops"))
+  ;; Streams wait on CV for ops to read.  The flusher waits on FLUSHER-CV for a
+  ;; coalescing deadline to arrive: a condition variable of its own, because
+  ;; bordeaux-threads has no broadcast, and a shutdown notify aimed at "the
+  ;; waiter" would otherwise wake a stream and leave the flusher parked — which
+  ;; is exactly how a server that has served stops shutting down.
   (cv (bt:make-condition-variable :name "serve-ops"))
+  (flusher-cv (bt:make-condition-variable :name "serve-flush"))
+  (stopping nil)
   epoch
   (ring (make-array *op-retention-count* :initial-element nil))
   (last-seq 0)
@@ -196,12 +203,18 @@ Any thread."
           ;; Anything else for an item must not overtake its text.
           (when (getf op :id)
             (op-log-flush-item log (getf op :topic) (getf op :id))))
-      (let ((seq (if (and (equal name "item.append") (getf op :id)
-                          (stringp (getf op :text)))
-                     (op-log-last-seq log)
-                     (op-log-append log op))))
-        (bt:condition-notify (op-log-cv log))
-        seq))))
+      (let ((buffered (and (equal name "item.append") (getf op :id)
+                           (stringp (getf op :text)))))
+        (let ((seq (if buffered
+                       (op-log-last-seq log)
+                       (op-log-append log op))))
+          ;; A buffered append is not in the log yet: the flusher is the one to
+          ;; wake (its deadline just moved).  A written op is what streams wait
+          ;; for.
+          (if buffered
+              (bt:condition-notify (op-log-flusher-cv log))
+              (bt:condition-notify (op-log-cv log)))
+          seq)))))
 
 (defun publish-op (server op-plist)
   "Publish OP-PLIST (:op, :topic, and the op's own fields) on SERVER's log.
@@ -223,6 +236,7 @@ none after it — the text still buffered counts as part of the snapshot."
   (bt:with-lock-held ((op-log-lock log))
     (op-log-flush-all log)
     (bt:condition-notify (op-log-cv log))
+    (bt:condition-notify (op-log-flusher-cv log))
     (values (op-log-epoch log) (op-log-last-seq log))))
 
 (defun op-log-ops-after (log since)
@@ -262,15 +276,23 @@ OP-LOG-OPS-AFTER does — possibly none, which is the caller's cue to ping."
          ;; Nothing to send: block until an op is published, the server is
          ;; shutting down, or TIMEOUT passes (the caller's cue to ping, which
          ;; is also how a vanished peer is noticed).
+         (when (op-log-stopping log)
+           ;; Shutting down: answer now, so a stream can write what it has and
+           ;; close instead of sleeping through its own death.
+           (return-from op-log-wait (%op-log-ops-after log since)))
          (bt:condition-wait (op-log-cv log) (op-log-lock log) :timeout timeout)
          (%op-log-ops-after log since))))))
 
 (defun op-log-wake (log)
-  "Wake a waiter on LOG — a shutdown.  bordeaux-threads has no broadcast, so
-a stream that is asleep wakes on its next ping; the socket closing under it
-is what actually ends it."
+  "Shutdown: nothing more will be published, and every waiter must look at
+STOPPING-P rather than at the log.  bordeaux-threads has no broadcast, so a
+stream that is asleep may still be waiting for its next ping — the socket
+closing under it is what ends it — but the flusher has a condition variable
+nobody else waits on, so the notify that ends its shift always reaches it."
   (bt:with-lock-held ((op-log-lock log))
-    (bt:condition-notify (op-log-cv log))))
+    (setf (op-log-stopping log) t)
+    (bt:condition-notify (op-log-cv log))
+    (bt:condition-notify (op-log-flusher-cv log))))
 
 (defun op-log-wait-seconds (log)
   "Seconds until the earliest buffered append must go out, for the flusher to
