@@ -227,13 +227,13 @@ bound — and the restart can name both exactly."
               ;; observe its predecessor's death otherwise.
               (setf recovery (recovery-env-string status code restarts duration
                                                   (and hung "hang too long")))
-              (sleep 2)))))
+              (sleep 2))))))
       ;; Nothing is left to restart: forget what the dead children reported,
       ;; and take the ready file with it — a client watching that path must
       ;; not keep trusting a pid that will never come back.
       (ignore-errors (evo.kernel:delete-supervisor-state))
       (let ((ready (ready-file-path argv)))
-        (when ready (ignore-errors (delete-file ready))))))))
+        (when ready (ignore-errors (delete-file ready)))))))
 
 (defun supervised-run-p (opts)
   "Should this invocation run the supervisor parent instead of a session?"

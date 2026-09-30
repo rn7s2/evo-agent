@@ -430,7 +430,9 @@ next run if input queued up meanwhile."
                                       :severity :error
                                       :durable t :data (list :source :serve)))))
       (when (and (eq (task-kind task) :run) text)
-        (evo.command:host-say server (format nil "✗ internal error in run: ~a" text) :error))
+        (evo.command:host-notice server (format nil "✗ internal error in run: ~a" text)
+                                 :severity :error :durable t
+                                 :data (list :source :serve)))
       (let ((goal (current-goal agent)))
         (when (and goal (member (pget goal :status) '(:complete :budget-limited :paused)))
           (evo.command:host-notice server (format nil "◆ goal ~a: ~(~a~)"
