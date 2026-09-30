@@ -281,62 +281,26 @@ cancelled input is never journaled.  Returns T when there was one."
   (let ((blocks (blocks-images (content-blocks (pget entry :message)))))
     (when blocks (setf (gethash id (v-media view)) (coerce blocks 'vector)))))
 
-(defun substitute-item (view id new)
-  "Replace the item ID names with NEW (whose id may differ) at the same
-position in the transcript: the client is told to drop one id and add another
-right where it stood."
-  (let ((i (item-index view id)))
-    (when i
-      (let ((after (and (plusp i) (pget (aref (v-items view) (1- i)) :id))))
-        (remhash id (v-index view))
-        (remhash id (v-wire view))
-        (remhash (pget new :id) (v-wire view))
-        (setf (aref (v-items view) i) new)
-        (setf (gethash (pget new :id) (v-index view)) new)
-        (emit-op view *op-item-remove* :id id)
-        (emit-op view *op-item-add* :item (item-wire view new) :after after)
-        new))))
-
-(defun queued-item-matching (view entry)
-  "The oldest queued item that this entry is.  It exists only for a kernel that
-does not mint the entry id when it queues the input (CONTRACT §3): without it,
-the row the user is looking at would survive its own message as a ghost.  With
-pre-minted ids the append finds the item by id and this never runs."
-  (let ((text (message-text (pget entry :message))))
-    (loop for item across (v-items view)
-          when (and (equal (pget item :kind) "user")
-                    (equal (pget item :status) "queued")
-                    (equal (pget item :text) text))
-            return item)))
-
 (defun handle-user-append (view entry)
+  "A user turn is journaled.  Input that was shown while it waited carries the
+entry's id already (the kernel mints it when it queues the input, CONTRACT §3),
+so this is the same row, now sent; anything else is a new item."
   (let* ((id (pget entry :id))
-         (existing (gethash id (v-index view)))
-         (item (entry->item entry (v-ctx view)))
-         (queued (and (null existing) (queued-item-matching view entry))))
+         (existing (gethash id (v-index view))))
     (cache-media view entry id)
-    (cond
-      ;; Queued input that is now sent: the same id, the entry as its content.
-      (existing (patch-item view (pput (or item (user-item id (entry-ms entry)))
-                                       :status "sent")))
-      (queued (substitute-item view (pget queued :id)
-                               (pput item :status "sent")))
-      (item (append-item view item)))))
+    (if existing
+        ;; The entry is authoritative, its timestamp included: a row that
+        ;; waited is dated by when it was journaled, not by when it was typed
+        ;; into a queue (which is the same second, to the millisecond).
+        (patch-item-fields view id :status "sent" :ts (entry-ms entry))
+        (patch-item view (entry->item entry (v-ctx view))))))
 
 (defun handle-assistant-append (view entry)
-  (let* ((id (pget entry :id))
-         (item (entry->item entry (v-ctx view)))
-         (existing (gethash id (v-index view))))
-    (cond
-      (existing (patch-item view item))
-      (t
-       ;; Without a pre-minted id the streaming item was minted here; the
-       ;; entry's id is the one that survives, so the ephemeral item goes.
-       (let ((streaming (and (v-assistant-item view)
-                             (gethash (v-assistant-item view) (v-index view)))))
-         (when (and streaming (equal (pget streaming :status) "streaming"))
-           (drop-item view (v-assistant-item view))))
-       (append-item view item)))
+  "The message is journaled.  Its id is the one the stream announced, so this
+finishes the item the client has been watching; an item that was never
+announced (a rebuild, or a frontend that missed the start) is added here."
+  (let ((id (pget entry :id)))
+    (patch-item view (entry->item entry (v-ctx view)))
     (setf (v-assistant-item view) id)))
 
 (defun handle-tool-append (view entry)
@@ -382,21 +346,24 @@ pre-minted ids the append finds the item by id and this never runs."
 ;;; follows says what happened, and wins.
 
 (defun handle-message-start (view event)
-  "The model has started talking.  With a pre-minted id (the loop mints the
-entry id here and uses it when it appends) the streaming item IS the entry; a
-provider that names no id gets one minted here, and the append that follows
-replaces the item with the journaled one."
-  (let* ((id (or (pget event :entry-id) (format nil "a_~a" (gen-id))))
-         (model (pget (v-state view) :model))
-         (existing (gethash id (v-index view)))
-         (item (list :id id :kind "assistant" :ts (now-ms)
-                     :text "" :thinking "" :status "streaming"
-                     :error nil
-                     :model (pget model :id)
-                     :provider (pget model :provider)
-                     :usage nil)))
-    (unless existing (append-item view item))
-    (setf (v-assistant-item view) id)))
+  "The model has started talking.  The event names the entry the attempt will
+be journaled as (CONTRACT §3: the id is minted at message-start), so the item
+that streams here IS that entry — the append that follows finishes it rather
+than replacing it.  A message-start with no id has nothing to name the line
+with; the entry still arrives when it is appended."
+  (let ((id (pget event :entry-id)))
+    (when id
+      (let* ((model (pget (v-state view) :model))
+             (item (list :id id :kind "assistant" :ts (now-ms)
+                         :text "" :thinking "" :status "streaming"
+                         :error nil
+                         :model (pget model :id)
+                         :provider (pget model :provider)
+                         :usage nil)))
+        ;; A retried attempt announces the same id again: the item is the
+        ;; attempt, not a second one.
+        (unless (gethash id (v-index view)) (append-item view item))
+        (setf (v-assistant-item view) id)))))
 
 (defun handle-text-delta (view event)
   (let ((id (v-assistant-item view)))
@@ -481,6 +448,14 @@ replaces the item with the journaled one."
                        :durable nil))))
 
 (defun handle-provider-retry (view event)
+  ;; The dead attempt's partial text is about to be streamed again from the
+  ;; top: what was shown of it is dropped, or the retry would read as the text
+  ;; said twice.  (The entry the attempt is journaled as keeps the id of that
+  ;; first attempt, so the item survives the retry.)
+  (let ((streaming (and (v-assistant-item view)
+                        (gethash (v-assistant-item view) (v-index view)))))
+    (when (and streaming (equal (pget streaming :status) "streaming"))
+      (patch-item-fields view (pget streaming :id) :text "" :thinking "")))
   (let* ((id "retry")
          (delay (pget event :delay))
          (item (list :id id :kind "provider_retry" :ts (now-ms)

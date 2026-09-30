@@ -8660,9 +8660,25 @@ durable), and a re-projection is not expected to have them."
 (defun view-durable-items (items)
   (remove-if #'view-ephemeral-item-p items))
 
+(defun view-wire-to-agent (view agent)
+  "Wire VIEW to AGENT the way serve does: the journal's appends, and the
+kernel's own events.  Everything the view knows arrives through these two, so
+a test that uses them tests the wiring as well as the projection."
+  (evo.journal:add-journal-listener
+   (agent-journal agent)
+   (lambda (journal entry)
+     (declare (ignore journal))
+     (evo.view:view-on-append view entry)))
+  (setf (agent-events-cb agent)
+        (lambda (event) (evo.view:view-on-event view event)))
+  view)
+
 (defun test-view-incremental ()
   "The property: applying the ops the view published to the projection it
-started from gives the projection of the journal it ended with."
+started from gives the projection of the journal it ended with.  The run is
+driven through the real kernel calls — queue-steering, drain-steering, the
+events the loop emits, appends with pre-minted ids — not through hand-built
+plists, so the wiring is under test too."
   (let* ((journal (view-fixture-journal "evo-view-inc"))
          (agent (make-agent :journal journal)))
     ;; A session that already exists when the client arrives.
@@ -8670,44 +8686,61 @@ started from gives the projection of the journal it ended with."
     (view-fixture-assistant journal :text "first answer")
     (let* ((start (evo.view:project-journal journal))
            (log (make-array 8 :adjustable t :fill-pointer 0))
-           (view (progn (evo.view:make-view agent)
-                        (let ((v (evo.view:make-view agent)))
-                          (evo.view:view-attach v (lambda (op) (vector-push-extend op log)))
-                          v))))
+           (view (view-wire-to-agent
+                  (evo.view:make-view agent)
+                  agent)))
+      (evo.view:view-attach view (lambda (op) (vector-push-extend op log)))
       (unwind-protect
            (progn
-             ;; --- one whole turn, driven the way the kernel drives it -------
+             ;; --- the queued input serve's input.send would show ------------
+             (let ((id (queue-steering agent "second question"
+                                       :from-user t :id "e-queued")))
+               (evo.view:view-input-queued view :id id :text "second question"))
              (evo.view:view-on-event view (list :type :run-start :run-id "r1"))
              (evo.view:view-on-event view (list :type :turn-start :turn 0))
-             (evo.view:view-on-event view (list :type :message-start))
-             (evo.view:view-on-event view (list :type :thinking-delta :text "think"))
-             (evo.view:view-on-event view (list :type :text-delta :text "second "))
-             (evo.view:view-on-event view (list :type :text-delta :text "answer"))
-             (let ((entry (view-fixture-assistant
-                           journal :text "second answer" :thinking "thinking"
-                           :stop :tool-use
-                           :calls (list (view-fixture-call "cc" "bash"
-                                                           (list :command "ls"))))))
-               (evo.view:view-on-append view entry))
-             (evo.view:view-on-event view (list :type :message-end :stop-reason :tool-use
-                                                :usage (list :input 20 :output 4
-                                                             :cache-read 0 :cache-write 0)))
-             (evo.view:view-on-event view (list :type :tool-call-start :id "cc"
-                                                :name "bash"
-                                                :arguments (list :command "ls")))
-             (evo.view:view-on-append view
-                                      (view-fixture-tool-result journal "cc" "bash"
-                                                                "a\nb"))
-             (evo.view:view-on-event view (list :type :tool-result :id "cc"
-                                                :is-error nil :content-chars 3))
-             (evo.view:view-on-event view (list :type :provider-retry :attempt 1 :max 3
-                                                :delay 2 :reason "500"))
-             (evo.view:view-on-event view (list :type :notice :severity :error
-                                                :text "boom" :source :extension))
-             (let ((entry (append-entry journal
-                                        (list :type :notice :severity :info
-                                              :text "durable" :source :swarm))))
-               (evo.view:view-on-append view entry))
+             ;; The run drains the queue: the entry keeps the id it was queued
+             ;; with, and the steering event names it.
+             (evo.kernel::drain-steering agent)
+             ;; --- one whole turn, driven the way the kernel drives it -------
+             (let ((id (gen-id)))
+               (evo.kernel:emit-event agent :type :message-start :entry-id id)
+               (evo.kernel:emit-event agent :type :thinking-delta :text "think")
+               (evo.kernel:emit-event agent :type :text-delta :text "second ")
+               (evo.kernel:emit-event agent :type :text-delta :text "answer")
+               (append-entry journal
+                             (list :type :message
+                                   :message (list :role :assistant
+                                                  :stop-reason :tool-use
+                                                  :model "m"
+                                                  :usage (list :input 20 :output 4
+                                                               :cache-read 0
+                                                               :cache-write 0)
+                                                  :content (list (list :type :thinking
+                                                                       :thinking "thinking")
+                                                                 (list :type :text
+                                                                       :text "second answer")
+                                                                 (list :type :tool-call
+                                                                       :id "cc"
+                                                                       :name "bash"
+                                                                       :arguments (list :command "ls")))))
+                             :id id)
+               (evo.kernel:emit-event agent :type :message-end :stop-reason :tool-use
+                                             :usage (list :input 20 :output 4
+                                                          :cache-read 0 :cache-write 0)))
+             (evo.kernel:emit-event agent :type :tool-call-start :id "cc"
+                                           :name "bash"
+                                           :arguments (list :command "ls"))
+             (view-fixture-tool-result journal "cc" "bash" "a b")
+             (evo.kernel:emit-event agent :type :tool-result :id "cc"
+                                           :is-error nil :content-chars 3)
+             (evo.kernel:emit-event agent :type :provider-retry :attempt 1 :max 3
+                                           :delay 2 :reason "500")
+             (evo.kernel:emit-event agent :type :notice :severity :error
+                                           :text "boom" :source :extension)
+             ;; A durable notice is a journal entry (the command layer's
+             ;; JOURNAL-NOTICE), so it survives a rebuild.
+             (evo.command::journal-notice agent "durable" :severity :info
+                                                       :source :swarm)
              (evo.view:view-on-append
               view
               (append-entry journal (list :type :goal :goal-id "g-2"
@@ -8721,27 +8754,21 @@ started from gives the projection of the journal it ended with."
                                           :objective "keep going"
                                           :status :active :token-budget 100
                                           :tokens-used 12)))
-             (let ((entry (append-entry journal
-                                        (list :type :message
-                                              :origin (list :kind :lane-report :lane 2
-                                                            :done "did it"
-                                                            :evidence "tests"
-                                                            :next "nothing"
-                                                            :blocked nil
-                                                            :requests nil
-                                                            :goal nil)
-                                              :message (list :role :user
-                                                             :content (list
-                                                                       (list :type :text
-                                                                             :text "[lane 2] did it")))))))
-               (evo.view:view-on-append view entry))
-             (evo.view:view-on-event view (list :type :compaction-start))
-             (let ((entry (append-entry journal
-                                        (list :type :compaction :summary "sum"
-                                              :summary-tokens 3 :retained-tail #()))))
-               (evo.view:view-on-append view entry))
-             (evo.view:view-on-event view (list :type :compaction-end))
-             (evo.view:view-on-event view (list :type :run-end :outcome :stop))
+             (append-entry journal
+                           (list :type :message
+                                 :origin (list :kind :lane-report :lane 2
+                                               :done "did it" :evidence "tests"
+                                               :next "nothing" :blocked nil
+                                               :requests nil :goal :active)
+                                 :message (list :role :user
+                                                :content (list
+                                                          (list :type :text
+                                                                :text "[lane 2] did it")))))
+             (evo.kernel:emit-event agent :type :compaction-start)
+             (append-entry journal (list :type :compaction :summary "sum"
+                                         :summary-tokens 3 :retained-tail #()))
+             (evo.kernel:emit-event agent :type :compaction-end)
+             (evo.kernel:emit-event agent :type :run-end :outcome :stop)
              ;; --- the two readings ------------------------------------------
              (let ((ops (coerce log 'list))
                    (live (view-durable-items (pget (evo.view:view-snapshot view) :items)))
@@ -8768,7 +8795,23 @@ started from gives the projection of the journal it ended with."
                                (or (not (equal (pget op :op) "item.append"))
                                    (member (pget op :field) '("text" "thinking")
                                            :test #'equal)))
-                             ops))))
+                             ops))
+               (check "the queued item became the journaled message, once"
+                      (let ((same (remove-if-not (lambda (i) (equal "e-queued" (pget i :id)))
+                                                 (coerce live 'list))))
+                        (and (= 1 (length same))
+                             (equal "sent" (pget (first same) :status)))))
+               (check "the steering event named the queued item, which is sent"
+                      (equal "sent"
+                             (pget (evo.view:view-item view "e-queued") :status)))
+               (check "the tool result came from the entry, not the event"
+                      (equal "a b"
+                             (getf (pget (evo.view:view-item view "t_cc") :result)
+                                   :text)))
+               (check "the atomic rules the session thread guarantees are not
+in the item stream"
+                      (null (find "topic.reset" ops :key (lambda (op) (pget op :op))
+                                                    :test #'equal)))))
         ;; A rebuild says so, and agrees with a fresh projection.
         (evo.view:view-reset view :leaf-moved)
         (check "a reset publishes topic.reset"
@@ -8780,64 +8823,81 @@ started from gives the projection of the journal it ended with."
                        (view-durable-items
                         (evo.view:project-journal journal))))))))
 
+(defun test-view-retry ()
+  "A retried attempt streams its text from the top: what the dead attempt had
+already said is dropped, or the retry reads as the same words twice."
+  (let* ((journal (view-fixture-journal "evo-view-retry"))
+         (agent (make-agent :journal journal))
+         (log (make-array 8 :adjustable t :fill-pointer 0))
+         (view (view-wire-to-agent (evo.view:make-view agent) agent))
+         (id (gen-id)))
+    (evo.view:view-attach view (lambda (op) (vector-push-extend op log)))
+    (evo.kernel:emit-event agent :type :message-start :entry-id id)
+    (evo.kernel:emit-event agent :type :text-delta :text "half an ans")
+    (check "the first attempt's text is on the item"
+           (equal "half an ans" (pget (evo.view:view-item view id) :text)))
+    (evo.kernel:emit-event agent :type :provider-retry :attempt 1 :max 3
+                                   :delay 1 :reason "connection reset")
+    (check "a retry drops the dead attempt's partial text"
+           (equal "" (pget (evo.view:view-item view id) :text)))
+    (evo.kernel:emit-event agent :type :message-start :entry-id id)
+    (evo.kernel:emit-event agent :type :text-delta :text "the whole answer")
+    (check "and the retry is not a second item"
+           (and (equal "the whole answer" (pget (evo.view:view-item view id) :text))
+                (= 1 (length (remove-if-not (lambda (i) (equal id (pget i :id)))
+                                            (coerce (pget (evo.view:view-snapshot view)
+                                                          :items)
+                                                    'list))))))
+    (check "the retry is an item of its own, ephemeral"
+           (let ((retry (evo.view:view-item view "retry")))
+             (and retry (equal "provider_retry" (pget retry :kind))
+                  (equal 1000 (pget retry :delay-ms)))))))
+
 (defun test-view-queue ()
-  "Queued input is shown, cancellable, and settles into its own message."
+  "Queued input is shown, cancellable, and settles into its own message.  The
+ids are the kernel's: it mints one when the input is queued and the drained
+entry keeps it (CONTRACT §3)."
   (let* ((journal (view-fixture-journal "evo-view-queue"))
          (agent (make-agent :journal journal))
          (log (make-array 8 :adjustable t :fill-pointer 0))
-         (view (let ((v (evo.view:make-view agent)))
-                 (evo.view:view-attach v (lambda (op) (vector-push-extend op log)))
-                 v)))
-    (evo.view:view-input-queued view :id "q1" :text "queued text" :queue :after-run)
-    (check "queued input is an item with status queued and its queue mode"
-           (let ((item (evo.view:view-item view "q1")))
-             (and (equal "queued" (pget item :status))
-                  (equal "after_run" (pget item :queue))
-                  (equal "queued text" (pget item :text)))))
-    (check "the state lists it in queue"
-           (equalp #("q1") (pget (pget (evo.view:view-snapshot view) :state) :queue)))
-    (check "and the status patch went out"
-           (some (lambda (op) (and (equal (pget op :op) "state.patch")
-                                   (pget (pget op :patch) :queue)))
-                 (coerce log 'list)))
-    (evo.view:view-input-cancelled view "q1")
-    (check "cancelling takes it out of the transcript"
-           (null (evo.view:view-item view "q1")))
-    (check "and out of the queue"
-           (equalp #() (pget (pget (evo.view:view-snapshot view) :state) :queue)))
-    ;; Input queued and then sent: the kernel mints the entry id at queue time,
-    ;; so the journal append carries the very id the item already has.
-    (evo.view:view-input-queued view :id "q2" :text "sent text")
-    (evo.view:view-on-append view (list :type :message :id "q2"
-                                        :timestamp "2026-09-30T00:00:00Z"
-                                        :message (list :role :user
-                                                       :content (list
-                                                                 (list :type :text
-                                                                       :text "sent text")))))
-    (check "the queued item becomes the journaled message, once"
-           (let* ((items (pget (evo.view:view-snapshot view) :items))
-                  (same (remove-if-not (lambda (i) (equal "q2" (pget i :id)))
-                                (coerce items 'list))))
-             (and (= 1 (length same))
-                  (equal "sent" (pget (first same) :status)))))
-    (check "and the queue is empty again"
-           (equalp #() (pget (pget (evo.view:view-snapshot view) :state) :queue)))
-    ;; A kernel that does not mint the entry id at queue time: the drained
-    ;; message must adopt the row the user is already looking at, in place,
-    ;; rather than leaving a ghost behind and duplicating the message.
-    (evo.view:view-input-queued view :id "q3" :text "no id yet")
-    (evo.view:view-on-append view (list :type :message :id "minted-later"
-                                        :timestamp "2026-09-30T00:00:01Z"
-                                        :message (list :role :user
-                                                       :content (list
-                                                                 (list :type :text
-                                                                       :text "no id yet")))))
-    (let ((texts (map 'list (lambda (i) (pget i :text))
-                      (pget (evo.view:view-snapshot view) :items))))
-      (check "the queued row is replaced, not duplicated"
-             (equal 1 (count "no id yet" texts :test #'equal)))
-      (check "and the message carries the entry id"
-             (null (evo.view:view-item view "q3"))))))
+         (view (view-wire-to-agent (evo.view:make-view agent) agent)))
+    (evo.view:view-attach view (lambda (op) (vector-push-extend op log)))
+    (let ((id (queue-steering agent "queued text" :from-user t)))
+      (evo.view:view-input-queued view :id id :text "queued text" :queue :after-run)
+      (check "queued input is an item with status queued and its queue mode"
+             (let ((item (evo.view:view-item view id)))
+               (and (equal "queued" (pget item :status))
+                    (equal "after_run" (pget item :queue))
+                    (equal "queued text" (pget item :text)))))
+      (check "the state lists it in queue"
+             (equalp (vector id) (pget (pget (evo.view:view-snapshot view) :state)
+                                       :queue)))
+      (check "and the status patch went out"
+             (some (lambda (op) (and (equal (pget op :op) "state.patch")
+                                     (pget (pget op :patch) :queue)))
+                   (coerce log 'list)))
+      ;; Cancelling is the kernel's CANCEL-QUEUED plus the view's item remove.
+      (check "the kernel still had it" (cancel-queued agent id))
+      (evo.view:view-input-cancelled view id)
+      (check "cancelling takes it out of the transcript"
+             (null (evo.view:view-item view id)))
+      (check "and out of the queue"
+             (equalp #() (pget (pget (evo.view:view-snapshot view) :state) :queue)))
+      ;; The same input, sent: the drained entry keeps the id the item has.
+      (let ((id2 (queue-steering agent "sent text" :from-user t)))
+        (evo.view:view-input-queued view :id id2 :text "sent text")
+        (evo.kernel::drain-steering agent)
+        (check "the queued item becomes the journaled message, once"
+               (let ((same (remove-if-not (lambda (i) (equal id2 (pget i :id)))
+                                          (coerce (pget (evo.view:view-snapshot view)
+                                                        :items)
+                                                  'list))))
+                 (and (= 1 (length same))
+                      (equal "sent" (pget (first same) :status)))))
+        (check "and the queue is empty again"
+               (equalp #() (pget (pget (evo.view:view-snapshot view) :state) :queue)))
+        (check "the journal entry is the one the queue minted"
+               (equal id2 (pget (car (last (entry-path journal))) :id)))))))
 
 (defun test-view-hold ()
   "waiting is what a held, idle agent is — not idle, not running."
@@ -8956,6 +9016,7 @@ started from gives the projection of the journal it ended with."
     (test-view-truncation)
     (test-view-paging)
     (test-view-incremental)
+    (test-view-retry)
     (test-view-queue)
     (test-view-hold)
     (test-view-segments)
