@@ -116,8 +116,9 @@ INSTALL-TUI-OBSERVATION, so a coordinator with no screen still has them."
 (defun install-tui-observation ()
   "What the TUI has that a headless coordinator does not: a segment on the
 status line.  Commands are not the TUI's (REGISTER-SWARM-COMMANDS) — a
-segment is a screen."
-  (evo.tui:add-status-segment :swarm-lanes #'lanes-segment :side :right :order 300)
+segment is a screen.  The registry is the core's, because a GUI renders the
+same segments (CONTRACT §4.2)."
+  (evo:define-status-segment :swarm-lanes #'lanes-segment :side :right :order 300)
   ;; The scrollback follows a lane through the mirror's change hook: the same
   ;; items a client of the headless swarm reads.
   (setf *mirror-change-hook* 'watch-lane-items))

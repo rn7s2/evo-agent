@@ -86,6 +86,11 @@ and the TUI.  MIRROR is the lane's when that is how we heard — a lane's own
 state.patch is what turns `working` into `idle`."
   (when mirror (mirror-note-lane-state mirror))
   (publish-swarm-state)
+  ;; A lane transition may start or end the coordinator's hold, and the hold
+  ;; can change while the coordinator is already settled: tell whoever renders
+  ;; its status, or it would show `idle` while its lanes still work (§4.2).
+  (let ((agent (and *swarm* (swarm-agent *swarm*))))
+    (when agent (note-hold-changed agent)))
   (swarm-repaint))
 
 ;;; The topic provider for `swarm` itself: state, no items.
@@ -111,10 +116,13 @@ state.patch is what turns `working` into `idle`."
 
 (defun register-swarm-topics (server swarm)
   "Register the swarm topic and one topic per lane on SERVER (§7), so the
-coordinator's own op log is where every client reads the swarm from."
-  (evo.serve:register-topic server "swarm" (make-instance 'swarm-topic))
-  (dolist (lane (swarm-lanes swarm))
-    (evo.serve:register-topic server (lane-topic lane) (lane-mirror lane))))
+coordinator's own op log is where every client reads the swarm from.  A
+coordinator with no op log (the TUI) has no topics to publish: it is a
+no-op."
+  (when server
+    (evo.serve:register-topic server "swarm" (make-instance 'swarm-topic))
+    (dolist (lane (swarm-lanes swarm))
+      (evo.serve:register-topic server (lane-topic lane) (lane-mirror lane)))))
 
 ;;; The hold: why the coordinator is `waiting` while its lanes work.
 

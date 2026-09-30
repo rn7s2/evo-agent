@@ -72,10 +72,12 @@ received, oldest first.  Nothing here needs a server."
          (saved (symbol-function 'evo.swarm::publish-op)))
      (unwind-protect
           (progn
+            ;; Appended, not pushed: the body reads OPS in the order a client
+            ;; would have received them, not backwards.
             (setf (symbol-function 'evo.swarm::publish-op)
-                  (lambda (op) (push op ,ops) t))
+                  (lambda (op) (setf ,ops (append ,ops (list op))) t))
             ,@body
-            (nreverse ,ops))
+            ,ops)
        (setf (symbol-function 'evo.swarm::publish-op) saved))))
 
 (defmacro with-lane-snapshot ((state &key (items '()) (has-more nil)) &body body)
@@ -612,12 +614,14 @@ another swarm gets that swarm's lanes back; any other keeps the running one."
              (with-published (ops)
                (evo.swarm::adopt-session-swarm agent)
                (check "switch: every topic is reset for the clients (§7.3)"
-                      (and (equal '("swarm" "lane:1" "lane:2")
-                                  (mapcar (lambda (op) (getf op :topic)) ops))
-                           (every (lambda (op)
-                                    (and (equal "topic.reset" (getf op :op))
-                                         (equal "swarm_switched" (getf op :reason))))
-                                  ops))))
+                      (let ((resets (remove-if-not (lambda (op)
+                                                     (equal "topic.reset" (getf op :op)))
+                                                   ops)))
+                        (and (equal '("swarm" "lane:1" "lane:2")
+                                    (mapcar (lambda (op) (getf op :topic)) resets))
+                             (every (lambda (op)
+                                      (equal "swarm_switched" (getf op :reason)))
+                                    resets)))))
              (check "switch: the running lanes stop"
                     (equal (list current) stopped))
              (check "switch: the recorded swarm replaces them"
