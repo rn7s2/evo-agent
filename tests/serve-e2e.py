@@ -670,6 +670,20 @@ def run_all(server, stub_port, work):
     status, reply, _ = server.op("run.interrupt", {"scope": "session"})
     check("interrupting an idle session reports nothing interrupted",
           reply["ok"] and reply["result"]["interrupted"] == [], reply)
+    # A lane is a topic on the server that has it: one that does not exist is
+    # NOT_FOUND, the caller naming something absent — not a failed op.
+    status, reply, _ = server.op("run.interrupt", {"scope": "lane", "lane": 9})
+    check("interrupting a lane that does not exist -> not_found",
+          reply["ok"] is False and reply["error"]["code"] == "not_found", reply)
+    status, reply, _ = server.op("run.interrupt", {"scope": "lane", "lane": 1})
+    check("interrupting lane 1 on a server with no lanes -> not_found",
+          reply["ok"] is False and reply["error"]["code"] == "not_found", reply)
+    status, reply, _ = server.op("run.interrupt", {"scope": "lane"})
+    check("scope lane without a lane number -> invalid_args",
+          reply["ok"] is False and reply["error"]["code"] == "invalid_args", reply)
+    status, reply, _ = server.op("run.interrupt", {"scope": "swarm"})
+    check("scope swarm on a plain server -> invalid_args (unchanged)",
+          reply["ok"] is False and reply["error"]["code"] == "invalid_args", reply)
 
     # --- after_run with nothing running is simply now -------------------------------
     status, reply, _ = server.op("input.send", {"text": "after_run and idle",
@@ -944,6 +958,12 @@ def swarm_catalog_check(work, stub_port):
                   for m in lanes["models"]), lanes)
         check("evo-swarm: every documented boolean is a boolean there too",
               not non_bools(catalog=catalog), non_bools(catalog=catalog))
+        # The swarm defines its own :lane method (which raises a plain error
+        # while looking a lane up); serve's :before method is what makes this
+        # not_found rather than op_failed.
+        status, reply, _ = swarm.op("run.interrupt", {"scope": "lane", "lane": 9})
+        check("evo-swarm: a lane that does not exist -> not_found, not op_failed",
+              reply["ok"] is False and reply["error"]["code"] == "not_found", reply)
         status, reply, _ = swarm.op("server.shutdown", {})
         check("evo-swarm: server.shutdown is answered", reply["ok"], reply)
         check("evo-swarm: the swarm exits 0 and takes its lane with it",
