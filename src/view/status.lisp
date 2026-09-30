@@ -132,7 +132,16 @@ publishes the same list as state.segments."
 ;;; view model from its state).
 
 (defun fmt-ktokens (n)
-  (format nil "~dk" (round (or n 0) 1000)))
+  "N tokens, compact for a status cell: thousands while that fits — \"34k\",
+\"999k\" — then whole millions, so a 1M context window reads \"1M\" and not
+\"1000k\", the way the model menus and the design spell it.
+
+Rounding is CL's, half to even, applied at each step: 999_499 is 999k,
+999_500 is 1M, and 1_500_000 — 1.5M — rounds up to 2M."
+  (let ((thousands (round (or n 0) 1000)))
+    (if (>= thousands 1000)
+        (format nil "~dM" (round thousands 1000))
+        (format nil "~dk" thousands))))
 
 (defun short-duration (seconds)
   "Compact elapsed clock for the status line: 45s, 3m, 1h2m."
