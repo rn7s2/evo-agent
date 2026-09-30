@@ -1025,6 +1025,47 @@ one out of the supervisor.)"
     (check "sample swarm.lisp: sets the lane count"
            (eql 4 (setting :swarm-workers)))))
 
+(defun test-swarm-check ()
+  "`evo-swarm check --json` (CONTRACT §2): whether a launch would work, and
+why not — the answer a GUI's chooser needs before it spawns anything."
+  (let ((saved-models evo.provider::*models*)
+        (saved-providers (copy-alist evo.provider::*providers*))
+        (journal (make-session-journal))
+        (agent nil))
+    (unwind-protect
+         (progn
+           (register-provider* :fixture
+                               :base-url "http://127.0.0.1:1/v1"
+                               :api-key-env "EVO_TEST_FIXTURE_KEY")
+           (register-model* "fixture-model" :provider :fixture :api :anthropic-messages
+                            :context-window 200000 :max-output 8000)
+           (setf agent (make-agent :journal journal))
+           (evo.port:setenv "EVO_TEST_FIXTURE_KEY" "")
+           (let ((check (evo.swarm::check-model-entry "fixture-model" agent nil)))
+             (check "check: a model with no key is not ok, and says which variable"
+                    (and (not (getf check :ok))
+                         (search "EVO_TEST_FIXTURE_KEY" (getf check :reason)))))
+           (let ((check (evo.swarm::check-model-entry "no-such-model" agent nil)))
+             (check "check: an unknown model name is reported, not signalled"
+                    (and (equal "no-such-model" (getf check :id))
+                         (not (getf check :ok)))))
+           (evo.port:setenv "EVO_TEST_FIXTURE_KEY" "sk-1")
+           (let ((check (evo.swarm::check-model-entry "fixture-model" agent nil)))
+             (check "check: with a key present the model is ok"
+                    (and (getf check :ok) (null (getf check :reason)))))
+           (check "check: --model ID@PROVIDER resolves that registration"
+                  (getf (evo.swarm::check-model-entry "fixture-model@fixture" agent nil) :ok))
+           (check "check: an unresolvable ID@PROVIDER is a problem, not a crash"
+                  (not (getf (evo.swarm::check-model-entry
+                              "fixture-model@nope" agent nil) :ok)))
+           (let ((problems nil))
+             (evo.swarm::check-workers '(:workers 999) problems)
+             (check "check: --workers out of range is a problem"
+                    (equal "invalid_workers" (getf (first problems) :code)))))
+      (setf evo.provider::*models* saved-models
+            evo.provider::*providers* saved-providers)
+      (evo.port:setenv "EVO_TEST_FIXTURE_KEY" ""))))
+
 (defun run-all ()
   (let ((*pass* 0) (*fail* 0))
     (test-baseline)
@@ -1052,6 +1093,8 @@ one out of the supervisor.)"
     (test-serve-exit-codes)
     (test-sse-reader)
     (test-pid-alive)
+    (test-catalog)
+    (test-swarm-check)
     (test-sample-config)
     (format t "~%swarm: ~d passed, ~d failed~%" *pass* *fail*)
     (if (zerop *fail*) 0 1)))
