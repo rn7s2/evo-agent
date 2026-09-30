@@ -52,6 +52,7 @@ LANES = 2
 # DELAY2 makes the lane wait before it "thinks", then SLOW streams 60 deltas a
 # tenth of a second apart: an ~8 s working window to observe and to watch live.
 TASK = "DELAY2 SLOW e2e lane work"
+RECORD = "the report is the item"
 
 passed = 0
 failed = 0
@@ -606,6 +607,23 @@ def run_checks(swarm, stub, home, work, proj):
           and 2 in (note.get("lanes") or []), note)
     check("...which was queued as after-run input, not steered into a run",
           note is not None and note.get("queue") == "after_run", note)
+
+    # --- a lane's report is an item, and not a notice too -------------------
+    status, reply = client.op(
+        "input.send",
+        {"text": "CALL delegate " + json.dumps(
+            {"lane": 1, "task": "CALL report " + json.dumps({"done": RECORD,
+                                                             "next": "nothing"})})})
+    check("a task whose lane reports is delegated", reply.get("ok"), reply)
+    item = wait_for(lambda: collector.view.find("lane_report", topic="session"), 60)
+    check("...and the report reaches the coordinator as a lane_report item",
+          item is not None and item.get("done") == RECORD, item)
+    check("...once, as the item: not also as a notice saying the same thing",
+          not any(RECORD in str(i.get("text") or "")
+                  for i in collector.view.topics["session"].items
+                  if i.get("kind") == "notice"),
+          [i for i in collector.view.topics["session"].items
+           if i.get("kind") == "notice"][-3:])
 
     collector.stop.set()
 
