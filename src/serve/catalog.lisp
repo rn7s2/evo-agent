@@ -230,11 +230,15 @@ part (the models a lane can run) — evo-swarm passes it."
                                                      (lambda (k) (string-downcase (symbol-name k)))
                                                      #'catalog-provider warnings "provider")
                          :default-model (and default-id (list :id default-id :provider default-provider))
-                         ;; The levels the session accepts: "off" plus the effort
-                         ;; ladder, in the order /thinking takes them.
-                         :thinking-levels (coerce (cons "off"
-                                                        (mapcar #'string-downcase
-                                                                (mapcar #'symbol-name +effort-levels+)))
+                         ;; Exactly the levels the session accepts, in the
+                         ;; order /thinking takes them: the ladder has no off
+                         ;; rung — the CLI, /thinking and evo-swarm all refuse
+                         ;; one, and a retired :off found in an old journal or
+                         ;; init.lisp is normalized onto the lowest rung, not
+                         ;; listed here as if it were a choice.
+                         :thinking-levels (coerce (mapcar (lambda (level)
+                                                            (string-downcase (symbol-name level)))
+                                                          +effort-levels+)
                                                   'vector)
                          :languages (coerce (loop for pack in (all-prompt-languages)
                                                   collect (list :code (pget pack :code)
