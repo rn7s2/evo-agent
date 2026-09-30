@@ -120,6 +120,15 @@ can rely on is worth more than the last few words."
     ("tool" (truncate-result item))
     (t item)))
 
+(defun wire-boolean (value)
+  "VALUE as the boolean this wire carries: T, or :FALSE for anything else.
+
+A field the contract calls a bool has to be one — NIL is how the encoder says
+null, and a client parsing a boolean cannot read null.  Only the documents
+convert: a Lisp-side verdict (MODEL-STATUS, a fold's :manual) stays T/NIL, so
+no Lisp has to know about a symbol that is true to IF."
+  (if value t :false))
+
 (defun result-wire (text)
   (list :text (or text "")
         :chars (length (or text ""))
@@ -351,7 +360,7 @@ CTX carries what the walk has to remember between entries."
              :summary (or (pget entry :summary) "")
              :tokens-before (pget entry :tokens-before)
              :tokens-after (pget entry :tokens-after)
-             :manual (and (pget entry :manual) t)))
+             :manual (wire-boolean (pget entry :manual))))
       (:goal
        (let ((item (goal-entry-item entry (pctx-goal ctx))))
          (setf (pctx-goal ctx) entry)
@@ -374,7 +383,7 @@ CTX carries what the walk has to remember between entries."
 (defun model-state (model-id model)
   (list :id model-id
         :provider (and model (pget model :provider))
-        :ready (and model t)
+        :ready (wire-boolean model)
         :reason (unless model
                   (if model-id
                       (format nil "model ~a is not registered" model-id)

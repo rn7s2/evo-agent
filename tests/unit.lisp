@@ -8777,7 +8777,9 @@ document, per-entry isolation, and never a key."
         (check "compaction item: the summary and that it is not manual"
                (let ((i (item "compaction")))
                  (and i (equal "sum" (pget i :summary))
-                      (null (pget i :manual)))))
+                      ;; The document's boolean, which is what the wire
+                      ;; carries: NIL would encode as null.
+                      (eq :false (pget i :manual)))))
         (check "lane_report item: the origin's fields, not the prose"
                (let ((i (item "lane_report")))
                  (and (equal 3 (pget i :lane))
@@ -8887,7 +8889,7 @@ outcome, a transport retry, an input not yet sent, a notice that is not
 durable), and a re-projection is not expected to have them."
   (let ((kind (pget item :kind)))
     (or (member kind '("run_outcome" "provider_retry") :test #'equal)
-        (and (equal kind "notice") (null (pget item :durable)))
+        (and (equal kind "notice") (eq :false (pget item :durable)))
         (and (equal kind "user") (equal (pget item :status) "queued")))))
 
 (defun view-durable-items (items)
@@ -9398,7 +9400,7 @@ document, per-entry isolation, and never a key."
                            (eq t (getf model :reasoning))
                            (eq t (getf model :images))))
                (check "catalog: a model whose key is missing is not ready, and says why"
-                      (and (not (getf model :ready))
+                      (and (eq :false (getf model :ready))
                            (search "EVO_TEST_FIXTURE_KEY" (getf model :reason))))
                (check "catalog: a model's reason may name the variable, never the key"
                       ;; The name of the variable is what a client needs — it
@@ -9416,7 +9418,7 @@ document, per-entry isolation, and never a key."
                       (let* ((model (find "fixture-model" (getf catalog :models)
                                           :key (lambda (m) (getf m :id)) :test #'equal))
                              (json (evo.serve:encode-json catalog)))
-                        (and (getf model :ready)
+                        (and (eq t (getf model :ready))
                              (not (search "sk-fixture-secret-1" json)))))
                (evo.port:setenv "EVO_TEST_FIXTURE_KEY" ""))
              (let ((provider (find "fixture" (getf catalog :providers)
@@ -9424,7 +9426,7 @@ document, per-entry isolation, and never a key."
                (check "catalog: a provider says whether it has a key, never the key"
                       (and provider
                            (equal "EVO_TEST_FIXTURE_KEY" (getf provider :key-env))
-                           (null (getf provider :has-key))
+                           (eq :false (getf provider :has-key))
                            (eq :anthropic-messages (getf provider :api)))))
              (check "catalog: the thinking ladder is the one the session accepts"
                     (equalp #("off" "low" "medium" "high" "xhigh" "max")
@@ -9456,7 +9458,7 @@ document, per-entry isolation, and never a key."
              (check "catalog: a swarm's catalog lists the lanes' models"
                     (and lanes (vectorp (getf lanes :models))))
              (check "catalog: a model the kernel API set has is offered to lanes"
-                    (and model (null (getf model :ok))
+                    (and model (eq :false (getf model :ok))
                          (search "EVO_TEST_FIXTURE_KEY" (getf model :reason)))))
            ;; A model whose API an extension defined is not one a lane can run
            ;; until that extension is loaded into it.
@@ -9468,7 +9470,7 @@ document, per-entry isolation, and never a key."
                   (model (find "extension-model" (getf (getf catalog :lanes) :models)
                                :key (lambda (m) (getf m :id)) :test #'equal)))
              (check "catalog: a model from an extension's API is not a lane's by default"
-                    (and model (null (getf model :ok))
+                    (and model (eq :false (getf model :ok))
                          (search "in-lanes" (getf model :reason))))))
       (setf evo.provider::*models* saved-models
             evo.provider::*providers* saved-providers)

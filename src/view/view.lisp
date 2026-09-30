@@ -465,7 +465,9 @@ with; the entry still arrives when it is appended."
                                         (t :info))))
                        :text (or (pget event :text) "")
                        :source (enum-string (or (pget event :source) :extension))
-                       :durable nil))))
+                       ;; Ephemeral by construction: the journaled notice is
+                       ;; the durable one, and the field is still a bool.
+                       :durable :false))))
 
 (defun handle-provider-retry (view event)
   ;; The dead attempt's partial text is about to be streamed again from the
