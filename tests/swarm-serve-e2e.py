@@ -20,6 +20,9 @@ Covers:
     task, restarts, last item — and busy/waiting_on_lanes while a lane works;
   * the lane:N topics: the lane's own items and state, mirrored and republished
     under the coordinator's cursor;
+  * a lane topic a client snapshotted *before* that lane existed is announced
+    with topic.reset lane:N when the lane comes up, so a client that held it
+    empty is not left holding `{}` for the lane's whole life;
   * a delegated task streams on lane:N through that one subscription;
   * a lane killed with SIGKILL comes back: a lane_event item (crashed, then
     restarted), topic.reset lane:N, and the exact session it was on;
@@ -264,10 +267,14 @@ class Client:
 class Collector(threading.Thread):
     """Follow one subscription in the background, applying its ops to a VIEW."""
 
-    def __init__(self, client, topics="session,swarm,lane:*", timeout=120):
+    def __init__(self, client, topics="session,swarm,lane:*", timeout=120, since=None):
         super().__init__(daemon=True)
         self.client = client
         self.path = f"/stream?topics={topics}"
+        if since:
+            # From a snapshot's cursor, the way a client that took a snapshot
+            # follows it: only what happened since.
+            self.path += f"&since={since}"
         self.timeout = timeout
         self.view = View(topics.split(","))
         self.hello = None
@@ -407,9 +414,72 @@ def lane_state(client, n):
     return client.topic_state(f"lane:{n}")
 
 
+def hold_lanes_from_the_start(swarm):
+    """The client evo-gui is: snapshot `lane:*` the moment the swarm is up, then
+    stream from that cursor.
+
+    A lane's topic is registered — empty — when the swarm starts; the lane's
+    process does not exist until later, and a resumed swarm's lanes are new
+    processes too.  So everything a lane turns out to be (its status, model,
+    context, its items) has to reach a client that is *already holding* that
+    topic: the protocol's way is `topic.reset` `lane:N`, on which the client
+    re-snapshots that one topic (docs/serve.md §5.3).  A client that is never
+    told keeps `{}` for the lane's whole life — no model, context or cache
+    chips, and "Lane N hasn't been given work yet" over work the lane's own
+    session is holding.
+    """
+    names = [f"lane:{n}" for n in range(1, LANES + 1)]
+    snapshot = swarm.client.snapshot(topics=",".join(names), items=1) or {}
+    held = Collector(swarm.client, ",".join(names), timeout=180,
+                     since=f"{snapshot.get('epoch')}.{snapshot.get('seq')}")
+    # The client's own view starts as the snapshot left it.
+    for name, topic in (snapshot.get("topics") or {}).items():
+        mine = held.view.topics.setdefault(name, Topic(name))
+        mine.state.update(topic.get("state") or {})
+        for item in topic.get("items") or []:
+            mine.add(item, None)
+    held.names = names
+    held.snapshot = snapshot
+    held.start()
+    return held
+
+
+def check_held_lanes_are_announced(swarm, held):
+    """Every lane a client is already holding empty has to be announced."""
+    late = [name for name in held.names
+            if ((held.snapshot.get("topics") or {}).get(name) or {}).get("state")]
+    for name in late:
+        print(f"note {name} was already up when the client snapshotted it", flush=True)
+    watched = [name for name in held.names if name not in late]
+    if not watched:
+        check("a lane topic is still empty when the client snapshots lane:*",
+              False, f"every lane was up already: {held.names}")
+        return
+    documented = {"session_switched", "leaf_moved", "lane_restarted", "swarm_switched"}
+    announced = wait_for(lambda: all(any(topic == name for topic, _ in held.view.resets)
+                                     for name in watched), 60)
+    reasons = {name: sorted({reason for topic, reason in held.view.resets if topic == name})
+               for name in watched}
+    check("a client holding a lane topic empty is told the lane came up",
+          announced is not None, reasons)
+    if announced is None:
+        return
+    check("...with a reason docs/serve.md gives a topic.reset",
+          all(reasons[name] and set(reasons[name]) <= documented for name in watched), reasons)
+    for name in watched:
+        # What a client does on topic.reset: re-snapshot that topic, and hold
+        # the lane it was never told about before.
+        fresh = (swarm.client.snapshot(topics=name, items=1) or {}).get("topics") or {}
+        mine = held.view.topics[name]
+        mine.state.update((fresh.get(name) or {}).get("state") or {})
+        check(f"{name} is whole in the client that re-snapshotted it",
+              bool(mine.state.get("status")) and bool((mine.state.get("session") or {}).get("id")),
+              mine.state)
+
+
 # --------------------------------------------------------------------------
 
-def run_checks(swarm, stub, home, work, proj):
+def run_checks(swarm, stub, home, work, proj, held):
     client = swarm.client
 
     # --- the ready file and /health ----------------------------------------
@@ -471,6 +541,9 @@ def run_checks(swarm, stub, home, work, proj):
     one = lane_state(client, 1)
     check("lane 1's own topic carries its items and its state",
           one.get("status") == "idle" and one.get("session", {}).get("id"), one)
+
+    # --- a lane the client was already holding ------------------------------
+    check_held_lanes_are_announced(swarm, held)
 
     # --- one subscription carries every lane --------------------------------
     collector = Collector(client)
@@ -686,7 +759,10 @@ def main():
             failed_early = True
         else:
             failed_early = False
-            run_checks(swarm, stub, home, work, proj)
+            # Snapshot lane:* *now*, before any lane's process exists: this is
+            # the cursor evo-gui holds when it opens a resumed swarm's tab.
+            held = hold_lanes_from_the_start(swarm)
+            run_checks(swarm, stub, home, work, proj, held)
 
         # --- shutdown ---------------------------------------------------------
         dirs = lane_dirs(home)
