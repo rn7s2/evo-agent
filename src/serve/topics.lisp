@@ -128,6 +128,14 @@ name replaces it (a swarm re-registers a lane after its restart)."
                (string= pattern name :start1 (1+ star) :end1 (length pattern)
                                     :start2 offset :end2 (length name)))))))
 
+(defun lane-topic-p (name)
+  "Is NAME a lane's topic (\"lane:3\")?  A lane topic is the coordinator's to
+write — it mirrors the lane and directs it (CONTRACT §5.5, §6) — so it is
+never a topic a client sends input to, whoever is asking."
+  (and (stringp name)
+       (let ((mark (search "lane:" name)))
+         (and mark (zerop mark) (> (length name) (length "lane:"))))))
+
 (defun expand-topic-names (server spec)
   "SPEC — \"session,swarm,lane:*\", or a list of the same — as the concrete
 registered topic names in SERVER, in request order and without duplicates.  A

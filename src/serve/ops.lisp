@@ -227,9 +227,14 @@ one in flight (CONTRACT §5.5)."
          ;; BLOCKED reports — and "after_run" with nothing running is simply
          ;; now, because a follow-up queue nobody drains is a dropped prompt.
          (later (and (equal queue "after_run") (server-task server) t)))
-    (when (getf args :topic)
-      (unless (equal (getf args :topic) "session")
-        (op-fail "not_found" "no such topic on this server")))
+    (let ((topic (getf args :topic)))
+      (when topic
+        (cond ((equal topic "session") nil)
+              ;; A lane topic is not a missing topic: it is one this op never
+              ;; writes to, whoever is asking (CONTRACT §6).
+              ((lane-topic-p topic)
+               (op-fail "invalid_args" "only the coordinator directs lanes"))
+              (t (op-fail "not_found" "no such topic on this server")))))
     (unless (or (plusp (length text)) images)
       (op-fail "invalid_args" "nothing to send"))
     (let* ((agent (server-agent server))
