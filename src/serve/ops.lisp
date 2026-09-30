@@ -305,6 +305,21 @@ extends this with the scopes it owns.")
                (funcall hook server scope lane)
                (op-fail "invalid_args" "this server has no such interrupt scope")))))))
 
+(defmethod interrupt-scope :before ((server server) (scope (eql :lane)) lane)
+  "Which lanes exist is a question serve can answer on its own — they are its
+topics, since the coordinator mirrors each lane as \"lane:N\" — so the answer
+for one this server does not have belongs here: NOT_FOUND, the caller named
+something absent (CONTRACT §5.5), not the failed op that a program's own
+method would raise while looking it up.
+
+Running before every primary method (the swarm defines its own for :lane) is
+what makes the code serve's to own: a program's :lane method only ever sees a
+lane it has."
+  (unless (and lane (integerp lane))
+    (op-fail "invalid_args" "scope lane takes a lane number"))
+  (unless (topic-provider server (format nil "lane:~d" lane))
+    (op-fail "not_found" "no such lane on this server")))
+
 (defun op-run-interrupt (server args)
   (let* ((scope (intern (string-upcase (op-arg-enum args :scope '("session" "swarm" "lane")
                                                        :default "session"))
