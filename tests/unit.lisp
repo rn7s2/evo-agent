@@ -8064,67 +8064,102 @@ became zero after the first reload."
     (evo.serve::http-error (e) (evo.serve::http-error-status e))))
 
 (defun test-serve-json ()
-  "The encoder is the wire: snake_case keys and values, plists as objects,
-vectors as arrays, and a value it cannot express degrades instead of killing
-the stream."
-  (check "serve json: a plist is an object, a vector an array"
-         (and (search "\"tool_name\"" (evo.serve:encode-json (list :tool-name "edit")))
-              (equal "[1,2]" (evo.serve:encode-json (vector 1 2)))
-              (equal "[\"a\",\"b\"]" (evo.serve:encode-json (list "a" "b")))))
-  (check "serve json: a keyword value is its snake_case name"
-         (equal "{\"kind\":\"lane_report\"}"
-                (evo.serve:encode-json (list :kind :lane-report))))
-  (check "serve json: an object keyed by a topic name needs json-object-value"
-         (and (equal "{\"lane:1\":2}"
-                     (evo.serve:encode-json
-                      (evo.serve:json-object-value '(("lane:1" . 2)))))
-              ;; ... while a list that is not a plist is an array.
-              (equal "[[\"a\",1]]" (evo.serve:encode-json (list (list "a" 1))))))
-  (check "serve json: t is true, nil null, 'false false"
-         (and (equal "{\"ok\":true}" (evo.serve:encode-json (list :ok t)))
-              (equal "{\"a\":null}" (evo.serve:encode-json (list :a nil)))
-              (equal "{\"ok\":false}" (evo.serve:encode-json (list :ok 'evo.serve::false)))))
-  (check "serve json: a ratio is a number"
-         (search "\"delay\":0.5" (evo.serve:encode-json (list :delay 1/2))))
-  ;; An item and a state round-trip through the wire exactly.
-  (let* ((item (list :id "e_1" :kind :tool :ts 1759000000000
-                     :call-id "tc_1" :name "edit" :args (list :path "a.lisp" :count 3)
-                     :status :running :result (list :text "ok" :chars 2 :truncated nil)))
-         (back (evo.serve:decode-json (evo.serve:encode-json item))))
-    (check "serve json: an item round-trips to the same JSON value"
-           (equalp (com.inuoe.jzon:parse (evo.serve:encode-json back))
-                   (com.inuoe.jzon:parse (evo.serve:encode-json item))))
-    (check "serve json: nested plists are objects, nested vectors arrays"
-           (equalp '(:path "a.lisp" :count 3) (getf back :args))))
-  (check "serve json: a value the encoder cannot express degrades, never kills a stream"
-         (search "unprintable" (evo.serve::op-log-encode (list :op "x" :seq 1 :ts 0
-                                                               :bad (cons 1 2))))))
+  "The one mapping between evo's sexprs and JSON — and the fact that it is
+TOTAL (CONTRACT §5.6, F1/G3): a configuration value the mapping has never
+seen is a document to send, not a request to fail."
+  (let ((samples
+          (list '(:type :text-delta :text "hé \"quoted\"" :run-id "r1" :turn 0)
+                '(:type :tool-call-start :name "edit" :id "tc_1"
+                  :arguments (:path "a.lisp" :old-string "x" :count 3)
+                  :arguments-json nil :run-id "r1" :turn 2)
+                '(:type :message-end :stop-reason :tool-use
+                  :usage (:input 10 :output 5 :cache-read 0 :cache-write 0)
+                  :error nil)
+                (list :type :todo-changed
+                      :todos (vector '(:text "a" :status :done) '(:text "b" :status :pending)))
+                '(:type :provider-retry :attempt 1 :max 4 :delay 1/2 :reason "503"))))
+    (dolist (sample samples)
+      (let* ((json (evo.serve:encode-json sample))
+             (back (evo:json->sexpr (com.inuoe.jzon:parse json))))
+        ;; Object key order is not part of a JSON value, and neither SBCL nor
+        ;; ECL promises one for a hash table: compare values, and key sets.
+        (check (format nil "serve json: ~(~a~) re-encodes to the same JSON value"
+                       (getf sample :type))
+               (equalp (com.inuoe.jzon:parse json)
+                       (com.inuoe.jzon:parse (evo.serve:encode-json back))))
+        (check (format nil "serve json: ~(~a~) keys come back as the same keywords"
+                       (getf sample :type))
+               (null (set-exclusive-or (loop for k in sample by #'cddr collect k)
+                                       (loop for k in back by #'cddr collect k))))))
+    (let ((obj (com.inuoe.jzon:parse (evo.serve:encode-json (second samples)))))
+      (check "serve json: keys are snake_case"
+             (and (gethash "run_id" obj) (gethash "arguments_json" obj :missing)))
+      (check "serve json: a nested plist is an object"
+             (equal "x" (gethash "old_string" (gethash "arguments" obj))))
+      (check "serve json: an enum value is snake_case"
+             (equal "tool_call_start" (gethash "type" obj)))
+      (check "serve json: nil is null" (eq 'null (gethash "arguments_json" obj))))
+    (check "serve json: t is true, a ratio a number"
+           (search "\"delay\":0.5" (evo.serve:encode-json (fifth samples))))
+    (check "serve json: 'false is false"
+           (equal "{\"ok\":false}" (evo.serve:encode-json (list :ok 'evo.serve::false)))))
+  ;; R1: one dotted pair in *settings* — an alist entry with a header in it —
+  ;; used to make the encoder signal, and the 500 body then quoted the value.
+  (let* ((settings (list :mcp-servers (list (cons "Authorization" "Bearer sk-secret-1"))))
+         (json (evo.serve:encode-json settings)))
+    (check "serve json: an alist entry (a dotted pair) is an object"
+           (search "{\"Authorization\":\"Bearer sk-secret-1\"}" json)))
+  (check "serve json: a bare dotted pair is an object, not a condition"
+         (equal "{\"a\":1}" (evo.serve:encode-json (cons :a 1))))
+  (check "serve json: an improper list is its printed form, never a condition"
+         (search "a b . c" (evo.serve:encode-json (list* :a :b :c))))
+  (check "serve json: an object outside the vocabulary still encodes"
+         (stringp (evo.serve:encode-json (make-hash-table))))
+  (check "serve json: a self-referential structure terminates"
+         (let ((ring (list :a 1)))
+           (setf (cdr (cdr ring)) ring)
+           (stringp (evo.serve:encode-json ring))))
+  ;; The other half of R1: an unclassified failure answers with a generic
+  ;; message.  A condition's text can quote what it was working on, and that
+  ;; value can be a secret.
+  (let ((out (flexi-streams:make-in-memory-output-stream))
+        (*error-output* (make-broadcast-stream)))
+    (evo.serve::server-error-reply
+     out (make-condition 'simple-error
+                         :format-control "~a"
+                         :format-arguments (list "Bearer sk-secret-2")))
+    (let ((text (response-text out)))
+      (check "serve 500: the client gets a generic message"
+             (search "\"error\":\"internal server error\"" text))
+      (check "serve 500: and never the value that caused it"
+             (not (search "sk-secret-2" text))))))
 
 (defun test-serve-http ()
-  (let ((req (request-from (crlf "POST /command?x=1&name=a%20b+c HTTP/1.1"
+  "The transport: request parsing, response framing, SSE, routing, auth."
+  (let ((req (request-from (crlf "POST /ops?x=1&name=a%20b+c HTTP/1.1"
                                  "Host: localhost"
                                  "Authorization: Bearer tok"
                                  "Content-Length: 17"
                                  ""
-                                 "{\"text\":\"/goal\"}X"))))
+                                 "{\"op\":\"x\"}XXXXX")))) 
     (check "http: method and decoded path"
            (and (equal "POST" (evo.serve:request-method req))
-                (equal "/command" (evo.serve:request-path req))))
+                (equal "/ops" (evo.serve:request-path req))))
     (check "http: query parameters decoded (%20 and +)"
            (equal '(("x" . "1") ("name" . "a b c")) (evo.serve:request-query req)))
     (check "http: headers are case-insensitive"
            (equal "Bearer tok" (evo.serve:request-header req "AUTHORIZATION")))
     (check "http: the body is exactly Content-Length bytes"
-           (equal "{\"text\":\"/goal\"}X" (evo.serve:request-body req))))
-  (let ((req (request-from (format nil "GET /events HTTP/1.1~%Last-Event-ID: 7~%~%"))))
+           (equal "{\"op\":\"x\"}XXXXX" (evo.serve:request-body req))))
+  (let ((req (request-from (format nil "GET /stream HTTP/1.1~%Last-Event-ID: 7~%~%"))))
     (check "http: bare LF line endings are accepted"
-           (and (equal "/events" (evo.serve:request-path req))
+           (and (equal "/stream" (evo.serve:request-path req))
                 (equal "7" (evo.serve:request-header req "last-event-id"))
                 (equal "" (evo.serve:request-body req)))))
   (let ((body "{\"text\":\"héllo ✓\"}"))
     (check "http: a UTF-8 body is decoded by bytes, not chars"
            (equal body (evo.serve:request-body
-                        (request-from (format nil "POST /prompt HTTP/1.1~%Content-Length: ~d~%~%~a"
+                        (request-from (format nil "POST /ops HTTP/1.1~%Content-Length: ~d~%~%~a"
                                               (length (octets-of body)) body))))))
   (check "http: an empty connection is NIL, not an error" (null (request-from "")))
   (check "http: a garbled request line is 400"
@@ -8155,10 +8190,10 @@ the stream."
                                        "")))))))
   ;; Responses.
   (let* ((out (flexi-streams:make-in-memory-output-stream))
-         (_ (evo.serve:write-response out 409 "{\"ok\":false}"))
-         (text (flexi-streams:octets-to-string (flexi-streams:get-output-stream-sequence out)
-                                               :external-format evo.serve::+utf-8+)))
-    (declare (ignore _))
+         (text (progn (evo.serve:write-response out 409 "{\"ok\":false}")
+                      (flexi-streams:octets-to-string
+                       (flexi-streams:get-output-stream-sequence out)
+                       :external-format evo.serve::+utf-8+))))
     (check "http: status line" (string-prefix-p (format nil "HTTP/1.1 409 Conflict~c~%" #\Return) text))
     (check "http: length and close headers"
            (and (search "Content-Length: 12" text) (search "Connection: close" text)))
@@ -8174,28 +8209,28 @@ the stream."
                           (map 'string #'code-char
                                (flexi-streams:get-output-stream-sequence out))))))
     (check "http: ...and still parses a request"
-           (equal "/state" (evo.serve:request-path
-                            (request-from (crlf "GET /state HTTP/1.1" "Host: x" ""))))))
+           (equal "/health" (evo.serve:request-path
+                             (request-from (crlf "GET /health HTTP/1.1" "Host: x" ""))))))
   (let* ((out (flexi-streams:make-in-memory-output-stream)))
-    (evo.serve::write-sse-event out "text-delta" "{\"a\":1}" :id 42)
+    (evo.serve::write-sse-event out "op" "{\"a\":1}" :id 42)
     (check "http: an SSE event is id, event, data, blank line"
-           (equal (format nil "id: 42~%event: text-delta~%data: {\"a\":1}~%~%")
+           (equal (format nil "id: 42~%event: op~%data: {\"a\":1}~%~%")
                   (flexi-streams:octets-to-string (flexi-streams:get-output-stream-sequence out)
                                                   :external-format evo.serve::+utf-8+))))
   ;; Routing and auth.
-  (check "route: GET /state"
-         (eq 'evo.serve::handle-state (evo.serve:route-request "GET" "/state")))
-  (check "route: a trailing slash is the same path"
-         (eq 'evo.serve::handle-prompt (evo.serve:route-request "POST" "/prompt/")))
   (check "route: every documented endpoint routes"
          (every (lambda (route)
                   (evo.serve:route-request (string (evo.serve:route-method route))
                                            (evo.serve:route-path route)))
                 evo.serve::*routes*))
+  (check "route: GET /health"
+         (eq 'evo.serve::handle-health (evo.serve:route-request "GET" "/health")))
+  (check "route: POST /ops"
+         (eq 'evo.serve::handle-ops (evo.serve:route-request "POST" "/ops")))
   (check "route: an unknown path is 404"
          (eql 404 (nth-value 1 (evo.serve:route-request "GET" "/nope"))))
   (check "route: the wrong method is 405"
-         (eql 405 (nth-value 1 (evo.serve:route-request "GET" "/prompt"))))
+         (eql 405 (nth-value 1 (evo.serve:route-request "GET" "/ops"))))
   ;; A program's own routes, in front of the default table: exact routes beat
   ;; prefix routes, prefix routes go longest-first, and the rest of the path
   ;; reaches the handler as *route-tail*.
@@ -8255,18 +8290,14 @@ the stream."
                  (evo.serve:route-request "GET" "/added-later/x"
                                           (evo.serve:server-routes server))))))
   ;; A handler a program writes, against the exported seams only: it reads the
-  ;; unmatched tail, answers JSON, and publishes into the same numbered log
-  ;; /events streams read — so the cursor it hands back resumes exactly there.
+  ;; unmatched tail and answers JSON.
   (let ((evo.serve::*routes* evo.serve::*routes*))
     (let* ((server (evo.serve:make-server :token "t"))
            (handler (lambda (srv request body stream)
-                      (declare (ignore request body))
-                      (evo.serve:server-publish
-                       srv (list :type :program-event :tail evo.serve:*route-tail*))
+                      (declare (ignore srv request body))
                       (evo.serve:write-json stream 200
                                             (list :ok t
-                                                  :tail evo.serve:*route-tail*
-                                                  :cursor (evo.serve:server-cursor srv))))))
+                                                  :tail evo.serve:*route-tail*)))))
       (evo.serve:add-route "/program/" :get handler :prefix t)
       (let ((out (flexi-streams:make-in-memory-output-stream)))
         (evo.serve::respond
@@ -8279,13 +8310,7 @@ the stream."
           (check "route: dispatch hands a prefix handler the unmatched tail"
                  (equal "7/thing" (getf reply :tail)))
           (check "route: a handler's write-json reply goes out with its status"
-                 (string-prefix-p "HTTP/1.1 200 OK" text))
-          (check "route: the event a handler published is in the same log, resumable"
-                 (let ((events (evo.serve::events-after (evo.serve::server-log server)
-                                                        (1- (getf reply :cursor)))))
-                   (and (= 1 (length events))
-                        (equal "program-event" (second (first events)))
-                        (search "\"tail\":\"7/thing\"" (third (first events))))))))))
+                 (string-prefix-p "HTTP/1.1 200 OK" text))))))
   ;; Identity: what a program says it is, and what /health answers.
   (check "identity: a server defaults to the program's identity"
          (equal '(:name "evo-agent" :version "0.1.0" :features nil)
@@ -8303,35 +8328,19 @@ the stream."
                                             :features '("widgets" "proxy")))
      nil nil out)
     (let ((health (evo.serve:decode-json (response-body (response-text out)))))
-      (check "identity: /health reports name, version and features"
-             (and (equal "widget-host" (getf health :name))
-                  (equal "2.0" (getf health :version))
-                  (equalp #("widgets" "proxy") (getf health :features))))
-      (check "identity: /health still reports ok, pid and cursor"
+      (check "identity: /health reports name and version"
+             (and (equal "widget-host" (getf health :program))
+                  (equal "2.0" (getf health :version))))
+      (check "identity: /health reports ok, pid and epoch (CONTRACT §5.1)"
              (and (getf health :ok)
                   (integerp (getf health :pid))
-                  (integerp (getf health :cursor))))))
-  (let ((out (flexi-streams:make-in-memory-output-stream)))
-    (evo.serve::handle-health (evo.serve:make-server :token "t") nil nil out)
-    (check "identity: the default features are an empty array"
-           (equalp #() (getf (evo.serve:decode-json (response-body (response-text out))) :features))))
-  (check "read: a non-integer limit is 400"
-         (eql 400 (http-status-of
-                   (lambda () (evo.serve::query-limit
-                               (evo.serve::%make-request :query '(("limit" . "abc"))))))))
-  (check "read: a negative limit is 400"
-         (eql 400 (http-status-of
-                   (lambda () (evo.serve::query-limit
-                               (evo.serve::%make-request :query '(("limit" . "-1"))))))))
-  (check "read: zero is a valid limit"
-         (zerop (evo.serve::query-limit
-                 (evo.serve::%make-request :query '(("limit" . "0"))))))
+                  (stringp (getf health :epoch))))))
   (let ((server (evo.serve:make-server :token "sekrit")))
     (flet ((auth (header)
              (evo.serve::authorized-p
               server (request-from (if header
-                                       (crlf "GET / HTTP/1.1" (format nil "Authorization: ~a" header) "")
-                                       (crlf "GET / HTTP/1.1" ""))))))
+                                       (crlf "GET /health HTTP/1.1" (format nil "Authorization: ~a" header) "")
+                                       (crlf "GET /health HTTP/1.1" ""))))))
       (check "auth: the right bearer token passes" (auth "Bearer sekrit"))
       (check "auth: no header fails" (not (auth nil)))
       (check "auth: a wrong token fails" (not (auth "Bearer sekrit2")))
@@ -8346,37 +8355,241 @@ the stream."
   (check "bind: loopback addresses" (every #'evo.serve:loopback-host-p
                                            '("127.0.0.1" "localhost" "::1" "127.1.2.3")))
   (check "bind: others are not" (notany #'evo.serve:loopback-host-p
-                                        '("0.0.0.0" "192.168.1.2" "example.com")))
-  ;; The CLI: serve flags, and what a supervisor restart keeps.
-  (let ((opts (evo.cli::parse-args '("serve" "--port" "0" "--token-file" "/t" "--model" "m"))))
+                                        '("0.0.0.0" "192.168.1.2" "example.com"))))
+
+(defun test-lifecycle ()
+  "The launch contract (CONTRACT §1, §8): one ready file a client watches, a
+port chosen once, stdin as parent death, and a restart that resumes the exact
+session the child was on rather than the newest one in the folder (E1)."
+  (let* ((dir (uiop:ensure-directory-pathname
+               (format nil "~a/evo-life-~a/" (tmp-dir) (gen-id))))
+         (ready (merge-pathnames "ready.json" dir))
+         (journal (progn (ensure-directories-exist dir) (make-session-journal dir)))
+         (agent (make-agent :journal journal))
+         (server (evo.serve:make-server :token "tok" :port 53701
+                                        :host "127.0.0.1" :ready-file ready)))
+    (append-entry journal '(:type :message :message (:role :assistant :content "hi")))
+    (let ((value (evo.serve:ready-file-value server agent)))
+      (check "ready: the epoch is the server's own op-log epoch"
+             (equal (evo.serve:server-epoch server) (getf value :epoch)))
+      (check "ready: it names the port, the url and the token"
+             (and (eql 53701 (getf value :port))
+                  (equal "http://127.0.0.1:53701/" (getf value :url))
+                  (equal "tok" (getf value :token))))
+      (check "ready: it names the session behind it (CONTRACT §1)"
+             (and (equal (namestring (journal-path journal))
+                         (getf (getf value :session) :path))
+                  (equal (pget (journal-header journal) :id)
+                         (getf (getf value :session) :id))))
+      (check "ready: it says what program this is"
+             (and (equal "evo-agent" (getf value :program))
+                  (stringp (getf value :version)))))
+    (evo.serve:write-ready-file server agent)
+    (check "ready: the file is written, and only readable by its owner"
+           (let ((mode (logand (sb-posix:stat-mode (sb-posix:stat (namestring ready))) #o777)))
+             (and (probe-file ready) (= #o600 mode))))
+    (check "ready: it holds no temp file behind"
+           (null (directory (merge-pathnames "*.tmp" dir))))
+    (let ((read-back (evo.serve:decode-json (read-file-string ready))))
+      (check "ready: what a client reads back is the JSON of the value"
+             (and (eql 53701 (getf read-back :port))
+                  (equal "tok" (getf read-back :token))
+                  (equal (evo.serve:server-epoch server) (getf read-back :epoch)))))
+    (check "ready: every write publishes the live port again"
+           (progn (setf (evo.serve:server-port server) 53702)
+                  (evo.serve:write-ready-file server agent)
+                  (eql 53702 (getf (evo.serve:decode-json (read-file-string ready)) :port))))
+    (evo.serve:delete-ready-file ready)
+    (check "ready: a clean exit takes it away" (null (probe-file ready))))
+  ;; The epoch is minted per process: two servers never share one.
+  (check "ready: epochs differ between servers"
+         (not (equal (evo.serve:server-epoch (evo.serve:make-server :token "a"))
+                     (evo.serve:server-epoch (evo.serve:make-server :token "b")))))
+  ;; E1: two sessions in one directory.  A supervisor restart must resume the
+  ;; session the child was on — a bare --resume means the newest one, which is
+  ;; the other tab's.
+  (let ((saved-home (getenv "EVO_HOME"))
+        (saved-sessions (getenv "EVO_SESSIONS_DIR"))
+        (saved-state (getenv "EVO_SUPERVISOR_STATE_DIR")))
+    (unwind-protect
+         (let* ((home (format nil "~a/evo-e1-~a/" (tmp-dir) (gen-id)))
+                (state (format nil "~a/evo-e1-state-~a/" (tmp-dir) (gen-id))))
+           (evo.port:setenv "EVO_HOME" home)
+           (evo.port:setenv "EVO_SESSIONS_DIR" "")
+           (ensure-directories-exist (sessions-directory))
+           ;; Two sessions in this cwd.  The first one is the one that
+           ;; "crashes"; the second is what a bare --resume would open.
+           (let ((first-journal (make-session-journal)))
+             (append-entry first-journal '(:type :message :message (:role :assistant :content "first")))
+             (sleep 1.1)                 ; the stamp a session file is named after
+             (let ((second-journal (make-session-journal)))
+               (append-entry second-journal '(:type :message
+                                              :message (:role :assistant :content "second")))
+               (check "e1: the newest session here is the other one"
+                      (equal (namestring (journal-path second-journal))
+                             (namestring (latest-session))))
+               ;; The child of the first session reports where it is, and the
+               ;; port it bound, then dies.
+               (evo.port:setenv "EVO_SUPERVISOR_STATE_DIR" state)
+               (evo:note-current-session (journal-path first-journal))
+               (evo.kernel:note-bound-port 53701)
+               (check "e1: the child reported its own session, not the newest"
+                      (equal (namestring (journal-path first-journal))
+                             (namestring (evo.kernel:supervisor-current-session))))
+               (check "e1: and the port it bound"
+                      (eql 53701 (evo.kernel:supervisor-bound-port)))
+               (let ((argv (evo.cli::restart-argv '("serve" "--port" "0" "--ready-file" "/tmp/r.json"))))
+                 (check "e1: a restart resumes the exact session (E1)"
+                        (equal (list "--resume" (namestring (journal-path first-journal)))
+                               (member "--resume" argv :test #'equal)))
+                 (check "e1: ...and never a bare --resume"
+                        (not (equal '("--resume") (member "--resume" argv :test #'equal))))
+                 (check "e1: the port it bound replaces --port 0 (CONTRACT §1)"
+                        (equal "53701"
+                               (second (member "--port" argv :test #'equal))))
+                 (check "e1: the ready file comes back with it"
+                        (equal "/tmp/r.json"
+                               (second (member "--ready-file" argv :test #'equal))))
+                 ;; And what the child would open with those arguments is that
+                 ;; session, not the other tab's.
+                 (check "e1: the restarted child opens the session it was on"
+                        (equal (namestring (journal-path first-journal))
+                               (namestring (journal-path
+                                            (evo.cli:resolve-journal
+                                             (list :resume (namestring (journal-path first-journal)))))))))))
+           ;; A child that never reported a session restarts fresh: no
+           ;; --resume at all, rather than a guess.
+           (evo:note-current-session "/nonexistent/never-written.sexp")
+           (check "e1: nothing to resume means no --resume"
+                  (null (member "--resume" (evo.cli::restart-argv '("serve")) :test #'equal)))
+           ;; The supervisor takes its state with it when it gives up.
+           (evo:note-current-session "/tmp/whatever.sexp")
+           (evo.kernel:delete-supervisor-state)
+           (check "e1: a supervisor that exits forgets what was reported"
+                  (null (evo.kernel:supervisor-current-session))))
+      (evo.port:setenv "EVO_HOME" (or saved-home ""))
+      (evo.port:setenv "EVO_SESSIONS_DIR" (or saved-sessions ""))
+      (evo.port:setenv "EVO_SUPERVISOR_STATE_DIR" (or saved-state ""))))
+  ;; The CLI: the serve flags, and what a restarted child keeps.
+  (let ((opts (evo.cli::parse-args '("serve" "--port" "0" "--ready-file" "/t"
+                                     "--watch-stdin" "--model" "m@prov"))))
     (check "cli: serve parses its flags"
            (and (getf opts :serve) (eql 0 (getf opts :port))
-                (equal "/t" (getf opts :token-file)) (equal "m" (getf opts :model)))))
+                (equal "/t" (getf opts :ready-file)) (getf opts :watch-stdin)))
+    (check "cli: --model ID@PROVIDER names the provider too"
+           (and (equal "m" (getf opts :model)) (eq :prov (getf opts :model-provider)))))
+  (check "cli: --model without a provider leaves it to the registry"
+         (and (equal "m" (getf (evo.cli::parse-args '("--model" "m")) :model))
+              (null (getf (evo.cli::parse-args '("--model" "m")) :model-provider))))
+  (check-signals "cli: --model @provider names no id"
+                 (evo.cli::parse-args '("--model" "@anthropic")))
+  (check "split-model-ref: the LAST @ separates"
+         (multiple-value-bind (id provider) (evo.provider:split-model-ref "gemini@2024@proxy")
+           (and (equal "gemini@2024" id) (eq :proxy provider))))
   (check "cli: serve has a default port"
          (eql 8421 (getf (evo.cli::parse-args '("serve")) :port)))
   (check-signals "cli: --port outside serve is unknown" (evo.cli::parse-args '("--port" "1")))
   (check-signals "cli: serve refuses -p" (evo.cli::parse-args '("serve" "-p" "hi")))
   (check-signals "cli: serve refuses a bad port" (evo.cli::parse-args '("serve" "--port" "x")))
+  (check-signals "cli: --token-file is gone" (evo.cli::parse-args '("serve" "--token-file" "/t")))
+  (check-signals "cli: serve without --ready-file or EVO_SERVE_TOKEN refuses to start"
+                 (let ((saved (getenv "EVO_SERVE_TOKEN")))
+                   (unwind-protect
+                        (progn (evo.port:setenv "EVO_SERVE_TOKEN" "")
+                               (evo.cli:check-serve-ready '(:serve t)))
+                     (evo.port:setenv "EVO_SERVE_TOKEN" (or saved "")))))
   (check "cli: a serve restart keeps the server flags, not the session's"
-         (equal '("--port" "9" "--token-file" "/t" "--allow-remote")
-                (evo.cli::serve-restart-flags
-                 '("--port" "9" "--model" "m" "--token-file" "/t" "--resume" "--allow-remote")))))
+         (equal '("--port" "9" "--ready-file" "/t" "--allow-remote" "--watch-stdin")
+                (evo.cli:serve-restart-flags
+                 '("--port" "9" "--model" "m" "--ready-file" "/t" "--resume" "--allow-remote"
+                   "--watch-stdin" "--thinking" "high")))))
 
-(defun test-serve-event-log ()
-  (let ((log (evo.serve::make-event-log :capacity 4)))
-    (check "log: ids start at 1"
-           (= 1 (evo.serve::publish log '(:type :a))))
-    (evo.serve::publish log '(:type :b))
-    (check "log: events after a cursor, oldest first"
-           (equal '(2) (mapcar #'first (evo.serve::events-after log 1))))
-    (check "log: each event is stored encoded, with its type"
-           (equal '(1 "a" "{\"type\":\"a\"}") (first (evo.serve::events-after log 0))))
-    (dotimes (i 5) (evo.serve::publish log '(:type :c)))
-    (multiple-value-bind (events missed) (evo.serve::events-after log 1)
-      (check "log: a cursor older than the ring reports the gap"
-             (and (eql 2 missed) (= 4 (length events)) (= 4 (first (first events))))))
-    (check "log: an up-to-date cursor gets nothing"
-           (null (evo.serve::events-after log (evo.serve::last-event-id log))))))
+(defun test-catalog ()
+  "GET /catalog and the offline `catalog --json` (CONTRACT §5.6): one
+document, per-entry isolation, and never a key."
+  (let* ((dir (uiop:ensure-directory-pathname
+               (format nil "~a/evo-catalog-~a/" (tmp-dir) (gen-id))))
+         (journal (progn (ensure-directories-exist dir) (make-session-journal dir)))
+         (agent (make-agent :journal journal))
+         (saved-models evo.provider::*models*)
+         (saved-providers (copy-alist evo.provider::*providers*))
+         (saved-settings (evo.util:capture-settings)))
+    (unwind-protect
+         (progn
+           (register-provider* :fixture
+                               :base-url "http://127.0.0.1:1/v1"
+                               :api-key-env "EVO_TEST_FIXTURE_KEY")
+           (evo.port:setenv "EVO_TEST_FIXTURE_KEY" "")
+           (register-model* "fixture-model" :provider :fixture :api :anthropic-messages
+                            :context-window 200000 :max-output 8000 :effort t)
+           (let ((catalog (evo.serve:catalog-plist agent)))
+             (let ((model (find "fixture-model" (getf catalog :models)
+                                :key (lambda (m) (getf m :id)) :test #'equal)))
+               (check "catalog: a model entry says what the chooser needs"
+                      (and model
+                           (eq :fixture (getf model :provider))
+                           (equal 200000 (getf model :context-window))
+                           (eq t (getf model :reasoning))
+                           (eq t (getf model :images))))
+               (check "catalog: a model whose key is missing is not ready, and says why"
+                      (and (not (getf model :ready))
+                           (search "EVO_TEST_FIXTURE_KEY" (getf model :reason))))
+               (check "catalog: a model entry carries no key"
+                      (null (member "EVO_TEST_FIXTURE_KEY"
+                                    (loop for (k v) on model by #'cddr
+                                          when (stringp v) collect v)
+                                    :test (lambda (a b) (and (stringp b) (search a b)))))))
+             (let ((provider (find "fixture" (getf catalog :providers)
+                                   :key (lambda (p) (getf p :name)) :test #'equal)))
+               (check "catalog: a provider says whether it has a key, never the key"
+                      (and provider
+                           (equal "EVO_TEST_FIXTURE_KEY" (getf provider :key-env))
+                           (null (getf provider :has-key))
+                           (eq :anthropic-messages (getf provider :api)))))
+             (check "catalog: the thinking ladder is the one the session accepts"
+                    (equalp #("off" "low" "medium" "high" "xhigh" "max")
+                            (getf catalog :thinking-levels)))
+             (check "catalog: the default language pack is listed first"
+                    (equal "en" (getf (aref (getf catalog :languages) 0) :code)))
+             (check "catalog: the ops carry their argument schema and precondition"
+                    (let ((op (find "input.send" (getf catalog :ops)
+                                    :key (lambda (o) (getf o :name)) :test #'equal)))
+                      (and op (hash-table-p (getf op :args))
+                           (stringp (getf op :precondition)))))
+             (check "catalog: commands, skills and tools are listed"
+                    (and (plusp (length (getf catalog :commands)))
+                         (vectorp (getf catalog :skills))
+                         (plusp (length (getf catalog :tools)))))
+             (check "catalog: an evo-agent catalog has no lane half"
+                    (null (getf catalog :lanes)))
+             (check "catalog: nothing failed to read"
+                    (equalp #() (getf catalog :warnings))))
+           ;; The swarm's half: computed from the kernel API set, without a lane.
+           (let* ((catalog (evo.serve:catalog-plist agent :swarm (list :workers 2)))
+                  (lanes (getf catalog :lanes))
+                  (model (find "fixture-model" (getf lanes :models)
+                               :key (lambda (m) (getf m :id)) :test #'equal)))
+             (check "catalog: a swarm's catalog lists the lanes' models"
+                    (and lanes (vectorp (getf lanes :models))))
+             (check "catalog: a model the kernel API set has is offered to lanes"
+                    (and model (null (getf model :ok))
+                         (search "EVO_TEST_FIXTURE_KEY" (getf model :reason)))))
+           ;; A model whose API an extension defined is not one a lane can run
+           ;; until that extension is loaded into it.
+           (evo.provider:register-api :fixture-api
+                                      (make-instance 'evo.provider:provider-api))
+           (register-model* "extension-model" :provider :fixture :api :fixture-api
+                            :context-window 1000 :max-output 100)
+           (let* ((catalog (evo.serve:catalog-plist agent :swarm (list :workers 1)))
+                  (model (find "extension-model" (getf (getf catalog :lanes) :models)
+                               :key (lambda (m) (getf m :id)) :test #'equal)))
+             (check "catalog: a model from an extension's API is not a lane's by default"
+                    (and model (null (getf model :ok))
+                         (search "in-lanes" (getf model :reason))))))
+      (setf evo.provider::*models* saved-models
+            evo.provider::*providers* saved-providers)
+      (evo.util:restore-settings saved-settings)
+      (evo.port:setenv "EVO_TEST_FIXTURE_KEY" ""))))
 
 ;;; The view model (src/view/).
 ;;;
@@ -9110,9 +9323,10 @@ entry keeps it (CONTRACT §3)."
     (test-reload-generation-ordering)
     (test-command-layer)
     (test-frontend-protocol)
-    (test-serve-event-encoding)
+    (test-serve-json)
     (test-serve-http)
-    (test-serve-event-log)
+    (test-lifecycle)
+    (test-catalog)
     (format t "~%~d passed, ~d failed~%" *pass* *fail*)
     (if (zerop *fail*) 0 1)))
 
