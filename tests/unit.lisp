@@ -8906,14 +8906,14 @@ entry keeps it (CONTRACT §3)."
          (held nil)
          (view (evo.view:make-view agent)))
     (flet ((reason (a) (declare (ignore a)) held))
-      (evo.kernel:register-hold-predicate #'reason)
+      (evo:register-hold-predicate #'reason)
       (unwind-protect
            (progn
              (check "an idle, unheld agent is idle"
                     (equal "idle" (pget (pget (evo.view:view-snapshot view) :state)
                                         :status)))
              (setf held "waiting on lanes 1-3")
-             (evo.kernel:note-hold-changed agent)
+             (evo:note-hold-changed agent)
              (check "a hold makes it waiting"
                     (equal "waiting" (pget (pget (evo.view:view-snapshot view) :state)
                                            :status)))
@@ -8932,13 +8932,13 @@ entry keeps it (CONTRACT §3)."
                     (equal "waiting" (pget (pget (evo.view:view-snapshot view) :state)
                                            :status)))
              (setf held nil)
-             (evo.kernel:note-hold-changed agent)
+             (evo:note-hold-changed agent)
              (check "and releasing it is idle"
                     (equal "idle" (pget (pget (evo.view:view-snapshot view) :state)
                                         :status)))
              (check "no task is left behind"
                     (null (pget (pget (evo.view:view-snapshot view) :state) :task))))
-        (evo.kernel:unregister-hold-predicate #'reason)))))
+        (evo:unregister-hold-predicate #'reason)))))
 
 (defun test-view-segments ()
   "The state's segments are the core registry, rendered frontend-neutrally."
