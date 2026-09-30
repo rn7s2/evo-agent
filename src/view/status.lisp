@@ -171,7 +171,15 @@ cache rate is zero."
     (round (* 100 cr) (max 1 (+ in cr cw)))))
 
 (defun cache-stats-label-text (context)
-  (format nil "~d% cached" (cache-stats-percent (getf context :cache-stats))))
+  "\"N% cached\" once the session has sent anything, else NIL.  A session that
+has made no request has no rate to speak of, and an always-on \"0% cached\"
+costs a narrow status line the room its innermost segments (an IDE
+selection, say) need: the line drops innermost cells first to fit."
+  (let ((stats (getf context :cache-stats)))
+    (when (plusp (+ (or (getf stats :input) 0)
+                    (or (getf stats :cache-read) 0)
+                    (or (getf stats :cache-write) 0)))
+      (format nil "~d% cached" (cache-stats-percent stats)))))
 
 (defun context-label-text (used window)
   (if window

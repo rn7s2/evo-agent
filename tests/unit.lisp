@@ -9351,18 +9351,14 @@ all; the design wants one for every session."
                                               :content (list (list :type :text
                                                                    :text "hi")))))))
     (let ((journal (view-fixture-journal "evo-cache-stats")))
-      ;; No request yet: the chip reads 0%, it does not vanish.
+      ;; No request yet: no rate to show, so no segment (a narrow TUI line
+      ;; needs the room); the totals still ride on the state.
       (append-entry journal '(:type :message
                               :message (:role :user
                                               :content ((:type :text :text "hi")))))
       (let ((state (evo.view:journal-state journal)))
-        (check "a fresh session still publishes a cache segment"
-               (cache-stats-cell state))
-        (check "a fresh session reads 0% cached"
-               (equal "0% cached" (pget (cache-stats-cell state) :text)))
-        (check "a fresh session's totals are zero"
-               (equal (list :input 0 :cache-read 0 :cache-write 0)
-                      (pget (cache-stats-cell state) :data)))
+        (check "a fresh session publishes no cache segment"
+               (null (cache-stats-cell state)))
         (check "the totals ride on the topic state as well"
                (equal (list :input 0 :cache-read 0 :cache-write 0)
                       (pget state :cache-stats))))
