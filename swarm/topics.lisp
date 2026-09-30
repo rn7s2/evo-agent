@@ -58,9 +58,12 @@
       (list :id (swarm-id swarm)
             :workers (swarm-workers swarm)
             :status (list :busy (length (lanes-busy-locked swarm))
-                          :waiting-on-lanes (and (not (swarm-coordinator-busy swarm))
-                                                 (lanes-busy-locked swarm)
-                                                 t))
+                          ;; WIRE-BOOLEAN: a field the contract calls a bool is
+                          ;; one on the wire, and this one is NIL most of the
+                          ;; time — which would read as "unknown", not "no".
+                          :waiting-on-lanes (wire-boolean
+                                             (and (not (swarm-coordinator-busy swarm))
+                                                  (lanes-busy-locked swarm))))
             :config (list :lane-model (lane-model-config swarm)
                           :lane-thinking (swarm-lane-thinking swarm))
             :lanes (coerce (mapcar #'lane-row (swarm-lanes swarm)) 'vector)))))
