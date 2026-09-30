@@ -43,7 +43,6 @@
   (run-tokens 0)        ; tokens this run has spent (the goal readout's live part)
   (held nil)            ; why the agent is held, or NIL
   (context nil)         ; live context accounting, while a run streams
-  (fold nil)            ; the last fold, for resolving a provider
   (counter 0))
 
 (defvar *views* nil
@@ -76,7 +75,10 @@ happened."
         (setf (gethash id (v-wire view)) (truncate-item item)))))
 
 (defun item-index (view id)
-  (loop for i from 0 below (length (v-items view))
+  "Where ID sits in the transcript.  Searched from the end: the item a change
+lands on is almost always the newest one — a streaming message, the tool that
+is running — so the common case is one step."
+  (loop for i downfrom (1- (length (v-items view))) to 0
         when (equal (pget (aref (v-items view) i) :id) id) return i))
 
 (defun store-item (view item)
@@ -86,11 +88,12 @@ happened."
 
 (defun replace-item (view item)
   "Adopt ITEM, which has the id of an item already in the transcript."
-  (let ((id (pget item :id)))
+  (let* ((id (pget item :id))
+         (i (item-index view id)))
+    (unless i (error "view: no item ~a to replace" id))
     (remhash id (v-wire view))
-    (setf (gethash id (v-index view)) item)
-    (let ((i (item-index view id)))
-      (if i (setf (aref (v-items view) i) item) (store-item view item)))
+    (setf (gethash id (v-index view)) item
+          (aref (v-items view) i) item)
     item))
 
 (defun make-item-vector (&optional (size 16))
@@ -121,17 +124,21 @@ are the hot path and every mutation has to keep it that way."
     item))
 
 (defun patch-item (view new)
-  "Adopt NEW, replacing the item with its id, and publish what changed."
+  "Adopt NEW, replacing the item with its id, and publish what changed.  An id
+that is not in the transcript yet is an ADD: the client must hear about the
+item itself, not about fields of one it has never seen."
   (let* ((id (pget new :id))
-         (old (gethash id (v-index view)))
-         (old-wire (and old (item-wire view old)))
-         (new-wire (truncate-item new))
-         (patch (loop for (k v) on new-wire by #'cddr
-                      unless (equal (pget old-wire k) v) append (list k v))))
-    (replace-item view new)
-    (setf (gethash id (v-wire view)) new-wire)
-    (when patch (emit-op view *op-item-patch* :id id :patch patch))
-    new))
+         (old (gethash id (v-index view))))
+    (if (null old)
+        (append-item view new)
+        (let* ((old-wire (item-wire view old))
+               (new-wire (truncate-item new))
+               (patch (loop for (k v) on new-wire by #'cddr
+                            unless (equal (pget old-wire k) v) append (list k v))))
+          (replace-item view new)
+          (setf (gethash id (v-wire view)) new-wire)
+          (when patch (emit-op view *op-item-patch* :id id :patch patch))
+          new))))
 
 (defun patch-item-fields (view id &rest fields)
   "Change a few fields of the item ID holds, publishing a merge patch."
@@ -191,7 +198,9 @@ publish the fields that moved."
                                :live-goal-tokens (v-run-tokens view)
                                :context (v-context view)))
          (old (v-state view)))
-    (setf (v-fold view) fold
+    ;; Resolution of a provider for a message that names only a model id reads
+    ;; the fold, so the walk's copy of it has to move with the journal.
+    (setf (pctx-fold (v-ctx view)) fold
           (v-state view) state)
     (when old
       (emit-state-patch view (loop for (k v) on state by #'cddr
@@ -248,7 +257,9 @@ carry when it is journaled.  Returns the item id."
                             :status "queued"
                             :queue (enum-string (or queue :now)))))
       (when blocks (setf (gethash id (v-media view)) (coerce blocks 'vector)))
-      (append-item view item)
+      ;; Queueing the same id twice (a retried op, a replayed event) is the
+      ;; same item, not a second one.
+      (patch-item view item)
       (view-refresh-state view)
       id)))
 
@@ -371,15 +382,20 @@ pre-minted ids the append finds the item by id and this never runs."
 ;;; follows says what happened, and wins.
 
 (defun handle-message-start (view event)
+  "The model has started talking.  With a pre-minted id (the loop mints the
+entry id here and uses it when it appends) the streaming item IS the entry; a
+provider that names no id gets one minted here, and the append that follows
+replaces the item with the journaled one."
   (let* ((id (or (pget event :entry-id) (format nil "a_~a" (gen-id))))
          (model (pget (v-state view) :model))
+         (existing (gethash id (v-index view)))
          (item (list :id id :kind "assistant" :ts (now-ms)
                      :text "" :thinking "" :status "streaming"
                      :error nil
                      :model (pget model :id)
                      :provider (pget model :provider)
                      :usage nil)))
-    (append-item view item)
+    (unless existing (append-item view item))
     (setf (v-assistant-item view) id)))
 
 (defun handle-text-delta (view event)
@@ -423,7 +439,7 @@ pre-minted ids the append finds the item by id and this never runs."
                           :parent (v-assistant-item view))))
     (setf (gethash call-id (pctx-calls (v-ctx view)))
           (list :name (pget event :name) :arguments (pget event :arguments)))
-    (append-item view item)
+    (patch-item view item)
     (setf (v-tool-item view) (pget item :id))))
 
 (defun handle-tool-result (view event)
@@ -625,7 +641,6 @@ is why only the append path has to be incremental."
               (v-wire view) (make-hash-table :test #'equal)
               (v-media view) (make-hash-table :test #'equal)
               (v-ctx view) (make-pctx :fold fold)
-              (v-fold view) fold
               (v-state view) state
               (v-assistant-item view) nil
               (v-tool-item view) nil)
@@ -655,7 +670,6 @@ nowhere until VIEW-ATTACH gives them a publisher."
          (view (%make-view :agent agent :topic topic
                            :items (make-item-vector)
                            :ctx (make-pctx :fold fold)
-                           :fold fold
                            :held (agent-hold-reason agent))))
     (multiple-value-bind (items state) (project-journal journal agent)
       (loop for item across items do (store-item view item))
@@ -663,3 +677,60 @@ nowhere until VIEW-ATTACH gives them a publisher."
       (setf (v-state view) (pput state :status (view-status view))))
     (push view *views*)
     view))
+
+;;; The client's half of the protocol.
+;;;
+;;; A frontend that only ever sees ops ends up holding exactly what a snapshot
+;;; would have given it — that is the invariant the unit suite property-tests
+;;; (project the journal, drive the view, apply the ops, compare).  It is also
+;;; what a coordinator runs to mirror a lane's stream into a lane:N topic, so
+;;; it lives here rather than in a client: one implementation, exercised by the
+;;; core's own tests.
+
+(defun apply-op (items op &optional state)
+  "ITEMS (a vector of wire items) and STATE with one op from the stream
+applied.  Returns (values items state); an op this build does not know is
+ignored, which is how a client survives a server that grew an op first."
+  (let* ((kind (pget op :op))
+         (id (pget op :id))
+         (list (coerce items 'list))
+         (pos (and id (position id list :key (lambda (i) (pget i :id))
+                                     :test #'equal))))
+    (cond
+      ((equal kind "item.add")
+       (let ((item (pget op :item))
+             (after (pget op :after)))
+         (if (null after)
+             (if (null list) (setf list (list item)) (push item list))
+             (let ((i (position after list :key (lambda (x) (pget x :id))
+                                         :test #'equal)))
+               (setf list (if i
+                              (append (subseq list 0 (1+ i)) (list item)
+                                      (subseq list (1+ i)))
+                              (append list (list item))))))))
+      ((and (equal kind "item.append") pos)
+       (let* ((item (nth pos list))
+              (field (if (equal (pget op :field) "thinking") :thinking :text)))
+         (setf (nth pos list)
+               (pput item field (concatenate 'string
+                                             (or (pget item field) "")
+                                             (or (pget op :text) ""))))))
+      ((and (equal kind "item.patch") pos)
+       (let ((item (nth pos list)))
+         (loop for (k v) on (pget op :patch) by #'cddr
+               do (setf item (pput item k v)))
+         (setf (nth pos list) item)))
+      ((and (equal kind "item.remove") pos)
+       (setf list (remove id list :key (lambda (i) (pget i :id)) :test #'equal)))
+      ((equal kind "state.patch")
+       (let ((new (copy-list (or state nil))))
+         (loop for (k v) on (pget op :patch) by #'cddr
+               do (setf (getf new k) v))
+         (setf state new)))
+      (t nil))
+    (values (coerce list 'vector) state)))
+
+(defun apply-ops (items ops &optional state)
+  "ITEMS and STATE with every op in OPS applied, in order.  See APPLY-OP."
+  (dolist (op ops (values items state))
+    (multiple-value-setq (items state) (apply-op items op state))))

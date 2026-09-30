@@ -1182,19 +1182,22 @@ that is how a human's next keystroke differs from a paste's last chunk."
 ;;; segment was computed correctly every frame and thrown away every frame.
 
 (defun test-status-segments ()
-  ;; Core segments are registered at load time, like anybody else's.
-  (let ((core (mapcar #'evo.tui::status-segment-name (evo.tui::status-segments :left))))
+  ;; The core's own segments are registered at load time, like anybody's.  The
+  ;; registry lives in the CORE (EVO:DEFINE-STATUS-SEGMENT) because a GUI
+  ;; renders the same segments the TUI status line does.
+  (let ((core (mapcar #'evo.view:status-segment-name
+                      (evo.view:status-segments :left))))
     (check "core model segment registered" (member :model core))
     (check "core context segment registered" (member :context core)))
   ;; A fresh dynamic binding isolates the rest from the core registrations.
-  (let ((evo.tui::*status-segments* nil)
+  (let ((evo.view::*status-segments* nil)
         (evo.tui::*cols* 41)                    ; renderer width = 40
         (tui (evo.tui::make-tui)))
-    (flet ((seg (text) (lambda (tui) (declare (ignore tui)) text)))
-      (evo.tui:add-status-segment :l1 (seg "L1") :side :left :order 100)
-      (evo.tui:add-status-segment :l2 (seg "L2") :side :left :order 200)
-      (evo.tui:add-status-segment :r1 (seg "R1") :side :right :order 100)
-      (evo.tui:add-status-segment :r2 (seg "R2") :side :right :order 200)
+    (flet ((seg (text) (lambda (ctx) (declare (ignore ctx)) text)))
+      (evo:define-status-segment :l1 (seg "L1") :side :left :order 100)
+      (evo:define-status-segment :l2 (seg "L2") :side :left :order 200)
+      (evo:define-status-segment :r1 (seg "R1") :side :right :order 100)
+      (evo:define-status-segment :r2 (seg "R2") :side :right :order 200)
       (let ((line (evo.tui::status-line tui)))
         (check "left: ascending order runs left to right"
                (< (search "L1" line) (search "L2" line)))
@@ -1206,34 +1209,46 @@ that is how a human's next keystroke differs from a paste's last chunk."
                (and (search "L1" line) (search "L2" line)))
         (check "same-side neighbours are separated by the renderer"
                (search " · " line)))
+      ;; A segment's declared style is the frontend's to paint: the same
+      ;; registry feeds the TUI's colours and the GUI's plain text.
+      (evo:define-status-segment :styled (seg "STYLED") :side :left :order 150
+                                 :style :muted)
+      (check "the TUI paints a segment's style"
+             (search (evo.tui:dim "STYLED") (evo.tui::status-line tui)))
+      (check "the core publishes the segment text unstyled"
+             (let ((cell (find :styled (evo.view:status-segments-live nil) 
+                               :key (lambda (c) (getf c :name)))))
+               (and cell (equal "STYLED" (getf cell :text))
+                    (eq :muted (getf cell :style)))))
+      (evo:remove-status-segment :styled)
       ;; Registering a name again replaces it: extension reloads are idempotent.
-      (evo.tui:add-status-segment :l2 (seg "L2-NEW") :side :left :order 200)
+      (evo:define-status-segment :l2 (seg "L2-NEW") :side :left :order 200)
       (let ((line (evo.tui::status-line tui)))
         (check "re-registering a name replaces it" (search "L2-NEW" line))
         (check "re-registering does not duplicate"
-               (= 4 (length (evo.tui::status-segments)))))
+               (= 4 (length (evo.view:status-segments)))))
       ;; A segment rendering nothing leaves no dangling separator or padding.
-      (evo.tui::remove-status-segment :l2)
-      (evo.tui::remove-status-segment :r1)
-      (evo.tui::remove-status-segment :r2)
-      (evo.tui:add-status-segment :quiet (seg nil) :side :left :order 300)
+      (evo:remove-status-segment :l2)
+      (evo:remove-status-segment :r1)
+      (evo:remove-status-segment :r2)
+      (evo:define-status-segment :quiet (seg nil) :side :left :order 300)
       (check "an empty segment contributes nothing at all"
              (string= "L1" (evo.tui::status-line tui)))
       ;; A signalling segment is skipped, not fatal to the whole line.
-      (evo.tui:add-status-segment :boom (lambda (tui) (declare (ignore tui))
-                                          (error "segment blew up"))
-                                  :side :left :order 350)
+      (evo:define-status-segment :boom (lambda (ctx) (declare (ignore ctx))
+                                         (error "segment blew up"))
+                                 :side :left :order 350)
       (check "a signalling segment is skipped, the line survives"
              (string= "L1" (evo.tui::status-line tui))))
     ;; Overflow: drop from the middle outward, so the segments nearest each
     ;; edge are the last to go.
-    (let ((evo.tui::*status-segments* nil)
+    (let ((evo.view::*status-segments* nil)
           (evo.tui::*cols* 21))                 ; renderer width = 20
-      (flet ((seg (text) (lambda (tui) (declare (ignore tui)) text)))
-        (evo.tui:add-status-segment :l1 (seg "LEFT-ONE") :side :left :order 100)
-        (evo.tui:add-status-segment :l2 (seg "LEFT-TWO") :side :left :order 200)
-        (evo.tui:add-status-segment :r1 (seg "RIGHT-ONE") :side :right :order 100)
-        (evo.tui:add-status-segment :r2 (seg "RIGHT-TWO") :side :right :order 200)
+      (flet ((seg (text) (lambda (ctx) (declare (ignore ctx)) text)))
+        (evo:define-status-segment :l1 (seg "LEFT-ONE") :side :left :order 100)
+        (evo:define-status-segment :l2 (seg "LEFT-TWO") :side :left :order 200)
+        (evo:define-status-segment :r1 (seg "RIGHT-ONE") :side :right :order 100)
+        (evo:define-status-segment :r2 (seg "RIGHT-TWO") :side :right :order 200)
         (let ((line (evo.tui::status-line tui)))
           (check "overflow keeps the segment nearest the left edge"
                  (search "LEFT-ONE" line))
@@ -1246,17 +1261,17 @@ that is how a human's next keystroke differs from a paste's last chunk."
           (check "the fitted line never paints past the width"
                  (<= (evo.tui::visible-length line) 20)))))
     ;; One segment that cannot fit is truncated, not blanked.
-    (let ((evo.tui::*status-segments* nil)
+    (let ((evo.view::*status-segments* nil)
           (evo.tui::*cols* 6))                  ; renderer width = 10 (floor)
-      (evo.tui:add-status-segment :only (lambda (tui) (declare (ignore tui))
+      (evo:define-status-segment :only (lambda (ctx) (declare (ignore ctx))
                                           "ABCDEFGHIJKLMNOP")
-                                  :side :left :order 100)
+                                 :side :left :order 100)
       (let ((line (evo.tui::status-line tui)))
         (check "an unfittable lone segment is truncated, not dropped"
                (and (search "ABC" line) (<= (evo.tui::visible-length line) 10)))))
     (check "SIDE is validated"
-           (handler-case (progn (evo.tui:add-status-segment :bad (lambda (tui) tui)
-                                                           :side :middle)
+           (handler-case (progn (evo:define-status-segment :bad (lambda (ctx) ctx)
+                                                          :side :middle)
                                 nil)
              (error () t)))))
 
@@ -2906,7 +2921,7 @@ but it takes DELAY, which is what makes the asynchrony observable."
         (remhash "broken__ping" evo.kernel::*tool-registry*)
         (remhash "late__ping" evo.kernel::*tool-registry*))
       (setf evo.kernel::*prompt-notes* saved-notes)
-      (evo.tui:remove-status-segment :mcp)
+      (evo:remove-status-segment :mcp)
       (remhash "mcp" evo.kernel::*commands*)
       (setf (symbol-function 'dex:post) saved-post)
       (if (eq saved-servers :unset)
@@ -3576,20 +3591,20 @@ just the pack that ships as a core extension, and what the user picked
         (evo.kernel::*extension-disposers* nil)
         (evo.kernel::*extension-tasks* nil)
         (evo.kernel::*extension-generation* 20)
-        (evo.tui::*status-segments* evo.tui::*status-segments*)
+        (evo.view::*status-segments* evo.view::*status-segments*)
         (evo.tui:*math-renderer* nil)
         (evo.tui:*math-enabled* nil)
         (evo.tui:*prose-styler* nil)
         (renderer (lambda (&rest args) (declare (ignore args)) nil))
         (styler (lambda (text) text)))
     (flet ((segment-p (name)
-             (find name (evo.tui:status-segments)
-                   :key #'evo.tui::status-segment-name)))
+             (find name (evo.view:status-segments)
+                   :key #'evo.view:status-segment-name)))
       (let ((evo.kernel::*extension-owner*
               (evo.kernel::%make-extension-owner :path "/x/600-seams.lisp"
                                                  :generation 20)))
-        (evo.tui:add-status-segment :probe-seam
-                                    (lambda (tui) (declare (ignore tui)) "probe"))
+        (evo:define-status-segment :probe-seam
+                                   (lambda (ctx) (declare (ignore ctx)) "probe"))
         (evo.tui:register-math-renderer renderer)
         (evo.tui:register-prose-styler styler))
       (check "an extension's TUI seams are installed"
@@ -4516,7 +4531,7 @@ and the guards around all of it."
         (check "running-jobs-summary reports the live job"
                (let ((s (running-jobs-summary))) (and s (>= (getf s :count) 1))))
         (check "job status segment renders the ▷ marker"
-               (let ((seg (evo.tui::jobs-status-segment)))
+               (let ((seg (evo.view:jobs-label-text (running-jobs-summary))))
                  (and (stringp seg) (search "▷" seg))))
         ;; Wait returns the instant it finishes, with the exit code.
         (multiple-value-bind (wnote wdetails)
@@ -4579,11 +4594,11 @@ and the guards around all of it."
                (not (evo.port:process-alive-p proc)))
         (check "reap-all-jobs empties the registry" (null evo.kernel::*jobs*))))
     ;; Status segment is wired onto the inner right at order 200.
-    (let ((seg (find :jobs (evo.tui::status-segments :right)
-                     :key #'evo.tui::status-segment-name)))
+    (let ((seg (find :jobs (evo.view:status-segments :right)
+                     :key #'evo.view:status-segment-name)))
       (check "jobs segment sits on the right" seg)
       (check "jobs segment order is 200 (inner, past model-load at 100)"
-             (and seg (= 200 (evo.tui::status-segment-order seg)))))))
+             (and seg (= 200 (evo.view:status-segment-order seg)))))))
 
 ;;; Tool-call display: one line, key arguments only, and total — malformed
 ;;; arguments must degrade, never signal (this renders in the tick loop).
@@ -8370,6 +8385,533 @@ became zero after the first reload."
     (check "log: an up-to-date cursor gets nothing"
            (null (evo.serve::events-after log (evo.serve::last-event-id log))))))
 
+;;; The view model (src/view/).
+;;;
+;;; PROJECT-JOURNAL is the definition and the live view is an optimization of
+;;; it, so the tests come in two shapes: one per item kind on the pure
+;;; projection, and a property test that drives the live view with recorded
+;;; events and journal appends and proves that the ops it published, applied to
+;;; the projection it started from, give the projection it ended with.
+
+(defun view-fixture-journal (&optional (stem "evo-view"))
+  (let ((dir (uiop:ensure-directory-pathname
+              (format nil "~a/~a-~a/" (tmp-dir) stem (gen-id)))))
+    (ensure-directories-exist dir)
+    (make-session-journal dir)))
+
+(defun view-fixture-user (journal text)
+  (append-entry journal (list :type :message
+                              :message (list :role :user
+                                             :content (list (list :type :text
+                                                                  :text text))))))
+
+(defun view-fixture-assistant (journal &key (text "hello") (thinking nil)
+                                            (model "m") (stop :stop) (calls nil)
+                                            (error-message nil))
+  (append-entry journal
+                (list :type :message
+                      :message (list :role :assistant
+                                     :stop-reason stop
+                                     :model model
+                                     :error-message error-message
+                                     :usage (list :input 10 :output 2
+                                                  :cache-read 1 :cache-write 0)
+                                     :content (append
+                                               (when thinking
+                                                 (list (list :type :thinking
+                                                             :thinking thinking)))
+                                               (list (list :type :text :text text))
+                                               calls)))))
+
+(defun view-fixture-call (id name args)
+  (list :type :tool-call :id id :name name :arguments args))
+
+(defun view-fixture-tool-result (journal call-id name text &key is-error)
+  (append-entry journal
+                (list :type :message
+                      :message (list :role :tool-result
+                                     :tool-call-id call-id
+                                     :tool-name name
+                                     :is-error is-error
+                                     :content (list (list :type :text :text text))))))
+
+(defun test-view-projection ()
+  "One item per kind, with the fields CONTRACT §4.1 asks for."
+  (let* ((journal (view-fixture-journal))
+         (user (view-fixture-user journal "hi there"))
+         (assistant (view-fixture-assistant journal :text "let me look"
+                                            :thinking "hmm" :stop :tool-use
+                                            :calls (list (view-fixture-call
+                                                          "c1" "bash"
+                                                          (list :command "ls"))))))
+    (view-fixture-tool-result journal "c1" "bash" "file1 file2")
+    (append-entry journal (list :type :notice :severity :warn
+                                :text "lane 2 is down" :source :swarm))
+    (append-entry journal
+                  (list :type :custom-message :key "ide-context"
+                        :message (list :role :user
+                                       :content (list (list :type :text
+                                                            :text "<ide-context/>")))))
+    (append-entry journal (list :type :recover :status :signaled :code 9
+                                :attempt 2 :reason "oom"))
+    (append-entry journal
+                  (list :type :custom-message :key "recovery"
+                        :message (list :role :user
+                                       :content (list (list :type :text
+                                                            :text "the previous run")))))
+    (append-entry journal (list :type :goal :goal-id "g-1" :objective "ship it"
+                                :status :active :token-budget 1000 :tokens-used 0))
+    (append-entry journal (list :type :goal :goal-id "g-1" :objective "ship it"
+                                :status :active :token-budget 1000 :tokens-used 40))
+    (append-entry journal (list :type :goal :goal-id "g-1" :objective "ship it and document it"
+                                :status :active :token-budget 1000 :tokens-used 40))
+    (append-entry journal (list :type :goal :goal-id "g-1" :objective "ship it and document it"
+                                :status :complete :token-budget 1000 :tokens-used 500))
+    (append-entry journal (list :type :compaction :summary "sum" :summary-tokens 10
+                                :retained-tail #() :files-read #() :files-modified #()))
+    (append-entry journal
+                  (list :type :message
+                        :origin (list :kind :lane-report :lane 3 :done "d"
+                                      :evidence "e" :next "n" :blocked nil
+                                      :requests nil :goal :active)
+                        :message (list :role :user
+                                       :content (list (list :type :text
+                                                            :text "[lane 3 report] d")))))
+    (append-entry journal
+                  (list :type :message
+                        :origin (list :kind :human-action :action :interrupt :lanes '(1 3))
+                        :message (list :role :user
+                                       :content (list (list :type :text
+                                                            :text "[interrupt lanes 1 3]")))))
+    (multiple-value-bind (items state) (evo.view:project-journal journal)
+      (flet ((item (kind) (find kind items :key (lambda (i) (pget i :kind))
+                                      :test #'equal))
+             (all (kind) (remove-if-not (lambda (i) (equal (pget i :kind) kind))
+                                        (coerce items 'list))))
+        (check "user item: id is the entry id, status sent, queue now"
+               (let ((i (first (all "user"))))
+                 (and (equal (pget i :id) (pget user :id))
+                      (equal "sent" (pget i :status))
+                      (equal "now" (pget i :queue))
+                      (equal "hi there" (pget i :text))
+                      (vectorp (pget i :images))
+                      (integerp (pget i :ts)))))
+        (check "assistant item: text, thinking, status, model, usage"
+               (let ((i (item "assistant")))
+                 (and (equal "let me look" (pget i :text))
+                      (equal "hmm" (pget i :thinking))
+                      (equal "final" (pget i :status))
+                      (equal "m" (pget i :model))
+                      (equal 10 (getf (pget i :usage) :input)))))
+        (check "tool item: id is t_<call-id>, args come from the call, ok"
+               (let ((i (item "tool")))
+                 (and (equal "t_c1" (pget i :id))
+                      (equal "c1" (pget i :call-id))
+                      (equal "bash" (pget i :name))
+                      (equal "ls" (getf (pget i :args) :command))
+                      (equal "ok" (pget i :status))
+                      (equal "file1 file2" (getf (pget i :result) :text))
+                      (equal 11 (getf (pget i :result) :chars))
+                      (null (getf (pget i :result) :truncated))
+                      (equal (pget assistant :id) (pget i :parent)))))
+        (check "notice item: severity, text, source, durable"
+               (let ((i (item "notice")))
+                 (and (equal "warn" (pget i :severity))
+                      (equal "lane 2 is down" (pget i :text))
+                      (equal "swarm" (pget i :source))
+                      (eq t (pget i :durable)))))
+        (check "context item: the custom message's key and text"
+               (let ((i (find "ide-context" items
+                              :key (lambda (x) (getf x :key)) :test #'equal)))
+                 (and i (equal "context" (pget i :kind))
+                      (equal "<ide-context/>" (pget i :text)))))
+        (check "recovery item: the facts the supervisor recorded"
+               (let ((i (item "recovery")))
+                 (and (equal "signaled" (pget i :status))
+                      (equal 9 (pget i :code))
+                      (equal 2 (pget i :attempt))
+                      (equal "oom" (pget i :reason)))))
+        (let ((goals (all "goal")))
+          (check "goal items: only the transitions, not the token bookkeeping"
+                 (equal '("created" "objective_updated" "complete")
+                        (mapcar (lambda (i) (pget i :event)) goals)))
+          (check "goal item: objective, budget, tokens"
+                 (let ((i (first goals)))
+                   (and (equal "g-1" (pget i :goal-id))
+                        (equal "ship it" (pget i :objective))
+                        (equal 1000 (pget i :budget))
+                        (equal 0 (pget i :tokens))))))
+        (check "compaction item: the summary and that it is not manual"
+               (let ((i (item "compaction")))
+                 (and i (equal "sum" (pget i :summary))
+                      (null (pget i :manual)))))
+        (check "lane_report item: the origin's fields, not the prose"
+               (let ((i (item "lane_report")))
+                 (and (equal 3 (pget i :lane))
+                      (equal "d" (pget i :done))
+                      (equal "e" (pget i :evidence))
+                      (equal "n" (pget i :next))
+                      (equal "active" (pget i :goal)))))
+        (check "human_action item: action and lanes"
+               (let ((i (item "human_action")))
+                 (and (equal "interrupt" (pget i :action))
+                      (equalp #(1 3) (pget i :lanes)))))
+        (check "state: session facts come from the header"
+               (let ((session (pget state :session)))
+                 (and (equal (pget (journal-header journal) :id) (pget session :id))
+                      (equal (journal-leaf-id journal) (pget session :leaf))
+                      (integerp (pget session :started-at)))))
+        (check "state: items are ordered along the path"
+               (equal (pget user :id) (pget (aref items 0) :id)))))))
+
+(defun test-view-images ()
+  "Images: a wire descriptor per image, and the bytes back on demand."
+  (let* ((journal (view-fixture-journal "evo-view-img"))
+         (octets #(137 80 78 71))
+         (entry (append-entry
+                 journal
+                 (list :type :message
+                       :message (list :role :user
+                                      :content (list (list :type :text :text "look")
+                                                     (list :type :image
+                                                           :media-type "image/png"
+                                                           :data (octets->base64 octets)
+                                                           :name "shot.png"
+                                                           :bytes 4))))))
+         (agent (make-agent :journal journal))
+         (view (evo.view:make-view agent))
+         (item (evo.view:view-item view (pget entry :id))))
+    (check "the image is described on the user item"
+           (let ((img (aref (pget item :images) 0)))
+             (and (equal "shot.png" (pget img :name))
+                  (equal "image/png" (pget img :media-type))
+                  (equal 4 (pget img :bytes))
+                  (equal (format nil "/media/~a/0" (pget entry :id))
+                         (pget img :href)))))
+    (multiple-value-bind (bytes media-type) (evo.view:view-media view (pget entry :id) 0)
+      (check "view-media returns the bytes and their type"
+             (and (equalp octets bytes) (equal "image/png" media-type))))
+    (check "view-media out of range is NIL"
+           (null (evo.view:view-media view (pget entry :id) 3)))))
+
+(defun test-view-truncation ()
+  "Thinking over 16 KiB and tool output over 4 KiB are cut in a snapshot and
+whole through VIEW-ITEM."
+  (let* ((journal (view-fixture-journal "evo-view-trunc"))
+         (big-thinking (make-string 20000 :initial-element #\x))
+         (big-result (make-string 9000 :initial-element #\y))
+         (assistant (view-fixture-assistant journal :text "t"
+                                            :thinking big-thinking
+                                            :stop :tool-use
+                                            :calls (list (view-fixture-call "c9" "cat" nil)))))
+    (view-fixture-tool-result journal "c9" "cat" big-result)
+    (let* ((agent (make-agent :journal journal))
+           (view (evo.view:make-view agent))
+           (items (pget (evo.view:view-snapshot view) :items))
+           (tool (find "t_c9" items :key (lambda (i) (pget i :id)) :test #'equal)))
+      (check "snapshot thinking is cut to 16 KiB"
+             (<= (length (pget (find (pget assistant :id) items
+                                     :key (lambda (i) (pget i :id)) :test #'equal)
+                               :thinking))
+                 evo.view:*thinking-max-chars*))
+      (check "snapshot tool output is cut to 4 KiB, chars is the whole length"
+             (let ((result (pget tool :result)))
+               (and (<= (length (pget result :text)) evo.view:*result-max-chars*)
+                    (= 9000 (pget result :chars))
+                    (eq t (pget result :truncated)))))
+      (check "VIEW-ITEM is the whole item"
+             (let ((whole (evo.view:view-item view "t_c9")))
+               (and (= 9000 (length (getf (pget whole :result) :text)))
+                    (null (getf (pget whole :result) :truncated))))))))
+
+(defun test-view-paging ()
+  "VIEW-ITEMS-BEFORE walks backwards through the transcript."
+  (let* ((journal (view-fixture-journal "evo-view-page")))
+    (dotimes (n 5)
+      (view-fixture-user journal (format nil "m~d" n)))
+    (let* ((view (evo.view:make-view (make-agent :journal journal)))
+           (snapshot (evo.view:view-snapshot view :items 2)))
+      (check "a snapshot returns the newest N items"
+             (equal '("m3" "m4")
+                    (map 'list (lambda (i) (pget i :text)) (pget snapshot :items))))
+      (check "and says older ones exist" (eq t (pget snapshot :has-more)))
+      (let ((oldest-shown (pget (aref (pget snapshot :items) 0) :id)))
+        (multiple-value-bind (items more)
+            (evo.view:view-items-before view oldest-shown 2)
+          (check "paging back returns the ones before, newest first"
+                 (equal '("m2" "m1") (map 'list (lambda (i) (pget i :text)) items)))
+          (check "and reports there is still more" (eq t more))
+          (multiple-value-bind (items more)
+              (evo.view:view-items-before
+               view (pget (aref items (1- (length items))) :id) 2)
+            (check "the oldest page reports the end"
+                   (and (equal '("m0") (map 'list (lambda (i) (pget i :text)) items))
+                        (null more)))))))))
+
+(defun view-ephemeral-item-p (item)
+  "Items the journal cannot vouch for: they exist only in the live view (a run
+outcome, a transport retry, an input not yet sent, a notice that is not
+durable), and a re-projection is not expected to have them."
+  (let ((kind (pget item :kind)))
+    (or (member kind '("run_outcome" "provider_retry") :test #'equal)
+        (and (equal kind "notice") (null (pget item :durable)))
+        (and (equal kind "user") (equal (pget item :status) "queued")))))
+
+(defun view-durable-items (items)
+  (remove-if #'view-ephemeral-item-p items))
+
+(defun test-view-incremental ()
+  "The property: applying the ops the view published to the projection it
+started from gives the projection of the journal it ended with."
+  (let* ((journal (view-fixture-journal "evo-view-inc"))
+         (agent (make-agent :journal journal)))
+    ;; A session that already exists when the client arrives.
+    (view-fixture-user journal "first question")
+    (view-fixture-assistant journal :text "first answer")
+    (let* ((start (evo.view:project-journal journal))
+           (log (make-array 8 :adjustable t :fill-pointer 0))
+           (view (progn (evo.view:make-view agent)
+                        (let ((v (evo.view:make-view agent)))
+                          (evo.view:view-attach v (lambda (op) (vector-push-extend op log)))
+                          v))))
+      (unwind-protect
+           (progn
+             ;; --- one whole turn, driven the way the kernel drives it -------
+             (evo.view:view-on-event view (list :type :run-start :run-id "r1"))
+             (evo.view:view-on-event view (list :type :turn-start :turn 0))
+             (evo.view:view-on-event view (list :type :message-start))
+             (evo.view:view-on-event view (list :type :thinking-delta :text "think"))
+             (evo.view:view-on-event view (list :type :text-delta :text "second "))
+             (evo.view:view-on-event view (list :type :text-delta :text "answer"))
+             (let ((entry (view-fixture-assistant
+                           journal :text "second answer" :thinking "thinking"
+                           :stop :tool-use
+                           :calls (list (view-fixture-call "cc" "bash"
+                                                           (list :command "ls"))))))
+               (evo.view:view-on-append view entry))
+             (evo.view:view-on-event view (list :type :message-end :stop-reason :tool-use
+                                                :usage (list :input 20 :output 4
+                                                             :cache-read 0 :cache-write 0)))
+             (evo.view:view-on-event view (list :type :tool-call-start :id "cc"
+                                                :name "bash"
+                                                :arguments (list :command "ls")))
+             (evo.view:view-on-append view
+                                      (view-fixture-tool-result journal "cc" "bash"
+                                                                "a\nb"))
+             (evo.view:view-on-event view (list :type :tool-result :id "cc"
+                                                :is-error nil :content-chars 3))
+             (evo.view:view-on-event view (list :type :provider-retry :attempt 1 :max 3
+                                                :delay 2 :reason "500"))
+             (evo.view:view-on-event view (list :type :notice :severity :error
+                                                :text "boom" :source :extension))
+             (let ((entry (append-entry journal
+                                        (list :type :notice :severity :info
+                                              :text "durable" :source :swarm))))
+               (evo.view:view-on-append view entry))
+             (evo.view:view-on-append
+              view
+              (append-entry journal (list :type :goal :goal-id "g-2"
+                                          :objective "keep going"
+                                          :status :active :token-budget 100
+                                          :tokens-used 0)))
+             ;; A settle that only moves the token count: state, not history.
+             (evo.view:view-on-append
+              view
+              (append-entry journal (list :type :goal :goal-id "g-2"
+                                          :objective "keep going"
+                                          :status :active :token-budget 100
+                                          :tokens-used 12)))
+             (let ((entry (append-entry journal
+                                        (list :type :message
+                                              :origin (list :kind :lane-report :lane 2
+                                                            :done "did it"
+                                                            :evidence "tests"
+                                                            :next "nothing"
+                                                            :blocked nil
+                                                            :requests nil
+                                                            :goal nil)
+                                              :message (list :role :user
+                                                             :content (list
+                                                                       (list :type :text
+                                                                             :text "[lane 2] did it")))))))
+               (evo.view:view-on-append view entry))
+             (evo.view:view-on-event view (list :type :compaction-start))
+             (let ((entry (append-entry journal
+                                        (list :type :compaction :summary "sum"
+                                              :summary-tokens 3 :retained-tail #()))))
+               (evo.view:view-on-append view entry))
+             (evo.view:view-on-event view (list :type :compaction-end))
+             (evo.view:view-on-event view (list :type :run-end :outcome :stop))
+             ;; --- the two readings ------------------------------------------
+             (let ((ops (coerce log 'list))
+                   (live (view-durable-items (pget (evo.view:view-snapshot view) :items)))
+                   (expected (view-durable-items
+                              (multiple-value-bind (items ignored)
+                                  (evo.view:project-journal journal)
+                                (declare (ignore ignored))
+                                items))))
+               (check "the ops are a faithful delta of the projection"
+                      (equalp (view-durable-items (evo.view:apply-ops start ops))
+                              expected))
+               (check "and the live view holds exactly the projection"
+                      (equalp live expected))
+               (check "the run published ops, not a full re-send"
+                      (and (plusp (length ops))
+                           (every (lambda (op) (pget op :op)) ops)))
+               (check "state.patch ops carry only the fields that moved"
+                      (every (lambda (op)
+                               (or (not (equal (pget op :op) "state.patch"))
+                                   (consp (pget op :patch))))
+                             ops))
+               (check "item.append ops only ever grow text"
+                      (every (lambda (op)
+                               (or (not (equal (pget op :op) "item.append"))
+                                   (member (pget op :field) '("text" "thinking")
+                                           :test #'equal)))
+                             ops))))
+        ;; A rebuild says so, and agrees with a fresh projection.
+        (evo.view:view-reset view :leaf-moved)
+        (check "a reset publishes topic.reset"
+               (let ((reset (find "topic.reset" (coerce log 'list)
+                                  :key (lambda (op) (pget op :op)) :test #'equal)))
+                 (and reset (equal "leaf_moved" (pget reset :reason)))))
+        (check "a rebuild equals a fresh projection"
+               (equalp (view-durable-items (pget (evo.view:view-snapshot view) :items))
+                       (view-durable-items
+                        (evo.view:project-journal journal))))))))
+
+(defun test-view-queue ()
+  "Queued input is shown, cancellable, and settles into its own message."
+  (let* ((journal (view-fixture-journal "evo-view-queue"))
+         (agent (make-agent :journal journal))
+         (log (make-array 8 :adjustable t :fill-pointer 0))
+         (view (let ((v (evo.view:make-view agent)))
+                 (evo.view:view-attach v (lambda (op) (vector-push-extend op log)))
+                 v)))
+    (evo.view:view-input-queued view :id "q1" :text "queued text" :queue :after-run)
+    (check "queued input is an item with status queued and its queue mode"
+           (let ((item (evo.view:view-item view "q1")))
+             (and (equal "queued" (pget item :status))
+                  (equal "after_run" (pget item :queue))
+                  (equal "queued text" (pget item :text)))))
+    (check "the state lists it in queue"
+           (equalp #("q1") (pget (pget (evo.view:view-snapshot view) :state) :queue)))
+    (check "and the status patch went out"
+           (some (lambda (op) (and (equal (pget op :op) "state.patch")
+                                   (pget (pget op :patch) :queue)))
+                 (coerce log 'list)))
+    (evo.view:view-input-cancelled view "q1")
+    (check "cancelling takes it out of the transcript"
+           (null (evo.view:view-item view "q1")))
+    (check "and out of the queue"
+           (equalp #() (pget (pget (evo.view:view-snapshot view) :state) :queue)))
+    ;; Input queued and then sent: the kernel mints the entry id at queue time,
+    ;; so the journal append carries the very id the item already has.
+    (evo.view:view-input-queued view :id "q2" :text "sent text")
+    (evo.view:view-on-append view (list :type :message :id "q2"
+                                        :timestamp "2026-09-30T00:00:00Z"
+                                        :message (list :role :user
+                                                       :content (list
+                                                                 (list :type :text
+                                                                       :text "sent text")))))
+    (check "the queued item becomes the journaled message, once"
+           (let* ((items (pget (evo.view:view-snapshot view) :items))
+                  (same (remove-if-not (lambda (i) (equal "q2" (pget i :id)))
+                                (coerce items 'list))))
+             (and (= 1 (length same))
+                  (equal "sent" (pget (first same) :status)))))
+    (check "and the queue is empty again"
+           (equalp #() (pget (pget (evo.view:view-snapshot view) :state) :queue)))
+    ;; A kernel that does not mint the entry id at queue time: the drained
+    ;; message must adopt the row the user is already looking at, in place,
+    ;; rather than leaving a ghost behind and duplicating the message.
+    (evo.view:view-input-queued view :id "q3" :text "no id yet")
+    (evo.view:view-on-append view (list :type :message :id "minted-later"
+                                        :timestamp "2026-09-30T00:00:01Z"
+                                        :message (list :role :user
+                                                       :content (list
+                                                                 (list :type :text
+                                                                       :text "no id yet")))))
+    (let ((texts (map 'list (lambda (i) (pget i :text))
+                      (pget (evo.view:view-snapshot view) :items))))
+      (check "the queued row is replaced, not duplicated"
+             (equal 1 (count "no id yet" texts :test #'equal)))
+      (check "and the message carries the entry id"
+             (null (evo.view:view-item view "q3"))))))
+
+(defun test-view-hold ()
+  "waiting is what a held, idle agent is — not idle, not running."
+  (let* ((journal (view-fixture-journal "evo-view-hold"))
+         (agent (make-agent :journal journal))
+         (held nil)
+         (view (evo.view:make-view agent)))
+    (flet ((reason (a) (declare (ignore a)) held))
+      (evo.kernel:register-hold-predicate #'reason)
+      (unwind-protect
+           (progn
+             (check "an idle, unheld agent is idle"
+                    (equal "idle" (pget (pget (evo.view:view-snapshot view) :state)
+                                        :status)))
+             (setf held "waiting on lanes 1-3")
+             (evo.kernel:note-hold-changed agent)
+             (check "a hold makes it waiting"
+                    (equal "waiting" (pget (pget (evo.view:view-snapshot view) :state)
+                                           :status)))
+             (evo.view:view-on-event view (list :type :run-start :run-id "r9"))
+             (check "a running agent is running, hold or not"
+                    (equal "running" (pget (pget (evo.view:view-snapshot view) :state)
+                                           :status)))
+             (check "the task carries its clock"
+                    (let ((task (pget (pget (evo.view:view-snapshot view) :state) :task)))
+                      (and (equal "r9" (pget task :id))
+                           (equal "run" (pget task :kind))
+                           (integerp (pget task :started-at))
+                           (integerp (pget task :step-started-at)))))
+             (evo.view:view-on-event view (list :type :run-end :outcome :stop))
+             (check "settling back into the hold is waiting again"
+                    (equal "waiting" (pget (pget (evo.view:view-snapshot view) :state)
+                                           :status)))
+             (setf held nil)
+             (evo.kernel:note-hold-changed agent)
+             (check "and releasing it is idle"
+                    (equal "idle" (pget (pget (evo.view:view-snapshot view) :state)
+                                        :status)))
+             (check "no task is left behind"
+                    (null (pget (pget (evo.view:view-snapshot view) :state) :task))))
+        (evo.kernel:unregister-hold-predicate #'reason)))))
+
+(defun test-view-segments ()
+  "The state's segments are the core registry, rendered frontend-neutrally."
+  (let* ((journal (view-fixture-journal "evo-view-seg"))
+         (agent (make-agent :journal journal))
+         (view (evo.view:make-view agent))
+         (segments (pget (pget (evo.view:view-snapshot view) :state) :segments)))
+    (check "segments is a vector of cells" (and (vectorp segments) (plusp (length segments))))
+    (check "each cell names itself, its side and its order"
+           (let ((cell (find "model" segments :key (lambda (c) (pget c :name))
+                                      :test #'equal)))
+             (and cell (equal "left" (pget cell :side))
+                  (equal 100 (pget cell :order))
+                  (stringp (pget cell :text)))))
+    (check "the text is the same the TUI's own segment function renders"
+           (let ((cell (find "context" segments :key (lambda (c) (pget c :name))
+                                        :test #'equal)))
+             (and cell
+                  (equal (evo.view:context-label-text (getf (pget cell :data) :tokens)
+                                                      (getf (pget cell :data) :window))
+                         (pget cell :text)))))
+    (check "a segment that signals is skipped, not fatal"
+           (progn (evo:define-status-segment :view-boom
+                                             (lambda (ctx)
+                                               (declare (ignore ctx))
+                                               (error "boom"))
+                                             :side :left :order 900)
+                  (let ((after (pget (pget (evo.view:view-snapshot view) :state)
+                                     :segments)))
+                    (evo:remove-status-segment :view-boom)
+                    (not (find "view-boom" after :key (lambda (c) (pget c :name))
+                                           :test #'equal)))))))
+
 (defun run-all ()
   (let ((*pass* 0) (*fail* 0))
     (test-sexpr-io)
@@ -8409,6 +8951,14 @@ became zero after the first reload."
     (test-input)
     (test-paste)
     (test-status-segments)
+    (test-view-projection)
+    (test-view-images)
+    (test-view-truncation)
+    (test-view-paging)
+    (test-view-incremental)
+    (test-view-queue)
+    (test-view-hold)
+    (test-view-segments)
     (test-tui-compose)
     (test-resume-picker)
     (test-session-ordering)

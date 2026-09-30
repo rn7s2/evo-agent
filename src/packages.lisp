@@ -186,6 +186,8 @@
    #:view-reset #:view-snapshot #:view-items-before #:view-item #:view-media
    #:view-input-queued #:view-input-cancelled
    #:view-agent #:view-topic
+   ;; a client's half of the protocol: ops -> items + state
+   #:apply-op #:apply-ops
    ;; the pieces a projector needs (exported for the unit suite and for a
    ;; frontend that builds its own topic out of journal entries)
    #:entry->item #:make-pctx #:journal-state #:user-item #:assistant-item
