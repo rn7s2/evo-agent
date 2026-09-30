@@ -63,7 +63,8 @@ named hooks so a /reload does not double-register them."
   "Journal the swarm's shape on the coordinator's session (a :custom entry,
 invisible to the model): lanes, their worktrees, the code evaluated into
 them, and the lane model configuration (CONTRACT §1).  Called whenever that
-shape changes."
+shape changes.  The session header names the swarm too (CONTRACT §3), so a
+session list can say which swarm a session drove without opening the file."
   (when (and *swarm* (swarm-agent *swarm*))
     (let ((agent (swarm-agent *swarm*)))
       (ignore-errors (evo:set-custom-state "swarm" (swarm-record) agent))
