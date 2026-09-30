@@ -261,6 +261,17 @@ in the user's profile is already private to that user by its ACL."
   #+evo-windows (declare (ignore path))
   path)
 
+(defun file-mode (path)
+  "PATH's permission bits (the low 777), or NIL where this platform does not
+report them — ECL, and Windows, where a file's privacy is its ACL and
+CHMOD-PRIVATE is a no-op.  Read by tests that have to prove a secret was
+written 0600; a caller that branches on it must treat NIL as \"cannot say\"."
+  #+(and sbcl (not evo-windows))
+  (ignore-errors
+    (logand (sb-posix:stat-mode (sb-posix:stat (namestring path))) #o777))
+  #-(and sbcl (not evo-windows))
+  (progn (ignore path) nil))
+
 (defun write-private-file (path string)
   "Write STRING to PATH readable by its owner only.  The file is recreated
 empty, restricted, and only then written, so the secret is never on disk
