@@ -178,21 +178,6 @@ the ready plist, or NIL when the deadline passes or the process exits."
           return nil
         do (sleep 0.2)))
 
-(defun refresh-lane-ready (lane)
-  "Re-read LANE's ready file; T when the lane is a different life than the one
-we were talking to (its epoch changed).  Every restart publishes a new one,
-with the port, token, pid and epoch of the process that is serving now."
-  (let ((ready (lane-ready-plist lane)))
-    (when (and ready (getf ready :port))
-      (with-swarm-lock ()
-        (let ((changed (not (equal (getf ready :epoch)
-                                   (getf (lane-ready lane) :epoch)))))
-          (setf (lane-ready lane) ready
-                (lane-port lane) (getf ready :port)
-                (lane-token lane) (getf ready :token)
-                (lane-pid lane) (getf ready :pid))
-          changed)))))
-
 (defun initialize-lane (lane)
   "Evaluate the baseline in LANE, then the code the coordinator has evaluated
 into it before (so a restart gets back what it had).  One form per eval, as

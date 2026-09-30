@@ -68,6 +68,7 @@
            #:journal-entries #:journal-leaf-id #:journal-header #:journal-started-p
            #:set-session-header
            #:append-entry #:find-entry #:entry-path #:fold-state #:fork-session
+           #:compaction-entry->messages
            #:add-journal-listener #:remove-journal-listener #:note-journal-append
            #:state-messages #:state-model #:state-model-provider #:state-thinking
            #:state-tools

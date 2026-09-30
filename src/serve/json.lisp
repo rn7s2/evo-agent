@@ -5,7 +5,13 @@
 ;;;; through exactly this mapping, the inverse of EVO:JSON->SEXPR:
 ;;;;
 ;;;;   plist (keyword keys)  -> object; :line-count -> "line_count"
-;;;;   any other list        -> array
+;;;;   JSON-OBJECT           -> object with keys that are not identifiers
+;;;;   a dotted pair         -> object of one key, its ALIST entry
+;;;;   any other proper list -> array
+;;;;   improper list, or an object this mapping has never seen
+;;;;                         -> its printed form, as a string: the mapping is
+;;;;                            total, because an error reply quotes the value
+;;;;                            it choked on, and a value can be a secret
 ;;;;   vector (not a string) -> array
 ;;;;   string, integer       -> string, number
 ;;;;   ratio, float          -> number (double)

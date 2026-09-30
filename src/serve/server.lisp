@@ -87,23 +87,24 @@ it — or passes :IDENTITY to MAKE-SERVER — so a client can tell which program
 answered (evo-swarm names itself \"evo-swarm\").")
 
 (defstruct (server (:constructor %make-server))
-  host port token ready-file
+  host port token
   ;; Who serves this session, and the extra routes it serves.  NIL means only
   ;; the program-wide defaults — *IDENTITY* and *ROUTES*.
   identity-override routes-override
   agent
-  (log (make-event-log))
-  ;; The tag every cursor of this serving life carries, and what a restart
-  ;; changes (see MINT-EPOCH).
-  (epoch (mint-epoch))
-  ;; Messages to the session thread, guarded by INBOX-LOCK.  STOPPING is
-  ;; written once, under the same lock, when the session thread shuts down.
-  (inbox nil) (inbox-lock (bt:make-lock "serve-inbox")) (stopping nil)
+  ;; The op log: the protocol's one source of ordering (oplog.lisp).
+  (oplog (make-op-log))
+  ;; Topic providers, by name ("session", "swarm", "lane:1").
+  (topics (make-hash-table :test #'equal))
+  (topics-lock (bt:make-lock "serve-topics"))
+  ;; Messages to the session thread.  STOPPING is written once, under the
+  ;; same lock, when the server shuts down; the condition variable is what
+  ;; the session thread waits on (never a sleep).
+  (inbox nil) (inbox-lock (bt:make-lock "serve-inbox"))
+  (inbox-cv (bt:make-condition-variable :name "serve-inbox"))
+  (stopping nil)
   ;; Session-thread state.
   task quit (loop-tick (op-now-ms))
-  ;; Queued input serve minted an id for: id -> (:text … :queue …).  The
-  ;; kernel's own ids replace this the day CANCEL-QUEUED lands (CONTRACT §3).
-  (queued (make-hash-table :test #'equal)) (queued-lock (bt:make-lock "serve-queued"))
   ;; Idempotency: the last 256 op replies by rid (CONTRACT §5.5).
   (rid-lock (bt:make-lock "serve-rid"))
   (rid-replies (make-hash-table :test #'equal))
@@ -117,37 +118,29 @@ answered (evo-swarm names itself \"evo-swarm\").")
   ;; stops its lanes and supervisor here).
   shutdown-hook
   ;; Launch plumbing (CONTRACT §1): where the ready file goes, and whether
-  ;; stdin EOF means the parent is gone.
+  ;; stdin EOF means the parent is gone (see LIFECYCLE.LISP for the file).
   ready-file watch-stdin
   (started-at (op-now-ms))
   flusher-thread
   ;; Listener state: the socket, its thread, and the connection threads it
   ;; started (guarded by CONNECTIONS-LOCK).
   listener listener-thread
-  (connections nil) (connections-lock (bt:make-lock "serve-connections"))
-  ;; The ready file this process published, and whether it wrote one:
-  ;; --watch-stdin watches the pipe a parent holds (see LIFECYCLE.LISP).
-  (wrote-ready-file nil) (watch-stdin nil))
+  (connections nil) (connections-lock (bt:make-lock "serve-connections")))
 
-;; The default route table lives with the routes (routes.lisp), which loads
-;; after this file; SERVER-ROUTES reads it at dispatch time.
-(declaim (special *routes*))
-
-(defvar *routes-lock* (bt:make-lock "serve-routes")
-  "Guards replacement and snapshots of the program-wide route table.")
-
-(defun make-server (&key (host "127.0.0.1") (port 8421) token ready-file watch-stdin
-                         identity routes)
+(defun make-server (&key (host "127.0.0.1") (port 8421) token ready-file
+                         (watch-stdin nil) identity routes (eval-enabled t))
   "A server.  IDENTITY says who this program is (see *IDENTITY*); ROUTES are
-additional routes considered before the built-ins (see *ROUTES*, ADD-ROUTE).
-READY-FILE is where this process publishes its URL, token, epoch and session
-once it listens (see WRITE-READY-FILE); WATCH-STDIN makes end-of-file on
-stdin a clean shutdown.  Program-wide routes added later are still seen."
+additional routes considered before the built-ins.  READY-FILE is where the
+serving process publishes its URL, token, epoch and session once it listens
+(see WRITE-READY-FILE, docs/serve.md \"Starting it\"); WATCH-STDIN makes
+end-of-file on stdin a clean shutdown (the parent that started us is gone).
+EVAL-ENABLED is the --no-http-eval gate."
   (%make-server :host host :port port :token (or token (resolve-token))
                 :identity-override identity
                 :routes-override routes
                 :ready-file ready-file
-                :watch-stdin watch-stdin))
+                :watch-stdin watch-stdin
+                :eval-enabled eval-enabled))
 
 (defun server-identity (server)
   "Who the program serving this session says it is: the server's own identity,
@@ -290,13 +283,21 @@ produced outside a command (a task finishing) goes to the view only.")
 (defmethod evo.command:host-start-compact ((server server) hint)
   (start-compact server hint))
 
-(defmethod evo.command:host-say ((server server) text &optional (style :plain))
-  (when *reply*
-    (push (list :style style :text text) (reply-output *reply*)))
-  (server-notice server text :source :command :severity (case style
-                                                          (:error :error)
-                                                          (:notice :info)
-                                                          (t :info))))
+(defmethod evo.command:host-notice ((server server) text &key severity durable data)
+  "A line the session says.  It is a notice item in the view (CONTRACT §4.1),
+not a line on a stream a client would have to parse, and the reply a command is
+building keeps it too — that is what command.run returns as `notices`."
+  (let ((style (case severity (:warn :notice) (:error :error) (t :plain))))
+    (when *reply*
+      (push (list :style style :text text) (reply-output *reply*)))
+    (server-notice server text
+                   :severity (or severity :info)
+                   :source (or (getf data :source) :command)
+                   :durable durable
+                   :data data))
+  ;; And a DURABLE notice is journalled, by the command layer's default
+  ;; method, so a rebuild still shows it (CONTRACT §3).
+  (call-next-method))
 
 (defmethod evo.command:host-choose ((server server) title items action &key (index 0))
   "No picker over HTTP: the choices come back as data, and the same command
@@ -322,9 +323,9 @@ takes one as its argument."
   nil)
 
 (defmethod evo.command:host-session-switched ((server server))
-  "A journal switch is not an append: the topic is reset and the client
-re-reads its snapshot (CONTRACT §5.3)."
-  (topic-reset server "session" "session_switched"))
+  "A journal switch is not an append: the view follows the new journal, the
+topic is reset, and the client re-reads its snapshot (CONTRACT §5.3)."
+  (sync-session-topic server))
 
 (defmethod evo.command:host-command-context ((server server)) (list :server server))
 (defmethod evo.command:host-interrupt-hint ((server server)) "interrupt it first")
@@ -366,8 +367,8 @@ otherwise say why, and leave queued input queued."
   (let ((agent (server-agent server)))
     (handler-case (progn (effective-model (fold-state (agent-journal agent)) agent) t)
       (error (e)
-        (evo.command:host-say server (format nil "✗ ~a" e) :error)
-        (evo.command:host-say server "recover with /model <id> (a registered model)" :dim)
+        (evo.command:host-notice server (format nil "✗ ~a" e) :severity :error)
+        (evo.command:host-notice server "recover with /model <id> (a registered model) or register one: POST /eval (evo:register-model ...)")
         (when (steering-pending-p agent)
           (evo.command:host-notice server "input stays queued — it runs once the model resolves"))
         nil))))
@@ -430,9 +431,12 @@ next run if input queued up meanwhile."
       (setf (server-task server) nil)
       (when (eq (task-kind task) :compact)
         (case outcome
+          ;; The durable ones survive a restart: what a compaction did, and a
+          ;; run that died, are facts the session should still show later.
           (:stop (evo.command:host-notice server "✓ compacted"
                                           :durable t :data (list :source :serve)))
-          (:aborted (evo.command:host-notice server "✗ compact interrupted" :severity :warn))
+          (:aborted (evo.command:host-notice server "✗ compact interrupted"
+                                             :severity :warn))
           (t (evo.command:host-notice server (format nil "✗ compact: ~a" text)
                                       :severity :error
                                       :durable t :data (list :source :serve)))))
@@ -464,25 +468,18 @@ next run if input queued up meanwhile."
       (:run-requested
        (let ((text (first args)))
          (when text
-           (publish (server-log server) (list :type :user-input :text text)))
-         (start-run server))))))
-
-(defun events-callback (server)
-  "The agent's events callback: every kernel event into the log, on the
-worker's own thread; a step boundary also tells the session thread, which
-owns the task's step clock."
-  (let ((log (server-log server)))
-    (lambda (event)
-      (publish log event)
-      (when (member (getf event :type) '(:turn-start :compaction-start :compaction-end))
-        (post server (list :step))))))
+           (log-user-input server text))
+         (start-run server)))
+      (:stdin-eof
+       (server-notice server "stdin closed — shutting down" :severity :info
+                                                        :source :serve)
+       (setf (server-quit server) t)))))
 
 (defun ready-file-value (server agent)
   "What the ready file says: everything a client needs to reach this session
 without asking for anything (see docs/serve.md \"Starting it\").  No config
 value beyond the session's own path is in it."
-  (let ((journal (agent-journal agent))
-        (identity (server-identity server)))
+  (let ((journal (agent-journal agent)))
     (list :epoch (server-epoch server)
           :pid (evo.port:getpid)
           :supervisor-pid (evo.kernel:supervisor-pid)
@@ -491,23 +488,30 @@ value beyond the session's own path is in it."
           :token (server-token server)
           :session (list :id (pget (journal-header journal) :id)
                          :path (namestring (journal-path journal)))
-          :program (getf identity :name)
-          :version (getf identity :version)
+          :program (server-program server)
+          :version (server-version server)
           :restarts (evo.kernel:supervisor-restarts))))
 
 (defun write-ready-file (server agent)
   "Publish SERVER's readiness where a client is watching.  Rewritten by every
 life of the process, so the epoch, pid and port in it are always the live
-ones."
+ones.  A server with no --ready-file has nowhere to publish and does
+nothing."
   (let ((path (server-ready-file server)))
     (when path
-      (write-json-atomically path (ready-file-value server agent))
-      (setf (server-wrote-ready-file server) t)
-      path)))
+      (write-json-atomically path (ready-file-value server agent)))))
 
 (defun session-loop (server)
+  "The session thread: drain what arrived, then wait for more.
+
+WAIT-FOR-INBOX blocks on a condition variable — work is announced by POST, never
+noticed by polling — and its timeout is only the heartbeat tick, which is what
+keeps a supervisor from mistaking a long idle stretch for a hang.  Without that
+call this loop is a spin: it would still work, at 100% of a core, which is why
+the e2e measures an idle server's CPU."
   (loop until (server-quit server)
         do (heartbeat-touch)
+           (setf (server-loop-tick server) (op-now-ms))
            (dolist (message (drain-inbox server))
              (handler-case (handle-message server message)
                (serious-condition (e)
@@ -617,55 +621,6 @@ and a model that does not resolve is said now rather than at the first op."
     (server-notice server (if resumed-p "session resumed" "session ready")
                    :severity :info :source :serve)))
 
-;;; The ready file (CONTRACT §1): the one place a client learns the port and
-;;; the token, written atomically so a reader never sees half of it.
-
-(defun ready-file-body (server)
-  "What the ready file says.  SUPERVISOR_PID and RESTARTS come from the
-supervisor's environment, and are absent when this process is its own
-parent."
-  (let* ((agent (server-agent server))
-         (journal (and agent (agent-journal agent))))
-    (list :epoch (server-epoch server)
-          :pid (evo.port:getpid)
-          :supervisor-pid (ignore-errors
-                            (parse-integer (getenv "EVO_SUPERVISOR_PID")))
-          :port (server-port server)
-          :url (format nil "http://~a:~d/" (server-host server) (server-port server))
-          :token (server-token server)
-          :session (and journal
-                        (list :id (pget (journal-header journal) :id)
-                              :path (namestring (journal-path journal))))
-          :program (server-program server)
-          :version (server-version server)
-          :restarts (or (ignore-errors
-                          (parse-integer (getenv "EVO_RESTARTS") :junk-allowed t))
-                        0))))
-
-(defun write-ready-file (server)
-  "Write the ready file atomically: a temp file in the same directory, mode
-0600, then a rename — which is atomic, so a reader either sees the old file
-or the complete new one."
-  (let* ((path (merge-pathnames (server-ready-file server)))
-         (tmp (make-pathname :name (format nil ".~a.tmp~a" (pathname-name path)
-                                           (gen-id 4))
-                             :defaults path)))
-    (ensure-directories-exist path)
-    (evo.port:write-private-file tmp (encode-json (ready-file-body server)))
-    (rename-file tmp path)
-    path))
-
-(defun delete-ready-file (server)
-  (when (server-ready-file server)
-    (ignore-errors (delete-file (merge-pathnames (server-ready-file server))))))
-
-;;; stdin: EOF means the parent that started us is gone (CONTRACT §1).
-
-(defun watch-stdin-loop (server)
-  (loop for char = (read-char *standard-input* nil :eof)
-        until (eq char :eof))
-  (post server (list :stdin-eof)))
-
 ;;; The op flusher: one thread, which waits for the next coalescing deadline
 ;;; instead of polling for it.
 
@@ -727,13 +682,13 @@ call still waiting is answered 503.  T once no task is left."
   (when (server-flusher-thread server)
     (ignore-errors (bt:join-thread (server-flusher-thread server))))
   (close-connection-threads server)
-  (delete-ready-file server))
+  (delete-ready-file (server-ready-file server)))
 
 (defun serve (server agent &key resumed-p)
-  "Serve AGENT's session over HTTP until POST /shutdown (or, with
---watch-stdin, until the pipe on stdin reaches end of file).  Returns the exit
-code: 0 after a clean shutdown, 64 when the address cannot be bound (a
-usage error — restarting would not free the port)."
+  "Serve AGENT's session over HTTP until POST /ops server.shutdown — or, with
+--watch-stdin, until stdin closes.  Returns the exit code: 0 after a clean
+shutdown, 64 when the address cannot be bound (a usage error — restarting
+would not free the port)."
   (setf (server-agent server) agent
         (agent-events-cb agent) (events-callback server))
   (handler-case (open-listener server)
@@ -744,19 +699,20 @@ usage error — restarting would not free the port)."
   ;; The port is chosen once: tell the supervisor which one, so a restart
   ;; binds the same and the clients that hold the URL keep it.
   (evo.kernel:note-bound-port (server-port server))
-  (write-ready-file server agent)
-  (when (server-watch-stdin server)
-    (watch-stdin-eof (lambda ()
-                       (say-event server "stdin closed — shutting down" :dim)
-                       (setf (server-quit server) t))))
-  (publish (server-log server)
-           (list :type :hello :pid (evo.port:getpid) :port (server-port server)
-                 :session (namestring (journal-path (agent-journal agent)))))
+  (install-session-topic server agent)
+  (when (server-ready-file server) (write-ready-file server agent))
   (setf (server-listener-thread server)
-        (bt:make-thread (lambda () (accept-loop server)) :name "evo-serve-listener"))
+        (bt:make-thread (lambda () (accept-loop server)) :name "evo-serve-listener")
+        (server-flusher-thread server)
+        (bt:make-thread (lambda () (op-flusher-loop server)) :name "evo-serve-flusher"))
+  ;; End of file on the pipe a parent holds is the immediate, pid-reuse-proof
+  ;; sign that it is gone (CONTRACT §1); the session thread is the one that
+  ;; decides to stop, so the watcher only tells it.
+  (when (server-watch-stdin server)
+    (watch-stdin-eof (lambda () (post server (list :stdin-eof)))))
   (format t "~&~a serve: listening on http://~a:~d/~@[ (ready file ~a)~]~%"
-          (getf (server-identity server) :name)
-          (server-host server) (server-port server) (server-ready-file server))
+          (server-program server) (server-host server) (server-port server)
+          (server-ready-file server))
   (finish-output)
   (unwind-protect
        (progn
@@ -769,8 +725,5 @@ usage error — restarting would not free the port)."
       (ignore-errors (funcall (server-shutdown-hook server) server)))
     (ignore-errors (end-session agent))
     (ignore-errors (shutdown-task server))
-    (publish (server-log server) (list :type :bye))
-    (stop-listening server)
-    (when (server-wrote-ready-file server)
-      (delete-ready-file (server-ready-file server))))
+    (stop-listening server))
   0)

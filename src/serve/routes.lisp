@@ -188,8 +188,9 @@ thread, which may be inside a long operation (CONTRACT §5.1)."
     (multiple-value-bind (epoch seq snaps) (topics-snapshot server names items)
       (write-json stream 200
                   (list :epoch epoch :seq seq
-                        :topics (json-object-value (loop for (name . snap) in snaps
-                                                   collect (cons name snap))))))))
+                        :topics (json-object-value
+                                 (loop for (name . snap) in snaps
+                                       collect (cons name (wire-has-more snap)))))))))
 
 (defun handle-items (server request body stream)
   "Older items of one topic, newest first among themselves (CONTRACT §5.4)."

@@ -1,19 +1,20 @@
-;;;; catalog.lisp — what this session can use, as one document.
+;;;; catalog.lisp — GET /catalog: everything this session can be told to do.
 ;;;;
-;;;; GET /catalog answers it live, and `evo-agent catalog --json` /
-;;;; `evo-swarm catalog --json` print the same thing with no listener at all
-;;;; (docs/serve.md): the models, the providers and whether they have a key,
-;;;; the thinking ladder, the languages, the tools, skills and commands, and
-;;;; — for a swarm — the models a lane can run.
+;;;; The GUI's chooser state, in one document: which models exist (and which
+;;;; are usable right now, and why not), which providers have a key, the
+;;;; language packs, the commands, the skills, the tools, and the ops with
+;;;; their argument schemas.  Nothing here is ever a secret — a provider says
+;;;; whether it HAS a key, never the key (CONTRACT §5.6).
 ;;;;
-;;;; Two rules hold over the whole document.  **No key ever appears**: a
-;;;; provider says whether it has one and which variable it comes from, never
-;;;; the key itself.  And **one bad entry never takes the document down**: an
-;;;; entry that cannot be built is left out and named in `warnings`, because
-;;;; a catalog is exactly what a client reads when something is wrong with the
-;;;; configuration.
+;;;; The builder is total: an entry that raises is dropped and named in
+;;;; `warnings`, because one broken extension must not cost a client the whole
+;;;; catalog (the old /registry answered 500 for the same case).
 
 (in-package :evo.serve)
+
+(defvar *server-for-catalog* nil
+  "The server whose ops (and eval gate) the catalog should describe.  Bound
+around a catalog build; a builder without a server describes every op.")
 
 (defvar *kernel-apis* (api-keys)
   "The provider APIs a lane starts with: the ones the kernel bundled, captured
@@ -22,37 +23,21 @@ another.  A lane boots --no-userspace, so a model whose API is not here runs
 in a lane only if the swarm's in-lanes code loaded that API's extension into
 it, which no catalog can know without running a lane.")
 
-(defvar *op-catalog* nil
-  "The POST /ops operations, as the ops layer registers them: a list of
-(:name NAME :args SCHEMA :precondition :none|:idle|:quiescent).  Empty until
-a program fills it; the catalog is still complete without it.")
-
-;;; Readiness: could this session run this model right now?
-
 (defun provider-has-key-p (registration)
-  "Whether PROVIDER (a provider-registration plist) has a usable key: one set
-with :api-key, or the variable it names holding something."
-  (or (plusp (length (or (getf registration :api-key) "")))
-      (let ((env (getf registration :api-key-env)))
-        (and env (plusp (length (or (getenv env) "")))))))
+  (let ((key (getf registration :api-key))
+        (env (getf registration :api-key-env)))
+    (and (or (and (stringp key) (plusp (length key)))
+             (and env (plusp (length (or (getenv env) "")))))
+         t)))
 
-(defun model-readiness (model)
-  "Whether a session could run MODEL now: (values ready reason code).  REASON
-is a short sentence naming what is missing — a provider, its address, or the
-variable its key comes from — and is NIL when there is nothing missing.  CODE
-is the same fact as a machine code (\"provider_unregistered\", \"no_base_url\",
-\"no_api_key\") for a caller that has to branch on it.  Neither ever quotes a
-value out of the configuration."
-  (let ((reg (provider-registration (pget model :provider))))
-    (cond
-      ((null reg) (values nil "its provider is not registered" "provider_unregistered"))
-      ((null (getf reg :base-url))
-       (values nil "its provider has no address configured" "no_base_url"))
-      ((and (null (getf reg :api-key))
-            (let ((env (getf reg :api-key-env)))
-              (and env (zerop (length (or (getenv env) ""))))))
-       (values nil (format nil "no API key: set ~a" (getf reg :api-key-env)) "no_api_key"))
-      (t (values t nil nil)))))
+(defun provider-api (key)
+  "The API provider KEY belongs to: the one that seeds it, else the API of a
+model registered under it, else NIL."
+  (or (loop for api-key in (api-keys)
+            for api = (ignore-errors (find-api api-key))
+            when (and api (eq (default-provider-key api) key)) return api-key)
+      (loop for model in (all-models)
+            when (eq (pget model :provider) key) return (pget model :api))))
 
 (defun model-reasoning-p (model)
   "Whether MODEL can be asked to think: an effort ladder, or an adapter that
@@ -114,8 +99,8 @@ without a server.)")
 
 (defun catalog-entries (items name-of build warnings what)
   "BUILD each of ITEMS into an entry, in order.  An entry that cannot be built
-is dropped and named in WARNINGS — never lets its condition reach the caller,
-and never quotes anything but the entry's own name."
+is dropped and named in WARNINGS — its condition never reaches the caller, and
+nothing but the entry's own name is quoted."
   (let ((out nil))
     (dolist (item items (coerce (nreverse out) 'vector))
       (let ((name (ignore-errors (funcall name-of item))))
@@ -148,61 +133,13 @@ and never quotes anything but the entry's own name."
           :has-key (wire-boolean (provider-has-key-p registration))
           :key-env (getf registration :api-key-env))))
 
-(defun provider-catalog (warnings)
-  (catalog-entries
-   (provider-keys)
-   (lambda (key) (string-downcase (symbol-name key)))
-   (lambda (key)
-     (let ((reg (provider-registration key)))
-       (list :name (string-downcase (symbol-name key))
-             :api (provider-api key)
-             :has-key (provider-has-key-p reg)
-             :key-env (getf reg :api-key-env))))
-   warnings "provider"))
+(defun catalog-commands ()
+  (loop for (name . description) in (evo.command:command-catalog)
+        collect (list :name name :description description :args-hint nil)))
 
-(defun language-catalog ()
-  (coerce (loop for pack in (all-prompt-languages)
-                collect (list :code (getf pack :code) :name (getf pack :name)))
-          'vector))
-
-(defun command-catalog-entries ()
-  (coerce (loop for (name . description) in (evo.command:command-catalog)
-                collect (list :name name :description description :args-hint nil))
-          'vector))
-
-(defun skill-catalog ()
-  (coerce (loop for skill in (available-skills)
-                collect (list :name (getf skill :name)
-                              :description (getf skill :description)))
-          'vector))
-
-(defun tool-catalog ()
-  (coerce (loop for name in (all-tool-names)
-                for tool = (find-tool name)
-                collect (list :name name
-                              :description (and tool (tool-description tool))))
-          'vector))
-
-(defun session-model (agent)
-  "The model this session's next turn runs on, or NIL when it does not
-resolve — the second half of `default_model` (the first half, the id, is kept
-even when it does not resolve, so a client can say what is wrong with it)."
-  (handler-case (effective-model (fold-state (agent-journal agent)) agent)
-    (error () nil)))
-
-(defun default-model-entry (agent)
-  (let* ((state (fold-state (agent-journal agent)))
-         (id (handler-case (effective-model-id state agent) (error () nil)))
-         (model (session-model agent)))
-    (when (or id model)
-      (list :id (or (pget model :id) id)
-            :provider (pget model :provider)))))
-
-(defun lane-catalog (swarm warnings)
+(defun lane-catalog (warnings)
   "The lane half of a swarm's catalog: the models a lane can run, computed
-from the kernel API set without starting one.  SWARM is the swarm's lane
-configuration as a plist (:lane-model :lane-provider :lane-thinking :workers)."
-  (declare (ignore swarm))
+from the kernel API set without starting one."
   (list :models (catalog-entries
                  (all-models)
                  (lambda (m) (pget m :id))

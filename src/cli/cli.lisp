@@ -24,6 +24,10 @@ Usage:
                                          with an active goal and no -p, continues the goal
   evo-agent --events ...                 emit line-delimited sexpr events instead of text
   evo-agent --list-sessions              list sessions for this cwd, last worked in first
+  evo-agent sessions --json              the session list as one JSON document, from the
+                                         index (~/.evo/sessions/index.jsonl); --all every
+                                         directory, --cwd DIR, --program evo-swarm, --rescan
+                                         to rebuild it from the journals
   evo-agent --model <id>[@<provider>]    model id (default: the :model setting from init.lisp);
                                          @provider picks one of several registrations
   evo-agent --thinking <level>           low|medium|high|xhigh|max (default medium)
@@ -37,8 +41,6 @@ Usage:
       --watch-stdin                      EOF on stdin means the driver is gone: shut down
       --as-lane                          write the session as a lane's, not a person's
       --no-http-eval                     do not offer the eval op (eval is RCE)
-      --as-lane                          this serve is a swarm's lane: its
-                                         journal says the program is lane
       --allow-remote                     permit a non-loopback --host
       --resume [path] --model <id> --thinking <level> --no-userspace  as above
   evo-agent catalog --json [--no-userspace]
@@ -74,8 +76,12 @@ models registered by extensions.  evo-agent ships no built-in model table, e.g.
 `catalog` selects that subcommand (:serve / :catalog) and admits its own
 flags."
   (let ((opts nil))
-    (when (and argv (member (first argv) '("serve" "catalog") :test #'string=))
-      (setf (getf opts (if (string= (pop argv) "serve") :serve :catalog)) t))
+    (when (and argv (member (first argv) '("serve" "catalog" "sessions") :test #'string=))
+      (let ((sub (pop argv)))
+        (setf (getf opts (cond ((string= sub "serve") :serve)
+                               ((string= sub "catalog") :catalog)
+                               (t :sessions)))
+              t)))
     (loop while argv
           for arg = (pop argv)
           do (cond
@@ -106,9 +112,8 @@ flags."
                       (append (getf opts :images)
                               (list (or (pop argv) (error "--image needs a path"))))))
                ((string= arg "--model")
-                ;; SET-MODEL-OPT returns the plist: SETF GETF on a key that is
-                ;; not there yet prepends, and a prepend cannot be seen by the
-                ;; caller unless it takes the result back.
+                ;; SETF: SET-MODEL-OPT may add a key, and GETF's setf
+                ;; prepends a cons our caller would never see.
                 (setf opts (set-model-opt opts (or (pop argv) (error "--model needs an id")))))
                ((string= arg "--thinking")
                 (let ((level (intern (string-upcase
@@ -127,11 +132,6 @@ flags."
                 (setf (getf opts :ready-file) (or (pop argv) (error "--ready-file needs a path"))))
                ((and (getf opts :serve) (string= arg "--watch-stdin"))
                 (setf (getf opts :watch-stdin) t))
-               ((and (getf opts :serve) (string= arg "--as-lane"))
-                ;; A lane: a serve process a swarm's coordinator owns.  Its
-                ;; journal says so (CONTRACT §3), so a session list can tell a
-                ;; lane from a coordinator without opening the file.
-                (setf (getf opts :as-lane) t))
                ((and (getf opts :serve) (string= arg "--no-http-eval"))
                 (setf (getf opts :no-http-eval) t))
                ;; A lane is an agent serving one session for a coordinator
@@ -265,9 +265,7 @@ program opened it (`evo-agent` or `evo-swarm`, the name this process runs
 under); a resumed session that predates the field is stamped with the same, so
 the session list can say whose sessions these are."
   (let ((resume (getf opts :resume))
-        (program (or (getf opts :program-name)
-                     (and (getf opts :as-lane) "lane")
-                     evo.port:*program-name* "evo-agent")))
+        (program (or (getf opts :program-name) evo.port:*program-name* "evo-agent")))
     (flet ((stamped (journal)
              (unless (pget (journal-header journal) :program)
                (set-session-header journal :program program))
@@ -318,10 +316,10 @@ that path rather than as a brand-new journal (CONTRACT §1, F4)."
           ;; One binary, two roles: the plain invocation is the
           ;; supervisor parent; it re-spawns this same binary as the child.
           ((supervised-run-p opts)
-           ;; A serve token is minted once per launch, here in the parent,
-           ;; so a restarted child keeps the one clients already hold.
            (when (getf opts :serve)
              (check-serve-ready opts)
+             ;; One token per launch, minted here in the parent, so a
+             ;; restarted child keeps the one clients already hold.
              (evo.port:setenv "EVO_SERVE_TOKEN" (evo.serve:resolve-token)))
            (supervise argv))
           (t (run-cli opts)))
@@ -490,9 +488,9 @@ whole point (see docs/serve.md \"Starting it\")."
 
 (defun check-serve-ready (opts)
   "serve needs somewhere for its URL and token to reach a client: a
---ready-file to publish them to, or EVO_SERVE_TOKEN naming the token itself.
-With neither, the random token would lock everybody out, so refuse up front
-(exit 64)."
+--ready-file to publish them to, or EVO_SERVE_TOKEN naming the token itself
+(tests do).  With neither, the random token would lock everybody out, so
+refuse up front (exit 64)."
   (unless (or (getf opts :ready-file)
               (plusp (length (getenv "EVO_SERVE_TOKEN"))))
     (error 'usage-error
@@ -500,7 +498,8 @@ With neither, the random token would lock everybody out, so refuse up front
 
 (defun run-serve (opts)
   "The HTTP frontend: validate the bind, bring the session up with the server
-as its frontend, then serve until POST /shutdown (or end of file on stdin)."
+as its frontend, then serve until the server.shutdown op — or, with
+--watch-stdin, until stdin closes."
   (check-serve-ready opts)
   (let ((host (or (getf opts :host) "127.0.0.1")))
     (unless (or (evo.serve:loopback-host-p host) (getf opts :allow-remote))
@@ -511,7 +510,8 @@ as its frontend, then serve until POST /shutdown (or end of file on stdin)."
                                          :port (getf opts :port)
                                          :token (evo.serve:resolve-token)
                                          :ready-file (getf opts :ready-file)
-                                         :watch-stdin (getf opts :watch-stdin))))
+                                         :watch-stdin (getf opts :watch-stdin)
+                                         :eval-enabled (not (getf opts :no-http-eval)))))
       (multiple-value-bind (agent resumed-p) (setup-agent opts :frontend server)
         (evo.serve:serve server agent :resumed-p resumed-p)))))
 

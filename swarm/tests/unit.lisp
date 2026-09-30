@@ -1345,8 +1345,6 @@ why not — the answer a GUI's chooser needs before it spawns anything."
     (test-serve-exit-codes)
     (test-sse-reader)
     (test-pid-alive)
-    (test-catalog)
-    (test-swarm-check)
     (test-sample-config)
     ;; The two questions the GUI asks before it starts a swarm, answered
     ;; offline (swarm/offline.lisp, CONTRACT §2).

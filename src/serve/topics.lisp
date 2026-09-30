@@ -205,8 +205,6 @@ one, else the swarm topic."
 
 (defun topic-on-event (server event)
   "Feed one kernel event to every provider that wants events."
-  (when (eq (getf event :type) :steering)
-    (forget-completed-input server (or (getf event :text) "")))
   (dolist (name (topic-provider-names server))
     (let ((provider (topic-provider server name)))
       (when provider

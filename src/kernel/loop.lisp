@@ -174,17 +174,14 @@ entry is then the session's history, not something a frontend may take back."
   ;; local binding (a flet parameter) would drop the entry from a copy and
   ;; leave the real queue untouched.
   (bt:with-lock-held ((agent-lock agent))
-    (flet ((without (queue)
-             (remove-if (lambda (item) (equal (pget item :id) id)) queue)))
-      (let* ((steering (agent-steering agent))
-             (followups (agent-followups agent))
-             (kept-steering (without steering))
-             (kept-followups (without followups))
-             (found (or (/= (length kept-steering) (length steering))
-                        (/= (length kept-followups) (length followups)))))
+    (let* ((steering (agent-steering agent))
+           (followups (agent-followups agent))
+           (kept-steering (remove-if (lambda (item) (equal (pget item :id) id)) steering))
+           (kept-followups (remove-if (lambda (item) (equal (pget item :id) id)) followups)))
+      (prog1 (or (not (eql (length kept-steering) (length steering)))
+                 (not (eql (length kept-followups) (length followups))))
         (setf (agent-steering agent) kept-steering
-              (agent-followups agent) kept-followups)
-        (and found t)))))
+              (agent-followups agent) kept-followups)))))
 
 (defun steering-pending-p (agent)
   (bt:with-lock-held ((agent-lock agent))

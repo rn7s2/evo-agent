@@ -212,8 +212,8 @@ does nothing a second time. A client branches on `error.code` alone.
 
 | op | args → result |
 |---|---|
-| `input.send` | `{text, images:[{name,media_type,data(base64)}], queue:"now"\|"after_run", topic?}` → `{item_id, queued, blocked}`. `blocked` is `model_not_ready` when the model does not resolve; the input waits, and runs once it does. |
-| `input.cancel` | `{item_id}` → `{}`. The queued item is marked `cancelled` (or removed); if it has already been drained, the error is `already_sent`. |
+| `input.send` | `{text, images:[{name,media_type,data(base64)}], queue:"now"\|"after_run", topic?}` → `{item_id, queued, blocked}`. The id is the entry id the input will be journaled under, so the row a client draws now keeps its identity when it is sent. `blocked` is `model_not_ready` when the model does not resolve; the input waits, and runs once it does. |
+| `input.cancel` | `{item_id}` → `{}`. Input that has not been drained leaves the transcript (the view publishes the `item.remove`); one that has been drained is history — `already_sent`. |
 | `run.interrupt` | `{scope:"session"\|"swarm"\|"lane", lane?}` → `{interrupted:["session", …]}` — the topics that were actually stopped, empty when nothing was running. |
 | `goal.set` / `goal.pause` / `goal.resume` / `goal.clear` | `{objective, budget?}` / `{}` / `{}` / `{}` → `{goal}`. Only a person pauses or resumes; a cleared goal reads as `null`. |
 | `model.set` / `thinking.set` / `language.set` | `{id, provider?}` / `{level}` / `{code}` → `{model}` / `{thinking}` / `{language}`. |
@@ -303,9 +303,15 @@ must keep: publish an op from inside the same critical section that changes
 the state it describes, so a client can fold the ops onto a snapshot and land
 on the state itself. `topic:*` never needs telling about a topic's meaning.
 
-serve installs exactly one topic itself — `session`, whose provider is the
-view (`evo.view`, CONTRACT §7) — and overlays onto its state the two keys it
-owns, `task` and `status`, because serve is what starts and finishes runs.
+serve installs exactly one topic itself: `session`, whose provider is the view
+(`evo.view`, CONTRACT §7).  The view derives the whole of that topic — items,
+status, task, model, context, goal, the queue — from the journal and the
+kernel's events, and serves nothing to serve's own bookkeeping; serve's part is
+to publish the ops it emits, to feed it the events (`view-on-event`), the
+journal appends (a journal listener, moved when the session switches journals)
+and the input a client queues before it is journaled
+(`view-input-queued` / `view-input-cancelled`), and to tell it when the fold
+moved in a way no append reports (a leaf move: `topic.reset`).
 
 ## What serve is, underneath
 
@@ -317,8 +323,10 @@ owns, `task` and `status`, because serve is what starts and finishes runs.
   is what keeps a long answer from costing thousands of ops.
 - **Snapshots.** A snapshot flushes the coalesced appends, reads the seq, asks
   every provider, and reads the seq again: if it moved, the snapshot is taken
-  again. That is the whole of the atomicity story, and it is why a client can
-  fold a stream onto a snapshot without applying anything twice.
+  again. The op log's lock is not held across the providers
+  (a provider publishes from inside its own critical section, so holding it
+  there would deadlock two threads taking the same two locks in opposite
+  orders); the second read is what replaces it.
 - **One command layer.** What `/goal`, `/model`, `/compact`, `/tree`,
   `/resume` … *do* lives in `src/command/command.lisp`, in the core, and both
   the TUI and serve dispatch through it. A frontend implements a small *host*

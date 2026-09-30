@@ -24,7 +24,9 @@
      (or (ignore-errors (file-write-date path)) start-time)))
 
 (defparameter *serve-restart-flags* '("--host" "--port" "--ready-file")
-  "serve flags a restarted child keeps, each with its value.")
+  "serve flags a restarted child keeps, each with its value.  The bound port
+is substituted for `--port 0` once the child has reported it (PIN-BOUND-PORT,
+CONTRACT §1).")
 
 (defparameter *serve-restart-switches*
   '("--allow-remote" "--no-userspace" "--watch-stdin" "--no-http-eval"
@@ -33,10 +35,10 @@
 
 (defun serve-restart-flags (argv)
   "The serve flags in ARGV that describe the server rather than the session:
-where it listens, where its ready file goes, and whether it follows stdin.
---model, --thinking and --resume are session state, which the journal already
-carries — re-passing --model would re-journal the launch model over a /model
-switch made since."
+where it listens, where its ready file goes, whether it follows stdin, and
+whether eval over HTTP is offered.  --model, --thinking and --resume are
+session state, which the journal already carries — re-passing --model would
+re-journal the launch model over a /model switch made since."
   (loop while argv
         for arg = (pop argv)
         when (member arg *serve-restart-flags* :test #'equal)

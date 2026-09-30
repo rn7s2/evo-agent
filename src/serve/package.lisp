@@ -38,6 +38,9 @@
            ;; the `lanes` half: a program that runs lanes registers it
            #:*catalog-lanes-hook* #:lane-catalog
            #:*op-catalog* #:*kernel-apis*
+           ;; ops, for a program that adds its own
+           #:register-op #:find-op #:all-ops #:op-error #:op-error-code
+           #:op-error-message #:op-fail #:dispatch-op #:answer-op
            ;; the seams a program extends: who it is, and the routes it adds
            #:*identity* #:server-routes
            #:add-route #:make-route #:route-path #:route-method #:route-handler
