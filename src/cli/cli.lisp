@@ -265,17 +265,7 @@ the session list can say whose sessions these are."
           ((supervised-run-p opts)
            ;; A serve token is minted once per launch, here in the parent,
            ;; so a restarted child keeps the one clients already hold.
-           (when (getf opts :sessions)
-      ;; An offline CLI: it prints one JSON document and exits, so nothing
-      ;; that would open a session belongs on the same command line.
-      (unless (getf opts :json)
-        (error "sessions needs --json — it prints the index as one document"))
-      (dolist (flag '((:prompt . "-p") (:events . "--events") (:images . "--image")
-                      (:serve . "serve") (:goal . "--goal")
-                      (:list-sessions . "--list-sessions")))
-        (when (getf opts (car flag))
-          (error "~a does not combine with sessions" (cdr flag)))))
-    (when (getf opts :serve)
+           (when (getf opts :serve)
              (check-serve-token opts)
              (evo.port:setenv "EVO_SERVE_TOKEN" (evo.serve:resolve-token)))
            (supervise argv))
