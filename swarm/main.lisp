@@ -40,12 +40,9 @@ Usage:
                                  then PATH)
   evo-swarm --no-userspace       no init files, extensions or swarm.lisp
   evo-swarm --no-supervisor      run the coordinator in-process
-  evo-swarm catalog --json [--lane-model <id>] [--workers <n>]
-                                 print what a swarm from here could use — the
-                                 coordinator's catalog plus the models a lane
-                                 can run — and exit
-  evo-swarm check   --json [--model <id>] [--lane-model <id>] [--workers <n>]
-                                 validate a launch (exit 1 when it cannot work)
+  evo-swarm catalog --json       what a swarm launched from here could use,
+                                 without launching one
+  evo-swarm check --json         whether that launch would work; exit 1 if not
   evo-swarm --help | --version
 
 serve takes the agent's serve flags and the swarm's own together.  Its port
@@ -67,12 +64,13 @@ settings for the swarm, lane count, tool limits, prompt notes, and
 
 (defun parse-args (argv)
   (let ((opts nil))
-    (when (and argv (member (first argv) '("serve" "catalog" "check") :test #'string=))
-      (let ((sub (pop argv)))
-        (setf (getf opts (cond ((string= sub "serve") :serve)
-                               ((string= sub "catalog") :catalog)
-                               (t :check)))
-              t)))
+    ;; The subcommands.  `serve` opens a door; `catalog` and `check` answer a
+    ;; question and exit — the GUI asks them before it starts anything.
+    (cond ((equal (first argv) "serve")
+           (pop argv)
+           (setf (getf opts :serve) t))
+          ((member (first argv) '("catalog" "check") :test #'equal)
+           (setf (getf opts (intern (string-upcase (pop argv)) :keyword)) t)))
     (loop while argv
           for arg = (pop argv)
           do (cond
@@ -121,6 +119,10 @@ settings for the swarm, lane count, tool limits, prompt notes, and
                       (or (pop argv) (error 'evo.cli:usage-error :text "--ready-file needs a path"))))
                ((and (getf opts :serve) (string= arg "--watch-stdin"))
                 (setf (getf opts :watch-stdin) t))
+               ;; catalog/check always answer JSON; --json says so out loud,
+               ;; as the agent's catalog does.
+               ((and (or (getf opts :catalog) (getf opts :check)) (string= arg "--json"))
+                (setf (getf opts :json) t))
                ((and (getf opts :serve) (string= arg "--allow-remote"))
                 (setf (getf opts :allow-remote) t))
                ((member arg '("-h" "--help") :test #'string=) (setf (getf opts :help) t))

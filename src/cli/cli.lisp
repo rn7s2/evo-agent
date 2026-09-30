@@ -32,8 +32,10 @@ Usage:
   evo-agent serve [options]              headless session controlled over HTTP (docs/serve.md)
       --host <addr>                      address to bind (default 127.0.0.1)
       --port <n>                         port to bind (default 8421; 0 picks a free one)
-      --ready-file <path>                publish url, token, epoch and session here (mode 0600)
-      --watch-stdin                      shut down cleanly when stdin reaches end of file
+      --ready-file <path>                publish {port, url, token, epoch, session} here,
+                                         mode 0600, atomically, rewritten after every restart
+      --watch-stdin                      EOF on stdin means the driver is gone: shut down
+      --as-lane                          write the session as a lane's, not a person's
       --no-http-eval                     do not offer the eval op (eval is RCE)
       --as-lane                          this serve is a swarm's lane: its
                                          journal says the program is lane
@@ -132,6 +134,12 @@ flags."
                 (setf (getf opts :as-lane) t))
                ((and (getf opts :serve) (string= arg "--no-http-eval"))
                 (setf (getf opts :no-http-eval) t))
+               ;; A lane is an agent serving one session for a coordinator
+               ;; that supervises it (CONTRACT §9.2): the session it writes
+               ;; belongs to "lane", so a session list can tell a lane's
+               ;; journals from a person's.
+               ((and (getf opts :serve) (string= arg "--as-lane"))
+                (setf (getf opts :program-name) "lane"))
                ((and (getf opts :serve) (string= arg "--allow-remote"))
                 (setf (getf opts :allow-remote) t))
                ((member arg '("-h" "--help") :test #'string=) (setf (getf opts :help) t))

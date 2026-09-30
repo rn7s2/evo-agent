@@ -26,7 +26,9 @@
 (defparameter *serve-restart-flags* '("--host" "--port" "--ready-file")
   "serve flags a restarted child keeps, each with its value.")
 
-(defparameter *serve-restart-switches* '("--allow-remote" "--no-userspace" "--watch-stdin")
+(defparameter *serve-restart-switches*
+  '("--allow-remote" "--no-userspace" "--watch-stdin" "--no-http-eval"
+    "--as-lane")
   "serve flags a restarted child keeps, each with no value.")
 
 (defun serve-restart-flags (argv)
