@@ -124,6 +124,12 @@ its exact session (CONTRACT §8), never a bare --resume."
                      (list "--resume" (namestring session)))
                     ((lane-has-session-p lane) '("--resume")))))))
 
+;; The unit suite drives BRING-UP-LANE with these three replaced (no process,
+;; no ready file, no eval): ECL compiles a call to a function in the same file
+;; as a direct call, so without NOTINLINE the replacement is never seen there
+;; and the real LAUNCH-LANE runs (see START-LANES/STOP-SWARM below).
+(declaim (notinline launch-lane wait-for-ready initialize-lane))
+
 (defun launch-lane (lane &key resume)
   "Start LANE's process, detached from our terminal, logging to its directory.
 RESUME continues the exact session its ready file named.  Returns the process,
