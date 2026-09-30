@@ -694,9 +694,20 @@ without a scope parameter, leaving the grant as it was."
 (defun claude-oauth--has-key-p ()
   "True if a Claude OAuth token is available: env var, init.lisp :api-key,
 or stored token file."
+  (evo:api-credentials-available-p (evo:find-api :anthropic-oauth-messages)
+                                   (evo:provider-registration :anthropic-oauth)))
+
+(defmethod evo:api-credentials-available-p ((api claude-oauth-messages-api)
+                                            registration)
+  "A Claude OAuth access token is not an environment variable: it is whatever
+CLAUDE_OAUTH_ACCESS_TOKEN holds, or the token a login stored in
+~/.evo/claude-oauth/token.sexp.  A readiness question reads that file and
+stops there — no network call, and above all no refresh, which would spend a
+single-use refresh token to answer a question about a swarm that may never
+start.  The token itself is never returned: only whether there is one."
+  (declare (ignore api))
   (or (claude-oauth--env "CLAUDE_OAUTH_ACCESS_TOKEN")
-      (claude-oauth--trim
-       (evo.util:pget (evo:provider-registration :anthropic-oauth) :api-key))
+      (claude-oauth--trim (evo.util:pget registration :api-key))
       (getf (claude-oauth--read-tokens) :access-token)))
 
 (when (claude-oauth--has-key-p)

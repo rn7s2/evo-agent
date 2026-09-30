@@ -98,6 +98,32 @@ seed nothing."))
   (:documentation "Canonical API-key environment variable for the seeded
 provider."))
 
+(defun registration-credentials-available-p (registration)
+  "The plain credential rule: REGISTRATION (as REGISTER-PROVIDER stored it)
+holds a literal :api-key, or names an :api-key-env variable that is set and
+non-empty.  Never returns the credential itself."
+  (let ((key (pget registration :api-key))
+        (env (pget registration :api-key-env)))
+    (and (or (and (stringp key) (plusp (length key)))
+             (and env (plusp (length (or (getenv env) "")))))
+         t)))
+
+(defgeneric api-credentials-available-p (api registration)
+  (:method ((api provider-api) registration)
+    (registration-credentials-available-p registration))
+  (:documentation "Whether a session can authenticate against API right now,
+given the REGISTRATION (:base-url :api-key :api-key-env) of the provider that
+uses it.  The default rule is REGISTRATION-CREDENTIALS-AVAILABLE-P — a
+literal key, or a set environment variable — but an API whose credential
+lives somewhere else says so for itself: Anthropic OAuth's, for one, is a
+token in a file the user logged in with, and it specializes this method
+(extensions/020-claude-oauth-provider.lisp).
+
+Readiness asks this before a launch and must stay cheap and harmless: an
+implementation reads configuration only — no network call, no refresh — and
+answers a boolean.  Nothing here is ever a secret (CONTRACT §5.6): the caller
+learns whether, never what."))
+
 ;;; Registry: ordered alist, populated at load time by the files in this
 ;;; module and at boot by extensions.
 

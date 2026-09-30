@@ -365,6 +365,25 @@ These three default to `nil` (seed nothing), so implementing them is
 genuinely optional. Re-registering the same key replaces in place, which
 is what keeps a reloaded extension idempotent.
 
+A credential that is *not* a literal `:api-key` and not an environment
+variable — a token you stored on disk yourself, say — needs one more method,
+or readiness will report the model as unusable:
+
+```lisp
+(defmethod evo:api-credentials-available-p ((api myco-api) registration)
+  (and (probe-file (myco-token-file)) t))
+```
+
+`registration` is the provider's registration plist
+(`evo:provider-registration`). The default method is the plain rule: a
+literal `:api-key`, or a set, non-empty `:api-key-env` variable. Yours is
+asked whenever anything wants to know whether a model is usable *now* —
+`/catalog`'s model and provider entries, and `evo-swarm check`/`catalog` —
+so it must stay cheap and side-effect free: read configuration, make no
+network call, and never refresh a token to answer. Return a boolean; the
+value itself is never read by anyone, and the catalog never quotes a
+credential (CONTRACT §5.6).
+
 ## Status line segments (core registry)
 
 The bottom status line is composed from named segments, not formatted in one

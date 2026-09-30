@@ -99,7 +99,10 @@ HTTP.
 - **No secrets in the catalog.** A provider reports whether it *has* a key and
   the name of the variable the key comes from, never a key. Error messages
   never quote a value the caller sent, so nothing a client holds can come back
-  out of an error.
+  out of an error. Whether a credential is there is the *API's* answer
+  (`evo:api-credentials-available-p`), not the catalog's guess: an API that
+  keeps its own — Claude OAuth's token file, say — is asked, and answers
+  whether, never what.
 
 ## Lifecycle and supervision
 
@@ -274,6 +277,13 @@ request rather than after the first lane boots:
 ```lisp
 (setf evo.serve:*catalog-lanes-hook* #'evo.serve:lane-catalog)
 ```
+
+A program that can answer better passes its half directly, as
+`evo.serve:catalog-plist`'s `:swarm` argument — `evo-swarm`'s offline
+`catalog`/`check` do, having evaluated the lanes' own configuration. The key
+is the whole half (`(:models […])`), so a program either hands one in or lets
+the kernel-API-set answer stand; both beat not answering at all, since the
+hook's absence is what makes `lanes` absent.
 
 A hook that raises costs the document its `lanes` key and names the fact in
 `warnings`, like every other entry.

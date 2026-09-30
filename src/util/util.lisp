@@ -3,8 +3,17 @@
 
 (in-package :evo.util)
 
+(defvar *environment-overlay* nil
+  "Alist of NAME → value GETENV answers before the process environment, for a
+caller that has to compute what *another process* would compute from inside
+this one.  evo-swarm's offline `check` and `catalog` bind it to the variables
+a launch puts in a lane's environment, and evaluate the lane's configuration
+under it, so the verdict they report is the lane's own.  NIL everywhere else,
+where the process environment is the environment.")
+
 (defun getenv (name)
-  (uiop:getenv name))
+  (let ((entry (assoc name *environment-overlay* :test #'string=)))
+    (if entry (cdr entry) (uiop:getenv name))))
 
 (defun url-host (url)
   (let* ((start (let ((p (search "://" url))) (if p (+ p 3) 0)))
