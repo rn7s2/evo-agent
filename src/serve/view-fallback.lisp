@@ -87,7 +87,13 @@ this is a test double, and a bounded one.")
 what every frontend shows about a session."
   (let* ((server (fallback-topic-server topic))
          (agent (server-agent server)))
-    (handler-case (evo.command:session-summary agent)
+    (handler-case
+        (let ((summary (evo.command:session-summary agent)))
+          ;; A withdrawn goal is no goal: it reads null here even before the
+          ;; fold itself learns that (:cleared is absence, not a status).
+          (when (eq (getf (getf summary :goal) :status) :cleared)
+            (setf (getf summary :goal) nil))
+          summary)
       (error () nil))))
 
 (defun fallback-publish-state (topic)

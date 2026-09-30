@@ -52,12 +52,17 @@ argument spec the catalog publishes (a plist of keyword -> plist with :type,
                                                             (getf value :description)))))))
              (required (loop for (key value) on spec by #'cddr
                              when (getf value :required)
-                               collect (string-downcase (symbol-name key)))))
+                               collect (substitute #\_ #\-
+                                                   (string-downcase (symbol-name key))))))
         (append (list :type "object")
                 (when properties (list :properties properties))
                 (when required (list :required (coerce required 'vector)))))))
 
 ;;; Arguments.  A bad argument is `invalid_args` with a fixed message.
+
+;; JSON keys arrive as keywords with "_" read as "-" (:line_count ->
+;; :LINE-COUNT), so an op's argument names are dashed here and underscore on
+;; the wire: :ITEM-ID is "item_id" in a request and in the catalog.
 
 (defun op-arg (args key &key required (type :string))
   (let ((value (getf args key)))
@@ -257,7 +262,7 @@ one in flight (CONTRACT §5.5)."
 
 (defun op-input-cancel (server args)
   "A queued turn that has not been drained yet: drop it."
-  (let ((id (op-arg args :item_id :required t)))
+  (let ((id (op-arg args :item-id :required t)))
     (let* ((agent (server-agent server))
            (record (bt:with-lock-held ((server-queued-lock server))
                      (gethash id (server-queued server))))
@@ -290,17 +295,29 @@ return the topic names that were interrupted (\"session\", \"lane:2\"), for
 run.interrupt's result.  A plain server knows only :session; evo-swarm
 extends this with the scopes it owns.")
   (:method ((server server) scope lane)
-    (declare (ignore lane))
     (case scope
-      (:session (request-abort (server-agent server)) (list "session"))
-      (t (op-fail "invalid_args" "this server has no such interrupt scope")))))
+      (:session
+       ;; Only what actually was interrupted is reported: an idle session is
+       ;; not something a client can reasonably show as stopped.
+       (let ((running (and (server-task server) t)))
+         (when running (request-abort (server-agent server)))
+         (if running (list "session") '())))
+      ;; A program on top of serve owns the other scopes: evo-swarm sets
+      ;; SERVER-INTERRUPT-HOOK to its lane/swarm path (or defines its own
+      ;; method for those scopes instead — either way :session is answered
+      ;; here and a client never has to know which program it is talking to).
+      (t (let ((hook (server-interrupt-hook server)))
+           (if hook
+               (funcall hook server scope lane)
+               (op-fail "invalid_args" "this server has no such interrupt scope")))))))
 
 (defun op-run-interrupt (server args)
   (let* ((scope (intern (string-upcase (op-arg-enum args :scope '("session" "swarm" "lane")
                                                        :default "session"))
                         :keyword))
          (lane (op-arg args :lane :type :number))
-         (interrupted (interrupt-scope server scope lane)))
+         (interrupted (interrupt-scope server scope lane))
+         (interrupted (if (listp interrupted) interrupted (list interrupted))))
     (list :interrupted (coerce interrupted 'vector))))
 
 (defun op-goal-set (server args)
@@ -342,10 +359,11 @@ goal, and only from the state that move makes sense in."
          (goal (current-goal agent)))
     (unless goal (op-fail "goal_state" "there is no goal"))
     ;; :cleared is not :complete: nothing was proven, the user simply withdrew
-    ;; the goal, and the driver must stop steering for it.
+    ;; the goal, and the driver must stop steering for it.  The goal then
+    ;; reads as absent, not as a goal in a strange state.
     (update-goal-entry agent goal :status :cleared)
     (refresh-topic-state server "session")
-    (list :goal (current-goal agent))))
+    (list :goal nil)))
 
 ;;; Ops: the session's settings.
 
@@ -380,7 +398,7 @@ goal, and only from the state that move makes sense in."
   (list :session (session-info server)))
 
 (defun op-session-resume (server args)
-  (let* ((id (op-arg args :session_id))
+  (let* ((id (op-arg args :session-id))
          (path (op-arg args :path))
          (resolved (cond
                      (path path)
@@ -394,7 +412,7 @@ goal, and only from the state that move makes sense in."
     (list :session (session-info server))))
 
 (defun op-session-rewind (server args)
-  (let ((entry (op-arg args :entry_id)))
+  (let ((entry (op-arg args :entry-id)))
     (if entry
         (evo.command:move-leaf server entry)
         (evo.command:rewind-command server))
@@ -403,7 +421,7 @@ goal, and only from the state that move makes sense in."
               (list :draft (getf (reply-data *reply*) :draft))))))
 
 (defun op-session-move (server args)
-  (evo.command:move-leaf server (op-arg args :entry_id :required t))
+  (evo.command:move-leaf server (op-arg args :entry-id :required t))
   (append (list :session (session-info server))
           (when (and *reply* (getf (reply-data *reply*) :draft))
             (list :draft (getf (reply-data *reply*) :draft)))))
@@ -490,7 +508,7 @@ goal, and only from the state that move makes sense in."
                         :queue (:type "string" :values ("now" "after_run"))
                         :topic (:type "string")))
   (register-op "input.cancel" #'op-input-cancel
-               :args '(:item_id (:type "string" :required t)))
+               :args '(:item-id (:type "string" :required t)))
   (register-op "run.interrupt" #'op-run-interrupt
                :args '(:scope (:type "string" :values ("session" "swarm" "lane"))
                         :lane (:type "integer")))
@@ -515,11 +533,11 @@ goal, and only from the state that move makes sense in."
   (register-op "session.new" #'op-session-new :args nil :precondition :quiescent)
   (register-op "session.fork" #'op-session-fork :args nil :precondition :quiescent)
   (register-op "session.resume" #'op-session-resume :precondition :quiescent
-               :args '(:session_id (:type "string") :path (:type "string")))
+               :args '(:session-id (:type "string") :path (:type "string")))
   (register-op "session.rewind" #'op-session-rewind :precondition :quiescent
-               :args '(:entry_id (:type "string")))
+               :args '(:entry-id (:type "string")))
   (register-op "session.move" #'op-session-move :precondition :quiescent
-               :args '(:entry_id (:type "string" :required t)))
+               :args '(:entry-id (:type "string" :required t)))
   (register-op "context.compact" #'op-context-compact :precondition :idle
                :args '(:hint (:type "string")))
   (register-op "lore.add" #'op-lore-add
