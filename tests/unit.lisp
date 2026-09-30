@@ -9392,8 +9392,12 @@ session the child was on rather than the newest one in the folder (E1)."
                   (stringp (getf value :version)))))
     (evo.serve:write-ready-file server agent)
     (check "ready: the file is written, and only readable by its owner"
-           (let ((mode (logand (sb-posix:stat-mode (sb-posix:stat (namestring ready))) #o777)))
-             (and (probe-file ready) (= #o600 mode))))
+           ;; The mode is read through EVO.PORT: SB-POSIX is SBCL's, and a
+           ;; test that reaches for it directly does not build on ECL — and
+           ;; says nothing on Windows, where privacy is the profile's ACL and
+           ;; there is no mode to read.
+           (let ((mode (evo.port:file-mode ready)))
+             (and (probe-file ready) (or (null mode) (= #o600 mode)))))
     (check "ready: it holds no temp file behind"
            (null (directory (merge-pathnames "*.tmp" dir))))
     (let ((read-back (evo.serve:decode-json (read-file-string ready))))

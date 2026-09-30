@@ -30,7 +30,7 @@
            #:terminal-raw-mode #:restore-terminal-mode #:terminal-sane
            #:terminal-size
            #:tty-p #:disable-debugger #:ensure-in-image-compiler
-           #:chmod-private #:write-private-file #:random-octets))
+           #:chmod-private #:file-mode #:write-private-file #:random-octets))
 
 (defpackage :evo.util
   (:use :cl)
