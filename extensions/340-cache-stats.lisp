@@ -66,19 +66,27 @@ session) resets to zero."
                   :cache-read (or (evo.util:pget saved :cache-read) 0)
                   :cache-write (or (evo.util:pget saved :cache-write) 0))))))
 
-(defun cache-stats-label (tui)
+(defun cache-stats-label (ctx)
   "Status segment: \"N% cached\" — cache-read over total input tokens
 (:input + :cache-read + :cache-write; the normalized plist keeps cached
 tokens OUT of :input, so the sum is the real input).  NIL while no provider
-has reported any cache activity, rather than a noise \"0%\"."
-  (declare (ignore tui))
+has reported any cache activity, rather than a noise \"0%\".
+
+Plain text: the segment declares its style (:muted) and each frontend paints
+it — the TUI in terminal colours, a GUI its own way."
+  (declare (ignore ctx))
   (bt:with-lock-held (*cache-stats-lock*)
     (let ((in (getf *cache-stats* :input))
           (cr (getf *cache-stats* :cache-read))
           (cw (getf *cache-stats* :cache-write)))
       (when (plusp (+ cr cw))
-        (evo.tui:dim (format nil "~d% cached" (round (* 100 cr) (+ in cr cw))))))))
+        (format nil "~d% cached" (round (* 100 cr) (+ in cr cw)))))))
 
 (evo:on :turn-end #'cache-stats-turn-end :name :cache-stats)
 (evo:on :session-start #'cache-stats-session-start :name :cache-stats)
-(evo.tui:add-status-segment :cache-stats #'cache-stats-label :side :left :order 350)
+(evo:define-status-segment :cache-stats #'cache-stats-label :side :left :order 350
+                           :style :muted
+                           :data (lambda (ctx)
+                                   (declare (ignore ctx))
+                                   (bt:with-lock-held (*cache-stats-lock*)
+                                     (copy-list *cache-stats*))))

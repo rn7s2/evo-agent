@@ -12,17 +12,18 @@
     (:working "●") (:compacting "◐") (:idle "○") (:starting "◌")
     (t "✗")))
 
-(defun lanes-segment (tui)
+(defun lanes-segment (ctx)
   "Status line: one glyph per lane (● working, ◐ compacting, ○ idle,
-◌ starting, ✗ down or stopped), and how many are busy."
-  (declare (ignore tui))
+◌ starting, ✗ down or stopped), and how many are busy.  Plain text — the
+segment declares its style and each frontend paints it."
+  (declare (ignore ctx))
   (when *swarm*
     (let ((states (with-swarm-lock ()
                     (mapcar #'lane-state (swarm-lanes *swarm*)))))
-      (evo.tui:dim (format nil "lanes ~{~a~} ~d/~d busy"
-                           (mapcar #'lane-glyph states)
-                           (count-if (lambda (s) (member s '(:working :compacting))) states)
-                           (length states))))))
+      (format nil "lanes ~{~a~} ~d/~d busy"
+              (mapcar #'lane-glyph states)
+              (count-if (lambda (s) (member s '(:working :compacting))) states)
+              (length states)))))
 
 (defun lanes-command (ctx)
   (declare (ignore ctx))
@@ -63,4 +64,5 @@ a coordinator with no screen still has them."
   "What the TUI has that a headless coordinator does not: a segment on the
 status line.  Commands are not the TUI's (REGISTER-SWARM-COMMANDS) — a
 segment is a screen."
-  (evo.tui:add-status-segment :swarm-lanes #'lanes-segment :side :right :order 300))
+  (evo:define-status-segment :swarm-lanes #'lanes-segment :side :right :order 300
+                             :style :muted))

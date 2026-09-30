@@ -365,27 +365,36 @@ These three default to `nil` (seed nothing), so implementing them is
 genuinely optional. Re-registering the same key replaces in place, which
 is what keeps a reloaded extension idempotent.
 
-## Status line segments (evo.tui)
+## Status line segments (core registry)
 
 The bottom status line is composed from named segments, not formatted in one
-place. Claim a piece of it:
+place. The registry is the **core's** (`evo:define-status-segment`,
+`src/view/status.lisp`), because the TUI status line and a GUI's readout render
+the same list — a segment an extension registers reaches every frontend.
+Claim a piece of the line:
 
 ```lisp
-(evo.tui:add-status-segment :ide-selection
-  (lambda (tui) (and (selection-p) (evo.tui:dim "⧉ 3 lines selected")))
-  :side :left :order 600)
+(evo:define-status-segment :ide-selection
+  (lambda (ctx) (and (selection-p) "⧉ 3 lines selected"))
+  :side :left :order 600 :style :muted)
 
-(evo.tui:remove-status-segment :ide-selection)
-(evo.tui:status-segments :right)   ; introspection, visual left-to-right
+(evo:remove-status-segment :ide-selection)
+(evo:status-segments :right)      ; introspection, visual left-to-right
+(evo.view:status-segments-live ctx)  ; the evaluated cells, for a frontend
 ```
 
-The function is called with the TUI on **every repaint** and returns a display
-string — already styled, the renderer will not restyle it (`evo.tui:dim` is
-the muted style the core's segments wear) — or `nil` to show nothing this
-frame. So it must be cheap and must never block: cache in a poller
-task if the value is expensive, and call `evo.tui:request-repaint` when it
-changes (never set `tui-dirty` from your thread — the TUI owns it). A segment
-that signals is skipped rather than taking the whole line down.
+The function is called on **every repaint** (and on every view refresh) with a
+context plist — `:model-label`, `:thinking`, `:context-tokens`,
+`:context-window`, `:goal`, `:goal-run-tokens`, `:jobs`, `:status` — and returns
+a **plain** display string, or `nil` to show nothing this frame. Styling is
+the frontend's business: declare a `:style` (`:muted`, `:accent`, `:error`,
+`:success`, `:warning`) and the TUI paints it in the terminal's colours while a
+GUI uses it its own way. Give `:data` (a plist, or a function of the context
+returning one) for values a structured reader should get alongside the text
+rather than parse back out of it. It must be cheap and must never block: cache
+in a poller task if the value is expensive, and call `evo.tui:request-repaint`
+when it changes (never set `tui-dirty` from your thread — the TUI owns it). A
+segment that signals is skipped rather than taking the whole line down.
 
 `:order` counts **inward from that side's edge** — on the left, ascending order
 runs left-to-right; on the right, ascending order runs right-to-left. So the

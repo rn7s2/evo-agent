@@ -25,7 +25,7 @@
   (destructuring-bind (&key n state task pid worktree branch restarts step-age reports &allow-other-keys)
       (lane-snapshot lane)
     (format nil "lane ~d  ~(~a~)~@[ · step ~a~]~@[ · task: ~a~]~@[ · worktree ~a~]~@[ (~a)~] · ~d report~:p~@[ · ~a~]~@[ · pid ~a~]"
-            n state (and step-age (evo.tui:short-duration step-age))
+            n state (and step-age (evo.view:short-duration step-age))
             (and task (truncate-string (substitute #\Space #\Newline task) 60 "…"))
             worktree branch reports
             (and (plusp restarts) (format nil "~d restart~:p" restarts))
