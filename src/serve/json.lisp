@@ -72,13 +72,6 @@ JSON-OBJECT-VALUE instead."
        (loop for tail on value by #'cddr
              always (and (keywordp (car tail)) (consp (cdr tail))))))
 
-(defun object-from-pairs (pairs)
-  "A JSON object from PAIRS, an alist of (key . value)."
-  (let ((object (make-hash-table :test #'equal)))
-    (dolist (pair pairs object)
-      (setf (gethash (json-key-name (car pair)) object)
-            (sexpr->json-value (cdr pair))))))
-
 (defun unprintable-string (value)
   "VALUE as a string, whatever it is.  The last resort of the mapping: a value
 outside the vocabulary must not fail the whole document, and printing it is
@@ -87,18 +80,41 @@ structure terminates."
   (let ((*print-circle* t))
     (or (ignore-errors (princ-to-string value)) "#<unprintable>")))
 
-;;; An object whose keys are not keywords.  A map keyed by topic name cannot
-;;; be a plist (the first element would read as an array), so it says so.
+;;; An object, holding its keys in the order they were written.  A map keyed
+;;; by topic name cannot be a plist (the first element would read as an
+;;; array), so it says so — and every object the mapping builds is this type,
+;;; because a hash table's keys come out in whatever order the implementation
+;;; walks them, which JSON does not define and two implementations do not
+;;; agree on.  A document evo emits is compared to itself (a test, a golden
+;;; file, an SSE line a client replays), so the order is ours to keep.
 
 (defstruct (json-object-value (:constructor %make-json-object-value))
   (pairs nil))
+
+(defun object-from-pairs (pairs)
+  "A JSON object from PAIRS, an alist of (key . value), in that order.  The
+pairs are converted once, here: a value inside an object is written as it
+stands, never through this mapping a second time (which would read the NIL a
+converted false became as null)."
+  (%make-json-object-value
+   :pairs (loop for (key . value) in pairs
+                collect (cons (json-key-name key) (sexpr->json-value value)))))
 
 (defun json-object-value (pairs)
   "PAIRS — a flat list of (key . value) — as a JSON object.  KEY may be a
 keyword or a string.  Not named JSON-OBJECT: that is EVO.JOURNAL's (a plist
 as JSON text), which a server inherits through its package, and one of the two
 would silently replace the other."
-  (%make-json-object-value :pairs pairs))
+  (object-from-pairs pairs))
+
+(defmethod com.inuoe.jzon:write-value ((writer com.inuoe.jzon:writer)
+                                       (value json-object-value))
+  "Write VALUE's keys in the order they were given (see above)."
+  (com.inuoe.jzon:begin-object writer)
+  (loop for (key . item) in (json-object-value-pairs value)
+        do (com.inuoe.jzon:write-key writer key)
+           (com.inuoe.jzon:write-value writer item))
+  (com.inuoe.jzon:end-object writer))
 
 (defun sexpr->json-value (value)
   "VALUE as the jzon value the mapping above says.  Total: every object has an
@@ -116,12 +132,9 @@ and a value can be a secret)."
         ((stringp value) value)
         ((integerp value) value)
         ((realp value) (coerce value 'double-float))
-        ((json-object-value-p value)
-         (let ((object (make-hash-table :test #'equal)))
-           (loop for (k . v) in (json-object-value-pairs value)
-                 do (setf (gethash (keyword->json-key k) object)
-                          (sexpr->json-value v)))
-           object))
+        ;; Built already converted (OBJECT-FROM-PAIRS): its pairs are the
+        ;; jzon values the writer emits, not sexprs to convert again.
+        ((json-object-value-p value) value)
         ((plist-p value)
          (object-from-pairs (loop for (k v) on value by #'cddr collect (cons k v))))
         ((consp value)
