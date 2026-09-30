@@ -599,6 +599,11 @@ def run_all(server, stub_port, work):
     status, reply, _ = server.op("context.compact", {})
     check("context.compact while busy -> busy",
           reply["ok"] is False and reply["error"]["code"] == "busy", reply)
+    # make sure the session is idle before the compaction below
+    deadline = time.time() + 30
+    while time.time() < deadline and \
+            server.snapshot("session")["topics"]["session"]["state"]["status"] != "idle":
+        time.sleep(0.1)
     server.op("run.interrupt", {"scope": "session"})
     deadline = time.time() + 30
     while time.time() < deadline and \
@@ -610,6 +615,29 @@ def run_all(server, stub_port, work):
     status, journal = server.get("/debug/journal")
     check("debug/journal shows the entries on the path",
           status == 200 and journal["entries"] and journal["header"]["id"], list(journal)[:3])
+
+    # --- a compaction, and the durable notice it leaves --------------------------------
+    # Make the compaction actually compact: what triggers it is the amount of
+    # context it may keep, not the size of the session.
+    server.op("eval", {"code": "(setf evo.kernel::*compact-keep-recent-tokens* 1)"})
+    status, reply, _ = server.op("context.compact", {"hint": "keep the last turn"})
+    check("context.compact on an idle session starts a task",
+          status == 200 and reply["ok"] and reply["result"]["task_id"], reply)
+    deadline = time.time() + 60
+    while time.time() < deadline:
+        state = server.snapshot("session")["topics"]["session"]["state"]
+        if state["status"] == "idle" and not state["task"]:
+            break
+        time.sleep(0.1)
+    time.sleep(0.3)
+    snap = server.snapshot("session")
+    notices = [i for i in snap["topics"]["session"]["items"]
+               if i["kind"] == "notice" and (i.get("text") or "").startswith("✓ compacted")]
+    check("a durable notice is one item, not a live copy beside the journaled one",
+          len(notices) == 1, notices)
+    check("the compaction is an item on the path too",
+          any(i["kind"] == "compaction" for i in snap["topics"]["session"]["items"]),
+          [(i["kind"], (i.get("text") or "")[:40]) for i in snap["topics"]["session"]["items"]][-5:])
 
     # --- sessions ---------------------------------------------------------------------
     status, sessions = server.get("/sessions")
