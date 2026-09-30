@@ -25,6 +25,8 @@ Covers the redesign's protocol (CONTRACT §5):
   * server.shutdown: exit 0, ready file removed
   * an idle server spends no CPU, and --watch-stdin ends it when its input does
     — before a turn and after one, with a stream open
+  * GET /catalog on a live evo-swarm carries `lanes.models[]`, from the hook
+    serve defines and swarm/main.lisp registers (skipped if it is not built)
   * the small truths: `queued`, has_more, result {}, truncated, usage,
     the default model's provider
   * every documented boolean is a boolean (notice.durable, compaction.manual,
@@ -48,6 +50,7 @@ import uuid
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 EVO = os.path.abspath(sys.argv[1]) if len(sys.argv) > 1 else os.path.join(ROOT, "build", "evo-agent")
+SWARM = os.path.join(ROOT, "build", "evo-swarm")
 
 passed = 0
 failed = 0
@@ -73,8 +76,9 @@ def free_port():
 class Server:
     """One `evo serve` child, driven through its ready file."""
 
-    def __init__(self, work, baby=False):
+    def __init__(self, work, baby=False, binary=None):
         self.work = work
+        self.binary = binary or EVO
         self.ready = os.path.join(work, "ready.json")
         self.log_path = os.path.join(work, "evo.log")
         self.baby = baby
@@ -90,7 +94,7 @@ class Server:
         # A pipe the test can close is how --watch-stdin is driven: the server
         # is told to end when its input does.
         self.proc = subprocess.Popen(
-            [EVO, "serve", "--no-userspace", "--port", "0",
+            [self.binary, "serve", "--no-userspace", "--port", "0",
              "--ready-file", self.ready, *args],
             cwd=os.path.join(self.work, "proj"), env=env,
             stdin=subprocess.PIPE if stdin_pipe else None,
@@ -421,6 +425,28 @@ def run_all(server, stub_port, work):
           (default, catalog["models"]))
     check("catalog: every documented boolean is a boolean",
           not non_bools(catalog=catalog), non_bools(catalog=catalog))
+    check("catalog: an evo-agent's document has no lanes key at all",
+          "lanes" not in catalog, sorted(catalog))
+    # The lanes half belongs to a program that runs lanes: evo-swarm registers
+    # the hook, and this is that registration.
+    status, reply, _ = server.op("eval", {"code":
+        "(progn (setf evo.serve:*catalog-lanes-hook* #'evo.serve:lane-catalog)"
+        " :hooked)"})
+    check("catalog: the lanes hook is installable", reply["ok"], reply)
+    status, hooked = server.get("/catalog")
+    lanes = hooked.get("lanes")
+    check("catalog: with the hook set, lanes.models is an object to read",
+          isinstance(lanes, dict) and isinstance(lanes.get("models"), list)
+          and [m["id"] for m in lanes["models"]] == ["stub-a"], lanes)
+    check("catalog: a lane model's ok is a boolean, beside its id and provider",
+          all(isinstance(m.get("ok"), bool) and m.get("provider")
+              for m in lanes["models"]), lanes)
+    check("catalog: the lanes half needs no lane started to answer",
+          not non_bools(catalog=hooked), non_bools(catalog=hooked))
+    server.op("eval", {"code": "(setf evo.serve:*catalog-lanes-hook* nil)"})
+    status, back = server.get("/catalog")
+    check("catalog: unregistering the hook takes the key back out",
+          "lanes" not in back, sorted(back))
     check("catalog carries no secret", "e2e-secret" not in text)
     check("catalog: thinking levels and languages",
           catalog["thinking_levels"][0] == "off" and catalog["languages"], catalog["languages"])
@@ -873,6 +899,43 @@ def shutdown_with_stream_check(server, stub_port):
     join(reading, 5)
 
 
+def swarm_catalog_check(work, stub_port):
+    """GET /catalog on a live evo-swarm: `lanes` is the swarm's half of the
+    document (CONTRACT §5.6).
+
+    It comes from the hook serve defines (`evo.serve:*catalog-lanes-hook*`)
+    and swarm/main.lisp registers, so this is the end-to-end check that a real
+    swarm answers `lanes.models[]` — and not the null a live run found."""
+    if not os.access(SWARM, os.X_OK):
+        print("skip no build/evo-swarm: the lanes half is not checked here")
+        return
+    swarm_work = os.path.join(work, "swarm")
+    os.makedirs(os.path.join(swarm_work, "home"), exist_ok=True)
+    os.makedirs(os.path.join(swarm_work, "proj"), exist_ok=True)
+    swarm = Server(swarm_work, binary=SWARM)
+    try:
+        swarm.start(args=("--workers", "1"))
+        register_stub_model(swarm, stub_port)
+        status, catalog = swarm.get("/catalog")
+        lanes = catalog.get("lanes")
+        check("evo-swarm: the live catalog has a lanes object",
+              isinstance(lanes, dict), (lanes, sorted(catalog)))
+        check("evo-swarm: lanes.models is the models a lane can run",
+              isinstance(lanes.get("models"), list)
+              and [m["id"] for m in lanes["models"]] == ["stub-a"], lanes)
+        check("evo-swarm: a lane model's ok is a boolean",
+              all(isinstance(m.get("ok"), bool) and m.get("provider")
+                  for m in lanes["models"]), lanes)
+        check("evo-swarm: every documented boolean is a boolean there too",
+              not non_bools(catalog=catalog), non_bools(catalog=catalog))
+        status, reply, _ = swarm.op("server.shutdown", {})
+        check("evo-swarm: server.shutdown is answered", reply["ok"], reply)
+        check("evo-swarm: the swarm exits 0 and takes its lane with it",
+              swarm.wait_exit(timeout=60) == 0)
+    finally:
+        swarm.stop()
+
+
 def eval_gate_check(server):
     """--no-http-eval removes the op and the catalog entry with it: eval over
     HTTP is remote code execution, and the flag is how a caller says no."""
@@ -958,6 +1021,7 @@ def main():
         stdin_eof_check(server, stub_port)
         shutdown_with_stream_check(server, stub_port)
         eval_gate_check(server)
+        swarm_catalog_check(work, stub_port)
     except BaseException as e:
         failed += 1
         print(f"FAIL aborted: {e!r}")

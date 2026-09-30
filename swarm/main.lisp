@@ -217,6 +217,10 @@ the swarm's own headless view — when asked for one (:serve)."
                        :ready-file (getf opts :ready-file)
                        :watch-stdin (getf opts :watch-stdin)
                        :identity *swarm-identity*)))
+          ;; GET /catalog describes the lanes this program runs (CONTRACT §5.6):
+          ;; the key is absent for a server with no lanes, and a swarm always
+          ;; has this half.
+          (setf evo.serve:*catalog-lanes-hook* #'evo.serve:lane-catalog)
           (make-instance 'serve-view :server server)))
       (progn
         (unless (evo.port:tty-p)

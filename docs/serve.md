@@ -246,12 +246,16 @@ Error codes: `busy`, `not_quiescent`, `no_task`, `goal_state`, `already_sent`,
 
 It never contains a key. The builder is total: an entry that raises is dropped
 and named in `warnings`, because one broken extension must not cost a client
-the whole catalog. A swarm adds `lanes` — the models a lane can run.
+the whole catalog.
+
+`lanes` — the models a lane can run — is the one half a program adds. For a
+server that runs no lanes the key is *absent*, not null: absent reads as "not
+a swarm", where null reads as an object that is not there.
 
 ## The seams a program adds
 
 serve is evo's headless frontend, and it is also a *host*: a program runs its
-own session on the same server, speaking the same protocol, and adds three
+own session on the same server, speaking the same protocol, and adds four
 general things to it. None of them knows what the program is, which is why
 nothing in the core names `evo-swarm`.
 
@@ -259,6 +263,20 @@ nothing in the core names `evo-swarm`.
 `evo.serve:*identity*` for every server it builds, or `make-server :identity`
 for one. `evo.serve:server-identity` reads it back. `evo-swarm serve` answers
 `evo-swarm` and adds its own topics and routes.
+
+**The catalog's lanes half.** `evo.serve:*catalog-lanes-hook*`, set to a
+function of one argument — the `warnings` list the builder is filling — that
+returns that half's plist. `evo-swarm` sets it to `evo.serve:lane-catalog`,
+which computes the models a lane can run from the kernel API set without
+starting a lane, so `GET /catalog` answers `lanes.models[]` from the first
+request rather than after the first lane boots:
+
+```lisp
+(setf evo.serve:*catalog-lanes-hook* #'evo.serve:lane-catalog)
+```
+
+A hook that raises costs the document its `lanes` key and names the fact in
+`warnings`, like every other entry.
 
 **Routes.** `evo.serve:add-route` adds an endpoint, or `make-server :routes`
 gives one server extra routes considered before the built-ins. A route is an
