@@ -47,6 +47,7 @@ named hooks so a /reload does not double-register them."
           :dir (namestring (swarm-dir *swarm*))
           :workers (swarm-workers *swarm*)
           :lane-model (swarm-lane-model *swarm*)
+          :lane-provider (swarm-lane-provider *swarm*)
           :lane-thinking (swarm-lane-thinking *swarm*)
           :lanes (coerce
                   (loop for lane in (swarm-lanes *swarm*)
@@ -81,7 +82,9 @@ shape changes."
     "EVO_SUPERVISOR_STATE_DIR=" "EVO_SUPERVISOR_PID=" "EVO_SUPERVISOR_RESTARTS="
     "EVO_RECOVERY=")
   "Variables of this process a lane must not inherit: they describe the
-coordinator's own supervision and session, not the lane's.")
+coordinator's own supervision and session, not the lane's.  A lane is launched
+with --no-supervisor, but an inherited supervisor state directory would still
+have it report to the coordinator's supervisor.")
 
 (defun lane-environment (lane)
   "The lane's environment: its own session directory, the providers' keys (by
@@ -110,9 +113,15 @@ its exact session (CONTRACT §8), never a bare --resume."
                 "--port" "0"
                 "--ready-file" (namestring (ready-file-path lane))
                 "--watch-stdin")
-          (let ((session (lane-session-path lane)))
-            (when (and resume session (probe-file session))
-              (list "--resume" (namestring session))))))
+          ;; The exact session it was on, never "whatever is newest in this
+          ;; directory" (CONTRACT §8).  A lane directory from before ready
+          ;; files existed has a session but no path: its own sessions
+          ;; directory still makes a bare --resume unambiguous.
+          (when resume
+            (let ((session (lane-session-path lane)))
+              (cond ((and session (probe-file session))
+                     (list "--resume" (namestring session)))
+                    ((lane-has-session-p lane) '("--resume")))))))
 
 (defun launch-lane (lane &key resume)
   "Start LANE's process, detached from our terminal, logging to its directory.
@@ -126,14 +135,15 @@ or NIL when the lane is being stopped."
   (ignore-errors (delete-file (ready-file-path lane)))
   (let ((args (lane-launch-args lane :resume resume))
         (process nil) (stdin nil))
+    ;; Piped, not inherited: the write end is how the coordinator holds the
+    ;; lane, and closing it is the end of file --watch-stdin stops on.
     (setf (values process stdin)
-          (evo.port:launch-child (namestring (swarm-evo-binary *swarm*)) args
-                                 :input :stream
-                                 :output (lane-log-path lane)
-                                 :error-output :output
-                                 :environment (lane-environment lane)
-                                 :directory (lane-cwd lane)
-                                 :new-session t))
+          (evo.port:launch-child-piped (namestring (swarm-evo-binary *swarm*)) args
+                                       :output (lane-log-path lane)
+                                       :error-output :output
+                                       :environment (lane-environment lane)
+                                       :directory (lane-cwd lane)
+                                       :new-session t))
     (when (with-swarm-lock ()
             (setf (lane-process lane) process
                   (lane-stdin lane) stdin)
@@ -433,6 +443,7 @@ and run (view.lisp); SERVER is its op log, when the coordinator is served."
                              :server server
                              :agent agent
                              :lane-model (getf record :lane-model)
+                             :lane-provider (getf record :lane-provider)
                              :lane-thinking (getf record :lane-thinking))))
     (setf (swarm-lanes swarm)
           (if record

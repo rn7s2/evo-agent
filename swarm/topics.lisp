@@ -25,6 +25,12 @@
 (defun lanes-busy-p (&optional (swarm *swarm*))
   (and (lanes-busy swarm) t))
 
+(defun lane-model-config (swarm)
+  "What the lanes run, as §4.3's config: an {id, provider} object or NIL."
+  (let ((id (swarm-lane-model swarm)))
+    (when id
+      (list :id id :provider (swarm-lane-provider swarm)))))
+
 (defun lane-row (lane)
   "One lane of the swarm topic (§4.3), with what its own mirror knows."
   (let* ((mirror (lane-mirror lane))
@@ -55,7 +61,7 @@
                           :waiting-on-lanes (and (not (swarm-coordinator-busy swarm))
                                                  (lanes-busy-locked swarm)
                                                  t))
-            :config (list :lane-model (swarm-lane-model swarm)
+            :config (list :lane-model (lane-model-config swarm)
                           :lane-thinking (swarm-lane-thinking swarm))
             :lanes (coerce (mapcar #'lane-row (swarm-lanes swarm)) 'vector)))))
 
@@ -64,17 +70,21 @@
 transition lands here, including starting→idle (CONTRACT §4.3)."
   (when swarm
     (let* ((state (swarm-state swarm))
-           (changed (or force (not (equal state (swarm-published swarm))))))
+           ;; EQUALP, not EQUAL: a topic state holds arrays (the lane rows,
+           ;; todos, segments) and EQUAL does not descend into an array, so
+           ;; EQUAL would call every state new and publish on every check.
+           (changed (or force (not (equalp state (swarm-published swarm))))))
       (when changed
         (bt:with-lock-held ((swarm-lock swarm))
           (setf (swarm-published swarm) state))
         (publish-op (list :op "state.patch" :topic "swarm" :patch state))))))
 
 (defun swarm-lane-changed (&optional mirror)
-  "A lane changed (its own state patch, or a transition the swarm made):
-refresh the swarm topic and the TUI.  MIRROR is the lane's, when that is how
-we heard; it is not needed — the whole state is recomputed."
-  (declare (ignore mirror))
+  "A lane changed: take what the lane says about itself (its status, its task
+and step clocks) into the swarm's record of it, then refresh the swarm topic
+and the TUI.  MIRROR is the lane's when that is how we heard — a lane's own
+state.patch is what turns `working` into `idle`."
+  (when mirror (mirror-note-lane-state mirror))
   (publish-swarm-state)
   (swarm-repaint))
 

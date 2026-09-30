@@ -37,16 +37,17 @@
     (ensure-directories-exist dir)
     (make-agent :journal (make-session-journal dir))))
 
-(defun test-swarm (&key (workers 3) agent view)
+(defun test-swarm (&key (workers 3) agent view server)
+  "A swarm of WORKERS lanes, with no processes and no ports: what the swarm
+computes and journals, without anything running."
   (let ((swarm (evo.swarm::%make-swarm
-                :id "unit" :workers workers :agent agent :view view
+                :id "unit" :workers workers :agent agent :view view :server server
                 :dir (uiop:ensure-directory-pathname
                       (format nil "~a/evo-swarm-unit-~a/" (tmp-dir) (gen-id)))
                 :cwd (uiop:getcwd))))
     (setf (evo.swarm::swarm-lanes swarm)
           (loop for n from 1 to workers
-                collect (evo.swarm::%make-lane :n n :port (+ 20000 n) :token "t"
-                                               :cwd (uiop:getcwd))))
+                collect (evo.swarm::make-lane-for swarm n)))
     swarm))
 
 (defun read-all (code)
@@ -54,6 +55,45 @@
   (let ((*package* (find-package :evo.user)) (*read-eval* nil))
     (with-input-from-string (in code)
       (loop for form = (read in nil :eof) until (eq form :eof) collect form))))
+
+(defun plist-keys (value)
+  "Every keyword key anywhere in VALUE — plists, lists, vectors."
+  (cond ((and (consp value) (keywordp (car value)))
+         (loop for (k v) on value by #'cddr append (cons k (plist-keys v))))
+        ((consp value) (append (plist-keys (car value)) (plist-keys (cdr value))))
+        ((and (vectorp value) (not (stringp value)))
+         (loop for x across value append (plist-keys x)))
+        (t nil)))
+
+(defmacro with-published ((ops) &body body)
+  "BODY with PUBLISH-OP bound to a collector: OPS is what a client would have
+received, oldest first.  Nothing here needs a server."
+  `(let ((,ops nil)
+         (saved (symbol-function 'evo.swarm::publish-op)))
+     (unwind-protect
+          (progn
+            (setf (symbol-function 'evo.swarm::publish-op)
+                  (lambda (op) (push op ,ops) t))
+            ,@body
+            (nreverse ,ops))
+       (setf (symbol-function 'evo.swarm::publish-op) saved))))
+
+(defmacro with-lane-snapshot ((state &key (items '()) (has-more nil)) &body body)
+  "BODY with LANE-SNAPSHOT answering STATE/ITEMS — the lane's own snapshot,
+without a lane process."
+  `(let ((saved (symbol-function 'evo.swarm::lane-snapshot)))
+     (unwind-protect
+          (progn
+            (setf (symbol-function 'evo.swarm::lane-snapshot)
+                  (lambda (lane &key topics items timeout)
+                    (declare (ignore lane topics items timeout))
+                    (list :epoch "e1" :seq 10
+                          :topics (list :session
+                                        (list :state ,state
+                                              :items (coerce ,items 'vector)
+                                              :has-more ,has-more)))))
+            ,@body)
+       (setf (symbol-function 'evo.swarm::lane-snapshot) saved))))
 
 (defun symbols-in (form)
   (cond ((and (symbolp form) form) (list form))
@@ -75,7 +115,7 @@
 (defmethod view-repaint ((view recording-view))
   (incf (slot-value view 'repaints)))
 
-(defmethod view-publish ((view recording-view) event)
+(defmethod view-record-event ((view recording-view) event)
   (push event (slot-value view 'events)))
 
 (defmethod view-run ((view recording-view) agent resumed-p)
@@ -382,90 +422,70 @@ did not register it; a lane whose default model is missing says why."
       (check "goal hold: no swarm, no hold"
              (null (evo.swarm::hold-goal-while-lanes-work agent nil))))))
 
-(defun test-events ()
+(defun test-lane-input ()
+  "What a lane's own items tell the coordinator: a report tool call and a
+finished run, each with the :origin plist CONTRACT §3 defines — no prose is
+parsed anywhere."
   (let* ((agent (fresh-agent))
          (evo.kernel:*frontend* nil)
          (recording (make-instance 'recording-view))
          (*swarm* (test-swarm :agent agent :view recording))
          (lane (first (swarm-lanes *swarm*))))
-    (evo.swarm::handle-lane-event lane "task-start" '(:type "task-start" :kind "run"))
-    (check "events: a task start makes the lane working"
-           (eq :working (lane-state lane)))
-    (check "events: ...and starts its step clock"
-           (evo.swarm::lane-step-started lane))
-    (check "events: ...and repaints the frontend"
-           (= 1 (slot-value recording 'repaints)))
-    (check "events: running is not news for the coordinator"
-           (not (steering-pending-p agent)))
-    (evo.swarm::handle-lane-event lane "report"
-                                  '(:type "report" :done "built it" :evidence "make ok"))
-    (check "events: a report becomes coordinator input"
+    (evo.swarm::mirror-note-item (evo.swarm::lane-mirror lane)
+                                 '(:id "t1" :kind "tool" :name "report"
+                                   :args (:done "built it" :evidence "make ok"
+                                                :goal "active")))
+    (check "input: a report becomes coordinator input"
            (let ((queued (evo.kernel::agent-steering agent)))
              (and queued (search "[lane 1 report] done: built it"
                                  (getf (first queued) :text))
                   (search "evidence: make ok" (getf (first queued) :text)))))
-    (check "events: a report carries its structure beside the prose"
-           (let ((origin (getf (first (evo.kernel::agent-steering agent)) :origin)))
-             (and (eq :lane-report (pget origin :kind))
-                  (eql 1 (pget origin :lane))
-                  (equal "built it" (pget origin :done))
-                  (equal "make ok" (pget origin :evidence))
-                  (null (pget origin :next)))))
-    (check "events: the report is shown through the swarm's view, not the TUI"
+    (check "input: ...with a :lane-report origin, never parsed prose"
+           (equal '(:kind :lane-report :lane 1
+                    :done "built it" :evidence "make ok" :next nil
+                    :blocked nil :requests nil :goal :active)
+                  (getf (first (evo.kernel::agent-steering agent)) :origin)))
+    (check "input: ...and the lane's report count goes up"
+           (= 1 (evo.swarm::lane-reports lane)))
+    (check "input: the report is shown through the swarm's view, not the TUI"
            (let ((said (slot-value recording 'said)))
              (and said (search "[lane 1 report] done: built it" (caar said))
                   (eq :notice (second (first said))))))
     (evo.kernel::drain-steering agent)
-    (evo.swarm::handle-lane-event lane "report"
-                                  '(:type "report" :done "all of it" :goal "complete"))
-    (check "events: a report says the lane's goal status"
-           (search "goal: complete" (getf (first (evo.kernel::agent-steering agent)) :text)))
-    (check "events: ...as a keyword, not a word to parse out"
-           (eq :complete (pget (getf (first (evo.kernel::agent-steering agent)) :origin)
-                               :goal)))
-    (evo.kernel::drain-steering agent)
-    (evo.swarm::handle-lane-event lane "settled" '(:type "settled" :outcome "stop"))
-    (check "events: settling makes the lane idle" (eq :idle (lane-state lane)))
-    (check "events: ...and tells the coordinator the run ended"
-           (let ((text (getf (first (evo.kernel::agent-steering agent)) :text)))
-             (and (search "[lane 1] run ended (stop)" text)
-                  (not (search "goal:" text)))))
-    (check "events: a finished run is a :lane-event with its outcome"
-           (let ((origin (getf (first (evo.kernel::agent-steering agent)) :origin)))
-             (and (eq :lane-event (pget origin :kind))
-                  (eq :run-ended (pget origin :event))
-                  (equal "stop" (pget origin :outcome))
-                  (null (pget origin :goal-status)))))
-    (evo.kernel::drain-steering agent)
-    (evo.swarm::handle-lane-event lane "settled"
-                                  '(:type "settled" :outcome "stop" :goal "complete"))
-    (check "events: a run end says a lane's goal is complete"
+    ;; The same item arriving again (a patch, a snapshot) is not news twice.
+    (evo.swarm::mirror-note-item (evo.swarm::lane-mirror lane)
+                       '(:id "t1" :kind "tool" :name "report" :args (:done "built it")))
+    (check "input: a re-patched report is not reported twice"
+           (and (not (steering-pending-p agent)) (= 1 (evo.swarm::lane-reports lane))))
+    ;; A finished run.
+    (evo.swarm::mirror-state-set (evo.swarm::lane-mirror lane) '(:status "idle" :goal (:status "complete")))
+    (evo.swarm::mirror-note-item (evo.swarm::lane-mirror lane)
+                       '(:id "r1" :kind "run_outcome" :outcome "stop"))
+    (check "input: a finished run says which goal status the lane settled with"
            (search "[lane 1] run ended (stop) — goal: complete"
                    (getf (first (evo.kernel::agent-steering agent)) :text)))
-    (check "events: ...and the origin names that goal status"
-           (eq :complete (pget (getf (first (evo.kernel::agent-steering agent)) :origin)
-                               :goal-status)))
+    (check "input: ...and carries it as a lane-event origin"
+           (equal '(:kind :lane-event :lane 1 :event :run-ended :outcome "stop"
+                    :goal-status :complete :severity :info)
+                  (getf (first (evo.kernel::agent-steering agent)) :origin)))
     (evo.kernel::drain-steering agent)
-    (evo.swarm::handle-lane-event lane "settled"
-                                  '(:type "settled" :outcome "aborted" :goal "active"))
-    (check "events: ...and that a stopped lane with an active goal waits to be steered"
+    (evo.swarm::mirror-state-set (evo.swarm::lane-mirror lane) '(:status "idle" :goal (:status "active")))
+    (evo.swarm::mirror-note-item (evo.swarm::lane-mirror lane) '(:id "r2" :kind "run_outcome" :outcome "aborted"))
+    (check "input: a stopped lane with an active goal waits to be steered"
            (search "goal: active, but the lane is idle until steered"
                    (getf (first (evo.kernel::agent-steering agent)) :text)))
     (evo.kernel::drain-steering agent)
-    (evo.swarm::handle-lane-event lane "task-end" '(:type "task-end" :error "boom"))
-    (check "events: an error in a lane reaches the coordinator"
-           (search "[lane 1] error: boom"
-                   (getf (first (evo.kernel::agent-steering agent)) :text)))
-    (check "events: ...with its severity and detail as structure"
-           (let ((origin (getf (first (evo.kernel::agent-steering agent)) :origin)))
-             (and (eq :lane-event (pget origin :kind))
-                  (eq :error (pget origin :event))
-                  (eq :error (pget origin :severity))
-                  (equal "boom" (pget origin :detail)))))
-    (evo.kernel::drain-steering agent)
-    (evo.swarm::handle-lane-event lane "text-delta" '(:type "text-delta" :text "hi"))
-    (check "events: streamed text is not coordinator input"
-           (not (steering-pending-p agent)))))
+    ;; Nothing else is news.
+    (evo.swarm::mirror-note-item (evo.swarm::lane-mirror lane) '(:id "a1" :kind "assistant" :text "hi"))
+    (check "input: streamed text is not coordinator input"
+           (not (steering-pending-p agent)))
+    (check "input: a run that simply stopped says no goal it never had"
+           (progn (evo.swarm::mirror-state-set (evo.swarm::lane-mirror lane) '(:status "idle"))
+                  (evo.swarm::mirror-note-item (evo.swarm::lane-mirror lane)
+                                     '(:id "r3" :kind "run_outcome" :outcome "stop"))
+                  (let ((text (getf (first (evo.kernel::agent-steering agent)) :text)))
+                    (and (search "[lane 1] run ended (stop)" text)
+                         (not (search "goal:" text))))))))
 
 ;;; The frontend seam (view.lisp).  What the swarm calls to be seen or run: a
 ;;; notice, a repaint, a machine event, the run itself — each routed to the
@@ -474,8 +494,7 @@ did not register it; a lane whose default model is missing says why."
 (defun test-view ()
   (let ((*swarm* nil))
     (check "view: no swarm, no notice" (null (swarm-say "x")))
-    (check "view: no swarm, no repaint" (null (swarm-repaint)))
-    (check "view: no swarm, no event" (null (swarm-publish (list :type :lane-state)))))
+    (check "view: no swarm, no repaint" (null (swarm-repaint))))
   (let* ((agent (fresh-agent))
          (recording (make-instance 'recording-view))
          (*swarm* (test-swarm :agent agent :view recording)))
@@ -487,10 +506,6 @@ did not register it; a lane whose default model is missing says why."
     (swarm-repaint)
     (swarm-repaint)
     (check "view: a repaint reaches the view" (= 2 (slot-value recording 'repaints)))
-    (swarm-publish (list :type :lane-state :lane 2 :state :working))
-    (check "view: a machine event reaches the view as the plist it was given"
-           (equal '((:type :lane-state :lane 2 :state :working))
-                  (reverse (slot-value recording 'events))))
     (check "view: the run goes to the view, and its exit code comes back"
            (and (eql 7 (swarm-run agent t))
                 (equal (list agent t) (slot-value recording 'ran)))))
@@ -500,30 +515,18 @@ did not register it; a lane whose default model is missing says why."
     (check "view: a TUI notice is dropped when no TUI is running"
            (null (view-say view "x")))
     (check "view: a TUI repaint is dropped when no TUI is running"
-           (null (view-repaint view)))
-    (check "view: the TUI has no event stream"
-           (null (view-publish view (list :type :lane-state))))))
+           (null (view-repaint view)))))
 
 (defun test-serve-view ()
-  "A serve view says through the command layer's host protocol, which lands as
-a notice item on the server's op log; an event it publishes goes to the
-server's topic providers rather than to a log of its own, because what only a
-machine reads is a topic now (CONTRACT §7) — a lane's state is queried at GET
-/lanes."
+  "A serve view says through the command layer's host protocol, and running
+the coordinator is serving it: no client of the swarm ever names the
+server's internals."
   (let* ((server (evo.serve:make-server :port 0 :token "t"))
          (view (make-instance 'serve-view :server server)))
     (check "serve view: it names its server" (eq server (serve-view-server view)))
-    (view-say view "lane 2 is working" :style :notice)
-    (view-publish view (list :type :lane-state :lane 2 :state :working))
-    (let ((ops (evo.serve::op-log-ops-after (evo.serve::server-oplog server) 0)))
-      (check "serve view: a notice is one item op, kept whole"
-             (and (= 1 (length ops))
-                  (search "\"op\":\"item.add\"" (second (first ops)))
-                  (search "\"text\":\"lane 2 is working\"" (second (first ops)))
-                  (search "\"severity\":\"warn\"" (second (first ops)))))
-      (check "serve view: a published event is the providers' business, not the log's"
-             (not (search "lane-state" (reduce (lambda (a op) (concatenate 'string a (second op)))
-                                               ops :initial-value "")))))
+    (check "serve view: a notice goes to the command layer's host protocol"
+           (handler-case (progn (view-say view "lane 2 is working" :style :notice) t)
+             (error () nil)))
     (check "serve view: a repaint is nothing to do" (null (view-repaint view)))))
 
 (defun test-record ()
@@ -536,25 +539,38 @@ machine reads is a topic now (CONTRACT §7) — a lane's state is queried at GET
             (evo.swarm::lane-cwd two) #p"/wt/lane-2/"
             (evo.swarm::lane-task two) "the task"
             (evo.swarm::lane-extra-forms two) (list "(defun x ())")))
+    (setf (evo.swarm::swarm-lane-model *swarm*) "lane-model"
+          (evo.swarm::swarm-lane-provider *swarm*) :stub
+          (evo.swarm::swarm-lane-thinking *swarm*) :high)
     (evo.swarm::record-swarm)
     (let ((record (evo:custom-state "swarm" agent)))
       (check "record: the swarm is journaled on the coordinator's session"
              (and record (equal "unit" (getf record :id)) (= 2 (getf record :workers))))
+      (check "record: the lanes' configuration is swarm data, not a user file"
+             (and (equal "lane-model" (getf record :lane-model))
+                  (eq :stub (getf record :lane-provider))
+                  (eq :high (getf record :lane-thinking))))
       (let ((restored (evo.swarm::make-swarm :agent agent :workers 9 :record record
                                              :evo-binary "/x/evo")))
         (check "record: a resumed swarm keeps its id, directory and lane count"
                (and (equal "unit" (swarm-id restored))
                     (equal (namestring (swarm-dir *swarm*)) (namestring (swarm-dir restored)))
                     (= 2 (length (swarm-lanes restored)))))
+        (check "record: ...and the lanes' model configuration"
+               (and (equal "lane-model" (evo.swarm::swarm-lane-model restored))
+                    (eq :stub (evo.swarm::swarm-lane-provider restored))
+                    (eq :high (evo.swarm::swarm-lane-thinking restored))))
         (let ((two (second (swarm-lanes restored))))
           (check "record: a lane's worktree, branch, cwd, task and evals come back"
                  (and (equal "/wt/lane-2/" (lane-worktree two))
                       (equal "/wt/lane-2/" (namestring (lane-cwd two)))
                       (equal "the task" (lane-task two))
                       (equal '("(defun x ())") (evo.swarm::lane-extra-forms two))))
-          (check "record: a resumed lane gets a fresh token and port"
-                 (and (= 64 (length (evo.swarm::lane-token two)))
-                      (integerp (evo.swarm::lane-port two)))))))))
+          (check "record: a resumed lane has no ready file yet, and a mirror of its own"
+                 (and (null (evo.swarm::lane-ready two))
+                      (typep (evo.swarm::lane-mirror two) 'evo.swarm::mirror)
+                      (equal "lane:2"
+                             (evo.swarm::mirror-topic (evo.swarm::lane-mirror two))))))))))
 
 (defun test-session-switch ()
   "/resume, /new and /fork on the coordinator: a resumed session recording
@@ -593,7 +609,15 @@ another swarm gets that swarm's lanes back; any other keeps the running one."
                                            (list :n 3 :cwd (namestring (uiop:getcwd))
                                                  :extra-forms #())))
               agent)
-             (evo.swarm::adopt-session-swarm agent)
+             (with-published (ops)
+               (evo.swarm::adopt-session-swarm agent)
+               (check "switch: every topic is reset for the clients (§7.3)"
+                      (and (equal '("swarm" "lane:1" "lane:2")
+                                  (mapcar (lambda (op) (getf op :topic)) ops))
+                           (every (lambda (op)
+                                    (and (equal "topic.reset" (getf op :op))
+                                         (equal "swarm_switched" (getf op :reason))))
+                                  ops))))
              (check "switch: the running lanes stop"
                     (equal (list current) stopped))
              (check "switch: the recorded swarm replaces them"
@@ -632,7 +656,8 @@ directory and watched pid must.  The list is written out rather than read from
 the strip list, so a name dropped from that list fails here."
   (let* ((forbidden '("EVO_SUPERVISED_CHILD" "EVO_HEARTBEAT_FILE" "EVO_NO_SUPERVISOR"
                       "EVO_SERVE_TOKEN" "EVO_SESSIONS_DIR" "EVO_SERVE_WATCH_PID"
-                      "EVO_RECOVERY"))
+                      "EVO_SUPERVISOR_STATE_DIR" "EVO_SUPERVISOR_PID"
+                      "EVO_SUPERVISOR_RESTARTS" "EVO_RECOVERY"))
          (saved (mapcar (lambda (name) (cons name (getenv name))) forbidden))
          (stale "swarm-unit-stale"))
     (unwind-protect
@@ -645,8 +670,7 @@ the strip list, so a name dropped from that list fails here."
                          forbidden))
            (dolist (name forbidden)
              (evo.port:setenv name stale))
-           (setf (evo.swarm::lane-dir lane) #p"/tmp/lane-1/"
-                 (evo.swarm::lane-token lane) "tok")
+           (setf (evo.swarm::lane-dir lane) #p"/tmp/lane-1/")
            (let ((env (evo.swarm::lane-environment lane)))
              (check "launch: not one of the coordinator's variables is inherited"
                     (null (intersection
@@ -654,11 +678,8 @@ the strip list, so a name dropped from that list fails here."
                            (mapcar (lambda (name) (concatenate 'string name "=" stale))
                                    forbidden)
                            :test #'equal)))
-             (check "launch: the lane's token, sessions and watched pid are set"
-                    (and (member "EVO_SERVE_TOKEN=tok" env :test #'equal)
-                         (member "EVO_SESSIONS_DIR=/tmp/lane-1/sessions/" env :test #'equal)
-                         (member (format nil "EVO_SERVE_WATCH_PID=~d" (evo.port:getpid))
-                                 env :test #'equal)))))
+             (check "launch: the lane's own sessions directory is set"
+                    (member "EVO_SESSIONS_DIR=/tmp/lane-1/sessions/" env :test #'equal))))
       (dolist (pair saved)
         (evo.port:setenv (car pair) (or (cdr pair) ""))))))
 
@@ -684,13 +705,26 @@ the strip list, so a name dropped from that list fails here."
   (check "cli: an unknown flag is a usage error"
          (handler-case (progn (evo.swarm::parse-args '("--wat")) nil)
            (evo.cli:usage-error () t)))
-  (check "cli: a restart keeps the swarm's flags and drops the session's"
-         (equal '("--workers" "4" "--evo" "/x/evo" "--no-userspace")
-                (remove "--resume"
-                        (evo.swarm::restart-argv '("--workers" "4" "--model" "m" "--evo" "/x/evo"
-                                                   "--thinking" "high" "--no-userspace"
-                                                   "--resume" "/old/path"))
-                        :test #'equal))))
+  (check "cli: --lane-model splits id@provider"
+         (let ((opts (evo.swarm::parse-args '("--lane-model" "stub-a@stub"))))
+           (and (equal "stub-a" (getf opts :lane-model))
+                (eq :stub (getf opts :lane-provider)))))
+  (check "cli: a bare --lane-model has no provider"
+         (let ((opts (evo.swarm::parse-args '("--lane-model" "stub-a"))))
+           (and (equal "stub-a" (getf opts :lane-model))
+                (null (getf opts :lane-provider)))))
+  (check "cli: --lane-thinking is an effort level"
+         (eq :high (getf (evo.swarm::parse-args '("--lane-thinking" "high")) :lane-thinking)))
+  (check "cli: a bad --lane-thinking is a usage error"
+         (handler-case (progn (evo.swarm::parse-args '("--lane-thinking" "wat")) nil)
+           (evo.cli:usage-error () t)))
+  (check "cli: a restart keeps the swarm's flags and the lane configuration"
+         (equal '("--workers" "4" "--evo" "/x/evo" "--no-userspace"
+                  "--lane-model" "stub-a" "--lane-thinking" "medium")
+                (evo.swarm::restart-argv '("--workers" "4" "--model" "m" "--evo" "/x/evo"
+                                          "--thinking" "high" "--no-userspace"
+                                          "--lane-model" "stub-a" "--lane-thinking" "medium"
+                                          "--resume" "/old/path")))))
 
 (defun test-serve-cli ()
   "`evo-swarm serve`: serve's flags alongside the swarm's, the loopback guard,
@@ -703,12 +737,13 @@ and what a restarted coordinator keeps."
   (check "serve: serve's flags and the swarm's parse together"
          (let ((opts (evo.swarm::parse-args
                       '("serve" "--host" "0.0.0.0" "--port" "9000"
-                        "--token-file" "/tmp/serve.token" "--allow-remote"
+                        "--ready-file" "/tmp/ready.json" "--watch-stdin" "--allow-remote"
                         "--workers" "2" "--evo" "/x/evo" "--no-userspace"))))
            (and (getf opts :serve)
                 (equal "0.0.0.0" (getf opts :host))
                 (eql 9000 (getf opts :port))
-                (equal "/tmp/serve.token" (getf opts :token-file))
+                (equal "/tmp/ready.json" (getf opts :ready-file))
+                (getf opts :watch-stdin)
                 (getf opts :allow-remote)
                 (eql 2 (getf opts :workers))
                 (equal "/x/evo" (getf opts :evo))
@@ -729,20 +764,25 @@ and what a restarted coordinator keeps."
            (evo.cli:usage-error () t)))
   (check "serve: ...and taken with it"
          (equal "0.0.0.0" (evo.swarm::check-serve-host "0.0.0.0" '(:serve t :allow-remote t))))
-  (check "serve: a restarted coordinator keeps where it listens and its token"
-         (equal '("serve" "--workers" "4" "--evo" "/x/evo" "--no-userspace"
-                  "--host" "127.0.0.1" "--port" "9000" "--token-file" "/tmp/t"
-                  "--allow-remote")
-                (remove "--resume"
-                        (evo.swarm::restart-argv
-                         '("serve" "--workers" "4" "--model" "m" "--evo" "/x/evo"
-                           "--thinking" "high" "--no-userspace" "--resume" "/old"
-                           "--host" "127.0.0.1" "--port" "9000" "--token-file" "/tmp/t"
-                           "--allow-remote"))
-                        :test #'equal)))
-  (check "serve: ...and does not re-pass the session's model or thinking"
-         (notany (lambda (a) (member a '("--model" "--thinking") :test #'equal))
-                 (evo.swarm::restart-argv '("serve" "--model" "m" "--thinking" "high")))))
+  (let ((argv (evo.swarm::restart-argv
+               '("serve" "--workers" "4" "--model" "m" "--evo" "/x/evo"
+                 "--thinking" "high" "--no-userspace" "--resume" "/old"
+                 "--host" "127.0.0.1" "--port" "9000" "--ready-file" "/tmp/ready.json"
+                 "--watch-stdin" "--allow-remote"))))
+    (check "serve: a restarted coordinator keeps the swarm's own flags"
+           (and (equal "serve" (first argv))
+                (member "--workers" argv :test #'equal)
+                (member "--evo" argv :test #'equal)
+                (member "--no-userspace" argv :test #'equal)))
+    (check "serve: ...and the door it serves on, from the shared layer"
+           (and (member "--ready-file" argv :test #'equal)
+                (member "/tmp/ready.json" argv :test #'equal)
+                (member "--watch-stdin" argv :test #'equal)
+                (member "--port" argv :test #'equal)))
+    (check "serve: ...and does not re-pass the session's model or thinking"
+           (notany (lambda (a) (member a '("--model" "--thinking") :test #'equal)) argv))
+    (check "serve: ...nor a bare --resume"
+           (not (member "--resume" argv :test #'equal)))))
 
 (defun test-serve-exit-codes ()
   "`evo-swarm`'s exit code for a command line that cannot start anything: 64,
@@ -768,249 +808,277 @@ one out of the supervisor.)"
              (check "exit: a serve flag without serve is 64"
                     (eql 64 (code "--host" "0.0.0.0")))
              (check "exit: a bad --port is 64" (eql 64 (code "serve" "--port" "nope")))
-             (check "exit: a --token-file with no path is 64"
-                    (eql 64 (code "serve" "--token-file")))
-             (check "exit: serve with no way to hand its token over is 64"
-                    (eql 64 (code "serve")))
+             (check "exit: a --ready-file with no path is 64"
+                    (eql 64 (code "serve" "--ready-file")))
              (check "exit: a non-loopback --host without --allow-remote is 64"
-                    (eql 64 (code "serve" "--token-file" "/tmp/serve.token"
+                    (eql 64 (code "serve" "--ready-file" "/tmp/ready.json"
                                   "--host" "0.0.0.0")))))
       (evo.port:setenv "EVO_NO_SUPERVISOR" (or saved ""))
       (evo.port:setenv "EVO_SERVE_TOKEN" (or saved-token "")))))
 
-;;; The read-only HTTP API (api.lisp, routes.lisp): lane state with its cached
-;;; goal, GET /lanes, a lane's transcript, and its own event stream relayed.
+;;; The mirror (mirror.lisp): a lane's ops applied to the coordinator's own
+;;; copy and republished as topic lane:N, which is how every client reads a
+;;; lane (CONTRACT §4.3, §6).
 
-(defun plist-keys (value)
-  "Every keyword key anywhere in VALUE — plists, lists, vectors."
-  (cond ((and (consp value) (keywordp (car value)))
-         (loop for (k v) on value by #'cddr append (cons k (plist-keys v))))
-        ((consp value) (append (plist-keys (car value)) (plist-keys (cdr value))))
-        ((and (vectorp value) (not (stringp value)))
-         (loop for x across value append (plist-keys x)))
-        (t nil)))
-
-(defun get-request (path &key query headers)
-  (evo.serve::%make-request :method "GET" :path path :query query
-                            :headers headers :body ""))
-
-(defun rendered (fn)
-  "What FN writes to a fresh octet stream, as a string."
-  (flexi-streams:octets-to-string
-   (flexi-streams:with-output-to-sequence (out) (funcall fn out))))
-
-(defun test-lane-api ()
+(defun test-mirror ()
   (let* ((agent (fresh-agent))
-         (*swarm* (test-swarm :agent agent))
-         (lane (first (swarm-lanes *swarm*))))
-    (note-lane-goal lane (list :goal-id "g1" :objective "ship it" :status "active"))
-    (check "api: a cached goal reaches the lane's snapshot"
-           (equal "active" (getf (getf (evo.swarm::lane-snapshot lane) :goal) :status)))
-    (note-lane-goal-status lane "complete")
-    (check "api: an event's goal status updates the cached goal"
-           (equal "complete" (cached-lane-goal-status lane)))
-    (note-lane-goal-status (second (swarm-lanes *swarm*)) "active")
-    (check "api: an event naming a goal with none cached creates one"
-           (equal "active" (cached-lane-goal-status (second (swarm-lanes *swarm*)))))
-    (let* ((body (swarm-lanes-response))
-           (lanes (getf body :lanes))
-           (info (aref lanes 0))
-           (keys (plist-keys info)))
-      (check "api: /lanes carries the swarm and one row per lane"
-             (and (= 3 (length lanes))
-                  (equal "unit" (getf (getf body :swarm) :id))
-                  (eql 0 (getf (getf body :swarm) :busy))))
-      (check "api: a lane row has its number, state, goal and clocks"
-             (and (= 1 (getf info :n))
-                  (eq :starting (getf info :state))
-                  (equal "complete" (getf (getf info :goal) :status))
-                  (member :task-age keys)
-                  (member :step-age keys)))
-      (check "api: a lane row never carries a token, url, port or dir"
-             (null (intersection '(:token :url :port :dir) keys))))))
+         (*swarm* (test-swarm :agent agent :workers 1))
+         (lane (first (swarm-lanes *swarm*)))
+         (mirror (evo.swarm::lane-mirror lane)))
+    (check "mirror: one per lane, named for its topic"
+           (and mirror (equal "lane:1" (evo.swarm::mirror-topic mirror))))
+    (let ((ops (with-published (ops)
+                 (evo.swarm::mirror-apply mirror '(:op "item.add" :topic "session" :after nil
+                                        :item (:id "e1" :kind "user" :ts 1 :text "hi")))
+                 (evo.swarm::mirror-apply mirror '(:op "item.add" :topic "session" :after "e1"
+                                        :item (:id "e2" :kind "assistant" :ts 2
+                                               :text "yo" :status "streaming")))
+                 (evo.swarm::mirror-apply mirror '(:op "item.append" :topic "session" :id "e2"
+                                        :field "text" :text " there"))
+                 (evo.swarm::mirror-apply mirror '(:op "item.patch" :topic "session" :id "e2"
+                                        :patch (:status "final" :usage (:input 7))))
+                 (evo.swarm::mirror-apply mirror '(:op "item.add" :topic "session" :after nil
+                                        :item (:id "e3" :kind "tool" :name "read"))
+                               ))))
+      (check "mirror: every op is republished under the lane's topic"
+             (and (= 5 (length ops))
+                  (every (lambda (op) (equal "lane:1" (getf op :topic))) ops)))
+      (check "mirror: ...keeping the op's own fields"
+             (and (equal "item.append" (getf (third ops) :op))
+                  (equal " there" (getf (third ops) :text))
+                  (equal "final" (getf (getf (fourth ops) :patch) :status)))))
+    (check "mirror: the lane's items read back in order"
+           (equal '("e1" "e2" "e3")
+                  (mapcar (lambda (i) (getf i :id)) (evo.swarm::mirror-items mirror))))
+    (check "mirror: an append concatenates and a patch keeps the rest"
+           (let ((item (evo.swarm::mirror-item-ref mirror "e2")))
+             (and (equal "yo there" (getf item :text))
+                  (equal "final" (getf item :status))
+                  (eql 2 (getf item :ts))
+                  (eql 7 (getf (getf item :usage) :input)))))
+    (check "mirror: an item id that arrives twice is replaced, not duplicated"
+           (progn (evo.swarm::mirror-apply mirror '(:op "item.add" :topic "session" :after nil
+                                         :item (:id "e3" :kind "tool" :name "read"
+                                                :status "ok")))
+                  (and (= 3 (length (evo.swarm::mirror-items mirror)))
+                       (equal "ok" (getf (evo.swarm::mirror-item-ref mirror "e3") :status)))))
+    (check "mirror: an unknown op is ignored, not an error"
+           (null (evo.swarm::mirror-apply mirror '(:op "something.new" :topic "session"))))
+    ;; The topic provider (§7): what serve serves from.
+    (let ((snapshot (evo.serve:topic-snapshot mirror :items 200)))
+      (check "mirror: its snapshot is the lane's own state and items"
+             (and (= 3 (length (getf snapshot :items)))
+                  (null (getf snapshot :has-more)))))
+    (multiple-value-bind (items more) (evo.serve:topic-items-before mirror "e3" 10)
+      (check "mirror: paging backwards stays in the window"
+             (and (equal '("e1" "e2") (mapcar (lambda (i) (getf i :id)) items))
+                  (null more))))
+    (check "mirror: one item whole" (equal "e1" (getf (evo.serve:topic-item mirror "e1") :id)))
+    ;; The lane's own status is the swarm's record of it.
+    (evo.swarm::mirror-apply mirror '(:op "state.patch" :topic "session"
+                           :patch (:status "running" :model (:id "stub-a"))))
+    (check "mirror: a state patch lands on its topic state"
+           (equal "running" (getf (evo.swarm::mirror-lane-state mirror) :status)))
+    (check "mirror: ...and the lane shows working"
+           (eq :working (lane-state lane)))
+    (evo.swarm::mirror-apply mirror '(:op "state.patch" :topic "session" :patch (:status "idle")))
+    (check "mirror: ...and idle again when the lane says so"
+           (eq :idle (lane-state lane)))
+    ;; The window, and what has_more means.
+    (let ((evo.swarm::*mirror-items* 3))
+      (dotimes (i 5)
+        (evo.swarm::mirror-apply mirror (list :op "item.add" :topic "session" :after nil
+                                   :item (list :id (format nil "x~d" i) :kind "user"))))
+      (check "mirror: only the newest *evo.swarm::mirror-items* are kept"
+             (equal '("x2" "x3" "x4")
+                    (mapcar (lambda (i) (getf i :id)) (evo.swarm::mirror-items mirror))))
+      (check "mirror: has_more says the rest are below"
+             (getf (evo.serve:topic-snapshot mirror :items 200) :has-more)))))
 
-(defun test-lane-state-events ()
+(defun test-mirror-rebuild ()
+  "A lane's process restarting, or its journal moving, is a topic.reset: its
+items are not ours to patch (CONTRACT §5.3, §6)."
+  (let* ((agent (fresh-agent))
+         (*swarm* (test-swarm :agent agent :workers 1))
+         (lane (first (swarm-lanes *swarm*)))
+         (mirror (evo.swarm::lane-mirror lane)))
+    (with-lane-snapshot ((list :status "idle")
+                         :items (list (list :id "e1" :kind "user" :ts 1 :text "hello")))
+      (let ((ops (with-published (ops) (evo.swarm::mirror-rebuild mirror "lane_restarted"))))
+        (check "rebuild: the lane's items are taken whole from its snapshot"
+               (equal '("e1") (mapcar (lambda (i) (getf i :id)) (evo.swarm::mirror-items mirror))))
+        (check "rebuild: ...and every client is told to re-snapshot"
+               (equal '("topic.reset" "lane:1" "lane_restarted")
+                      (list (getf (first ops) :op) (getf (first ops) :topic)
+                            (getf (first ops) :reason)))))
+      (check "rebuild: the cursor is the snapshot's, not the stream's"
+             (equal "e1.10" (evo.swarm::mirror-cursor mirror))))
+    ;; A stream.reset from the lane is the same thing.
+    (with-lane-snapshot ((list :status "running")
+                         :items (list (list :id "n1" :kind "assistant" :ts 2 :text "fresh")))
+      (let ((ops (with-published (ops)
+                   (evo.swarm::mirror-apply mirror '(:op "stream.reset" :topic "session"
+                                          :reason "cursor_too_old")))))
+        (check "rebuild: a stream.reset is a rebuild with a client-visible reset"
+               (and (equal "topic.reset" (getf (first ops) :op))
+                    (equal "lane_restarted" (getf (first ops) :reason))
+                    (equal '("n1") (mapcar (lambda (i) (getf i :id)) (evo.swarm::mirror-items mirror)))))))))
+
+(defun test-topics ()
+  "The swarm is one observable thing (CONTRACT §4.3): its topic carries the
+whole state, and every lane transition publishes it."
+  (let* ((agent (fresh-agent))
+         (*swarm* (test-swarm :agent agent :workers 2))
+         (lane (first (swarm-lanes *swarm*))))
+    (setf (evo.swarm::swarm-lane-model *swarm*) "stub-a"
+          (evo.swarm::swarm-lane-provider *swarm*) :stub
+          (evo.swarm::swarm-lane-thinking *swarm*) :high)
+    (let ((ops (with-published (ops) (evo.swarm::publish-swarm-state *swarm* t))))
+      (check "topics: the swarm topic is one state.patch"
+             (and (= 1 (length ops))
+                  (equal "state.patch" (getf (first ops) :op))
+                  (equal "swarm" (getf (first ops) :topic))))
+      (let ((state (getf (first ops) :patch)))
+        (check "topics: it names the swarm, its workers and its lanes"
+               (and (equal "unit" (getf state :id))
+                    (eql 2 (getf state :workers))
+                    (= 2 (length (getf state :lanes)))))
+        (check "topics: the lane configuration is its config"
+               (and (equal "stub-a" (getf (getf (getf state :config) :lane-model) :id))
+                    (eq :stub (getf (getf (getf state :config) :lane-model) :provider))
+                    (eq :high (getf (getf state :config) :lane-thinking))))
+        (check "topics: a lane row has its number, state and clocks"
+               (let ((row (elt (getf state :lanes) 0)))
+                 (and (eql 1 (getf row :n)) (eq :starting (getf row :state))
+                      (member :task-started-at (plist-keys row))
+                      (member :step-started-at (plist-keys row)))))))
+    (check "topics: an unchanged swarm publishes nothing"
+           (null (with-published (ops) (evo.swarm::publish-swarm-state *swarm*))))
+    ;; Every transition, including starting -> idle (D2).
+    (let ((ops (with-published (ops)
+                 (evo.swarm::with-swarm-lock () (setf (lane-state lane) :idle))
+                 (evo.swarm::swarm-lane-changed))))
+      (check "topics: a lane transition publishes the swarm state"
+             (and (= 1 (length ops))
+                  (eq :idle (getf (elt (getf (getf (first ops) :patch) :lanes) 0)
+                                  :state)))))
+    (evo.swarm::with-swarm-lock () (setf (lane-state lane) :working))
+    (let ((ops (with-published (ops) (evo.swarm::swarm-lane-changed))))
+      (check "topics: busy counts the working lanes"
+             (eql 1 (getf (getf (getf (first ops) :patch) :status) :busy))))
+    (check "topics: waiting_on_lanes is the coordinator settled with lanes working"
+           (progn (setf (evo.swarm::swarm-coordinator-busy *swarm*) nil)
+                  (getf (getf (evo.swarm::swarm-state) :status) :waiting-on-lanes)))
+    (check "topics: ...and off while the coordinator is running"
+           (progn (setf (evo.swarm::swarm-coordinator-busy *swarm*) t)
+                  (not (getf (getf (evo.swarm::swarm-state) :status) :waiting-on-lanes))))
+    ;; The hold the VIEW reads to report status `waiting` (§4.2).
+    (check "topics: the swarm holds the coordinator while its lanes work"
+           (stringp (evo.swarm::coordinator-hold-reason agent)))
+    (check "topics: ...and holds nobody else"
+           (null (evo.swarm::coordinator-hold-reason (fresh-agent))))))
+
+(defun followup-text (entry)
+  "A queued follow-up's text, whether the kernel stores the entry as a string
+or as a plist carrying its origin too."
+  (if (stringp entry) entry (getf entry :text)))
+
+(defun test-interrupt ()
+  "The one human action on lanes (CONTRACT §5.5, design §7.4): run.interrupt
+with scope lane or swarm, mediated through serve's hook."
   (let* ((agent (fresh-agent))
          (evo.kernel:*frontend* nil)
-         (recording (make-instance 'recording-view))
-         (*swarm* (test-swarm :agent agent :view recording))
-         (lane (first (swarm-lanes *swarm*))))
-    (maybe-publish-lane-state lane)
-    (check "lane-state: the first shape is published through the view"
-           (let ((event (first (slot-value recording 'events))))
-             (and (eq :lane-state (getf event :type))
-                  (= 1 (getf event :lane)))))
-    (maybe-publish-lane-state lane)
-    (check "lane-state: an unchanged lane publishes nothing"
-           (= 1 (length (slot-value recording 'events))))
-    (evo.swarm::handle-lane-event lane "task-start" '(:type "task-start" :kind "run"))
-    (check "lane-state: a state change publishes again"
-           (let ((event (first (slot-value recording 'events))))
-             (and (= 2 (length (slot-value recording 'events)))
-                  (eq :working (getf event :state)))))
-    (evo.swarm::handle-lane-event lane "report"
-                                  '(:type "report" :done "did it" :goal "active"))
-    (check "lane-state: a goal status change publishes"
-           (let ((event (first (slot-value recording 'events))))
-             (and (= 3 (length (slot-value recording 'events)))
-                  (equal "active" (getf event :goal)))))
-    (evo.kernel::drain-steering agent)
-    (evo.swarm::handle-lane-event lane "settled" '(:type "settled" :outcome "stop"))
-    (check "lane-state: settling publishes the lane idle"
-           (and (= 4 (length (slot-value recording 'events)))
-                (eq :idle (getf (first (slot-value recording 'events)) :state))))
-    (evo.kernel::drain-steering agent)
-    ;; A TUI view has no event stream: publishing is a no-op, not an error.
-    (let ((*swarm* (test-swarm :agent agent)))
-      (check "lane-state: a view without a stream drops it"
-             (null (maybe-publish-lane-state lane))))))
+         (*swarm* (test-swarm :agent agent :workers 2))
+         (server (evo.serve:make-server :port 0 :token "t"))
+         (saved (symbol-function 'evo.swarm::lane-op))
+         (ops nil) (interrupted t))
+    (setf (evo.swarm::swarm-server *swarm*) server)
+    (unwind-protect
+         (progn
+           (setf (symbol-function 'evo.swarm::lane-op)
+                 (lambda (lane op args &key timeout)
+                   (declare (ignore lane timeout))
+                   (push (list op args) ops)
+                   (and interrupted (list :interrupted t))))
+           (check "interrupt: scope lane stops exactly that lane"
+                  (equal '("lane:1") (evo.serve:interrupt-scope server :lane 1)))
+           (check "interrupt: ...through that lane's own run.interrupt"
+                  (equal '(("run.interrupt" (:scope "session"))) ops))
+           (check "interrupt: ...and the coordinator is told a human did it"
+                  (let ((queued (evo.kernel::agent-followups agent)))
+                    (and queued (search "[human] stopped lane 1"
+                                        (followup-text (first queued))))))
+           (setf ops nil)
+           (check "interrupt: scope swarm stops the coordinator and every lane"
+                  (progn (setf (evo.swarm::swarm-coordinator-busy *swarm*) t)
+                         (equal '("session" "lane:1" "lane:2")
+                                (evo.serve:interrupt-scope server :swarm nil))))
+           (check "interrupt: ...one run.interrupt per lane"
+                  (= 2 (length ops)))
+           (check "interrupt: ...and one human-action message naming every lane"
+                  (let ((queued (evo.kernel::agent-followups agent)))
+                    (and queued
+                         (some (lambda (entry)
+                                 (search "[human] stopped lanes 1, 2"
+                                         (followup-text entry)))
+                               queued))))
+           ;; Nothing running: nothing is reported as interrupted.
+           (setf ops nil interrupted nil
+                 (evo.kernel::agent-followups agent) nil)
+           (setf (evo.swarm::swarm-coordinator-busy *swarm*) nil)
+           (check "interrupt: an idle lane is not reported as interrupted"
+                  (null (evo.serve:interrupt-scope server :lane 1)))
+           (check "interrupt: an idle swarm is not reported either"
+                  (null (evo.serve:interrupt-scope server :swarm nil)))
+           (check "interrupt: ...and the coordinator hears nothing about it"
+                  (null (evo.kernel::agent-followups agent)))
+           (check "interrupt: an unknown lane is a refusal"
+                  (handler-case (progn (evo.serve:interrupt-scope server :lane 9) nil)
+                    (error () t)))
+           (check "interrupt: another server's swarm is not ours to stop"
+                  (null (evo.serve:interrupt-scope (evo.serve:make-server :port 0 :token "u")
+                                                   :swarm nil))))
+      (setf (symbol-function 'evo.swarm::lane-op) saved))))
 
-(defun test-swarm-json-handlers ()
-  (let* ((agent (fresh-agent))
-         (*swarm* (test-swarm :agent agent)))
-    (note-lane-goal (first (swarm-lanes *swarm*))
-                    (list :goal-id "g1" :objective "ship it" :status "active"))
-    (let ((text (rendered (lambda (out)
-                            (evo.swarm::handle-swarm-lanes nil nil nil out)))))
-      (check "handlers: GET /lanes writes the swarm, its lanes and their goals"
-             (and (search "\"lanes\"" text) (search "\"swarm\"" text)
-                  (search "\"goal\"" text) (search "ship it" text)
-                  (search "\"status\":\"active\"" text)))
-      (check "handlers: GET /lanes writes no token and no port key"
-             (and (not (search "\"token\"" text)) (not (search "\"port\"" text)))))
-    (check "handlers: the bare /lanes path through the prefix route is the listing"
-           (search "\"lanes\""
-                   (rendered (lambda (out)
-                               (evo.swarm::handle-swarm-lane-route
-                                nil (get-request "/lanes") nil out)))))
-    (check "handlers: an unknown action under /lanes is a JSON 404"
-           (search "no such swarm endpoint"
-                   (rendered (lambda (out)
-                               (evo.swarm::handle-swarm-lane-route
-                                nil (get-request "/lanes/3/reports") nil out)))))
-    (let ((text (rendered (lambda (out)
-                            (evo.swarm::handle-swarm-lane-transcript
-                             nil (get-request "/lanes/9/transcript") nil out)))))
-      (check "handlers: a transcript for an unknown lane is a 404 JSON error"
-             (and (search "404 Not Found" text) (search "no lane 9" text))))
-    (let ((text (rendered (lambda (out)
-                            (evo.swarm::handle-swarm-lane-transcript
-                             nil (get-request "/lanes/x/transcript") nil out)))))
-      (check "handlers: a transcript without a lane number is a 400 JSON error"
-             (and (search "400 Bad Request" text) (search "lane number" text))))
-    ;; A reply that cannot be a stream is an HTTP error, never a 200 SSE head.
-    (let ((text (rendered (lambda (out)
-                            (evo.swarm::handle-swarm-lane-events
-                             nil (get-request "/lanes/9/events") nil out)))))
-      (check "handlers: an unknown lane's events is a 404 JSON error"
-             (and (search "404 Not Found" text) (search "no lane 9" text))))
-    (let ((text (rendered (lambda (out)
-                            (evo.swarm::handle-swarm-lane-events
-                             nil (get-request "/lanes/x/events") nil out)))))
-      (check "handlers: events without a lane number is a 400, before any SSE head"
-             (and (search "400 Bad Request" text)
-                  (search "lane number" text)
-                  (not (search "text/event-stream" text)))))
-    (check "handlers: /lanes with no swarm is a JSON error"
-           (let ((*swarm* nil))
-             (search "no swarm"
-                     (rendered (lambda (out)
-                                 (evo.swarm::handle-swarm-lanes nil nil nil out))))))))
-
-(defun test-lane-event-relay ()
-  (let* ((sequence
-           (flexi-streams:with-output-to-sequence (out)
-             (with-input-from-string
-                 (in (format nil ": hello~%~%id: 7~%event: report~%data: {\"done\":\"x\"}~%~%id: 8~%event: settled~%data: {}~%~%"))
-               (check "relay: the last id relayed is returned"
-                      (eql 8 (copy-lane-events in out))))))
-         (text (flexi-streams:octets-to-string sequence)))
-    (check "relay: ids, types, data and keepalive comments are copied through"
-           (and (search ": hello" text)
-                (search "id: 7" text)
-                (search "event: report" text)
-                (search "data: {\"done\":\"x\"}" text)
-                (search "id: 8" text)
-                (search "event: settled" text)))))
-
-(defun test-swarm-route-parsing ()
-  (check "routes: the lane number comes out of the path"
-         (and (eql 3 (evo.swarm::route-lane "3/transcript"))
-              (eql 12 (evo.swarm::route-lane "/12/events"))
-              (null (evo.swarm::route-lane ""))))
-  (check "routes: the action comes out of the path"
-         (and (equal "/transcript" (evo.swarm::route-action "3/transcript"))
-              (equal "/events" (evo.swarm::route-action "12/events"))
-              (null (evo.swarm::route-action "3"))))
-  (check "routes: the path below /lanes is taken whole or as a suffix"
-         (and (equal "3/events" (evo.swarm::route-path (get-request "/lanes/3/events")))
-              (equal "3/events" (evo.swarm::route-path (get-request "/3/events")))
-              (equal "" (evo.swarm::route-path (get-request "/lanes")))
-              (equal "" (evo.swarm::route-path nil))))
-  ;; What a prefix route's handler reads when the router bound it.
-  (let ((evo.serve:*route-tail* "3/events"))
-    (check "routes: a prefix route's tail is the path below /lanes"
-           (equal "3/events" (evo.swarm::route-path (get-request "/lanes/3/events")))))
-  (let ((resumable (get-request "/lanes/1/events" :query '(("since" . "42"))))
-        (fresh (get-request "/lanes/1/events")))
-    (check "routes: ?since is the resume cursor"
-           (eql 42 (evo.swarm::request-cursor resumable)))
-    (check "routes: no cursor at all tails the lane live"
-           (eq :live (evo.swarm::request-cursor fresh)))
-    (setf (evo.serve::request-headers resumable) '(("last-event-id" . "99")))
-    (check "routes: Last-Event-ID wins over ?since"
-           (eql 99 (evo.swarm::request-cursor resumable)))
-    (check "routes: a bad or negative event cursor is invalid"
-           (and (eq :invalid (evo.swarm::request-cursor
-                              (get-request "/x" :query '(("since" . "abc")))))
-                (eq :invalid (evo.swarm::request-cursor
-                              (get-request "/x" :query '(("since" . "-1")))))))
-    (check "routes: ?limit follows serve's non-negative integer contract"
-           (and (eql 5 (evo.swarm::request-limit
-                        (get-request "/x" :query '(("limit" . "5")))))
-                (eql 0 (evo.swarm::request-limit
-                        (get-request "/x" :query '(("limit" . "0")))))
-                (eq :invalid (evo.swarm::request-limit
-                              (get-request "/x" :query '(("limit" . "-1")))))
-                (eq :invalid (evo.swarm::request-limit
-                              (get-request "/x" :query '(("limit" . "abc")))))
-                (null (evo.swarm::request-limit fresh))))))
-
-(defun test-swarm-route-registration ()
-  (let ((server (evo.serve:make-server :token "t"))
-        (before (length (evo.serve:server-routes (evo.serve:make-server :token "t")))))
-    (declare (ignorable server))
-    (register-swarm-routes)
-    (check "routes: registering adds one route"
-           (= (1+ before) (length (evo.serve:server-routes server))))
-    (register-swarm-routes)
-    (check "routes: re-registering replaces, never stacks"
-           (= (1+ before) (length (evo.serve:server-routes server))))
-    (multiple-value-bind (handler status tail)
-        (evo.serve:route-request "GET" "/lanes")
-      (check "routes: GET /lanes takes the swarm's handler"
-             (and (eq handler #'evo.swarm::handle-swarm-lane-route) (null tail))))
-    (multiple-value-bind (handler status tail)
-        (evo.serve:route-request "GET" "/lanes/3/transcript")
-      (check "routes: a lane's path takes it too, tail and all"
-             (and (eq handler #'evo.swarm::handle-swarm-lane-route)
-                  (equal "3/transcript" tail))))
-    (multiple-value-bind (handler status tail)
-        (evo.serve:route-request "POST" "/lanes")
-      (declare (ignore tail))
-      (check "routes: the swarm's API is read-only (POST is a 405)"
-             (and (null handler) (eql 405 status))))
-    (check "routes: the swarm says who it is, for a client that asks"
-           (equal '(:name "evo-swarm" :version "0.1.0" :features ("swarm"))
-                  *swarm-identity*))))
+(defun test-lane-launch-args ()
+  "How a lane is launched (CONTRACT §1, §6): its own port, its own ready file,
+a pipe we hold, and an exact --resume."
+  (let* ((*swarm* (test-swarm :workers 1))
+         (lane (first (swarm-lanes *swarm*)))
+         (args (evo.swarm::lane-launch-args lane :resume nil)))
+    (check "launch: no supervisor of its own (the coordinator restarts it)"
+           (member "--no-supervisor" args :test #'equal))
+    (check "launch: it picks its own port and publishes its own ready file"
+           (and (equal "0" (second (member "--port" args :test #'equal)))
+                (equal (namestring (evo.swarm::ready-file-path lane))
+                       (second (member "--ready-file" args :test #'equal)))))
+    (check "launch: stdin is a pipe, so EOF is the coordinator going away"
+           (member "--watch-stdin" args :test #'equal))
+    (check "launch: a fresh lane resumes nothing"
+           (not (member "--resume" args :test #'equal)))
+    (let ((session (merge-pathnames "sessions/s.sexp" (evo.swarm::lane-dir lane))))
+      (ensure-directories-exist session)
+      (write-file-string session "")
+      (setf (evo.swarm::lane-session-path lane) (namestring session))
+      (check "launch: a resumed lane names its exact session, never a bare --resume"
+             (let ((args (evo.swarm::lane-launch-args lane :resume t)))
+               (and (member "--resume" args :test #'equal)
+                    (member (namestring session) args :test #'equal))))
+      (delete-file session))))
 
 (defun test-sse-reader ()
+  "serve's stream cursor is the frame's own id text; the reader hands it over
+whole, and it splits into the epoch and the seq at the dot."
   (let ((seen nil))
     (with-input-from-string
-        (in (format nil ": hello~%~%id: 7~%event: report~%data: {\"a\":1}~%~%id: 8~%event: settled~%data: {}~%~%"))
+        (in (format nil ": ping~%~%id: 7f3a.7~%event: op~%data: {\"op\":\"item.add\"}~%~%id: 7f3a.8~%event: op~%data: {}~%~%"))
       (evo.swarm::read-sse-events in (lambda (id type data) (push (list id type data) seen))))
     (check "sse: ids, types and data, comments skipped"
-           (equal '((7 "report" "{\"a\":1}") (8 "settled" "{}")) (nreverse seen)))))
+           (equal '(("7f3a.7" "op" "{\"op\":\"item.add\"}") ("7f3a.8" "op" "{}"))
+                  (nreverse seen)))
+    (check "sse: an id splits into the epoch and the seq"
+           (multiple-value-bind (epoch seq) (evo.swarm::split-cursor "7f3a.12")
+             (and (equal "7f3a" epoch) (eql 12 seq))))))
 
 (defun test-pid-alive ()
   (check "port: this process is alive" (evo.port:pid-alive-p (evo.port:getpid)))
@@ -1075,13 +1143,12 @@ why not — the answer a GUI's chooser needs before it spawns anything."
     (test-notes)
     (test-coordinator-tools)
     (test-goal-hold)
-    (test-events)
-    (test-lane-api)
-    (test-lane-state-events)
-    (test-swarm-json-handlers)
-    (test-lane-event-relay)
-    (test-swarm-route-parsing)
-    (test-swarm-route-registration)
+    (test-lane-input)
+    (test-mirror)
+    (test-mirror-rebuild)
+    (test-topics)
+    (test-interrupt)
+    (test-lane-launch-args)
     (test-view)
     (test-serve-view)
     (test-record)

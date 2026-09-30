@@ -15,7 +15,7 @@ it is working, starting a run when it is idle — and shown to the human.  ORIGI
 rides the message into the journal and is never shown to the model."
   (let ((agent (and *swarm* (swarm-agent *swarm*))))
     (when agent
-      (evo:steer text agent :origin origin)
+      (queue-steering agent text :origin origin)
       (swarm-say text :style style)
       (evo:request-run))))
 
