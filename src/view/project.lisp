@@ -418,6 +418,7 @@ same keys the TUI fills from its own slots, so both render the same line."
           :thinking (pget state :thinking)
           :context-tokens (pget context :tokens)
           :context-window (pget context :window)
+          :cache-stats (pget state :cache-stats)
           ;; Journal shape, which is what GOAL-LABEL-TEXT renders; :tokens
           ;; already carries what a live run has spent.
           :goal (and goal (list :goal-id (pget goal :goal-id)
@@ -469,6 +470,10 @@ come from the caller."
                                    (list :tokens (estimate-context-tokens messages)
                                          :window (and model (model-context-window model))
                                          :source "estimate"))
+                      ;; Session-wide prompt-cache totals, folded — the status
+                      ;; line's "N% cached" reads these, and a client can show
+                      ;; the same numbers without parsing the rendered text.
+                      :cache-stats (state-cache-stats fold)
                       :goal (goal-state (state-goal fold) live-goal-tokens)
                       :todos (todo-wire (custom-state fold "todo"))
                       :queue (coerce (or queue #()) 'vector)

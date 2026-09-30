@@ -285,6 +285,13 @@ never from the journal."
   tools            ; list of active tool names, nil = default set
   goal             ; current goal plist or nil
   (loads nil)      ; list of :load entry plists, chronological
+  ;; Prompt-cache accounting: the session's own totals over every assistant
+  ;; message on the path.  Numbers, not a plist, because states share structure
+  ;; with their parent in the fold cache — an incremented list would be mutated
+  ;; under a cached ancestor.
+  (cache-input 0)  ; sent input tokens; cached ones are OUT of this
+  (cache-read 0)   ; … the provider read this many from its prompt cache
+  (cache-write 0)  ; … and wrote this many into it
   (custom nil))    ; alist key-string -> data (last :custom entry wins)
 
 (defun state-messages (state)
@@ -297,6 +304,27 @@ accumulator on first use, and cached: the fold touches the accumulator only."
 (defun state-push-message (state message)
   (push message (state-messages-rev state))
   (setf (state-messages-cache state) nil))
+
+(defun state-cache-stats (state)
+  "STATE's prompt-cache accounting as the normalized usage shape — totals of
+\(:input n :cache-read n :cache-write n) over every assistant message on the
+path.  :input excludes the cached tokens (src/provider/api.lisp states the
+contract), so the three sum to what the session actually sent.  A session that
+has made no request reads all zeros, which the status line renders as \"0%
+cached\" rather than as unknown."
+  (list :input (state-cache-input state)
+        :cache-read (state-cache-read state)
+        :cache-write (state-cache-write state)))
+
+(defun note-cache-usage (state message)
+  "Fold MESSAGE's provider-reported usage into STATE's running totals.  Only
+the provider reports usage, and only assistant messages carry it: an error or a
+provider that reports none contributes nothing."
+  (let ((usage (pget message :usage)))
+    (when usage
+      (incf (state-cache-input state) (or (pget usage :input) 0))
+      (incf (state-cache-read state) (or (pget usage :cache-read) 0))
+      (incf (state-cache-write state) (or (pget usage :cache-write) 0)))))
 
 (defun custom-state (state key)
   "Extension state from :custom entries (invisible to the LLM)."
@@ -322,7 +350,12 @@ interpreted: FOLD-STATE walks a path through it, and APPEND-ENTRY extends a
 cached state with exactly one entry, so the two can never disagree."
   (case (pget entry :type)
     (:message
-     (state-push-message state (pget entry :message)))
+     (state-push-message state (pget entry :message))
+     ;; Cache totals are the session's, not the fold's: a compaction drops
+     ;; messages from the context but does not un-send them, so the totals
+     ;; deliberately survive the :compaction branch below.
+     (when (eq (pget (pget entry :message) :role) :assistant)
+       (note-cache-usage state (pget entry :message))))
     (:custom-message
      ;; Extension-injected content, visible to the LLM.  Tagged with
      ;; the entry's :key so a transform-context hook can filter it

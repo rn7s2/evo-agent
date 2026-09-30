@@ -150,6 +150,20 @@ in parentheses when the id alone does not identify the endpoint."
          (format nil "~a (~(~a~))" model-id (pget model :provider)))
         (t model-id)))
 
+(defun cache-stats-percent (stats)
+  "The share of input tokens the provider read from its prompt cache: cache
+reads over all input tokens.  The normalized usage plist keeps cached tokens
+OUT of :input, so :input + :cache-read + :cache-write is what the session
+actually sent.  No tokens sent yet is 0%, not unknown — a fresh session's
+cache rate is zero."
+  (let ((in (or (getf stats :input) 0))
+        (cr (or (getf stats :cache-read) 0))
+        (cw (or (getf stats :cache-write) 0)))
+    (round (* 100 cr) (max 1 (+ in cr cw)))))
+
+(defun cache-stats-label-text (context)
+  (format nil "~d% cached" (cache-stats-percent (getf context :cache-stats))))
+
 (defun context-label-text (used window)
   (if window
       (format nil "ctx ~a/~a (~d%)"
@@ -187,6 +201,8 @@ RUNNING-JOBS-SUMMARY's plist."
 (defun thinking-status-text (context) (segment-thinking-level context))
 (defun context-status-text (context)
   (context-label-text (getf context :context-tokens) (getf context :context-window)))
+(defun cache-stats-status-text (context)
+  (cache-stats-label-text context))
 (defun goal-status-text (context)
   (let ((goal (getf context :goal)))
     (and goal (goal-label-text goal (getf context :goal-run-tokens)))))
@@ -199,6 +215,15 @@ RUNNING-JOBS-SUMMARY's plist."
 (define-status-segment :context #'context-status-text :side :left :order 300 :style :muted
                        :data (lambda (c) (list :tokens (getf c :context-tokens)
                                                :window (getf c :context-window))))
+;; The same name the shipped userspace extension registers
+;; (~/.evo/extensions/340-cache-stats.lisp), on purpose: whichever loads last
+;; owns the chip, and a session with that extension loaded replaces this
+;; segment instead of showing two "N% cached" claims side by side.  Sessions
+;; that load no userspace at all — a swarm lane, `serve --no-userspace` — get
+;; this one.
+(define-status-segment :cache-stats #'cache-stats-status-text
+                       :side :left :order 350 :style :muted
+                       :data (lambda (c) (getf c :cache-stats)))
 (define-status-segment :goal #'goal-status-text :side :left :order 400 :style :muted
                        :data (lambda (c) (getf c :goal)))
 (define-status-segment :jobs (lambda (c) (jobs-label-text (getf c :jobs)))
