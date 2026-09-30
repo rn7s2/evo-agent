@@ -955,6 +955,81 @@ items are not ours to patch (CONTRACT §5.3, §6)."
                     (equal "lane_restarted" (getf (first ops) :reason))
                     (equal '("n1") (mapcar (lambda (i) (getf i :id)) (evo.swarm::mirror-items mirror)))))))))
 
+(defun test-bring-up-announces ()
+  "A lane's topic is registered — empty — when the swarm starts, before the
+lane's process exists, and MIRROR-LOAD publishes nothing by design (mirror.lisp).
+The first bring-up is therefore what tells a client that snapshotted the empty
+topic to read it again: without it that client keeps a lane with no model,
+context or cache chips, and `hasn't been given work yet` over a transcript the
+lane's own session is holding.  A swarm resumed from a journal is the same
+client's case — it has no reset of its own to rely on (CONTRACT §5.3)."
+  (let* ((agent (fresh-agent))
+         (*swarm* (test-swarm :agent agent :workers 1))
+         (lane (first (swarm-lanes *swarm*)))
+         (saved-launch (symbol-function 'evo.swarm::launch-lane))
+         (saved-ready (symbol-function 'evo.swarm::wait-for-ready))
+         (saved-init (symbol-function 'evo.swarm::initialize-lane)))
+    (unwind-protect
+         (progn
+           (setf (symbol-function 'evo.swarm::launch-lane)
+                 (lambda (lane &key resume)
+                   (declare (ignore lane resume))
+                   t)
+                 (symbol-function 'evo.swarm::wait-for-ready)
+                 (lambda (lane &key epoch)
+                   (declare (ignore lane epoch))
+                   (list :epoch "e1" :session (list :path "/tmp/lane-1.sexp")))
+                 (symbol-function 'evo.swarm::initialize-lane)
+                 (lambda (lane) (declare (ignore lane)) nil))
+           (labels ((resets (ops)
+                      (remove-if-not (lambda (op) (equal "topic.reset" (getf op :op)))
+                                     ops))
+                    ;; WITH-PUBLISHED answers the ops it collected, so the
+                    ;; call's own value is taken by side effect.
+                    (bring-up (&rest args)
+                      (let ((came-up nil))
+                        (let ((ops (with-published (ops)
+                                     (setf came-up (apply #'evo.swarm::bring-up-lane
+                                                          lane args)))))
+                          (values came-up ops)))))
+             (with-lane-snapshot ((list :status "idle" :model (list :id "stub-a" :ready t))
+                                  :items (list (list :id "e1" :kind "user" :ts 1
+                                                     :text "old work")))
+               (multiple-value-bind (came-up ops) (bring-up)
+                 (check "bring-up: the lane came up"
+                        (and came-up ops))
+                 (check "bring-up: a lane's first state is announced to clients"
+                        (equal '(("topic.reset" "lane:1" "lane_restarted"))
+                               (mapcar (lambda (op) (list (getf op :op) (getf op :topic)
+                                                          (getf op :reason)))
+                                       (resets ops))))
+                 (check "bring-up: ...after the snapshot it just took"
+                        (and (equal "idle" (getf (evo.swarm::mirror-lane-state
+                                                  (evo.swarm::lane-mirror lane))
+                                                 :status))
+                             (equal '("e1") (mapcar (lambda (i) (getf i :id))
+                                                    (evo.swarm::mirror-items
+                                                     (evo.swarm::lane-mirror lane)))))))
+               ;; The lane's topic has a state now: a plain bring-up is not news.
+               (with-lane-snapshot ((list :status "working"))
+                 (check "bring-up: a lane that was only followed again is not announced twice"
+                        (null (resets (multiple-value-bind (came-up ops) (bring-up :resume t)
+                                        (declare (ignore came-up))
+                                        ops)))))
+               ;; A restart is news whatever the mirror holds: the caller says so.
+               (with-lane-snapshot ((list :status "idle"))
+                 (check "bring-up: a restarted lane is announced"
+                        (equal "topic.reset"
+                               (getf (first (resets
+                                             (multiple-value-bind (came-up ops)
+                                                 (bring-up :resume t :reset t)
+                                               (declare (ignore came-up))
+                                               ops)))
+                                     :op)))))))
+      (setf (symbol-function 'evo.swarm::launch-lane) saved-launch
+            (symbol-function 'evo.swarm::wait-for-ready) saved-ready
+            (symbol-function 'evo.swarm::initialize-lane) saved-init))))
+
 (defun test-topics ()
   "The swarm is one observable thing (CONTRACT §4.3): its topic carries the
 whole state, and every lane transition publishes it."
@@ -1490,6 +1565,7 @@ changes nothing about the coordinator."
     (test-lane-input)
     (test-mirror)
     (test-mirror-rebuild)
+    (test-bring-up-announces)
     (test-topics)
     (test-interrupt)
     (test-tools)

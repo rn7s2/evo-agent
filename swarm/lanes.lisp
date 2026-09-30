@@ -220,15 +220,23 @@ quitting, or switched away from by /resume) stops coming up, quietly."
          (return-from bring-up-lane nil))
        ;; The lane's own view is authoritative for what it shows; the first
        ;; snapshot is what makes it `starting → idle` (CONTRACT §4.3).
-       (ignore-errors (mirror-load (lane-mirror lane)))
-       (mirror-note-lane-state (lane-mirror lane))
-       (swarm-lane-changed)
-       ;; A lane that came back is a lane whose topic every client must
-       ;; re-snapshot: its items are the ones its resumed session has now,
-       ;; not the ones a client applied before it went down (§5.3).
-       (when reset
-         (publish-op (list :op "topic.reset" :topic (lane-topic lane)
-                           :reason "lane_restarted")))
+       ;; MIRROR-LOAD publishes nothing (mirror.lisp), so a lane's *first*
+       ;; state has to be announced: this topic is registered — empty — when
+       ;; the swarm starts, before the lane's process exists, and a resumed
+       ;; swarm has no reset to hide behind either.  A client that snapshotted
+       ;; the empty topic would keep `state: {}` and no items — a lane with no
+       ;; model, context or cache chips, and "hasn't been given work yet" over
+       ;; a transcript its own session is holding (§5.3).
+       (let ((first (null (mirror-lane-state (lane-mirror lane)))))
+         (ignore-errors (mirror-load (lane-mirror lane)))
+         (mirror-note-lane-state (lane-mirror lane))
+         (swarm-lane-changed)
+         ;; A lane that came back is a lane whose topic every client must
+         ;; re-snapshot: its items are the ones its resumed session has now,
+         ;; not the ones a client applied before it went down (§5.3).
+         (when (or reset first)
+           (publish-op (list :op "topic.reset" :topic (lane-topic lane)
+                             :reason "lane_restarted"))))
        t))))
 
 (defun clear-lane-ready (lane)
