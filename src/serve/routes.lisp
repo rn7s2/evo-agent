@@ -185,7 +185,8 @@ STATUS BODY RUNNING-P) as a list.  A refusal becomes its HTTP status."
 (defvar *server* nil "The server whose command is running (session thread).")
 
 (defun say (text &optional (style :plain))
-  (evo.command:host-say *server* text style))
+  (evo.command:host-notice *server* text
+                           :severity (case style (:error :error) (:notice :warn) (t :info))))
 
 (defmacro define-command-route (name (server body) &body forms)
   "A POST handler whose FORMS run on the session thread as a command."

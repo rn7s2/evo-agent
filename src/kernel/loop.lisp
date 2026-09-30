@@ -135,23 +135,49 @@ input) calls it from its own loop too."
       (funcall cb (append event (list :run-id (agent-run-id agent)
                                       :turn (agent-turn-index agent)))))))
 
-(defun queue-steering (agent text &key images from-user)
-  "Queue a user turn for the next turn boundary.  IMAGES is a list of :image
-content blocks (evo.media builds them); they ride the same queue as the text
-so that a message and its screenshots can never be split across turns.
+(defun queue-steering (agent text &key images from-user origin (id (gen-id)))
+  "Queue a user turn for the next turn boundary; returns the entry id the
+drained entry will carry.  IMAGES is a list of :image content blocks (evo.media
+builds them); they ride the same queue as the text so that a message and its
+screenshots can never be split across turns.
 
 FROM-USER marks TEXT as what the user said — typed at a frontend, or given on
 the command line — rather than a turn evo or an extension steers with (a goal
 continuation, a command's hand-off).  Only such a turn is announced as
-:user-message when it is journaled."
+:user-message when it is journaled.
+
+ORIGIN says who injected it when nobody did: a plist `(:kind ...)` naming the
+injector (a goal continuation, a lane's report, a command's note) and its
+fields; it is journaled beside the message and never shown to the model.  The
+id is minted here, so a frontend can name the line it shows before the turn it
+belongs to exists, and (CANCEL-QUEUED agent id) can take it back."
   (bt:with-lock-held ((agent-lock agent))
     (setf (agent-steering agent)
           (append (agent-steering agent)
-                  (list (list :text text :images images :from-user from-user))))))
+                  (list (list :id id :text text :images images
+                              :from-user from-user :origin origin)))))
+  id)
 
-(defun queue-followup (agent text)
+(defun queue-followup (agent text &key origin (id (gen-id)))
+  "Queue TEXT to be steered when the run in flight settles; returns its entry
+id, which the steering it becomes reuses."
   (bt:with-lock-held ((agent-lock agent))
-    (setf (agent-followups agent) (append (agent-followups agent) (list text)))))
+    (setf (agent-followups agent)
+          (append (agent-followups agent) (list (list :id id :text text :origin origin)))))
+  id)
+
+(defun cancel-queued (agent id)
+  "Remove the queued input ID from AGENT's queues, returning T.  NIL when it
+is not queued any more — it was already drained (or never existed), and its
+entry is then the session's history, not something a frontend may take back."
+  (bt:with-lock-held ((agent-lock agent))
+    (flet ((drop (queue)
+             (let ((kept (remove-if (lambda (item) (equal (pget item :id) id)) queue)))
+               (prog1 (not (eql (length kept) (length queue)))
+                 (setf queue kept)))))
+      (let ((from-steering (drop (agent-steering agent)))
+            (from-followups (drop (agent-followups agent))))
+        (and (or from-steering from-followups) t)))))
 
 (defun steering-pending-p (agent)
   (bt:with-lock-held ((agent-lock agent))
@@ -196,7 +222,10 @@ stacks read an image better when the text that asks about it follows it."
 A turn the user said (QUEUE-STEERING :FROM-USER) is announced first, as
 :user-message (:agent :text :images), on this — the run's — thread and at a
 turn boundary: whatever a hook journals (EVO:INJECT-CONTEXT, typically) lands
-immediately before the user's message, never inside a turn in flight."
+immediately before the user's message, never inside a turn in flight.
+
+Each entry keeps the id the queue minted for it and, when nobody typed it, the
+:origin saying who injected it."
   (let ((queued (bt:with-lock-held ((agent-lock agent))
                   (prog1 (agent-steering agent)
                     (setf (agent-steering agent) nil))))
@@ -204,6 +233,7 @@ immediately before the user's message, never inside a turn in flight."
     (dolist (item queued)
       (let* ((text (pget item :text))
              (images (pget item :images))
+             (origin (pget item :origin))
              (content (steering-content text images)))
         ;; An item with neither text nor images journals nothing, and must not
         ;; be counted either: the count is what tells the run there is new
@@ -213,10 +243,12 @@ immediately before the user's message, never inside a turn in flight."
             (run-hooks :user-message
                        (list :agent agent :text text :images images)))
           (append-entry (agent-journal agent)
-                        (list :type :message
-                              :message (list :role :user :content content)))
+                        (append (list :type :message
+                                      :message (list :role :user :content content))
+                                (when origin (list :origin origin)))
+                        :id (pget item :id))
           (incf appended)
-          (emit-event agent :type :steering :text text
+          (emit-event agent :type :steering :text text :entry-id (pget item :id)
                             :images (length images)))))
     appended))
 
@@ -498,6 +530,7 @@ Returns :stop :length :error :aborted."
                 (when (agent-abort-flag agent)
                   (return :aborted))))
             (let* ((ctx (prepare-next-turn agent))
+                   (entry-id nil)
                    (assistant
                      (call-provider
                       :model (pget ctx :model)
@@ -508,8 +541,21 @@ Returns :stop :length :error :aborted."
                       :abort-flag (lambda () (agent-abort-flag agent))
                       :abort-cleanup (lambda (cleanup)
                                        (add-abort-cleanup agent cleanup))
-                      :on-event (lambda (ev) (handle-provider-event agent ev)))))
-              (append-entry (agent-journal agent) (list :type :message :message assistant))
+                      ;; The assistant entry's id is minted when the attempt
+                      ;; starts talking, not when it is journaled, so a
+                      ;; frontend can name the streaming line it draws — and
+                      ;; the same id names the entry if the stream is retried
+                      ;; from the top.  A provider that never got that far
+                      ;; (it failed before opening a message) gets an id here.
+                      :on-event (lambda (ev)
+                                  (if (eq (pget ev :type) :message-start)
+                                      (handle-provider-event
+                                       agent (append ev (list :entry-id
+                                                              (or entry-id (setf entry-id (gen-id))))))
+                                      (handle-provider-event agent ev))))))
+              (append-entry (agent-journal agent)
+                            (list :type :message :message assistant)
+                            :id (or entry-id (gen-id)))
               (emit-event agent :type :message-end
                                 :stop-reason (message-stop-reason assistant)
                                 :usage (message-usage assistant)
@@ -588,7 +634,9 @@ moment the agent is waiting for the human."
          (setf (agent-compact-retried agent) nil)
          (let ((followup (pop-followup agent)))
            (cond
-             (followup (queue-steering agent followup))
+             (followup (queue-steering agent (pget followup :text)
+                                       :origin (pget followup :origin)
+                                       :id (pget followup :id)))
              ((steering-pending-p agent))   ; steered while settling: go again
              ((loop for fn in *settled-hooks*
                       thereis (handler-case (funcall fn agent outcome)

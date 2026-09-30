@@ -60,13 +60,14 @@ images: no terminal can hand an app the image itself, so evo reads the clipboard
 (defmethod evo.command:host-start-compact ((tui tui) hint)
   (start-compact-worker tui hint))
 
-(defmethod evo.command:host-say ((tui tui) text &optional (style :plain))
-  (scroll tui (ecase style
-                (:plain text)
-                (:dim (dim text))
-                (:notice (yellow text))
-                (:success (green text))
-                (:error (red text)))))
+(defmethod evo.command:host-notice ((tui tui) text &key severity durable data)
+  ;; A durable notice is journaled by the default method; the scrollback shows
+  ;; it either way.
+  (call-next-method)
+  (scroll tui (case severity
+                (:warn (yellow text))
+                (:error (red text))
+                (t text))))
 
 (defmethod evo.command:host-refresh ((tui tui)) (refresh-goal tui))
 
@@ -240,7 +241,8 @@ already-painted scrollback keeps its colours."
            (let ((goal (tui-goal tui)))
              (if (and goal (eq (pget goal :status) :active))
                  (progn
-                   (queue-steering agent (goal-continuation-for agent goal))
+                   (queue-steering agent (goal-continuation-for agent goal)
+                                   :origin (goal-origin goal :continue))
                    (start-worker tui))
                  (check-model-ready tui)))
            (repaint tui)

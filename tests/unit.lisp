@@ -4007,7 +4007,7 @@ and the guards around all of it."
                                                  :arguments (:path "x"))))
                                     `(:role :tool-result :tool-call-id ,id
                                       :content ((:type :text :text "ok")))))))
-         (state (evo.journal::make-state :messages messages))
+         (state (evo.journal::make-state :messages-rev (reverse messages)))
          (capped '(:id "capped" :context-window 1000000 :max-output 1000
                    :max-input-items 1000))
          (uncapped '(:id "uncapped" :context-window 1000000 :max-output 1000)))
@@ -7469,8 +7469,12 @@ became zero after the first reload."
 (defmethod evo.command:host-start-run ((h fake-host)) (incf (fake-host-runs h)))
 (defmethod evo.command:host-start-compact ((h fake-host) hint)
   (push hint (fake-host-compacts h)))
-(defmethod evo.command:host-say ((h fake-host) text &optional (style :plain))
-  (push (cons style text) (fake-host-said h)))
+(defmethod evo.command:host-notice ((h fake-host) text &key severity durable data)
+  ;; Durable notices are journaled by the default method; the host records
+  ;; what it was asked to show either way.
+  (call-next-method)
+  (setf (fake-host-said h) (cons (cons (or severity :info) text)
+                                 (fake-host-said h))))
 (defmethod evo.command:host-choose ((h fake-host) title items action &key (index 0))
   (setf (fake-host-choices h) (list title items action index)))
 (defmethod evo.command:host-set-draft ((h fake-host) text)
@@ -7480,10 +7484,10 @@ became zero after the first reload."
 (defmethod evo.command:host-data ((h fake-host) key value)
   (setf (getf (fake-host-data h) key) value))
 
-(defun said-p (host needle &optional style)
+(defun said-p (host needle &optional severity)
   (find-if (lambda (line)
              (and (search needle (cdr line))
-                  (or (null style) (eq style (car line)))))
+                  (or (null severity) (eq severity (car line)))))
            (fake-host-said host)))
 
 (defun refusal-kind (thunk)
@@ -7504,7 +7508,7 @@ became zero after the first reload."
     ;; /goal: create, refine, pause, resume — and the refusals between.
     (evo.command:goal-command host "")
     (check "cmd: /goal with no goal says how to set one"
-           (said-p host "no goal" :dim))
+           (said-p host "no goal"))
     (evo.command:goal-command host "ship the thing")
     (check "cmd: /goal <text> creates an active goal"
            (eq :active (pget (current-goal agent) :status)))
@@ -7526,7 +7530,7 @@ became zero after the first reload."
     (evo.command:goal-command host "pause")
     (check "cmd: /goal pause pauses" (eq :paused (pget (current-goal agent) :status)))
     (check "cmd: pausing mid-run says the run finishes first"
-           (said-p host "the run in flight finishes first" :notice))
+           (said-p host "the run in flight finishes first"))
     (setf (fake-host-running host) nil)
     (check "cmd: pausing a paused goal is a conflict"
            (eq :conflict (refusal-kind (lambda () (evo.command:goal-command host "pause")))))

@@ -199,10 +199,14 @@ produced outside a command (a task finishing) goes to the event log only.")
 (defmethod evo.command:host-start-compact ((server server) hint)
   (start-compact server hint))
 
-(defmethod evo.command:host-say ((server server) text &optional (style :plain))
-  (when *reply*
-    (push (list :style style :text text) (reply-output *reply*)))
-  (say-event server text style))
+(defmethod evo.command:host-notice ((server server) text &key severity durable data)
+  ;; The reply a command builds keeps its :style field (its clients are being
+  ;; rewritten against the view model, which carries severity instead).
+  (call-next-method)
+  (let ((style (case severity (:warn :notice) (:error :error) (t :plain))))
+    (when *reply*
+      (push (list :style style :text text) (reply-output *reply*)))
+    (say-event server text style)))
 
 (defmethod evo.command:host-choose ((server server) title items action &key (index 0))
   "No picker over HTTP: the choices come back as data, and the same command
@@ -215,13 +219,12 @@ takes one as its argument."
                                 (list :label (car item) :value (cdr item))))))
     (when *reply*
       (setf (reply-choices *reply*) (list :title title :index index :items rows)))
-    (evo.command:host-say server
-                          (format nil "~a~%~{  ~a~%~}" title
-                                  (loop for row in rows
-                                        collect (format nil "~a~@[  ~a~]"
-                                                        (getf row :label)
-                                                        (getf row :description))))
-                          :plain)))
+    (evo.command:host-notice server
+                             (format nil "~a~%~{  ~a~%~}" title
+                                     (loop for row in rows
+                                           collect (format nil "~a~@[  ~a~]"
+                                                           (getf row :label)
+                                                           (getf row :description)))))))
 
 (defmethod evo.command:host-set-draft ((server server) text)
   ;; The layer reports the text as :draft data; nothing to paint here.
@@ -241,7 +244,7 @@ takes one as its argument."
   (when *reply*
     (setf (reply-status *reply*) 422
           (reply-error *reply*) (format nil "/~a: ~a" name condition)))
-  (evo.command:host-say server (format nil "✗ /~a: ~a" name condition) :error))
+  (evo.command:host-notice server (format nil "✗ /~a: ~a" name condition) :severity :error))
 
 ;;; The server as the session's frontend.
 
@@ -258,10 +261,10 @@ otherwise say why and how to recover, and leave queued input queued."
   (let ((agent (server-agent server)))
     (handler-case (progn (effective-model (fold-state (agent-journal agent)) agent) t)
       (error (e)
-        (evo.command:host-say server (format nil "✗ ~a" e) :error)
-        (evo.command:host-say server "recover with /model <id> (a registered model) or register one: POST /eval (evo:register-model ...)" :dim)
+        (evo.command:host-notice server (format nil "✗ ~a" e) :severity :error)
+        (evo.command:host-notice server "recover with /model <id> (a registered model) or register one: POST /eval (evo:register-model ...)")
         (when (steering-pending-p agent)
-          (evo.command:host-say server "input stays queued — it runs once the model resolves" :dim))
+          (evo.command:host-notice server "input stays queued — it runs once the model resolves"))
         nil))))
 
 (defun spawn-task (server kind body)
@@ -323,19 +326,24 @@ next run if input queued up meanwhile — or announce the session settled."
       (setf (server-task server) nil)
       (when (eq (task-kind task) :compact)
         (case outcome
-          (:stop (evo.command:host-say server "✓ compacted" :success))
-          (:aborted (evo.command:host-say server "✗ compact interrupted" :dim))
-          (t (evo.command:host-say server (format nil "✗ compact: ~a" text) :error))))
+          (:stop (evo.command:host-notice server "✓ compacted"
+                                          :durable t :data (list :source :serve)))
+          (:aborted (evo.command:host-notice server "✗ compact interrupted" :severity :warn))
+          (t (evo.command:host-notice server (format nil "✗ compact: ~a" text)
+                                      :severity :error
+                                      :durable t :data (list :source :serve)))))
       (when (and (eq (task-kind task) :run) text)
-        (evo.command:host-say server (format nil "✗ internal error in run: ~a" text) :error))
+        (evo.command:host-notice server (format nil "✗ internal error in run: ~a" text)
+                                 :severity :error
+                                 :durable t :data (list :source :serve)))
       (publish (server-log server)
                (list :type :task-end :task-id id :kind (task-kind task)
                      :outcome outcome :error text))
       (let ((goal (current-goal agent)))
         (when (and goal (member (pget goal :status) '(:complete :budget-limited :paused)))
-          (evo.command:host-say server (format nil "◆ goal ~a: ~(~a~)"
-                                               (pget goal :goal-id) (pget goal :status))
-                                :notice)))
+          (evo.command:host-notice server (format nil "◆ goal ~a: ~(~a~)"
+                                                  (pget goal :goal-id) (pget goal :status))
+                                   :durable t :data (list :source :goal))))
       (when (and (steering-pending-p agent) (not (server-quit server)))
         (start-run server))
       (unless (server-task server)
@@ -486,7 +494,8 @@ and a model that does not resolve is said now rather than at the first prompt."
   (let* ((agent (server-agent server))
          (goal (current-goal agent)))
     (cond ((and goal (eq (pget goal :status) :active))
-           (queue-steering agent (goal-continuation-for agent goal))
+           (queue-steering agent (goal-continuation-for agent goal)
+                           :origin (goal-origin goal :continue))
            (start-run server))
           (t (model-ready-p server))))
   (publish (server-log server)

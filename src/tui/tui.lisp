@@ -559,12 +559,20 @@ the activity line has one row."
      (refresh-goal tui :reset-goal-run-tokens nil)
      (setf (tui-dirty tui) t))
     (:compact-result
+     ;; A compaction's result is a fact about the session, so the notice is
+     ;; durable: it is still there for whoever opens this session later.
      (case (pget event :outcome)
-       (:stop (scroll tui (green "✓ compacted")))
-       (:aborted (scroll tui (dim "✗ compact interrupted")))
-       (:error (scroll tui (red (format nil "✗ compact: ~a" (pget event :text)))))))
+       (:stop (evo.command:host-notice tui "✓ compacted"
+                                       :durable t :data (list :source :command)))
+       (:aborted (evo.command:host-notice tui "✗ compact interrupted" :severity :warn))
+       (:error (evo.command:host-notice tui (format nil "✗ compact: ~a" (pget event :text))
+                                        :severity :error
+                                        :durable t :data (list :source :command)))))
     (:worker-error
-     (scroll tui (red (format nil "✗ internal error in run: ~a" (pget event :text)))))
+     (evo.command:host-notice tui
+                              (format nil "✗ internal error in run: ~a" (pget event :text))
+                              :severity :error
+                              :durable t :data (list :source :command)))
     (:worker-done
      (let ((task (tui-task tui)))
        ;; A task is forgotten only after its actual thread has exited.  Ignore a
@@ -586,9 +594,11 @@ the activity line has one row."
          (let ((goal (tui-goal tui)))
            (when (and goal (member (pget goal :status)
                                    '(:complete :budget-limited :paused)))
-             (scroll tui (yellow (format nil "◆ goal ~a: ~a"
-                                         (pget goal :goal-id)
-                                         (string-downcase (pget goal :status)))))))
+             ;; A goal transition, journalled with the run that caused it.
+             (evo.command:host-notice tui (format nil "◆ goal ~a: ~a"
+                                                  (pget goal :goal-id)
+                                                  (string-downcase (pget goal :status)))
+                                      :durable t :data (list :source :goal))))
          ;; Input submitted while this task settled belongs to the same session
          ;; and starts a fresh task only after the old one is joined.
          (when (steering-pending-p (tui-agent tui))

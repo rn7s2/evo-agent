@@ -16,14 +16,41 @@
 
 ;;; Telling the coordinator.
 
-(defun tell-coordinator (text &key (style :notice))
+(defun tell-coordinator (text &key origin (style :notice))
   "Give the coordinator TEXT as input: queued to its next turn boundary when
-it is working, starting a run when it is idle — and shown to the human."
+it is working, starting a run when it is idle — and shown to the human.
+
+ORIGIN is the structured record of what was injected (`:lane-report` or
+`:lane-event`, CONTRACT §3), journaled beside the message.  TEXT stays exactly
+what it was: the model still reads a `[lane 3 report] …` line, and a frontend
+that has the origin does not have to parse it back out."
   (let ((agent (and *swarm* (swarm-agent *swarm*))))
     (when agent
-      (evo:steer text agent)
+      (evo:steer text agent nil :origin origin)
       (swarm-say text :style style)
       (evo:request-run))))
+
+(defun lane-report-origin (lane event)
+  "A lane's report as structure: what the coordinator used to have to re-parse
+out of the English line (B1)."
+  (list* :kind :lane-report :lane (lane-n lane)
+         :done (getf event :done)
+         (append (when (getf event :evidence) (list :evidence (getf event :evidence)))
+                 (when (getf event :next) (list :next (getf event :next)))
+                 (when (getf event :blocked) (list :blocked (getf event :blocked)))
+                 (when (getf event :requests) (list :requests (getf event :requests)))
+                 (when (getf event :goal)
+                   (list :goal (intern (string-upcase (getf event :goal)) :keyword))))))
+
+(defun lane-event-origin (lane event &key detail severity outcome goal-status)
+  "One lane transition as structure — the machine-readable half of the line
+TELL-COORDINATOR carries.  EVENT is one of :RUN-ENDED :ERROR :FAILED-TO-START
+:INIT-FAILED :CRASHED :DOWN :RESTARTED."
+  (list :kind :lane-event :lane (lane-n lane) :event event
+        :severity (or severity :info)
+        :outcome outcome
+        :goal-status (and goal-status (intern (string-upcase goal-status) :keyword))
+        :detail detail))
 
 ;;; Holding the coordinator's goal.
 
@@ -193,7 +220,11 @@ quitting, or switched away from by /resume) stops coming up, quietly."
        (tell-coordinator (format nil "[lane ~d] failed to start — see ~a"
                                  (lane-n lane)
                                  (namestring (merge-pathnames "lane.log" (lane-dir lane))))
-                         :style :error)
+                         :style :error
+                         :origin (lane-event-origin
+                                  lane :failed-to-start
+                                  :severity :error
+                                  :detail (namestring (merge-pathnames "lane.log" (lane-dir lane)))))
        nil)
       (t
        (with-swarm-lock () (setf (lane-pid lane) (getf health :pid)))
@@ -201,7 +232,10 @@ quitting, or switched away from by /resume) stops coming up, quietly."
          (lane-error (e)
            (tell-coordinator (format nil "[lane ~d] initialization failed: ~a"
                                      (lane-n lane) (lane-error-text e))
-                             :style :error)))
+                             :style :error
+                             :origin (lane-event-origin lane :init-failed
+                                                        :severity :error
+                                                        :detail (lane-error-text e)))))
        ;; Subscribe from here on: what the lane said before it was
        ;; initialized (its model gate complaining that no model exists yet)
        ;; is not news for the coordinator.
@@ -279,21 +313,31 @@ coordinator must hear — reports, finished runs, errors — into its input."
        (with-swarm-lock () (push event (lane-reports lane)))
        (note-lane-goal-status lane (getf event :goal))
        (maybe-publish-lane-state lane)
-       (tell-coordinator (report-text lane event)))
+       (tell-coordinator (report-text lane event)
+                         :origin (lane-report-origin lane event)))
       ((string= type "task-end")
        (let ((error (getf event :error)))
          (when error
            (tell-coordinator (format nil "[lane ~d] error: ~a" (lane-n lane) error)
-                             :style :error))))
+                             :style :error
+                             :origin (lane-event-origin lane :error
+                                                        :severity :error
+                                                        :detail (format nil "~a" error))))))
       ((string= type "settled")
        (with-swarm-lock () (setf (lane-state lane) :idle))
        (note-lane-goal-status lane (getf event :goal))
        (maybe-publish-lane-state lane)
        (when watched (flush-watch lane))
-       (tell-coordinator (run-ended-text lane event)))
+       (tell-coordinator (run-ended-text lane event)
+                         :origin (lane-event-origin lane :run-ended
+                                                    :outcome (getf event :outcome)
+                                                    :goal-status (getf event :goal))))
       ((and (string= type "output") (equal (getf event :style) "error"))
        (tell-coordinator (format nil "[lane ~d] ~a" (lane-n lane) (getf event :text))
-                         :style :error))
+                         :style :error
+                         :origin (lane-event-origin lane :error
+                                                    :severity :error
+                                                    :detail (getf event :text))))
       (watched
        (cond ((string= type "text-delta") (watch-output lane (getf event :text)))
              ((string= type "tool-call-start")
@@ -340,7 +384,8 @@ itself exited is down.  Returns NIL when the lane is gone for good."
       (when (and process (not (evo.port:process-alive-p process)))
         (tell-coordinator (format nil "[lane ~d] is down: its process exited. restart_lane brings it back."
                                   (lane-n lane))
-                          :style :error)
+                          :style :error
+                          :origin (lane-event-origin lane :down :severity :error))
         (return nil)))
     (let ((health (lane-health lane)))
       (when health
@@ -360,7 +405,12 @@ itself exited is down.  Returns NIL when the lane is gone for good."
                  (format nil "[lane ~d] crashed and was restarted by its supervisor (pid ~a → ~a); its session was resumed and it was re-initialized.~@[ The task in flight (~a) may need re-delegating.~]"
                          (lane-n lane) old new
                          (with-swarm-lock () (lane-task lane)))
-                 :style :error)))
+                 :style :error
+                 :origin (lane-event-origin
+                          lane :crashed :severity :error
+                          :detail (format nil "pid ~a → ~a~@[ — task in flight: ~a~]"
+                                          old new
+                                          (with-swarm-lock () (lane-task lane)))))))
           (return t))))
     (sleep 0.5)))
 

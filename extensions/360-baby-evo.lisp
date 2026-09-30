@@ -425,7 +425,9 @@ Steering plus a run request is exactly what a typed submission does."
                                         (baby-evo-alert-cancelled-p
                                          *baby-evo-alert*)))))
                    (when (and reply (not cancelled))
-                     (evo:steer reply agent)
+                     (evo:steer reply agent nil
+                                :origin (list :kind :command-note
+                                              :command "notify" :text reply))
                      (funcall *baby-evo-run-requester* reply)
                      ;; What came back is worth one glance at /notify status.
                      (when *baby-evo-last-result*
@@ -842,7 +844,10 @@ STYLE is human-set and a CLI cannot write it."
            ;; command dispatcher starts the run worker as soon as it sees
            ;; queued steering, so this returns and the conversation continues.
            (progn (evo:steer (baby-evo-doctor-prompt)
-                             (or (evo.util:pget ctx :agent) evo:*agent*))
+                             (or (evo.util:pget ctx :agent) evo:*agent*)
+                             nil
+                             :origin (list :kind :command-note :command "notify"
+                                           :text "/notify doctor"))
                   "◆ baby-evo doctor — handing over to the agent…")))
       (t "usage: /notify [status | on | off | doctor]"))))
 

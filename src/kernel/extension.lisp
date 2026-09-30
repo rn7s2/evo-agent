@@ -560,21 +560,28 @@ NAMES nil restores the full registered tool set."
 (defun current-goal (&optional (agent *agent*))
   (evo.kernel:current-goal agent))
 
-(defun steer (text &optional (agent *agent*) (images nil))
-  "Queue a steering message; picked up at the next turn boundary.
+(defun steer (text &optional (agent *agent*) (images nil) &key origin)
+  "Queue a steering message; picked up at the next turn boundary.  Returns the
+entry id the message will be journaled under.
 IMAGES, when given, is a list of :image content blocks — build them with
-evo.media:attach-image-file or evo.media:clipboard-image."
-  (evo.kernel:queue-steering agent text :images images))
+evo.media:attach-image-file or evo.media:clipboard-image.
+ORIGIN is the `(:kind ...)` plist naming an injector that is not a person
+typing (a goal continuation, a lane's report, a command's note); it is recorded
+beside the message and never shown to the model."
+  (evo.kernel:queue-steering agent text :images images :origin origin))
 
-(defun inject-context (text &key key (agent *agent*))
+(defun inject-context (text &key key origin (agent *agent*))
   "Append a :custom-message entry — content visible to the LLM.  With KEY, a
-:transform-context hook can filter it back out later (mode discipline)."
+:transform-context hook can filter it back out later (mode discipline).
+ORIGIN is the same `(:kind ...)` marker a steered message carries; a context
+injection gets `(:kind :context :key KEY)` when it has a key of its own."
   (evo.journal:append-entry
    (evo.kernel:agent-journal agent)
    (append (list :type :custom-message
                  :message (list :role :user
                                 :content (list (list :type :text :text text))))
-           (when key (list :key key)))))
+           (when key (list :key key))
+           (when origin (list :origin origin)))))
 
 (defun custom-state (key &optional (agent *agent*))
   "Current value of extension state KEY (fold over :custom entries)."
