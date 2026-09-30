@@ -90,7 +90,7 @@
            #:model-effort #:model-thinking-mode #:model-vision-p #:+effort-levels+
            #:normalize-thinking-level
            #:register-model* #:register-provider* #:provider-config
-           #:provider-registration #:provider-keys #:json->sexpr
+           #:provider-registration #:provider-keys #:registry-name #:json->sexpr
            #:reset-user-registries
            #:call-provider #:provider-error
            #:parse-sse-stream

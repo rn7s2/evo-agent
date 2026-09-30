@@ -154,7 +154,8 @@ passes through, NIL stays NIL."
                      :status status
                      :error (pget message :error-message)
                      :model (pget message :model)
-                     :provider provider))
+                     ;; The wire name, not the keyword: see REGISTRY-NAME.
+                     :provider (registry-name provider)))
          ;; USAGE is left out when the model reported none: absent says
          ;; "unknown", where a null reads as zero tokens.
          (usage (usage-wire (pget message :usage))))
@@ -373,7 +374,7 @@ CTX carries what the walk has to remember between entries."
 
 (defun model-state (model-id model)
   (list :id model-id
-        :provider (and model (pget model :provider))
+        :provider (and model (registry-name (pget model :provider)))
         :ready (wire-boolean model)
         :reason (unless model
                   (if model-id

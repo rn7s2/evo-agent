@@ -962,7 +962,9 @@ whole state, and every lane transition publishes it."
          (*swarm* (test-swarm :agent agent :workers 2))
          (lane (first (swarm-lanes *swarm*))))
     (setf (evo.swarm::swarm-lane-model *swarm*) "stub-a"
-          (evo.swarm::swarm-lane-provider *swarm*) :stub
+          ;; A dashed key, so the published config proves REGISTRY-NAME is
+          ;; what crosses the wire rather than the snake_case an enum gets.
+          (evo.swarm::swarm-lane-provider *swarm*) :stub-relay
           (evo.swarm::swarm-lane-thinking *swarm*) :high)
     (let ((ops (with-published (ops) (evo.swarm::publish-swarm-state *swarm* t))))
       (check "topics: the swarm topic is one state.patch"
@@ -976,7 +978,8 @@ whole state, and every lane transition publishes it."
                     (= 2 (length (getf state :lanes)))))
         (check "topics: the lane configuration is its config"
                (and (equal "stub-a" (getf (getf (getf state :config) :lane-model) :id))
-                    (eq :stub (getf (getf (getf state :config) :lane-model) :provider))
+                    (equal "stub-relay"
+                           (getf (getf (getf state :config) :lane-model) :provider))
                     (eq :high (getf (getf state :config) :lane-thinking))))
         (check "topics: a lane row has its number, state and clocks"
                (let ((row (elt (getf state :lanes) 0)))
@@ -1312,7 +1315,31 @@ why not — the answer a GUI's chooser needs before it spawns anything."
                          (equal "why" (getf wire :reason))
                          (eq t (getf (evo.swarm::check-entry-wire
                                       (list :id "m" :ok t))
-                                     :ok))))))
+                                     :ok)))))
+           ;; A provider is a name, not an enum (REGISTRY-NAME): the document
+           ;; says "foo-bar", the way init.lisp and --model id@foo-bar spell
+           ;; it, not the "foo_bar" the JSON mapping gives a keyword value.
+           (register-provider* :foo-bar :base-url "http://127.0.0.1:7/v1"
+                                        :api-key-env "EVO_TEST_FOO_KEY")
+           (register-model* "dash-model" :provider :foo-bar :api :anthropic-messages
+                            :context-window 200000 :max-output 8000)
+           (evo.port:setenv "EVO_TEST_FOO_KEY" "sk-1")
+           (let* ((entry (evo.swarm::check-model-entry "dash-model@foo-bar" agent))
+                  (wire (evo.swarm::check-entry-wire entry)))
+             (check "check: a model names its provider with its dashes"
+                    (equal "foo-bar" (getf entry :provider)))
+             (check "check: ...and the document encodes it that way"
+                    (and (search "\"provider\":\"foo-bar\"" (evo.serve:encode-json wire))
+                         (not (search "foo_bar" (evo.serve:encode-json wire))))))
+           (let* ((plan (evo.swarm::lane-plan '(:lane-model "dash-model"
+                                                :lane-provider :foo-bar)
+                                              agent))
+                  (entry (evo.swarm::check-lane-entry plan)))
+             (check "check: the lane's model names its provider the same way"
+                    (equal "foo-bar" (getf entry :provider)))
+             (check "check: ...and the encoder agrees with the document it sits in"
+                    (search "\"provider\":\"foo-bar\""
+                            (evo.serve:encode-json (evo.swarm::check-entry-wire entry))))))
       (setf evo.provider::*models* saved-models
             evo.provider::*providers* saved-providers)
       (evo.util:restore-settings saved-settings)

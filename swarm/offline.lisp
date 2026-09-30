@@ -53,7 +53,8 @@ asked for it."
                                (format nil "the model ~@[~a ~]the swarm would run is not usable: ~a"
                                        ref reason)))
         (multiple-value-bind (ready why why-code) (evo.serve:model-readiness model)
-          (values (list :id (getf model :id) :provider (getf model :provider)
+          (values (list :id (getf model :id)
+                        :provider (registry-name (getf model :provider))
                         :ok ready :reason why)
                   (unless ready
                     (check-problem (or why-code "model_unready")
@@ -244,20 +245,23 @@ fail, which is exactly what `check` exists to report."
 \(:id :provider :ok :reason).  A model whose API the lane's own code did not
 load is not runnable there, however ready it is here."
   (let ((id (lane-plan-model-id plan))
-        (api (lane-plan-api plan)))
+        (api (lane-plan-api plan))
+        ;; The wire name, not the keyword: the check document and the catalog
+        ;; must agree with the providers[].name they sit next to.
+        (provider (registry-name (lane-plan-provider plan))))
     (cond
       ((null id)
        (list :id nil :provider nil :ok nil
              :reason (or (lane-plan-reason plan) "the lanes' forms name no model")))
       ((null api)
-       (list :id id :provider (lane-plan-provider plan) :ok nil
+       (list :id id :provider provider :ok nil
              :reason (or (lane-plan-reason plan) "no registered model matches it")))
       ((member api (lane-plan-apis plan))
-       (list :id id :provider (lane-plan-provider plan)
+       (list :id id :provider provider
              :ok (and (lane-plan-ready plan) t)
              :reason (lane-plan-reason plan)))
       (t
-       (list :id id :provider (lane-plan-provider plan) :ok nil
+       (list :id id :provider provider :ok nil
              :reason (format nil "its API ~(~a~) comes from an extension: load that extension in the lanes with (evo.swarm:in-lanes ...) in swarm.lisp"
                              api))))))
 
