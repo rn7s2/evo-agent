@@ -170,17 +170,18 @@ id, which the steering it becomes reuses."
   "Remove the queued input ID from AGENT's queues, returning T.  NIL when it
 is not queued any more — it was already drained (or never existed), and its
 entry is then the session's history, not something a frontend may take back."
+  ;; The queues are lists of plists, so a removal has to be written back: a
+  ;; local binding (a flet parameter) would drop the entry from a copy and
+  ;; leave the real queue untouched.
   (bt:with-lock-held ((agent-lock agent))
-    (flet ((drop (queue)
-             ;; (VALUES what-is-left found-p): an emptied queue and a queue ID
-             ;; was never in are different answers, and both look like NIL.
-             (let ((kept (remove-if (lambda (item) (equal (pget item :id) id)) queue)))
-               (values kept (not (eql (length kept) (length queue)))))))
-      (multiple-value-bind (steering in-steering) (drop (agent-steering agent))
-        (multiple-value-bind (followups in-followups) (drop (agent-followups agent))
-          (when in-steering (setf (agent-steering agent) steering))
-          (when in-followups (setf (agent-followups agent) followups))
-          (and (or in-steering in-followups) t))))))
+    (let* ((steering (agent-steering agent))
+           (followups (agent-followups agent))
+           (kept-steering (remove-if (lambda (item) (equal (pget item :id) id)) steering))
+           (kept-followups (remove-if (lambda (item) (equal (pget item :id) id)) followups)))
+      (prog1 (or (not (eql (length kept-steering) (length steering)))
+                 (not (eql (length kept-followups) (length followups))))
+        (setf (agent-steering agent) kept-steering
+              (agent-followups agent) kept-followups)))))
 
 (defun steering-pending-p (agent)
   (bt:with-lock-held ((agent-lock agent))
