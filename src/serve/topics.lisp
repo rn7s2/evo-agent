@@ -77,6 +77,12 @@ anything ran.  A provider that mints its own IDs has nothing to do.")
     (declare (ignore id text images queue))
     nil))
 
+(defgeneric topic-provider-sync (provider)
+  (:documentation "The fold may have moved under the provider in a way no
+append reports (a journal switch, a leaf move): re-derive what it must, or do
+nothing when appends already said everything.")
+  (:method ((provider t)) nil))
+
 (defgeneric topic-provider-input-cancelled (provider id)
   (:documentation "A queued user item was cancelled: mark it, so the next
 snapshot agrees with the item.patch op serve published.")
@@ -213,40 +219,16 @@ installed while a server serves)."
 message): the provider decides how to show it."
   (topic-notice server "session" text :severity :info :source :user))
 
-;;; The session topic's task clock.  Serve owns the task, so serve owns the
-;;; two state keys that describe it: no provider has to be told what a run is.
+;;; The session's own state — status, task, model, context, goal, queue — is
+;;; the view's: it derives all of it from the journal and the events, and it
+;;; publishes the fields that move (CONTRACT §4.2).  Serve adds nothing to it,
+;;; which is what keeps one writer per key.
 
-(defun server-status (server)
-  "The topic status (CONTRACT §4.2).  \"waiting\" is a program-level state a
-swarm publishes itself; serve knows idle, running and compacting."
-  (let ((task (server-task server)))
-    (cond ((null task) "idle")
-          ((eq (task-kind task) :compact) "compacting")
-          (t "running"))))
-
-(defun session-state-overlay (server)
-  "The state keys serve owns on the session topic."
-  (list :status (server-status server) :task (task-state server)))
-
-(defun topic-task-state-changed (server)
-  "The task started or ended: republish the state keys that describe it."
-  (publish-state-patch server "session" (session-state-overlay server)))
-
-(defun refresh-topic-state (server topic)
-  "The provider's own state may have changed outside an event (a command
-switched the model): republish what serve owns, and let the provider resend
-the rest by publishing a state.patch of its own."
-  (when (equal topic "session")
-    (publish-state-patch server topic (session-state-overlay server))))
-
-(defun topic-run-outcome (server outcome text)
-  "A run ended with something other than a plain stop: an item, so a client
-that never saw the events still knows why the answer stopped."
-  (when (member outcome '(:aborted :error :length))
-    (topic-notice server "session"
-                  (or text (format nil "run ended: ~(~a~)" outcome))
-                  :severity (if (eq outcome :aborted) :warn :error)
-                  :source :run)))
+(defun sync-session-topic (server)
+  "Ask the session topic to re-derive what appends cannot report (a journal
+switch, a leaf move)."
+  (let ((provider (topic-provider server "session")))
+    (when provider (topic-provider-sync provider))))
 
 ;;; Snapshots.
 
@@ -284,12 +266,7 @@ the same two locks in opposite orders.  The seq re-read is what replaces it."
 (defun %collect-topic-snapshots (server names items)
   (loop for name in names
         for provider = (topic-provider server name)
-        collect (cons name
-                      (when provider
-                        (if (equal name "session")
-                            (session-snapshot-with-overlay
-                             server (topic-snapshot provider :items items))
-                            (topic-snapshot provider :items items))))))
+        collect (cons name (when provider (topic-snapshot provider :items items)))))
 
 (defun %topic-snapshot-last-attempt (server names items)
   "The final attempt of TOPICS-SNAPSHOT, taken whether or not the session was
@@ -297,15 +274,4 @@ quiet: a reader that keeps losing the race gets a snapshot one op old rather
 than none at all."
   (multiple-value-bind (epoch seq) (op-log-cursor (server-oplog server))
     (values epoch seq (%collect-topic-snapshots server names items))))
-
-(defun session-snapshot-with-overlay (server snap)
-  "SNAP as served: serve's own task clock wins over whatever the provider
-says about :task/:status, because serve is what owns them."
-  (let ((state (getf snap :state)))
-    (list* :state (append (session-state-overlay server)
-                          (loop for (k v) on state by #'cddr
-                                unless (member k '(:task :status) :test #'eq)
-                                  append (list k v)))
-           (loop for (k v) on snap by #'cddr
-                 unless (eq k :state) append (list k v)))))
 

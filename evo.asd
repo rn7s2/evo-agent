@@ -110,7 +110,6 @@
                                            (:file "server")
                                            (:file "oplog")
                                            (:file "topics")
-                                           (:file "view-fallback")
                                            (:file "view-topic")
                                            (:file "ops")
                                            (:file "catalog")

@@ -170,7 +170,9 @@ Returns (values ITEM-ID QUEUED-P)."
     (remember-queued-input server id text queue)
     (let ((provider (topic-provider server "session")))
       (when provider
-        (topic-provider-queued-input provider id text (length images) queue)))
+        ;; The blocks, not just a count: the view needs them for the item's
+        ;; images (and /media serves their bytes).
+        (topic-provider-queued-input provider id text images queue)))
     (values id (and (steering-pending-p agent) t))))
 
 (defun cancel-queue-entry (agent text queue)
@@ -281,10 +283,11 @@ one in flight (CONTRACT §5.5)."
                   (remhash id (server-queued server)))))))
       (unless removed
         (op-fail "already_sent" "that input has already been sent"))
+      ;; The provider drops the item and publishes that itself (the view
+      ;; emits item.remove): a cancellation is not an append, so serving it
+      ;; here as well would say it twice.
       (let ((provider (topic-provider server "session")))
         (when provider (topic-provider-input-cancelled provider id)))
-      (publish-op server (list :op "item.patch" :topic "session" :id id
-                               :patch (list :status :cancelled)))
       nil)))
 
 ;;; Ops: the run and the goal.
@@ -335,7 +338,6 @@ extends this with the scopes it owns.")
       (t (create-goal-entry agent objective :token-budget budget)
          (queue-steering agent (goal-continuation-for agent (current-goal agent)))
          (start-run server)))
-    (refresh-topic-state server "session")
     (list :goal (current-goal agent))))
 
 (defun op-goal-state (server wanted)
@@ -350,7 +352,6 @@ goal, and only from the state that move makes sense in."
     (when (eq wanted :active)
       (queue-steering agent (goal-continuation-for agent (current-goal agent)))
       (start-run server))
-    (refresh-topic-state server "session")
     (list :goal (current-goal agent))))
 
 (defun op-goal-clear (server args)
@@ -362,27 +363,23 @@ goal, and only from the state that move makes sense in."
     ;; the goal, and the driver must stop steering for it.  The goal then
     ;; reads as absent, not as a goal in a strange state.
     (update-goal-entry agent goal :status :cleared)
-    (refresh-topic-state server "session")
     (list :goal nil)))
 
 ;;; Ops: the session's settings.
 
 (defun op-model-set (server args)
   (evo.command:set-model server (op-arg args :id :required t))
-  (refresh-topic-state server "session")
   (list :model (let ((model (evo.command::current-model (server-agent server))))
                  (and model (list :id (pget model :id) :provider (pget model :provider))))))
 
 (defun op-thinking-set (server args)
   (evo.command:thinking-command server (op-arg args :level :required t))
-  (refresh-topic-state server "session")
   (list :thinking (evo.kernel:effective-thinking
                    (fold-state (agent-journal (server-agent server)))
                    (agent-thinking-override (server-agent server)))))
 
 (defun op-language-set (server args)
   (evo.command:set-language server (op-arg args :code :required t))
-  (refresh-topic-state server "session")
   (list :language (op-arg args :code)))
 
 ;;; Ops: the session itself (all quiescent).
