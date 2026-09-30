@@ -1113,27 +1113,38 @@ why not — the answer a GUI's chooser needs before it spawns anything."
                             :context-window 200000 :max-output 8000)
            (setf agent (make-agent :journal journal))
            (evo.port:setenv "EVO_TEST_FIXTURE_KEY" "")
-           (let ((check (evo.swarm::check-model-entry "fixture-model" agent nil)))
+           (multiple-value-bind (entry problem)
+               (evo.swarm::check-model-entry "fixture-model" agent)
              (check "check: a model with no key is not ok, and says which variable"
-                    (and (not (getf check :ok))
-                         (search "EVO_TEST_FIXTURE_KEY" (getf check :reason)))))
-           (let ((check (evo.swarm::check-model-entry "no-such-model" agent nil)))
+                    (and (not (getf entry :ok))
+                         (search "EVO_TEST_FIXTURE_KEY" (getf entry :reason))))
+             (check "check: ...and the problem is the caller's to report"
+                    ;; The code names what is missing, not just "not ready":
+                    ;; a chooser can act on no_api_key and cannot on unready.
+                    (equal "no_api_key" (getf problem :code))))
+           (multiple-value-bind (entry problem)
+               (evo.swarm::check-model-entry "no-such-model" agent)
              (check "check: an unknown model name is reported, not signalled"
-                    (and (equal "no-such-model" (getf check :id))
-                         (not (getf check :ok)))))
+                    (and (equal "no-such-model" (getf entry :id))
+                         (not (getf entry :ok))))
+             (check "check: ...as model_unresolved"
+                    (equal "model_unresolved" (getf problem :code))))
            (evo.port:setenv "EVO_TEST_FIXTURE_KEY" "sk-1")
-           (let ((check (evo.swarm::check-model-entry "fixture-model" agent nil)))
+           (multiple-value-bind (entry problem)
+               (evo.swarm::check-model-entry "fixture-model" agent)
              (check "check: with a key present the model is ok"
-                    (and (getf check :ok) (null (getf check :reason)))))
+                    (and (getf entry :ok) (null (getf entry :reason)) (null problem))))
            (check "check: --model ID@PROVIDER resolves that registration"
-                  (getf (evo.swarm::check-model-entry "fixture-model@fixture" agent nil) :ok))
+                  (getf (evo.swarm::check-model-entry "fixture-model@fixture" agent) :ok))
            (check "check: an unresolvable ID@PROVIDER is a problem, not a crash"
                   (not (getf (evo.swarm::check-model-entry
-                              "fixture-model@nope" agent nil) :ok)))
-           (let ((problems nil))
-             (evo.swarm::check-workers '(:workers 999) problems)
-             (check "check: --workers out of range is a problem"
-                    (equal "invalid_workers" (getf (first problems) :code)))))
+                              "fixture-model@nope" agent) :ok)))
+           (check "check: --workers out of range is a problem"
+                  (equal "invalid_workers"
+                         (getf (nth-value 1 (evo.swarm::check-workers '(:workers 999)))
+                               :code)))
+           (check "check: --workers in range is not"
+                  (null (nth-value 1 (evo.swarm::check-workers '(:workers 3))))))
       (setf evo.provider::*models* saved-models
             evo.provider::*providers* saved-providers)
       (evo.port:setenv "EVO_TEST_FIXTURE_KEY" ""))))
@@ -1167,5 +1178,8 @@ why not — the answer a GUI's chooser needs before it spawns anything."
     (test-catalog)
     (test-swarm-check)
     (test-sample-config)
+    ;; The two questions the GUI asks before it starts a swarm, answered
+    ;; offline (swarm/offline.lisp, CONTRACT §2).
+    (test-swarm-check)
     (format t "~%swarm: ~d passed, ~d failed~%" *pass* *fail*)
     (if (zerop *fail*) 0 1)))
