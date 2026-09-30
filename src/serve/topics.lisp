@@ -260,46 +260,43 @@ session cannot stall a reader for ever.")
   "Snapshot every topic in NAMES as of one seq: (values EPOCH SEQ
 ((NAME . SNAPSHOT) …)).
 
-The op log's lock is held while the providers are read, so no op can be
-published into the middle of the snapshot: a client gets state that reflects
-every op up to SEQ and none after it (CONTRACT §5.2).  A provider that
-mutates and then publishes may still be one op ahead of what we read — the
-second cursor read catches exactly that, and the snapshot is taken again."
+A client must be able to fold the ops after SEQ onto this state and land on
+the state itself — no op applied twice, none missing.  Two things give it:
+the buffered appends are written out first, so every byte the snapshot shows
+has a seq; and the seq is read again after the providers have answered, so a
+snapshot taken while an op was being published is taken again.  A snapshot
+takes microseconds and appends are coalesced over 50 ms, so the first attempt
+almost always lands.
+
+The op log's lock is deliberately *not* held while a provider answers: a
+provider publishes its ops from inside the critical section that changes its
+state, so holding the log's lock here would deadlock two threads that take
+the same two locks in opposite orders.  The seq re-read is what replaces it."
   (let ((log (server-oplog server)))
     (loop repeat *snapshot-attempts*
           do (multiple-value-bind (epoch seq) (op-log-cursor log)
-               (let ((snaps (bt:with-lock-held ((op-log-lock log))
-                              (loop for name in names
-                                    for provider = (topic-provider server name)
-                                    collect (cons name
-                                                  (when provider
-                                                    (if (equal name "session")
-                                                        (session-snapshot-with-overlay
-                                                         server
-                                                         (topic-snapshot provider :items items))
-                                                        (topic-snapshot provider :items items))))))))
+               (let ((snaps (%collect-topic-snapshots server names items)))
                  (multiple-value-bind (epoch-now seq-now) (op-log-cursor log)
                    (when (and (equal epoch epoch-now) (= seq seq-now))
-                     (return-from topics-snapshot (values epoch seq snaps))))))
-          finally (return (%topics-snapshot server names items)))))
+                     (return-from topics-snapshot (values epoch seq snaps)))))))
+    (%topic-snapshot-last-attempt server names items)))
 
-(defun %topics-snapshot (server names items)
-  "The last attempt of TOPICS-SNAPSHOT, taken whether or not the session was
+(defun %collect-topic-snapshots (server names items)
+  (loop for name in names
+        for provider = (topic-provider server name)
+        collect (cons name
+                      (when provider
+                        (if (equal name "session")
+                            (session-snapshot-with-overlay
+                             server (topic-snapshot provider :items items))
+                            (topic-snapshot provider :items items))))))
+
+(defun %topic-snapshot-last-attempt (server names items)
+  "The final attempt of TOPICS-SNAPSHOT, taken whether or not the session was
 quiet: a reader that keeps losing the race gets a snapshot one op old rather
 than none at all."
-  (let ((log (server-oplog server)))
-    (multiple-value-bind (epoch seq) (op-log-cursor log)
-      (values epoch seq
-              (bt:with-lock-held ((op-log-lock log))
-                (loop for name in names
-                      for provider = (topic-provider server name)
-                      collect (cons name
-                                    (when provider
-                                      (if (equal name "session")
-                                          (session-snapshot-with-overlay
-                                           server
-                                           (topic-snapshot provider :items items))
-                                          (topic-snapshot provider :items items))))))))))
+  (multiple-value-bind (epoch seq) (op-log-cursor (server-oplog server))
+    (values epoch seq (%collect-topic-snapshots server names items))))
 
 (defun session-snapshot-with-overlay (server snap)
   "SNAP as served: serve's own task clock wins over whatever the provider

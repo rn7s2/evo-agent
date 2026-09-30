@@ -2,18 +2,27 @@
 """serve-e2e.py — drive `build/evo-agent serve --no-userspace` over HTTP only.
 
 Backend-free: the model is tests/stub-messages.py, registered at runtime
-through POST /eval, so this needs nothing but python3 and a built binary.
-Everything evo does is asked of it over HTTP, exactly as a coordinator would;
-the stub's own request log (GET /_requests on the stub) is how the test sees
-what evo sent to the "model".
+through the `eval` op, so this needs nothing but python3 and a built binary.
+Everything evo does is asked of it over HTTP, exactly as a GUI or a
+coordinator would; the stub's own request log (GET /_requests on the stub) is
+how the test sees what evo sent to the "model".
 
-Covers: bad tokens rejected; model + provider registered by eval; a prompt
-streamed to its settled end; interrupt; steer; a 409 for a journal switch
-while busy; /compact; goal create/refine/pause/resume/complete; model and
-thinking switch; a tool registered by eval offered on the next turn; fork,
-new, resume; state, transcript, journal, lore, sessions, registry (no
-secrets); event replay by Last-Event-ID; clean shutdown with :session-end
-fired and exit 0 — under the supervisor, as `evo serve` normally runs.
+Covers the redesign's protocol (CONTRACT §5):
+  * the ready file: port, token, epoch, session, mode 0600, deleted on exit
+  * auth and transport: 401, 400 (bad JSON envelope), 404, 405
+  * GET /health without touching the session thread
+  * GET /snapshot: one seq across topics, and /items paging
+  * GET /stream: hello first, item ops, coalesced item.append, topic filter
+  * snapshot + stream consistency: applying the ops to a snapshot equals the
+    next snapshot
+  * reconnecting with a cursor: the ops that follow it, exactly
+  * input.send / input.cancel, with a queued item a client can cancel
+  * ops idempotency by rid (a retry does nothing twice)
+  * error codes: unknown_op, invalid_args, not_quiescent, not_found, busy
+  * GET /catalog, GET /sessions, GET /debug/context, GET /debug/journal
+  * stream.reset after a restart: the epoch changed, so a cursor from the old
+    process gets hello then stream.reset{restarted}
+  * server.shutdown: exit 0, ready file removed
 
 Usage: tests/serve-e2e.py [path/to/evo-agent]    (exit 0 on success)
 """
@@ -23,14 +32,16 @@ import json
 import os
 import shutil
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
+import uuid
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 EVO = os.path.abspath(sys.argv[1]) if len(sys.argv) > 1 else os.path.join(ROOT, "build", "evo-agent")
-SECRET = "e2e-secret-api-key-never-shown"
 
 passed = 0
 failed = 0
@@ -52,91 +63,150 @@ def free_port():
         return s.getsockname()[1]
 
 
-class Evo:
-    def __init__(self, port, token):
-        self.port = port
-        self.token = token
+class Server:
+    """One `evo serve` child, driven through its ready file."""
 
-    def request(self, method, path, body=None, token=None, headers=None, timeout=60):
+    def __init__(self, work, baby=False):
+        self.work = work
+        self.ready = os.path.join(work, "ready.json")
+        self.log_path = os.path.join(work, "evo.log")
+        self.baby = baby
+
+    def start(self, args=()):
+        env = dict(os.environ, EVO_HOME=os.path.join(self.work, "home"),
+                   EVO_NO_SUPERVISOR="1")
+        for var in ("EVO_SERVE_TOKEN", "EVO_SESSIONS_DIR", "ANTHROPIC_API_KEY"):
+            env.pop(var, None)
+        if os.path.exists(self.ready):
+            os.remove(self.ready)
+        log = open(self.log_path, "a")
+        self.proc = subprocess.Popen(
+            [EVO, "serve", "--no-userspace", "--port", "0",
+             "--ready-file", self.ready, *args],
+            cwd=os.path.join(self.work, "proj"), env=env,
+            stdout=log, stderr=subprocess.STDOUT)
+        deadline = time.time() + 60
+        while not os.path.exists(self.ready) and time.time() < deadline:
+            if self.proc.poll() is not None:
+                raise SystemExit("serve-e2e: evo exited before writing its ready file")
+            time.sleep(0.05)
+        if not os.path.exists(self.ready):
+            raise SystemExit("serve-e2e: evo never wrote its ready file")
+        self.info = json.load(open(self.ready))
+        self.port = self.info["port"]
+        self.token = self.info["token"]
+        return self.info
+
+    def request(self, method, path, body=None, token=None, headers=None, timeout=30,
+                raw_body=None):
         conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=timeout)
-        h = {"Authorization": f"Bearer {self.token if token is None else token}"}
-        if token == "":
-            h = {}
+        h = {} if token == "" else {"Authorization": f"Bearer {self.token if token is None else token}"}
         h.update(headers or {})
-        data = None
+        data = raw_body
         if body is not None:
             data = json.dumps(body).encode()
+        if data is not None:
             h["Content-Type"] = "application/json"
         conn.request(method, path, body=data, headers=h)
         resp = conn.getresponse()
-        raw = resp.read().decode()
+        payload = resp.read().decode()
         conn.close()
         try:
-            return resp.status, json.loads(raw)
+            return resp.status, json.loads(payload)
         except ValueError:
-            return resp.status, raw
+            return resp.status, payload
 
     def get(self, path, **kw):
         return self.request("GET", path, **kw)
 
-    def post(self, path, body=None, **kw):
-        return self.request("POST", path, body if body is not None else {}, **kw)
+    def op(self, name, args=None, rid=None, **kw):
+        rid = rid or uuid.uuid4().hex
+        status, reply = self.request("POST", "/ops",
+                                     {"rid": rid, "op": name, "args": args or {}}, **kw)
+        return status, reply, rid
 
-    def command(self, text):
-        return self.post("/command", {"text": text})
+    def snapshot(self, topics="session", items=200):
+        status, body = self.get(f"/snapshot?topics={topics}&items={items}")
+        assert status == 200, (status, body)
+        return body
 
-    def stream(self, method, path, body=None, headers=None, timeout=60):
-        """Open an SSE response and yield (id, event, data) until it closes."""
+    def stream(self, topics=None, since=None, timeout=30, limit=None):
+        """Open the SSE stream and yield (id, event, data) until it closes."""
+        path = "/stream"
+        params = []
+        if topics:
+            params.append(f"topics={topics}")
+        if since:
+            params.append(f"since={since}")
+        if params:
+            path += "?" + "&".join(params)
         conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=timeout)
-        h = {"Authorization": f"Bearer {self.token}"}
-        h.update(headers or {})
-        data = None
-        if body is not None:
-            data = json.dumps(body).encode()
-            h["Content-Type"] = "application/json"
-        conn.request(method, path, body=data, headers=h)
+        conn.request("GET", path, headers={"Authorization": f"Bearer {self.token}"})
         resp = conn.getresponse()
-        assert resp.status == 200, resp.status
-        event = {"id": None, "event": None, "data": None}
-        while True:
-            line = resp.fp.readline()
-            if not line:
-                break
-            line = line.decode().rstrip("\n")
-            if line == "":
-                if event["event"]:
-                    yield (event["id"], event["event"], json.loads(event["data"]))
-                event = {"id": None, "event": None, "data": None}
-            elif line.startswith(":"):
+        if resp.status != 200:
+            conn.close()
+            raise AssertionError(f"stream: {resp.status} {resp.read()!r}")
+        frame = {"id": None, "event": None, "data": None}
+        seen = 0
+        try:
+            while True:
+                line = resp.fp.readline()
+                if not line:
+                    break
+                line = line.decode().rstrip("\n")
+                if line == "":
+                    if frame["event"]:
+                        seen += 1
+                        yield (frame["id"], frame["event"], json.loads(frame["data"]))
+                        if limit and seen >= limit:
+                            break
+                    frame = {"id": None, "event": None, "data": None}
+                elif line.startswith(":"):
+                    continue
+                else:
+                    key, _, value = line.partition(": ")
+                    frame[key] = value
+        finally:
+            conn.close()
+
+    def read_stream(self, collect, topics=None, since=None, timeout=30):
+        """Read the stream until COLLECT(hello, ops) is satisfied; returns the
+        hello frame and the ops seen."""
+        hello = None
+        ops = []
+        for eid, event, data in self.stream(topics=topics, since=since, timeout=timeout):
+            if event != "op":
                 continue
-            else:
-                key, _, value = line.partition(": ")
-                event[key] = int(value) if key == "id" else value
-        conn.close()
-
-    def stream_command(self, path, body):
-        """POST with "stream": true; return the result and the events after it."""
-        events = list(self.stream("POST", path, dict(body, stream=True)))
-        assert events and events[0][1] == "result", events[:1]
-        return events[0][2], events[1:]
-
-    def wait_settled(self, cursor, timeout=60):
-        """Events after CURSOR up to and including the next `settled`."""
-        seen = []
-        for eid, etype, data in self.stream("GET", f"/events?since={cursor}", timeout=timeout):
-            seen.append((eid, etype, data))
-            if etype == "settled":
+            if data.get("op") == "hello":
+                hello = data
+                continue
+            ops.append(data)
+            if collect and collect(ops):
                 break
-        return seen
+        return hello, ops
 
-    def wait_for(self, predicate, timeout=30):
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            status, state = self.get("/state")
-            if status == 200 and predicate(state):
-                return state
-            time.sleep(0.1)
-        return None
+    def probe_stream(self, topics=None, seconds=1.5):
+        """Open a stream and read it for SECONDS: the frames it carried, and
+        nothing more (an unsatisfiable predicate would block until the socket
+        times out, which is exactly what a filtered stream looks like)."""
+        frames = []
+        try:
+            for frame in self.stream(topics=topics, timeout=seconds):
+                frames.append(frame)
+        except (socket.timeout, TimeoutError, OSError):
+            pass
+        return frames
+
+    def wait_exit(self, timeout=30):
+        try:
+            return self.proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            self.proc.kill()
+            return None
+
+    def stop(self):
+        if self.proc.poll() is None:
+            self.proc.kill()
 
 
 def stub_requests(stub_port):
@@ -147,8 +217,426 @@ def stub_requests(stub_port):
     return data
 
 
-def types(events):
-    return [e[1] for e in events]
+def apply_ops(items, state, ops):
+    """The client's job: fold the op stream onto a snapshot.
+
+    Items are a list in order; a patch is a JSON merge patch (arrays
+    replaced whole), an append concatenates, an add inserts."""
+    items = [dict(i) for i in items]
+    state = dict(state or {})
+    for op in ops:
+        kind = op.get("op")
+        if kind == "item.add":
+            item = dict(op["item"])
+            after = op.get("after")
+            if after is None:
+                items.append(item)
+            else:
+                index = next((n for n, i in enumerate(items) if i["id"] == after), None)
+                items.insert(index + 1 if index is not None else len(items), item)
+        elif kind == "item.append":
+            for item in items:
+                if item["id"] == op["id"]:
+                    item[op["field"]] = (item.get(op["field"]) or "") + op["text"]
+        elif kind == "item.patch":
+            for item in items:
+                if item["id"] == op["id"]:
+                    item.update(op["patch"])
+        elif kind == "item.remove":
+            items = [i for i in items if i["id"] != op["id"]]
+        elif kind == "state.patch":
+            state.update(op["patch"])
+    return items, state
+
+
+def item_text(items, kind, i=-1):
+    got = [x for x in items if x["kind"] == kind]
+    return got[i] if got else None
+
+
+def in_thread(fn):
+    """Run FN on a thread, remembering what it raised — a stream that dies
+    quietly would otherwise look like an empty stream."""
+    result = {}
+
+    def run():
+        try:
+            fn()
+        except BaseException as e:            # noqa: BLE001 - reported below
+            result["error"] = repr(e)
+            import traceback
+            result["traceback"] = traceback.format_exc()
+
+    thread = threading.Thread(target=run)
+    thread.start()
+    result["thread"] = thread
+    return result
+
+
+def join(result, timeout):
+    result["thread"].join(timeout=timeout)
+    if "error" in result:
+        print(result.get("traceback"))
+    return result.get("error")
+
+
+def run_all(server, stub_port, work):
+    # --- transport and auth -------------------------------------------------
+    check("no token -> 401", server.get("/health", token="")[0] == 401)
+    check("wrong token -> 401", server.get("/health", token="nope")[0] == 401)
+    status, reply, _ = server.op("server.shutdown", token="nope")
+    check("wrong token on an op -> 401", status == 401, (status, reply))
+    check("unknown endpoint -> 404", server.get("/nope")[0] == 404)
+    check("wrong method -> 405", server.get("/ops")[0] == 405)
+    status, _ = server.request("POST", "/ops", raw_body=b"{not json")
+    check("malformed JSON envelope -> 400", status == 400, status)
+    status, _ = server.request("POST", "/ops", body={"op": "input.send"})
+    check("an op without a rid -> 400", status == 400, status)
+
+    # --- health -------------------------------------------------------------
+    status, health = server.get("/health")
+    check("health: identity, epoch, pid and the session clock",
+          status == 200 and health["ok"] and health["program"] == "evo-agent"
+          and health["version"] and len(health["epoch"]) == 8
+          and isinstance(health["pid"], int)
+          and isinstance(health["started_at"], int) and health["started_at"] > 10**12
+          and isinstance(health["session_loop_age_ms"], int), health)
+
+    # --- the model, registered through the eval op ----------------------------
+    form = ("(progn"
+            f" (evo:register-provider :stub :base-url \"http://127.0.0.1:{stub_port}\""
+            "   :api-key \"e2e-secret\")"
+            " (evo:register-model \"stub-a\" :provider :stub :context-window 200000"
+            "   :max-output 8000 :effort t)"
+            " (evo:set-setting :model \"stub-a\")"
+            " :registered)")
+    status, reply, _ = server.op("eval", {"code": form})
+    check("the eval op registers a provider and a model",
+          status == 200 and reply["ok"] and reply["result"]["values"] == [":registered"], reply)
+    status, reply, _ = server.op("eval", {"code": "(+ 1 2)"})
+    check("eval returns the value", reply["result"]["values"] == ["3"], reply)
+
+    # --- catalog --------------------------------------------------------------
+    status, catalog = server.get("/catalog")
+    text = json.dumps(catalog)
+    check("catalog: models, providers, ops, commands, tools",
+          status == 200 and [m["id"] for m in catalog["models"]] == ["stub-a"]
+          and catalog["default_model"]["id"] == "stub-a"
+          and any(p["name"] == "stub" and p["has_key"] for p in catalog["providers"])
+          and {"input.send", "input.cancel", "run.interrupt", "server.shutdown"}
+          <= {o["name"] for o in catalog["ops"]}
+          and any(c["name"] == "compact" for c in catalog["commands"]),
+          sorted(catalog))
+    check("catalog carries no secret", "e2e-secret" not in text)
+    check("catalog: thinking levels and languages",
+          catalog["thinking_levels"][0] == "off" and catalog["languages"], catalog["languages"])
+    op_schema = next(o for o in catalog["ops"] if o["name"] == "input.send")
+    check("catalog: an op carries its argument schema",
+          op_schema["args"]["properties"]["text"]["type"] == "string"
+          and op_schema["args"]["properties"]["queue"]["enum"] == ["now", "after_run"]
+          and op_schema["precondition"] == "none", op_schema)
+    cancel_schema = next(o for o in catalog["ops"] if o["name"] == "input.cancel")
+    check("catalog: required arguments are named",
+          cancel_schema["args"]["required"] == ["item_id"]
+          and cancel_schema["precondition"] == "none", cancel_schema)
+
+    # --- the first snapshot: empty session, one seq for every topic -----------
+    snap = server.snapshot("session,swarm,lane:*")
+    check("snapshot has an epoch, a seq and the session topic",
+          snap["epoch"] and isinstance(snap["seq"], int) and "session" in snap["topics"]
+          and isinstance(snap["topics"]["session"]["state"], dict), sorted(snap))
+    check("snapshot reports the model the catalog does",
+          snap["topics"]["session"]["state"]["model"] == "stub-a", snap["topics"]["session"]["state"])
+
+    # --- stream: hello, then the ops of a turn --------------------------------
+    # The snapshot the stream is about to continue: the consistency check
+    # folds the ops onto exactly this state.
+    baseline = server.snapshot("session")
+
+    def got_answer(ops):
+        """The turn is over when the assistant item it created is final."""
+        answer = next((o for o in ops
+                       if o["op"] == "item.add" and o["item"]["kind"] == "assistant"), None)
+        if not answer:
+            return False
+        return any(o["op"] == "item.patch" and o.get("id") == answer["item"]["id"]
+                   and o["patch"].get("status") in ("final", "error") for o in ops)
+
+    wrote = {}
+    collected = {}
+
+    def stream_turn():
+        cursor = f"{baseline['epoch']}.{baseline['seq']}"
+        hello, ops = server.read_stream(got_answer, topics="session", since=cursor)
+        collected["hello"] = hello
+        collected["ops"] = ops
+
+    reading = in_thread(stream_turn)
+    time.sleep(0.3)
+    status, reply, _ = server.op("input.send", {"text": "hello e2e"})
+    check("input.send answers with the item id and its queue state",
+          status == 200 and reply["ok"] and reply["result"]["item_id"]
+          and reply["result"]["queued"] and reply["result"]["blocked"] is None, reply)
+    wrote["id"] = reply["result"]["item_id"]
+    join(reading, 45)
+    ops = collected.get("ops") or []
+    hello = collected.get("hello")
+    check("the stream's first frame is hello, at the snapshot's cursor",
+          hello and hello["epoch"] == baseline["epoch"] and hello["seq"] == baseline["seq"], hello)
+    check("input.send's item appears (item.add, queued)",
+          any(o["op"] == "item.add" and o["item"]["id"] == wrote["id"]
+              and o["item"]["kind"] == "user" and o["item"]["status"] == "queued" for o in ops),
+          ops[:3])
+    assistant = [o for o in ops if o["op"] == "item.add" and o["item"]["kind"] == "assistant"]
+    check("the answer is its own item", len(assistant) == 1, assistant)
+    answer_id = assistant[0]["item"]["id"] if assistant else None
+    check("the answer's text arrives as item.append",
+          any(o["op"] == "item.append" and o.get("id") == answer_id and o["field"] == "text"
+              for o in ops), ops[-4:])
+    appends = [o for o in ops if o["op"] == "item.append" and o.get("id") == answer_id]
+    text = "".join(o["text"] for o in appends)
+    check("the stub's answer streams back", text == "ok: hello e2e", text)
+    check("every op carries seq, ts and topic",
+          all(isinstance(o.get("seq"), int) and isinstance(o.get("ts"), int)
+              and o.get("topic") == "session" for o in ops
+              if o["op"] not in ("hello", "stream.reset")), ops[:2])
+    check("appends are coalesced, not one op per delta",
+          len(appends) <= 3, len(appends))
+
+    # --- snapshot + stream consistency ----------------------------------------
+    items, state = apply_ops(baseline["topics"]["session"]["items"],
+                             baseline["topics"]["session"]["state"], ops)
+    after = server.snapshot("session")
+    check("applying the ops to a snapshot equals the next snapshot",
+          [i["id"] for i in items] == [i["id"] for i in after["topics"]["session"]["items"]]
+          and [i.get("text") for i in items]
+          == [i.get("text") for i in after["topics"]["session"]["items"]],
+          (items, after["topics"]["session"]["items"]))
+    check("the snapshot is at a seq no older than the stream's last op",
+          after["seq"] >= ops[-1]["seq"], (after["seq"], ops[-1]["seq"]))
+    check("the answer's status is final in the snapshot",
+          item_text(after["topics"]["session"]["items"], "assistant")["status"] == "final")
+
+    # --- reconnect with a cursor ----------------------------------------------
+    cursor = f"{after['epoch']}.{after['seq']}"
+    seen = {}
+
+    def stream_second():
+        hello, ops = server.read_stream(lambda ops: len(ops) >= 2, since=cursor)
+        seen["hello"] = hello
+        seen["ops"] = ops
+
+    reading = in_thread(stream_second)
+    time.sleep(0.3)
+    server.op("input.send", {"text": "second turn"})
+    join(reading, 45)
+    check("reconnecting with a cursor hears only what came after it",
+          seen.get("hello", {}).get("seq") == after["seq"]
+          and seen["ops"][0]["seq"] == after["seq"] + 1, (seen.get("hello"), seen.get("ops", [])[:1]))
+    check("the ops after the cursor are the new turn's",
+          len(seen["ops"]) >= 2, seen.get("ops"))
+
+    # --- a cursor from nowhere -------------------------------------------------
+    hello, ops = server.read_stream(lambda ops: len(ops) >= 0, since="deadbeef.5")
+    check("a cursor from another epoch gets hello then stream.reset{restarted}",
+          hello and any(o["op"] == "stream.reset" and o["reason"] == "restarted" for o in ops),
+          (hello, ops))
+    hello, ops = server.read_stream(lambda ops: len(ops) >= 0, since=f"{snap['epoch']}.999999")
+    check("a cursor beyond the log gets stream.reset{cursor_unknown}",
+          any(o["op"] == "stream.reset" and o["reason"] == "cursor_unknown" for o in ops), ops)
+    hello, ops = server.read_stream(lambda ops: len(ops) >= 0, since="not-a-cursor")
+    check("a cursor that is not one gets stream.reset{cursor_unknown}",
+          any(o["op"] == "stream.reset" and o["reason"] == "cursor_unknown" for o in ops), ops)
+
+    # --- topic filtering -------------------------------------------------------
+    frames = server.probe_stream(topics="lane:*", seconds=1.5)
+    check("a stream filtered to lane:* carries hello and nothing else",
+          len(frames) == 1 and frames[0][1] == "op"
+          and frames[0][2]["op"] == "hello", frames[:3])
+
+    # --- a queued item a client can cancel -------------------------------------
+    # Queued input is drainable at the running turn's next boundary, so the
+    # window a client can cancel in is a turn: the stub's SLOW answer holds it
+    # open for six seconds.
+    status, reply, _ = server.op("input.send", {"text": "SLOW while queuing"})
+    first_id = reply["result"]["item_id"]
+    status, reply, _ = server.op("input.send", {"text": "cancel this one"})
+    item_id = reply["result"]["item_id"]
+    check("input.send while running queues, and says so",
+          reply["ok"] and item_id != first_id, reply)
+    status, reply, _ = server.op("input.cancel", {"item_id": item_id})
+    check("a queued input can be cancelled", status == 200 and reply["ok"], reply)
+    status, reply, _ = server.op("input.cancel", {"item_id": item_id})
+    check("cancelling it again -> already_sent",
+          reply["ok"] is False and reply["error"]["code"] == "already_sent", reply)
+    status, reply, _ = server.op("input.cancel", {"item_id": first_id})
+    check("input already drained -> already_sent",
+          reply["ok"] is False and reply["error"]["code"] == "already_sent", reply)
+    snap = server.snapshot("session")
+    cancelled = [i for i in snap["topics"]["session"]["items"] if i["id"] == item_id]
+    check("the cancelled item reads as cancelled in the snapshot",
+          cancelled and cancelled[0]["status"] == "cancelled", cancelled)
+    server.op("run.interrupt", {"scope": "session"})
+
+    # --- input.cancel while the run is going, then interrupt --------------------
+    status, reply, _ = server.op("input.send", {"text": "SLOW and long"})
+    running_snap = server.snapshot("session")
+    check("input.send starts a run when the session is idle",
+          running_snap["topics"]["session"]["state"]["status"] == "running",
+          running_snap["topics"]["session"]["state"])
+    queued_id = reply["result"]["item_id"]
+    status, reply, _ = server.op("input.send", {"text": "steered mid run"})
+    check("input.send while running queues a second item", reply["ok"], reply)
+    status, reply, _ = server.op("run.interrupt", {"scope": "session"})
+    check("run.interrupt(scope session) reports what it interrupted",
+          reply["ok"] and reply["result"]["interrupted"] == ["session"], reply)
+    deadline = time.time() + 30
+    idle = False
+    while time.time() < deadline:
+        if server.snapshot("session")["topics"]["session"]["state"]["status"] == "idle":
+            idle = True
+            break
+        time.sleep(0.1)
+    check("the session is idle again after the interrupt", idle)
+    status, reply, _ = server.op("run.interrupt", {"scope": "session"})
+    check("interrupting an idle session reports nothing interrupted",
+          reply["ok"] and reply["result"]["interrupted"] == [], reply)
+
+    # --- ops idempotency ---------------------------------------------------------
+    before = len(stub_requests(stub_port))
+    rid = uuid.uuid4().hex
+    status, first, _ = server.op("input.send", {"text": "sent once"}, rid=rid)
+    status, second, _ = server.op("input.send", {"text": "sent once"}, rid=rid)
+    check("a retried rid returns the same reply",
+          first["ok"] and second == first, (first, second))
+    time.sleep(2)
+    check("and does nothing a second time",
+          len(stub_requests(stub_port)) - before == 1,
+          len(stub_requests(stub_port)) - before)
+    snap = server.snapshot("session")
+    check("the retried prompt is one item, not two",
+          len([i for i in snap["topics"]["session"]["items"]
+               if i["kind"] == "user" and i.get("text") == "sent once"]) == 1)
+
+    # --- error codes --------------------------------------------------------------
+    status, reply, _ = server.op("nonsense.op", {})
+    check("an unknown op -> unknown_op (still HTTP 200)",
+          status == 200 and reply["error"]["code"] == "unknown_op", reply)
+    status, reply, _ = server.op("input.send", {"text": ""})
+    check("an op with bad arguments -> invalid_args",
+          reply["error"]["code"] == "invalid_args", reply)
+    status, reply, _ = server.op("input.send", {"text": "x", "queue": "whenever"})
+    check("an enum argument out of range -> invalid_args",
+          reply["error"]["code"] == "invalid_args", reply)
+    status, reply, _ = server.op("input.cancel", {"item_id": "e_nope"})
+    check("cancelling something never queued -> already_sent",
+          reply["error"]["code"] == "already_sent", reply)
+    status, reply = server.get("/items/not-an-item?topic=session")
+    check("an unknown item -> 404", status == 404, (status, reply))
+    check("an unknown topic -> 404", server.get("/items?topic=nope")[0] == 404)
+    check("unknown media -> 404", server.get("/media/e_x/0?topic=session")[0] == 404)
+    check("an error message never quotes the value it refused",
+          "whenever" not in json.dumps(reply), reply)
+
+    # --- command.run ---------------------------------------------------------------
+    status, reply, _ = server.op("command.run", {"name": "model"})
+    check("command.run runs a builtin and returns its choices",
+          reply["ok"] and reply["result"]["choices"] is not None, reply)
+    status, reply, _ = server.op("command.run", {"name": "thinking", "args": "high"})
+    check("command.run switches the thinking level",
+          reply["ok"] and reply["result"]["data"]["thinking"] == "high", reply)
+    snap = server.snapshot("session")
+    check("the state follows the command", snap["topics"]["session"]["state"]["thinking"] == "high",
+          snap["topics"]["session"]["state"]["thinking"])
+    status, reply, _ = server.op("command.run", {"name": "nonsense"})
+    check("command.run of an unknown command -> not_found",
+          reply["error"]["code"] == "not_found", reply)
+
+    # --- goal ops -----------------------------------------------------------------
+    status, reply, _ = server.op("goal.set", {"objective": "e2e objective"})
+    check("goal.set creates the goal", reply["ok"] and reply["result"]["goal"]["status"] == "active",
+          reply)
+    status, reply, _ = server.op("goal.pause", {})
+    check("goal.pause pauses it", reply["result"]["goal"]["status"] == "paused", reply)
+    status, reply, _ = server.op("goal.resume", {})
+    check("goal.resume resumes it", reply["result"]["goal"]["status"] == "active", reply)
+    status, reply, _ = server.op("goal.clear", {})
+    check("goal.clear withdraws the goal (it reads as none)",
+          reply["ok"] and reply["result"]["goal"] is None, reply)
+
+    # --- items paging ---------------------------------------------------------------
+    status, page = server.get("/items?topic=session&limit=1")
+    check("items: paging returns the newest N and says there is more",
+          status == 200 and len(page["items"]) == 1 and page["has_more"] is True, page)
+    older = page["items"][0]["id"]
+    status, page2 = server.get(f"/items?topic=session&before={older}&limit=100")
+    check("items: `before` pages back from an id",
+          status == 200 and all(i["id"] != older for i in page2["items"]), page2)
+
+    # --- preconditions and the debug reads --------------------------------------------
+    status, reply, _ = server.op("input.send", {"text": "SLOW while switching"})
+    status, reply, _ = server.op("session.new", {})
+    check("session.new while busy -> not_quiescent",
+          reply["ok"] is False and reply["error"]["code"] == "not_quiescent", reply)
+    status, reply, _ = server.op("context.compact", {})
+    check("context.compact while busy -> busy",
+          reply["ok"] is False and reply["error"]["code"] == "busy", reply)
+    server.op("run.interrupt", {"scope": "session"})
+    deadline = time.time() + 30
+    while time.time() < deadline and \
+            server.snapshot("session")["topics"]["session"]["state"]["status"] != "idle":
+        time.sleep(0.1)
+    status, ctx = server.get("/debug/context")
+    check("debug/context shows what the model sees",
+          status == 200 and isinstance(ctx["messages"], list) and ctx["messages"], list(ctx)[:3])
+    status, journal = server.get("/debug/journal")
+    check("debug/journal shows the entries on the path",
+          status == 200 and journal["entries"] and journal["header"]["id"], list(journal)[:3])
+
+    # --- sessions ---------------------------------------------------------------------
+    status, sessions = server.get("/sessions")
+    check("sessions: the current session is listed with its path",
+          status == 200 and any(os.path.realpath(s["path"])
+                                == os.path.realpath(server.info["session"]["path"])
+                                for s in sessions["sessions"]), sessions)
+
+    # --- eval gate ----------------------------------------------------------------------
+    # What the restart check needs from this process, taken while it is alive.
+    snap = server.snapshot("session")
+    server.last_cursor = f"{snap['epoch']}.{snap['seq']}"
+    status, reply, _ = server.op("eval", {"code": "(+ 1 1)"})
+    check("eval is offered when it is not disabled", reply["ok"], reply)
+    status, reply, _ = server.op("server.shutdown", {})
+    check("server.shutdown is answered", status == 200 and reply["ok"], reply)
+
+
+def eval_gate_check(server):
+    """--no-http-eval removes the op and the catalog entry with it: eval over
+    HTTP is remote code execution, and the flag is how a caller says no."""
+    server.start(args=("--no-http-eval",))
+    status, catalog = server.get("/catalog")
+    check("--no-http-eval keeps eval out of the catalog",
+          status == 200 and all(o["name"] != "eval" for o in catalog["ops"]), catalog["ops"])
+    status, reply, _ = server.op("eval", {"code": "(+ 1 1)"})
+    check("--no-http-eval answers unknown_op",
+          reply["ok"] is False and reply["error"]["code"] == "unknown_op", reply)
+    server.op("server.shutdown", {})
+    check("the gated server still shuts down cleanly", server.wait_exit() == 0)
+
+
+def restart_check(server):
+    """A restart is a new epoch: a cursor from the old process is told to
+    re-snapshot, in band (CONTRACT §5.3) — pids are never compared."""
+    cursor = server.last_cursor
+    old_epoch = cursor.split(".")[0]
+    info = server.start()
+    check("the restarted server has a new epoch", info["epoch"] != old_epoch,
+          (old_epoch, info["epoch"]))
+    hello, ops = server.read_stream(lambda ops: len(ops) >= 0, since=cursor)
+    check("a cursor from the old epoch gets hello then stream.reset{restarted}",
+          hello and hello["epoch"] == info["epoch"]
+          and any(o["op"] == "stream.reset" and o["reason"] == "restarted" for o in ops),
+          (hello, ops))
 
 
 def main():
@@ -157,327 +645,52 @@ def main():
         print(f"serve-e2e: no binary at {EVO} (make build first)")
         return 1
     work = tempfile.mkdtemp(prefix="evo-serve-e2e-")
-    home = os.path.join(work, "home")
-    proj = os.path.join(work, "proj")
-    os.makedirs(home)
-    os.makedirs(proj)
-    token_file = os.path.join(work, "token")
-    ended_file = os.path.join(work, "session-ended")
+    os.makedirs(os.path.join(work, "home"))
+    os.makedirs(os.path.join(work, "proj"))
     stub_port = free_port()
-    port = free_port()
-
     stub = subprocess.Popen([sys.executable, os.path.join(ROOT, "tests", "stub-messages.py"),
                              str(stub_port)], stdout=subprocess.PIPE, text=True)
     assert stub.stdout.readline().startswith("stub listening")
-
-    env = dict(os.environ, EVO_HOME=home)
-    for var in ("EVO_SERVE_TOKEN", "EVO_SUPERVISED_CHILD", "EVO_NO_SUPERVISOR",
-                "ANTHROPIC_API_KEY"):
-        env.pop(var, None)
-    log = open(os.path.join(work, "evo.log"), "w")
-    # Plain invocation: the supervisor parent spawns the session child.
-    evo_proc = subprocess.Popen([EVO, "serve", "--no-userspace", "--port", str(port),
-                                 "--token-file", token_file],
-                                cwd=proj, env=env, stdout=log, stderr=subprocess.STDOUT)
+    server = Server(work)
     try:
-        deadline = time.time() + 60
-        while not os.path.exists(token_file) and time.time() < deadline:
-            time.sleep(0.1)
-        check("token file written", os.path.exists(token_file))
-        if not os.path.exists(token_file):
-            raise SystemExit("serve-e2e: evo never came up")
-        mode = os.stat(token_file).st_mode & 0o777
-        check("token file is private (0600)", mode == 0o600, oct(mode))
-        token = open(token_file).read().strip()
-        evo = Evo(port, token)
-        # The listener may come up a moment after the file.
-        health, status = None, None
-        for _ in range(100):
-            try:
-                status, health = evo.get("/health")
-                if status == 200:
-                    break
-            except OSError:
-                pass
-            time.sleep(0.1)
-        check("health: the program's identity, ok, pid and cursor",
-              status == 200 and isinstance(health, dict) and health.get("ok")
-              and isinstance(health.get("pid"), int)
-              and isinstance(health.get("cursor"), int)
-              and health.get("name") == "evo-agent" and health.get("version")
-              and health.get("features") == [], health)
-
-        run_all(evo, stub_port, work, ended_file)
-
-        # --- shutdown -----------------------------------------------------
-        status, reply = evo.post("/shutdown")
-        check("shutdown accepted", status == 200 and reply["ok"], reply)
+        info = server.start()
+        mode = stat.S_IMODE(os.stat(server.ready).st_mode)
+        check("the ready file is private (0600)", mode == 0o600, oct(mode))
+        for key in ("epoch", "pid", "port", "url", "token", "session", "program", "version"):
+            if key not in info:
+                check(f"ready file carries {key}", False, sorted(info))
+                break
+        else:
+            check("the ready file carries epoch, pid, port, url, token, session, program, version",
+                  info["token"] == server.token and len(info["epoch"]) == 8
+                  and info["program"] == "evo-agent"
+                  and info["session"]["id"] and info["session"]["path"], info)
+        run_all(server, stub_port, work)
+        # --- clean shutdown ----------------------------------------------------------
         try:
-            code = evo_proc.wait(timeout=30)
+            code = server.proc.wait(timeout=30)
         except subprocess.TimeoutExpired:
             code = None
-        check("evo exits 0 after shutdown (supervisor included)", code == 0, code)
-        check(":session-end fired on shutdown", os.path.exists(ended_file))
-        check("token file removed on clean exit", not os.path.exists(token_file))
+        check("evo exits 0 after server.shutdown", code == 0, code)
+        check("the ready file is removed on a clean exit", not os.path.exists(server.ready))
+        restart_check(server)
+        server.op("server.shutdown", {})
+        server.wait_exit()
+        eval_gate_check(server)
     except BaseException as e:
         failed += 1
         print(f"FAIL aborted: {e!r}")
+        import traceback
+        traceback.print_exc()
     finally:
-        if evo_proc.poll() is None:
-            evo_proc.kill()
+        server.stop()
         stub.kill()
-        log.close()
     if failed:
-        print(open(os.path.join(work, "evo.log")).read()[-4000:])
+        print(open(server.log_path).read()[-4000:])
     else:
         shutil.rmtree(work, ignore_errors=True)
     print(f"\nserve-e2e: {passed} passed, {failed} failed")
     return 1 if failed else 0
-
-
-def run_all(evo, stub_port, work, ended_file):
-    # --- auth ---------------------------------------------------------------
-    check("no token -> 401", evo.get("/state", token="")[0] == 401)
-    check("wrong token -> 401", evo.get("/state", token="not-the-token")[0] == 401)
-    check("wrong token on a command -> 401",
-          evo.post("/prompt", {"text": "x"}, token="nope")[0] == 401)
-    check("unknown endpoint -> 404", evo.get("/nope")[0] == 404)
-    check("wrong method -> 405", evo.get("/prompt")[0] == 405)
-    conn = http.client.HTTPConnection("127.0.0.1", evo.port, timeout=10)
-    conn.request("POST", "/command", body=b"{not json",
-                 headers={"Authorization": f"Bearer {evo.token}"})
-    check("bad JSON -> 400", conn.getresponse().status == 400)
-    conn.close()
-
-    status, state = evo.get("/state")
-    check("state before any model: idle, no model", status == 200
-          and state["status"] == "idle" and state["model_ready"] is None, state)
-
-    # --- register a provider and models via eval ------------------------------
-    form = ("(progn"
-            f" (evo:register-provider :stub :base-url \"http://127.0.0.1:{stub_port}\""
-            f"   :api-key \"{SECRET}\")"
-            " (evo:register-model \"stub-a\" :provider :stub :context-window 200000"
-            "   :max-output 8000 :effort t)"
-            " (evo:register-model \"stub-b\" :provider :stub :context-window 100000"
-            "   :max-output 8000 :effort t)"
-            " (evo:set-setting :model \"stub-a\")"
-            f" (evo:on :session-end (lambda (p) (declare (ignore p))"
-            f"   (with-open-file (o \"{ended_file}\" :direction :output"
-            "     :if-exists :supersede) (write-line \"ended\" o))) :name :e2e-end)"
-            " :registered)")
-    status, reply = evo.post("/eval", {"form": form})
-    check("eval form registers provider + models", status == 200
-          and reply["data"]["values"] == [":registered"], reply)
-    status, reply = evo.post("/eval", {"code": "(defun e2e-f () 41) (1+ (e2e-f))"})
-    check("eval body (the tool's form) returns the last value",
-          status == 200 and reply["data"]["values"] == ["42"], reply)
-    status, reply = evo.post("/eval", {"form": "(error \"boom\")"})
-    check("a failing eval is 422 with the condition", status == 422
-          and "boom" in reply["error"], reply)
-    status, reply = evo.post("/eval", {"form": "(+ 1 2) (+ 3 4)"})
-    check("eval form refuses two forms (400)", status == 400, reply)
-    status, state = evo.get("/state")
-    check("model now resolves", state["model"] == "stub-a" and state["model_ready"], state)
-
-    # --- a prompt streamed to the end of its run --------------------------------
-    result, events = evo.stream_command("/prompt", {"text": "hello e2e"})
-    check("prompt stream opens with its result", result["ok"] and result["task"], result)
-    t = types(events)
-    check("prompt stream carries the run",
-          "task-start" in t and "text-delta" in t and "run-end" in t, t)
-    check("prompt stream ends when the session settles", t and t[-1] == "settled", t)
-    text = "".join(d["text"] for _, e, d in events if e == "text-delta")
-    check("the stub's answer streamed back", text == "ok: hello e2e", text)
-    ids = [i for i, _, _ in events]
-    check("event ids are consecutive", ids == list(range(ids[0], ids[0] + len(ids))), ids)
-    status, tr = evo.get("/transcript")
-    msgs = tr["messages"]
-    check("transcript has the exchange", len(msgs) == 2 and msgs[0]["role"] == "user"
-          and msgs[1]["content"][0]["text"] == "ok: hello e2e", msgs)
-
-    # Last-Event-ID replays what came after it.
-    first = ids[0]
-    replay = []
-    for ev in evo.stream("GET", "/events", headers={"Last-Event-ID": str(first)}, timeout=5):
-        replay.append(ev)
-        if len(replay) == 2:
-            break
-    check("Last-Event-ID resumes right after the given id",
-          [r[0] for r in replay] == [first + 1, first + 2], replay)
-
-    # --- model and thinking switch -------------------------------------------------
-    status, reply = evo.command("/model stub-b")
-    check("/model <id> switches", status == 200 and reply["data"]["model"]["id"] == "stub-b", reply)
-    status, reply = evo.command("/model")
-    check("/model with no id lists the choices", status == 200
-          and [i["value"]["id"] for i in reply["choices"]["items"]] == ["stub-a", "stub-b"], reply)
-    status, reply = evo.command("/model no-such-model")
-    check("/model with an unknown id is 400", status == 400, reply)
-    status, reply = evo.command("/thinking high")
-    check("/thinking switches", status == 200 and reply["data"]["thinking"] == "high", reply)
-    status, reply = evo.command("/thinking sideways")
-    check("/thinking with a bad level is 400", status == 400, reply)
-    status, state = evo.get("/state")
-    check("state shows the new model and thinking",
-          state["model"] == "stub-b" and state["thinking"] == "high", state)
-    evo.stream_command("/prompt", {"text": "after switch"})
-    last = stub_requests(stub_port)[-1]
-    check("the next turn runs on the new model", last["model"] == "stub-b", last)
-    check("the next turn carries the new effort", last["effort"] == "high", last)
-
-    # --- a tool registered by eval is offered the very next turn ------------------
-    code = ("(evo:register-tool \"e2e_probe\" :description \"e2e probe tool\""
-            " :schema '(:object) :execute (lambda (args) (declare (ignore args))"
-            " \"probe-result-7\"))")
-    status, reply = evo.post("/eval", {"code": code})
-    check("eval registers a tool", status == 200, reply)
-    before = len(stub_requests(stub_port))
-    result, events = evo.stream_command("/prompt", {"text": "please TOOL:e2e_probe now"})
-    reqs = stub_requests(stub_port)[before:]
-    check("the new tool is offered on the next turn",
-          reqs and "e2e_probe" in reqs[0]["tools"], reqs[:1])
-    results = [d for _, e, d in events if e == "tool-result"]
-    check("the model's call ran the new tool",
-          results and results[0]["name"] == "e2e_probe"
-          and "probe-result-7" in results[0]["content"], results)
-
-    # --- steer ---------------------------------------------------------------------
-    status, reply = evo.post("/steer", {"text": "nothing runs"})
-    check("steer with no run is 409", status == 409, reply)
-    status, reply = evo.post("/prompt", {"text": "SLOW for steering"})
-    check("a slow prompt starts a run", status == 200 and reply["task"], reply)
-    cursor = reply["cursor"]
-    status, reply = evo.post("/steer", {"text": "steered-in mid run"})
-    check("steer during a run is accepted", status == 200, reply)
-    status, reply = evo.command("/new")
-    check("a journal switch while busy is 409, not a race", status == 409, reply)
-    status, reply = evo.command("/compact")
-    check("/compact while busy is 409", status == 409, reply)
-    events = evo.wait_settled(cursor)
-    steering = [d["text"] for _, e, d in events if e == "steering"]
-    check("the steer landed at a turn boundary of the same run",
-          "steered-in mid run" in steering, steering)
-    status, tr = evo.get("/transcript")
-    answers = [m["content"][0]["text"] for m in tr["messages"]
-               if m["role"] == "assistant" and m["content"] and m["content"][0]["type"] == "text"]
-    check("the model answered the steer", "ok: steered-in mid run" in answers, answers[-3:])
-
-    # --- interrupt -----------------------------------------------------------------
-    status, reply = evo.post("/interrupt")
-    check("interrupt with nothing running says so", status == 200
-          and reply["data"]["interrupted"] is None, reply)
-    status, reply = evo.post("/prompt", {"text": "SLOW to interrupt"})
-    cursor = reply["cursor"]
-    # Wait until the model is actually talking, then interrupt it.
-    for eid, etype, data in evo.stream("GET", f"/events?since={cursor}", timeout=30):
-        if etype == "text-delta":
-            break
-    result, events = evo.stream_command("/interrupt", {})
-    check("interrupt answers interrupted", result["data"]["interrupted"] is True, result)
-    run_ends = [d for _, e, d in events if e == "run-end"]
-    check("the run ends aborted", run_ends and run_ends[-1]["outcome"] == "aborted", events)
-    check("interrupt's stream ends settled", types(events)[-1:] == ["settled"], types(events))
-    state = evo.wait_for(lambda s: s["status"] == "idle")
-    check("idle after the interrupt", state is not None)
-
-    # --- /compact --------------------------------------------------------------------
-    evo.post("/eval", {"form": "(setf evo.kernel::*compact-keep-recent-tokens* 1)"})
-    result, events = evo.stream_command("/command", {"text": "/compact keep the probe"})
-    outputs = [d["text"] for _, e, d in events if e == "output"]
-    check("/compact runs as a task and succeeds", "✓ compacted" in outputs, outputs)
-    status, journal = evo.get("/journal")
-    check("a :compaction entry is on the path",
-          any(e["type"] == "compaction" for e in journal["entries"]))
-    summarizer = [r for r in stub_requests(stub_port) if r["summarizer"]]
-    check("the summarizer request reached the model", len(summarizer) >= 1)
-
-    # --- goal create / refine / pause / resume / complete ------------------------------
-    status, reply = evo.command("/goal")
-    check("/goal with no goal says so", status == 200 and reply["data"]["goal"] is None, reply)
-    status, reply = evo.command("/goal alpha objective")
-    check("/goal creates the goal and starts driving it", status == 200
-          and reply["data"]["goal"]["status"] == "active" and reply["task"], reply)
-    status, reply = evo.command("/goal beta objective")
-    check("/goal on an active goal refines it",
-          reply["data"]["goal"]["objective"] == "beta objective", reply)
-    status, reply = evo.command("/goal pause")
-    check("/goal pause pauses it", reply["data"]["goal"]["status"] == "paused", reply)
-    state = evo.wait_for(lambda s: s["status"] == "idle", timeout=30)
-    check("a paused goal stops driving", state is not None
-          and state["goal"]["status"] == "paused", state and state["goal"])
-    status, reply = evo.command("/goal pause")
-    check("pausing a paused goal is 409", status == 409, reply)
-    status, reply = evo.command("/goal resume")
-    check("/goal resume resumes it", status == 200
-          and reply["data"]["goal"]["status"] == "active", reply)
-    cursor = reply["cursor"]
-    status, reply = evo.command("/goal beta objective FINISH")
-    check("refine again while it runs", status == 200, reply)
-    evo.wait_for(lambda s: s["goal"] and s["goal"]["status"] == "complete"
-                 and s["status"] == "idle", timeout=60)
-    status, state = evo.get("/state")
-    check("the model completed the goal through update_goal",
-          state["goal"]["status"] == "complete", state["goal"])
-
-    # --- lore, export, tree, rewind ---------------------------------------------------------
-    status, reply = evo.command("/lore prefer small commits")
-    check("/lore adds project lore", status == 200 and reply["data"]["id"], reply)
-    status, lore = evo.get("/lore")
-    check("GET /lore lists it", any(e["text"] == "prefer small commits" for e in lore["entries"]))
-    export_path = os.path.join(work, "export.md")
-    status, reply = evo.command(f"/export {export_path}")
-    check("/export writes the transcript", status == 200 and os.path.exists(export_path), reply)
-    status, reply = evo.command("/rewind")
-    check("/rewind hands the last user text back as a draft",
-          status == 200 and reply["data"].get("draft"), reply)
-    status, reply = evo.command("/tree")
-    check("/tree lists the path's entries",
-          status == 200 and reply["choices"] and reply["choices"]["items"], reply)
-
-    # --- fork / new / resume ---------------------------------------------------------------
-    status, state = evo.get("/state")
-    original = state["session"]
-    status, reply = evo.command("/fork")
-    forked = reply["data"].get("session")
-    check("/fork switches to a new file", status == 200 and forked and forked != original, reply)
-    status, reply = evo.command("/new")
-    fresh = reply["data"].get("session")
-    check("/new starts a fresh session", status == 200 and fresh not in (original, forked), reply)
-    status, tr = evo.get("/transcript")
-    check("a new session has an empty transcript", tr["messages"] == [], tr)
-    status, sessions = evo.get("/sessions")
-    # The list resolves each path (truename) while a command reply keeps the
-    # journal path as spelled — on macOS /var is a symlink to /private/var, so
-    # compare what the filesystem says the two names are.
-    paths = [os.path.realpath(s["path"]) for s in sessions["sessions"]]
-    check("GET /sessions lists the sessions on disk",
-          os.path.realpath(original) in paths and os.path.realpath(forked) in paths, paths)
-    status, reply = evo.command(f"/resume {original}")
-    check("/resume <path> switches back", status == 200
-          and reply["data"].get("session") == original, reply)
-    status, tr = evo.get("/transcript")
-    check("the resumed session's history is back",
-          any(m["role"] == "user" and "hello e2e" in json.dumps(m) for m in tr["messages"])
-          or any("SUMMARY" in json.dumps(m) for m in tr["messages"]), len(tr["messages"]))
-    status, reply = evo.command("/resume 99")
-    check("/resume <n> past the list is 404", status == 404, reply)
-    status, reply = evo.command("/nonsense-command")
-    check("an unknown command is 404", status == 404, reply)
-
-    # --- state, registry --------------------------------------------------------------------
-    status, state = evo.get("/state")
-    check("state has the status fields", all(k in state for k in (
-        "status", "task", "model", "thinking", "context_tokens", "goal", "todos",
-        "jobs", "session", "cursor")), sorted(state))
-    status, raw = evo.request("GET", "/registry")
-    text = json.dumps(raw)
-    check("registry lists models, tools and commands",
-          "stub-a" in text and "e2e_probe" in text and "compact" in text)
-    check("registry shows no secrets", SECRET not in text)
-    stub_provider = [p for p in raw["providers"] if p["key"] == "stub"]
-    check("a provider says it has a key without showing it",
-          stub_provider and stub_provider[0]["has_api_key"] is True, stub_provider)
 
 
 if __name__ == "__main__":
