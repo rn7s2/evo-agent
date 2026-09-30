@@ -1,77 +1,111 @@
-;;;; view-topic.lisp — the session topic's provider, when the view is loaded.
+;;;; view-topic.lisp — the session topic's provider: the view, wired to serve.
 ;;;;
-;;;; CONTRACT §7 is the interface: `evo.view:make-view` builds a projection of
-;;;; the agent's journal, `view-attach` hands it a publish callback (every
-;;;; change becomes an op), `view-on-event` / `view-on-append` feed it, and
-;;;; `view-snapshot` / `view-items-before` / `view-item` / `view-media` answer
-;;;; the reads serve's protocol needs.  This file is that wiring and nothing
-;;;; else — the projection lives in src/view/.
-;;;;
-;;;; The symbols are resolved once, at install time, rather than at read time:
-;;;; "evo" is built without the view system in the work packages that do not
-;;;; need it (tests/evo-only.lisp loads the frontends alone), so a file that
-;;;; named EVO.VIEW:MAKE-VIEW directly would fail to load there.  A missing
-;;;; view is not an error — INSTALL-SESSION-TOPIC falls back to the local test
-;;;; double (view-fallback.lisp).
+;;;; CONTRACT §7 is the interface.  `evo.view:make-view` projects the agent's
+;;;; journal into items and state; `view-attach` hands it a publisher (every
+;;;; change becomes an op, from inside the view's own lock, so op order is
+;;;; mutation order); `view-on-event` and `view-on-append` keep it current; and
+;;;; `view-snapshot` and friends answer the reads the protocol needs.  This
+;;;; file is that wiring and nothing else — the projection lives in src/view/.
 
 (in-package :evo.serve)
 
 (defstruct (view-topic (:constructor %make-view-topic))
   server
-  agent
   view
-  (fn nil))                            ; name -> function, resolved once
-
-(defun view-fn (topic name)
-  (or (getf (view-topic-fn topic) name)
-      (setf (getf (view-topic-fn topic) name)
-            (let ((symbol (find-symbol name :evo.view)))
-              (unless (and symbol (fboundp symbol))
-                (error "evo.view:~a is not defined" name))
-              (fdefinition symbol)))))
-
-(defun view-topic-available-p ()
-  (and (find-package :evo.view)
-       (let ((maker (find-symbol "MAKE-VIEW" :evo.view)))
-         (and maker (fboundp maker)))))
+  ;; The journal the view is following, and the listener that follows it.  A
+  ;; session switch points the agent at another journal; a listener left on the
+  ;; old one would feed a view of a session nobody is looking at.
+  journal
+  listener
+  leaf)
 
 (defun make-view-topic (server agent)
-  "The real session topic: the view, attached to this server's op log."
-  (let ((topic (%make-view-topic :server server :agent agent)))
-    (setf (view-topic-view topic)
-          (funcall (view-fn topic "MAKE-VIEW") agent :topic "session"))
-    (funcall (view-fn topic "VIEW-ATTACH")
-             (view-topic-view topic)
-             (lambda (op-plist) (publish-op server op-plist)))
+  "The session topic: the view of AGENT, publishing into SERVER's op log."
+  (let ((topic (%make-view-topic :server server
+                                 :view (evo.view:make-view agent :topic "session"))))
+    (evo.view:view-attach (view-topic-view topic)
+                          (lambda (op-plist) (publish-op server op-plist)))
+    (follow-journal topic)
     topic))
 
+(defun follow-journal (topic)
+  "Listen to the agent's current journal."
+  (let* ((agent (server-agent (view-topic-server topic)))
+         (journal (agent-journal agent)))
+    (unless (eq journal (view-topic-journal topic))
+      (when (view-topic-journal topic)
+        (remove-journal-listener (view-topic-journal topic)
+                                 (view-topic-listener topic)))
+      (let ((view (view-topic-view topic)))
+        (setf (view-topic-listener topic)
+              (lambda (journal entry)
+                (declare (ignore journal))
+                (evo.view:view-on-append view entry)))
+        (add-journal-listener journal (view-topic-listener topic))))
+    (setf (view-topic-journal topic) journal
+          (view-topic-leaf topic) (journal-leaf-id journal))
+    topic))
+
+(defun sync-view-topic (topic)
+  "The fold may have moved under the view in a way no append reports: the
+journal switched (a listener on the old one), or the leaf moved (the whole
+item list changed, and nothing was appended).  Both are a rebuild, and the
+client is told to re-read the topic."
+  (let* ((agent (server-agent (view-topic-server topic)))
+         (journal (agent-journal agent)))
+    (cond
+      ((not (eq journal (view-topic-journal topic)))
+       (follow-journal topic)
+       (evo.view:view-reset (view-topic-view topic) :session-switched))
+      ((not (equal (journal-leaf-id journal) (view-topic-leaf topic)))
+       (setf (view-topic-leaf topic) (journal-leaf-id journal))
+       (evo.view:view-reset (view-topic-view topic) :leaf-moved))
+      ;; Anything else the fold changed (a setting, a model, the provider
+      ;; registry) leaves the items alone but can move the state: re-derive it.
+      ;; EVO.VIEW::VIEW-REFRESH-STATE is internal — asked for by name in the
+      ;; report; the exported view interface has no state-only refresh yet.
+      (t (evo.view::view-refresh-state (view-topic-view topic)))))
+  t)
+
 (defmethod topic-snapshot ((topic view-topic) &key (items 200))
-  (funcall (view-fn topic "VIEW-SNAPSHOT") (view-topic-view topic) :items items))
+  (evo.view:view-snapshot (view-topic-view topic) :items items))
 
 (defmethod topic-items-before ((topic view-topic) before-id limit)
-  (funcall (view-fn topic "VIEW-ITEMS-BEFORE") (view-topic-view topic) before-id limit))
+  (evo.view:view-items-before (view-topic-view topic) before-id limit))
 
 (defmethod topic-item ((topic view-topic) id)
-  (funcall (view-fn topic "VIEW-ITEM") (view-topic-view topic) id))
+  (evo.view:view-item (view-topic-view topic) id))
 
 (defmethod topic-media ((topic view-topic) id n)
-  (funcall (view-fn topic "VIEW-MEDIA") (view-topic-view topic) id n))
+  (evo.view:view-media (view-topic-view topic) id n))
 
 (defmethod topic-feed-event ((topic view-topic) event)
-  (funcall (view-fn topic "VIEW-ON-EVENT") (view-topic-view topic) event)
+  (evo.view:view-on-event (view-topic-view topic) event)
   t)
 
 (defmethod topic-feed-append ((topic view-topic) entry)
-  (funcall (view-fn topic "VIEW-ON-APPEND") (view-topic-view topic) entry)
+  (evo.view:view-on-append (view-topic-view topic) entry)
   t)
 
 (defmethod topic-provider-reset ((topic view-topic) reason)
-  (funcall (view-fn topic "VIEW-RESET") (view-topic-view topic) reason))
+  "Rebuild from the journal as it stands now (a leaf move, a lane restart)."
+  (follow-journal topic)
+  (evo.view:view-reset (view-topic-view topic) reason))
+
+(defmethod topic-provider-queued-input ((topic view-topic) id text images queue)
+  "Input a client queued and can still cancel: it is in the transcript before
+it is journaled, which is what makes the row drawable at once."
+  (evo.view:view-input-queued (view-topic-view topic) :id id :text text
+                                                      :images images :queue queue))
+
+(defmethod topic-provider-input-cancelled ((topic view-topic) id)
+  "The queued input was withdrawn: it leaves the transcript (and the view
+publishes that removal itself)."
+  (evo.view:view-input-cancelled (view-topic-view topic) id))
+
+(defmethod topic-provider-sync ((topic view-topic))
+  (sync-view-topic topic))
 
 (defun install-session-topic (server agent)
-  "Install the provider for the `session` topic: the view when the view system
-is loaded, the local test double otherwise (CONTRACT §7)."
-  (register-topic server "session"
-                  (if (view-topic-available-p)
-                      (make-view-topic server agent)
-                      (make-fallback-topic server agent))))
+  "Install the provider for the `session` topic (CONTRACT §7)."
+  (register-topic server "session" (make-view-topic server agent)))

@@ -14,12 +14,13 @@
            #:server-epoch #:server-seq #:server-cursor #:server-oplog
            #:server-interrupt-hook #:server-shutdown-hook
            #:server-program #:server-version #:server-identity
-           #:server-status #:server-task #:task-id #:task-kind
+           #:server-task #:task-id #:task-kind #:task-started #:task-step-started
            ;; topics: how a program adds what it observes (CONTRACT §7)
            #:register-topic #:unregister-topic #:topic-provider
            #:topic-provider-names #:expand-topic-names
            #:topic-snapshot #:topic-items-before #:topic-item #:topic-media
            #:topic-feed-event #:topic-feed-append #:topic-provider-reset
+           #:topic-provider-sync #:sync-session-topic
            #:topic-provider-queued-input #:topic-provider-input-cancelled
            #:topic-reset #:topic-notice #:topic-on-event
            #:publish-op #:publish-state-patch #:publish-item-add

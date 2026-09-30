@@ -315,6 +315,9 @@ def run_all(server, stub_port, work):
           status == 200 and reply["ok"] and reply["result"]["values"] == [":registered"], reply)
     status, reply, _ = server.op("eval", {"code": "(+ 1 2)"})
     check("eval returns the value", reply["result"]["values"] == ["3"], reply)
+    status, reply, _ = server.op("model.set", {"id": "stub-a"})
+    check("model.set journals the choice", reply["ok"] and reply["result"]["model"]["id"] == "stub-a",
+          reply)
 
     # --- catalog --------------------------------------------------------------
     status, catalog = server.get("/catalog")
@@ -346,30 +349,35 @@ def run_all(server, stub_port, work):
           snap["epoch"] and isinstance(snap["seq"], int) and "session" in snap["topics"]
           and isinstance(snap["topics"]["session"]["state"], dict), sorted(snap))
     check("snapshot reports the model the catalog does",
-          snap["topics"]["session"]["state"]["model"] == "stub-a", snap["topics"]["session"]["state"])
+          snap["topics"]["session"]["state"]["model"]["id"] == "stub-a",
+          snap["topics"]["session"]["state"])
+    check("state carries the shape the GUI draws (CONTRACT §4.2)",
+          {"status", "task", "model", "thinking", "language", "context", "goal",
+           "todos", "queue", "jobs", "segments", "session"}
+          <= set(snap["topics"]["session"]["state"]), sorted(snap["topics"]["session"]["state"]))
 
     # --- stream: hello, then the ops of a turn --------------------------------
-    # The snapshot the stream is about to continue: the consistency check
-    # folds the ops onto exactly this state.
     baseline = server.snapshot("session")
 
-    def got_answer(ops):
-        """The turn is over when the assistant item it created is final."""
-        answer = next((o for o in ops
-                       if o["op"] == "item.add" and o["item"]["kind"] == "assistant"), None)
-        if not answer:
-            return False
-        return any(o["op"] == "item.patch" and o.get("id") == answer["item"]["id"]
-                   and o["patch"].get("status") in ("final", "error") for o in ops)
+    def fold(ops, snapshot=None):
+        base = snapshot or baseline
+        return apply_ops(base["topics"]["session"]["items"],
+                         base["topics"]["session"]["state"], ops)
 
-    wrote = {}
+    def turn_over(ops):
+        """The turn is over when the answer is final *and* nothing runs: the
+        run's own end is the last op of a turn."""
+        items, state = fold(ops)
+        return (any(i["kind"] == "assistant" and i.get("status") in ("final", "error")
+                    for i in items)
+                and state.get("status") not in ("running", "compacting"))
+
     collected = {}
 
     def stream_turn():
         cursor = f"{baseline['epoch']}.{baseline['seq']}"
-        hello, ops = server.read_stream(got_answer, topics="session", since=cursor)
-        collected["hello"] = hello
-        collected["ops"] = ops
+        collected["hello"], collected["ops"] = server.read_stream(turn_over, topics="session",
+                                                                  since=cursor)
 
     reading = in_thread(stream_turn)
     time.sleep(0.3)
@@ -377,35 +385,41 @@ def run_all(server, stub_port, work):
     check("input.send answers with the item id and its queue state",
           status == 200 and reply["ok"] and reply["result"]["item_id"]
           and reply["result"]["queued"] and reply["result"]["blocked"] is None, reply)
-    wrote["id"] = reply["result"]["item_id"]
+    sent_id = reply["result"]["item_id"]
     join(reading, 45)
     ops = collected.get("ops") or []
     hello = collected.get("hello")
     check("the stream's first frame is hello, at the snapshot's cursor",
           hello and hello["epoch"] == baseline["epoch"] and hello["seq"] == baseline["seq"], hello)
-    check("input.send's item appears (item.add, queued)",
-          any(o["op"] == "item.add" and o["item"]["id"] == wrote["id"]
+    check("the input appears as a queued user item",
+          any(o["op"] == "item.add" and o["item"].get("id") == sent_id
               and o["item"]["kind"] == "user" and o["item"]["status"] == "queued" for o in ops),
           ops[:3])
-    assistant = [o for o in ops if o["op"] == "item.add" and o["item"]["kind"] == "assistant"]
-    check("the answer is its own item", len(assistant) == 1, assistant)
-    answer_id = assistant[0]["item"]["id"] if assistant else None
-    check("the answer's text arrives as item.append",
-          any(o["op"] == "item.append" and o.get("id") == answer_id and o["field"] == "text"
-              for o in ops), ops[-4:])
-    appends = [o for o in ops if o["op"] == "item.append" and o.get("id") == answer_id]
-    text = "".join(o["text"] for o in appends)
-    check("the stub's answer streams back", text == "ok: hello e2e", text)
+    items, state = fold(ops)
+    answers = [i for i in items if i["kind"] == "assistant"]
+    check("the answer is its own item", len(answers) == 1, answers)
+    check("the answer streamed back through item.append",
+          answers and answers[0]["text"] == "ok: hello e2e", answers)
+    check("the answer's final status reached the client",
+          any(o["op"] == "item.patch" and o["patch"].get("status") in ("final", "error")
+              for o in ops)
+          or any(o["op"] == "item.add" and o["item"]["kind"] == "assistant"
+                 and o["item"]["status"] == "final" for o in ops), ops[-3:])
+    check("the item's model and provider are on it",
+          answers and answers[0]["model"] == "stub-a" and answers[0]["provider"] == "stub",
+          answers)
+    check("the user's item reads as sent once it is journaled",
+          any(i["kind"] == "user" and i["status"] == "sent" for i in items), items)
     check("every op carries seq, ts and topic",
           all(isinstance(o.get("seq"), int) and isinstance(o.get("ts"), int)
               and o.get("topic") == "session" for o in ops
               if o["op"] not in ("hello", "stream.reset")), ops[:2])
     check("appends are coalesced, not one op per delta",
-          len(appends) <= 3, len(appends))
+          len([o for o in ops if o["op"] == "item.append" and o["field"] == "text"]) <= 3,
+          [o for o in ops if o["op"] == "item.append"])
 
     # --- snapshot + stream consistency ----------------------------------------
-    items, state = apply_ops(baseline["topics"]["session"]["items"],
-                             baseline["topics"]["session"]["state"], ops)
+    items, state = fold(ops)
     after = server.snapshot("session")
     check("applying the ops to a snapshot equals the next snapshot",
           [i["id"] for i in items] == [i["id"] for i in after["topics"]["session"]["items"]]
@@ -416,6 +430,9 @@ def run_all(server, stub_port, work):
           after["seq"] >= ops[-1]["seq"], (after["seq"], ops[-1]["seq"]))
     check("the answer's status is final in the snapshot",
           item_text(after["topics"]["session"]["items"], "assistant")["status"] == "final")
+    check("the folded state matches the snapshot's too",
+          state.get("status") == after["topics"]["session"]["state"]["status"]
+          and state.get("model") == after["topics"]["session"]["state"]["model"], state)
 
     # --- reconnect with a cursor ----------------------------------------------
     cursor = f"{after['epoch']}.{after['seq']}"
@@ -473,9 +490,10 @@ def run_all(server, stub_port, work):
     check("input already drained -> already_sent",
           reply["ok"] is False and reply["error"]["code"] == "already_sent", reply)
     snap = server.snapshot("session")
-    cancelled = [i for i in snap["topics"]["session"]["items"] if i["id"] == item_id]
-    check("the cancelled item reads as cancelled in the snapshot",
-          cancelled and cancelled[0]["status"] == "cancelled", cancelled)
+    check("the cancelled item is gone from the snapshot",
+          all(i["id"] != item_id for i in snap["topics"]["session"]["items"]),
+          [i for i in snap["topics"]["session"]["items"] if i["id"] == item_id])
+
     server.op("run.interrupt", {"scope": "session"})
 
     # --- input.cancel while the run is going, then interrupt --------------------

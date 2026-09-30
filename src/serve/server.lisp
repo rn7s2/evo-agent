@@ -269,19 +269,6 @@ produced outside a command (a task finishing) goes to the view only.")
   (when *reply*
     (setf (getf (reply-data *reply*) key) value)))
 
-(defun task-state (server)
-  "The session's task as the protocol's state carries it, epoch milliseconds
-and never an age: the client's clock and ours may differ, and a client that
-gets a start time can compute an age better than a server can (CONTRACT §4.2)."
-  (let ((task (server-task server)))
-    (when task
-      (list :id (task-id task)
-            :kind (task-kind task)
-            :turn (evo.kernel::agent-turn-index (server-agent server))
-            :started-at (task-started task)
-            :step-started-at (or (task-step-started task)
-                                 (task-started task))))))
-
 ;;; The server as the command layer's host.
 
 (defmethod evo.command:host-agent ((server server)) (server-agent server))
@@ -337,8 +324,10 @@ re-reads its snapshot (CONTRACT §5.3)."
   (evo.command:host-notice server (format nil "✗ /~a: ~a" name condition) :severity :error))
 
 (defmethod evo.command:host-refresh ((server server))
-  "The fold state changed under the session: republish the topic state."
-  (refresh-topic-state server "session"))
+  "The fold changed under the session.  Most changes are journal appends, and
+the view hears those itself; a leaf that moved appends nothing and needs a
+rebuild, which is what the sync is for."
+  (sync-session-topic server))
 
 ;;; The server as the session's frontend.
 
@@ -379,7 +368,6 @@ arrives, whatever BODY does."
          (id (task-id task)))
     (reset-agent-run-control agent)
     (setf (server-task server) task)
-    (topic-task-state-changed server)
     (setf (task-thread task)
           (bt:make-thread
            (lambda ()
@@ -437,15 +425,13 @@ next run if input queued up meanwhile."
                                       :durable t :data (list :source :serve)))))
       (when (and (eq (task-kind task) :run) text)
         (evo.command:host-say server (format nil "✗ internal error in run: ~a" text) :error))
-      (topic-run-outcome server outcome text)
       (let ((goal (current-goal agent)))
         (when (and goal (member (pget goal :status) '(:complete :budget-limited :paused)))
           (evo.command:host-notice server (format nil "◆ goal ~a: ~(~a~)"
                                                   (pget goal :goal-id) (pget goal :status))
                                    :durable t :data (list :source :goal))))
       (when (and (steering-pending-p agent) (not (server-quit server)))
-        (start-run server))
-      (topic-task-state-changed server))))
+        (start-run server)))))
 
 ;;; The session thread.
 
