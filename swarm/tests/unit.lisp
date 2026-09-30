@@ -115,8 +115,8 @@ without a lane process."
   ((said :initform nil) (repaints :initform 0)
    (events :initform nil) (ran :initform nil)))
 
-(defmethod view-say ((view recording-view) text &key style)
-  (push (list text style) (slot-value view 'said)))
+(defmethod view-say ((view recording-view) text &key style (source :swarm))
+  (push (list text style source) (slot-value view 'said)))
 
 (defmethod view-repaint ((view recording-view))
   (incf (slot-value view 'repaints)))
@@ -515,14 +515,17 @@ parsed anywhere."
     (check "view: the swarm carries its view" (eq recording (swarm-view *swarm*)))
     (swarm-say "hello" :style :error)
     (swarm-say "quiet")
-    (check "view: a notice reaches the view, with its style (and :dim by default)"
-           (equal '(("hello" :error) ("quiet" :dim)) (said recording)))
+    (check "view: a notice reaches the view, with its style and its source"
+           (equal '(("hello" :error :swarm) ("quiet" :dim :swarm))
+                  (said recording)))
     (swarm-repaint)
     (swarm-repaint)
     (check "view: a repaint reaches the view" (= 2 (slot-value recording 'repaints)))
     (check "view: the run goes to the view, and its exit code comes back"
            (and (eql 7 (swarm-run agent t))
-                (equal (list agent t) (slot-value recording 'ran)))))
+                (equal (list agent t) (slot-value recording 'ran))))
+    (check "view: a frontend that does not show the queue says it as a notice"
+           (null (swarm-shows-queued-input-p))))
   ;; The TUI view with no terminal up: nothing painted, nothing published, and
   ;; — the point of the seam — nothing signalled.
   (let ((view (make-instance 'tui-view)))

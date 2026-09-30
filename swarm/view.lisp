@@ -24,9 +24,18 @@
   (:documentation "Where a coordinator's notices go, and how it runs.  One
 instance per swarm, in the SWARM's VIEW slot."))
 
-(defgeneric view-say (view text &key style)
+(defgeneric view-say (view text &key style source)
   (:documentation "Show TEXT in VIEW.  STYLE is the command layer's: :plain,
-:dim, :notice, :success, :error.  Safe from any thread."))
+:dim, :notice, :success, :error.  SOURCE names the producer of a notice that
+travels to a client (CONTRACT §3), :swarm for what this program says.  Safe
+from any thread."))
+
+(defgeneric view-shows-queued-input-p (view)
+  (:documentation "Whether VIEW shows the messages the swarm queues for the
+coordinator — as items of its transcript — so that a notice saying the same
+thing again would be the same news twice.  serve does; the TUI shows a queued
+message only once it is sent, so its notice is how the human hears it now.")
+  (:method ((view view)) nil))
 
 (defgeneric view-repaint (view)
   (:documentation "The lanes changed: let VIEW redraw, if it has a screen."))
@@ -46,8 +55,8 @@ exit code."))
 (defclass tui-view (view) ()
   (:documentation "The coordinator in the human's terminal."))
 
-(defmethod view-say ((view tui-view) text &key (style :dim))
-  (declare (ignore view))
+(defmethod view-say ((view tui-view) text &key (style :dim) (source :swarm))
+  (declare (ignore view source))
   (evo.tui:post-notice text :style style))
 
 (defmethod view-repaint ((view tui-view))
@@ -66,12 +75,17 @@ exit code."))
   (:documentation "A headless coordinator: an `evo serve` session an HTTP
 client drives."))
 
-(defmethod view-say ((view serve-view) text &key (style :dim))
+(defmethod view-say ((view serve-view) text &key (style :dim) (source :swarm))
   ;; Through the command layer's host protocol, which publishes it as a notice
   ;; the client's stream carries.  A lane's thread has no command reply bound
   ;; (bindings are per-thread), so a notice never lands in a command's reply.
+  ;; SOURCE rides the notice's data, so a client can tell the swarm's own lines
+  ;; from the session's (§3).
   (evo.command:host-notice (serve-view-server view) text
-                           :severity (style-severity style)))
+                           :severity (style-severity style)
+                           :data (list :source source)))
+
+(defmethod view-shows-queued-input-p ((view serve-view)) t)
 
 (defmethod view-repaint ((view serve-view))
   ;; Nothing to redraw: a client reads the lanes from the swarm and lane topics.
@@ -84,10 +98,15 @@ client drives."))
 ;;; What the swarm calls.  One place that finds the view, so the rest of the
 ;;; swarm never has to know which frontend is up — or that there is one.
 
-(defun swarm-say (text &key (style :dim))
+(defun swarm-say (text &key (style :dim) (source :swarm))
   "Show TEXT in the coordinator's frontend, when one is up.  Any thread."
   (let ((view (and *swarm* (swarm-view *swarm*))))
-    (when view (view-say view text :style style))))
+    (when view (view-say view text :style style :source source))))
+
+(defun swarm-shows-queued-input-p ()
+  "Whether the coordinator's frontend already shows what the swarm queues."
+  (let ((view (and *swarm* (swarm-view *swarm*))))
+    (and view (view-shows-queued-input-p view) t)))
 
 (defun swarm-repaint ()
   "The lanes changed: let the coordinator's frontend redraw, if it can."

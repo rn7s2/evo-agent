@@ -16,7 +16,11 @@ rides the message into the journal and is never shown to the model."
   (let ((agent (and *swarm* (swarm-agent *swarm*))))
     (when agent
       (queue-steering agent text :origin origin)
-      (swarm-say text :style style)
+      ;; A frontend that shows the queued message says it already: under serve
+      ;; it is an item of the coordinator's transcript — the lane_report item
+      ;; IS a lane's report — and a notice repeating it would be the same news
+      ;; twice, under a kind a client has to read as prose.
+      (unless (swarm-shows-queued-input-p) (swarm-say text :style style))
       (evo:request-run))))
 
 (defun tell-lane-event (lane event &key detail outcome goal-status (severity :error))

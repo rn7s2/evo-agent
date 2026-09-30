@@ -28,8 +28,9 @@
            #:interrupt-lane-now
            ;; the frontend seam (view.lisp): where notices and the run itself go
            #:view #:tui-view #:serve-view #:serve-view-server
-           #:view-say #:view-repaint #:view-run
+           #:view-say #:view-repaint #:view-run #:view-shows-queued-input-p
            #:swarm-view #:swarm-say #:swarm-repaint #:swarm-run
+           #:swarm-shows-queued-input-p
            ;; the swarm's commands, which both frontends get, and the TUI's
            ;; own status-line segment, which only it gets (tui.lisp)
            #:register-swarm-commands #:install-tui-observation
