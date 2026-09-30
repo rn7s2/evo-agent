@@ -311,7 +311,7 @@ model from the next turn."
                               (and (cdr (model-providers (pget resolved :id)))
                                    (pget resolved :provider))))
     (host-data host :model (list :id (pget resolved :id)
-                                 :provider (pget resolved :provider)))
+                                 :provider (registry-name (pget resolved :provider))))
     ;; A submit blocked by the model gate left its steering queued in
     ;; memory; a valid model releases it.
     (release-queued-input host)
@@ -916,7 +916,7 @@ Total: a model that does not resolve reads as NIL, never signals."
                        (error () nil))))
          (goal (state-goal state)))
     (list :model model-id
-          :provider (and model (pget model :provider))
+          :provider (and model (registry-name (pget model :provider)))
           :model-ready (and model t)
           :thinking (effective-thinking state (agent-thinking-override agent))
           :language (pget (resolve-language (language-request state)) :code)

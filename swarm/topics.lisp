@@ -26,10 +26,12 @@
   (and (lanes-busy swarm) t))
 
 (defun lane-model-config (swarm)
-  "What the lanes run, as §4.3's config: an {id, provider} object or NIL."
+  "What the lanes run, as §4.3's config: an {id, provider} object or NIL.
+The provider is published by name (REGISTRY-NAME), like every other provider
+in a document."
   (let ((id (swarm-lane-model swarm)))
     (when id
-      (list :id id :provider (swarm-lane-provider swarm)))))
+      (list :id id :provider (registry-name (swarm-lane-provider swarm))))))
 
 (defun lane-row (lane)
   "One lane of the swarm topic (§4.3), with what its own mirror knows."

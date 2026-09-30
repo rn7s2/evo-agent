@@ -354,7 +354,8 @@ goal, and only from the state that move makes sense in."
 (defun op-model-set (server args)
   (evo.command:set-model server (op-arg args :id :required t))
   (list :model (let ((model (evo.command::current-model (server-agent server))))
-                 (and model (list :id (pget model :id) :provider (pget model :provider))))))
+                 (and model (list :id (pget model :id)
+                                  :provider (registry-name (pget model :provider)))))))
 
 (defun op-thinking-set (server args)
   (evo.command:thinking-command server (op-arg args :level :required t))

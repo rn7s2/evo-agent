@@ -99,9 +99,11 @@ one."
       (t (values t nil nil)))))
 
 (defun model-status (model)
-  "MODEL as a launch-time verdict: (:id :provider :ok :reason)."
+  "MODEL as a launch-time verdict: (:id :provider :ok :reason).  :PROVIDER is
+the provider's NAME (REGISTRY-NAME): a provider is not an enum, and a client
+hands the value back to `--model id@provider`."
   (multiple-value-bind (ready reason) (model-readiness model)
-    (list :id (pget model :id) :provider (pget model :provider)
+    (list :id (pget model :id) :provider (registry-name (pget model :provider))
           :ok ready :reason reason)))
 
 (defun lane-model-status (model &optional (apis *kernel-apis*))
@@ -112,9 +114,9 @@ anyone has worked out what it ends up with; the swarm's offline check passes
 the set its evaluation of the lane forms ended with."
   (multiple-value-bind (ready reason) (model-readiness model)
     (if (member (pget model :api) apis)
-        (list :id (pget model :id) :provider (pget model :provider)
+        (list :id (pget model :id) :provider (registry-name (pget model :provider))
               :ok ready :reason reason)
-        (list :id (pget model :id) :provider (pget model :provider)
+        (list :id (pget model :id) :provider (registry-name (pget model :provider))
               :ok nil
               :reason (format nil "its API ~(~a~) comes from an extension: load that extension in the lanes with (evo.swarm:in-lanes ...) in swarm.lisp"
                               (pget model :api))))))
@@ -154,11 +156,13 @@ nothing but the entry's own name is quoted."
 (defun catalog-model (model)
   (multiple-value-bind (ready reason) (model-readiness model)
     (list :id (pget model :id)
-          :provider (pget model :provider)
+          :provider (registry-name (pget model :provider))
           ;; The registry has no separate display name: the id is what a person
           ;; types and what a picker shows.
           :name (or (pget model :name) (pget model :id))
-          :api (provider-api (pget model :provider))
+          ;; The API by name too: it is registered with dashes
+          ;; (:anthropic-oauth-messages) and every document says so.
+          :api (registry-name (provider-api (pget model :provider)))
           :context-window (pget model :context-window)
           ;; The verdicts are Lisp booleans; the document's are JSON ones.
           :reasoning (wire-boolean (model-reasoning-p model))
@@ -168,8 +172,8 @@ nothing but the entry's own name is quoted."
 
 (defun catalog-provider (key)
   (let ((registration (provider-registration key)))
-    (list :name (string-downcase (symbol-name key))
-          :api (provider-api key)
+    (list :name (registry-name key)
+          :api (registry-name (provider-api key))
           :has-key (wire-boolean (provider-has-key-p key))
           :key-env (getf registration :api-key-env))))
 
@@ -228,9 +232,11 @@ runs lanes passes (LANE-CATALOG warnings), the kernel-API-set answer."
                                                   (lambda (m) (pget m :id))
                                                   #'catalog-model warnings "model")
                          :providers (catalog-entries (provider-keys)
-                                                     (lambda (k) (string-downcase (symbol-name k)))
+                                                     #'registry-name
                                                      #'catalog-provider warnings "provider")
-                         :default-model (and default-id (list :id default-id :provider default-provider))
+                         :default-model (and default-id
+                                            (list :id default-id
+                                                  :provider (registry-name default-provider)))
                          ;; Exactly the levels the session accepts, in the
                          ;; order /thinking takes them: the ladder has no off
                          ;; rung — the CLI, /thinking and evo-swarm all refuse

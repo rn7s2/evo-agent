@@ -191,6 +191,29 @@ default would silently blind a correctly-configured session."
   "Every registered provider key, in registration order."
   (mapcar #'car *providers*))
 
+(defun registry-name (key)
+  "KEY — a name a person writes in config (a provider key, an API key), a
+string already carrying it, or NIL — as the name to publish: the key's own
+spelling, dashes and all.
+
+A registry key is a *name*, not an enum.  A provider is `:super-relay` in
+init.lisp and `super-relay` in `--model id@super-relay`; an API is
+`:anthropic-messages` where it is registered and in a model's `:api`.  Both
+must read that way in a document too.  Published as a keyword they would not:
+the JSON mapping snake_cases a keyword VALUE on purpose, for enums
+\(:lane-report -> \"lane_report\"), so a catalog would say `providers[].name`
+\"super-relay\" and `models[].provider` \"super_relay\" about the same thing,
+and `models[].api` \"anthropic_messages\" about a name its own init.lisp
+writes with dashes.
+
+The rule is fixed here rather than in the mapping: which values are names is
+the caller's to know (an API is, a lane state is not), and only the caller can
+say so."
+  (etypecase key
+    (null nil)
+    (string key)
+    (symbol (string-downcase (symbol-name key)))))
+
 (defun provider-registration (key)
   "What is registered for provider KEY, as given to REGISTER-PROVIDER — a
 fresh plist of the fields set so far (:base-url :api-key :api-key-env), merged

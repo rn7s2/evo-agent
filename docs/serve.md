@@ -219,7 +219,7 @@ does nothing a second time. A client branches on `error.code` alone.
 | `input.cancel` | `{item_id}` → `{}`. Input that has not been drained leaves the transcript (the view publishes the `item.remove`); one that has been drained is history — `already_sent`. |
 | `run.interrupt` | `{scope:"session"\|"swarm"\|"lane", lane?}` → `{interrupted:["session", …]}` — the topics that were actually stopped, empty when nothing was running. |
 | `goal.set` / `goal.pause` / `goal.resume` / `goal.clear` | `{objective, budget?}` / `{}` / `{}` / `{}` → `{goal}`. Only a person pauses or resumes; a cleared goal reads as `null`. |
-| `model.set` / `thinking.set` / `language.set` | `{id, provider?}` / `{level}` / `{code}` → `{model}` / `{thinking}` / `{language}`. |
+| `model.set` / `thinking.set` / `language.set` | `{id, provider?}` / `{level}` / `{code}` → `{model}` / `{thinking}` / `{language}`. `provider` is the name a model is registered under (`super-relay`), as in the catalog. |
 | `session.new` / `session.fork` / `session.resume` / `session.rewind` / `session.move` | `{}` / `{}` / `{session_id\|path}` / `{entry_id?}` / `{entry_id}` → `{session, draft?}`. All of them need a quiescent session: no task and nothing queued. |
 | `context.compact` | `{hint?}` → `{task_id}`. Needs an idle session. |
 | `lore.add` / `memory.request` | `{scope:"project"\|"global", text}` / `{text}` |
@@ -250,6 +250,18 @@ Error codes: `busy`, `not_quiescent`, `no_task`, `goal_state`, `already_sent`,
 It never contains a key. The builder is total: an entry that raises is dropped
 and named in `warnings`, because one broken extension must not cost a client
 the whole catalog.
+
+**A provider — and an API — is a name, not an enum.** Every `provider` field
+(a model's, the default model's, a lane model's, and the `model` of a
+`model.set` reply) and every `api` field (`models[]` and `providers[]`) is the
+name it is registered under, dashes and all: `super-relay`,
+`anthropic-messages`, the string `providers[].name` carries, `--model
+id@provider` takes back, and the model's own `init.lisp` line writes. It is
+deliberately *not* the snake_case the mapping gives a keyword value
+(`lane_report`), which is for enum values; sent that way a provider would
+disagree with the same document's `providers[].name` and with the user's
+init.lisp, and an API would read `anthropic_messages` about a name registered
+as `:anthropic-messages`.
 
 `lanes` — the models a lane can run — is the one half a program adds. For a
 server that runs no lanes the key is *absent*, not null: absent reads as "not

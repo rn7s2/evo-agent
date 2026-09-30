@@ -7961,7 +7961,9 @@ became zero after the first reload."
     (check "cmd: /model <id> journals the model"
            (equal "claude-opus-5" (state-model (fold-state (agent-journal agent)))))
     (check "cmd: /model reports (id provider)"
-           (equal '(:id "claude-opus-5" :provider :anthropic)
+           ;; The provider is the name a client hands back to /model, so the
+           ;; host's data says "anthropic" and not the keyword (REGISTRY-NAME).
+           (equal '(:id "claude-opus-5" :provider "anthropic")
                   (getf (fake-host-data host) :model)))
     (check "cmd: /model with an unknown id is invalid"
            (eq :invalid (refusal-kind (lambda () (evo.command:set-model host "nope-9")))))
@@ -9665,6 +9667,94 @@ does not use (CONTRACT §5.6)."
       (evo.port:setenv "EVO_TEST_OAUTH_TOKEN" "")
       (evo.port:setenv "EVO_TEST_PLAIN_KEY" ""))))
 
+(defclass registry-name-fixture-api (provider-api) ()
+  (:documentation "An API registered under a dashed key: the fixture for a
+document quoting a registry key the way a person writes it."))
+
+(defun test-registry-names ()
+  "A registry key a person writes — a provider, an API — goes on the wire
+spelled the way it is registered (EVO.PROVIDER:REGISTRY-NAME): \"super-relay\",
+\"anthropic-messages\", never the snake_case the mapping gives a keyword value,
+which made one catalog disagree with itself."
+  (let* ((dir (uiop:ensure-directory-pathname
+               (format nil "~a/evo-registry-names-~a/" (tmp-dir) (gen-id))))
+         (journal (progn (ensure-directories-exist dir) (make-session-journal dir)))
+         (agent (make-agent :journal journal))
+         (saved-models evo.provider::*models*)
+         (saved-providers (copy-alist evo.provider::*providers*))
+         (saved-apis (copy-alist evo.provider::*apis*))
+         (saved-settings (capture-settings)))
+    (unwind-protect
+         (progn
+           (register-api :fixture-registry-api
+                         (make-instance 'registry-name-fixture-api))
+           (register-provider* :foo-bar :base-url "http://127.0.0.1:7/v1"
+                                        :api-key "sk-fixture")
+           (register-model* "dash-model" :provider :foo-bar
+                                         :api :fixture-registry-api
+                            :context-window 200000 :max-output 8000 :effort t)
+           ;; A kernel API, registered with its dashes by the core itself.
+           (register-provider* :baz-qux :base-url "http://127.0.0.1:8/v1"
+                                        :api-key "sk-fixture")
+           (register-model* "kernel-api-model" :provider :baz-qux
+                                               :api :anthropic-messages
+                            :context-window 200000 :max-output 8000)
+           (set-setting :model "dash-model")
+           (check "registry names: the helper keeps the key's own spelling"
+                  (and (equal "foo-bar" (evo.provider:registry-name :foo-bar))
+                       (equal "anthropic-messages"
+                              (evo.provider:registry-name :anthropic-messages))
+                       (equal "foo-bar" (evo.provider:registry-name "foo-bar"))
+                       (null (evo.provider:registry-name nil))))
+           (let* ((catalog (evo.serve:catalog-plist agent))
+                  (json (evo.serve:encode-json catalog))
+                  (model (find "dash-model" (getf catalog :models)
+                               :key (lambda (m) (getf m :id)) :test #'equal))
+                  (provider (find "foo-bar" (getf catalog :providers)
+                                  :key (lambda (p) (getf p :name)) :test #'equal)))
+             (check "registry names: a catalog model carries the name, not the keyword"
+                    (equal "foo-bar" (getf model :provider)))
+             (check "registry names: ...and so does the default model"
+                    (equal "foo-bar" (getf (getf catalog :default-model) :provider)))
+             (check "registry names: ...matching its own providers[].name"
+                    (and provider (equal "foo-bar" (getf provider :name))))
+             ;; An API is a registry key too, and it is registered with dashes.
+             (check "registry names: a model's api is the name it was registered under"
+                    (equal "fixture-registry-api" (getf model :api)))
+             (check "registry names: ...and the provider's own api agrees"
+                    (equal "fixture-registry-api" (getf provider :api)))
+             (check "registry names: a kernel API keeps its dashes too"
+                    ;; The key is :anthropic-messages, so the catalog says
+                    ;; that and not "anthropic_messages".
+                    (equal "anthropic-messages"
+                           (getf (find "kernel-api-model" (getf catalog :models)
+                                       :key (lambda (m) (getf m :id)) :test #'equal)
+                                 :api)))
+             (check "registry names: the encoder writes both spellings"
+                    (and (search "\"provider\":\"foo-bar\"" json)
+                         (search "\"api\":\"fixture-registry-api\"" json)
+                         (not (search "foo_bar" json))
+                         (not (search "fixture_registry_api" json)))))
+           ;; The topic state's model says the same thing, and survives the
+           ;; same encoder.
+           (let* ((state (evo.view:journal-state journal))
+                  (model (getf state :model)))
+             (check "registry names: the topic state's model names its provider"
+                    (equal "foo-bar" (getf model :provider)))
+             (check "registry names: ...and encodes with the dashes"
+                    (and (search "\"provider\":\"foo-bar\""
+                                 (evo.serve:encode-json model))
+                         (not (search "foo_bar" (evo.serve:encode-json model))))))
+           ;; An enum VALUE is still snake_case: the rule a registry name is
+           ;; the exception to, and the reason it has to be applied by hand.
+           (check "registry names: an enum value is still snake_case"
+                  (search "\"kind\":\"lane_report\""
+                          (evo.serve:encode-json (list :kind :lane-report)))))
+      (setf evo.provider::*models* saved-models
+            evo.provider::*providers* saved-providers
+            evo.provider::*apis* saved-apis)
+      (evo.util:restore-settings saved-settings))))
+
 (defun test-catalog ()
   "GET /catalog and the offline `catalog --json` (CONTRACT §5.6): one
 document, per-entry isolation, and never a key."
@@ -9688,7 +9778,11 @@ document, per-entry isolation, and never a key."
                                 :key (lambda (m) (getf m :id)) :test #'equal)))
                (check "catalog: a model entry says what the chooser needs"
                       (and model
-                           (eq :fixture (getf model :provider))
+                           ;; The provider by name (REGISTRY-NAME), which is
+                           ;; what providers[].name and --model id@provider use.
+                           (equal "fixture" (getf model :provider))
+                           ;; The API too, and its dashes survive.
+                           (equal "anthropic-messages" (getf model :api))
                            (equal 200000 (getf model :context-window))
                            (eq t (getf model :reasoning))
                            (eq t (getf model :images))))
@@ -9720,7 +9814,9 @@ document, per-entry isolation, and never a key."
                       (and provider
                            (equal "EVO_TEST_FIXTURE_KEY" (getf provider :key-env))
                            (eq :false (getf provider :has-key))
-                           (eq :anthropic-messages (getf provider :api)))))
+                           ;; The API by name, like the provider: the name it
+                           ;; was registered under (REGISTRY-NAME).
+                           (equal "anthropic-messages" (getf provider :api)))))
              (check "catalog: the thinking ladder is the one the session accepts"
                     ;; Exactly the levels the session accepts — there is no
                     ;; off rung to offer (a retired :off normalizes onto low).
@@ -9912,6 +10008,7 @@ document, per-entry isolation, and never a key."
     (test-serve-topics)
     (test-lifecycle)
     (test-model-credentials)
+    (test-registry-names)
     (test-catalog)
     (format t "~%~d passed, ~d failed~%" *pass* *fail*)
     (if (zerop *fail*) 0 1)))

@@ -164,7 +164,7 @@ seam](serve.md#the-seams-a-program-adds); `GET /catalog` carries the
 models a lane can run with:
 
 ```json
-{"lanes": {"models": [{"id", "provider", "name", "api", "ready", "reason"}]}}
+{"lanes": {"models": [{"id", "provider", "ok", "reason"}]}}
 ```
 
 ### The topics a swarm adds
