@@ -125,6 +125,35 @@ and because an append landing between the copy and the rename would be lost."
                  (setf (journal-leaf-id journal) (pget entry :id)))
         journal))))
 
+(defun session-id-from-path (path)
+  "The session id a journal file name carries (…_<id>.sexp), or NIL."
+  (let* ((name (file-namestring path))
+         (dot (position #\. name :from-end t))
+         (underscore (and dot (position #\_ name :from-end t :end dot))))
+    (when (and dot underscore (< (1+ underscore) dot))
+      (subseq name (1+ underscore) dot))))
+
+(defun reopen-session (path &key (program "evo-agent"))
+  "The session at PATH: the journal on disk when there is one, otherwise an
+empty journal whose path is exactly PATH — a session nothing has been
+journalled to yet.
+
+A supervisor restart names the session its child was on before it died; an
+idle server has answered nothing, so its journal was never written.  Coming
+back to it must not move the client to another journal, so the path (and the
+id its file name carries) is kept, and the file appears the moment something
+is journalled (CONTRACT §1, F4)."
+  (if (probe-file path)
+      (open-journal path)
+      (%make-journal :path (pathname path)
+                     :header (list :type :session :version 1
+                                   :id (or (session-id-from-path path) (gen-id 16))
+                                   :cwd (namestring (uiop:ensure-directory-pathname
+                                                     (uiop:getcwd)))
+                                   :program program
+                                   :timestamp (iso8601-now))
+                     :started-p nil)))
+
 (defun flush-pending (journal)
   "Write header + buffered entries to disk; subsequent appends go straight through."
   (ensure-directories-exist (journal-path journal))

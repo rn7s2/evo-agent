@@ -63,7 +63,8 @@
 
 (defpackage :evo.journal
   (:use :cl :evo.util)
-  (:export #:journal #:make-session-journal #:open-journal #:journal-path
+  (:export #:journal #:make-session-journal #:open-journal #:reopen-session
+           #:journal-path
            #:journal-entries #:journal-leaf-id #:journal-header #:journal-started-p
            #:set-session-header
            #:append-entry #:find-entry #:entry-path #:fold-state #:fork-session
