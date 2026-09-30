@@ -23,12 +23,15 @@ another.  A lane boots --no-userspace, so a model whose API is not here runs
 in a lane only if the swarm's in-lanes code loaded that API's extension into
 it, which no catalog can know without running a lane.")
 
-(defun provider-has-key-p (registration)
-  (let ((key (getf registration :api-key))
-        (env (getf registration :api-key-env)))
-    (and (or (and (stringp key) (plusp (length key)))
-             (and env (plusp (length (or (getenv env) "")))))
-         t)))
+(defun kernel-api-registry ()
+  "The API registry a fresh `--no-userspace` lane boots with: *KERNEL-APIS*
+and their instances.  A program that has to evaluate what a lane would end up
+with (EVO.SWARM does, for `check` and `catalog`) rebinds the registry to this
+as the lane's starting point — anything its own forms register lands on the
+copy."
+  (loop for key in *kernel-apis*
+        for api = (ignore-errors (find-api key))
+        when api collect (cons key api)))
 
 (defun provider-api (key)
   "The API provider KEY belongs to: the one that seeds it, else the API of a
@@ -38,6 +41,27 @@ model registered under it, else NIL."
             when (and api (eq (default-provider-key api) key)) return api-key)
       (loop for model in (all-models)
             when (eq (pget model :provider) key) return (pget model :api))))
+
+(defun provider-api-instance (key)
+  "The API instance provider KEY's requests go through: the one that seeds it,
+else the API of a model registered under it, else NIL.  PROVIDER-API answers
+the API's registry key; this is the instance carrying its methods."
+  (let ((api (provider-api key)))
+    (and api (ignore-errors (find-api api)))))
+
+(defun provider-has-key-p (key)
+  "Whether provider KEY can authenticate right now — what the catalog's
+`providers` half reports and what MODEL-READINESS asks before it calls a model
+usable.  Its API decides (API-CREDENTIALS-AVAILABLE-P), so an API that keeps
+its own credential — a token in a file, say — is not judged by the plain
+environment-variable rule; a provider that names no API at all gets that rule.
+The verdict only: no key, variable value or token is ever quoted
+\(CONTRACT §5.6)."
+  (let ((registration (provider-registration key))
+        (api (provider-api-instance key)))
+    (if api
+        (api-credentials-available-p api registration)
+        (registration-credentials-available-p registration))))
 
 (defun model-reasoning-p (model)
   "Whether MODEL can be asked to think: an effort ladder, or an adapter that
@@ -52,17 +76,25 @@ is a short sentence naming what is missing — a provider, its address, or the
 variable its key comes from — and is NIL when nothing is.  CODE is the same
 fact as a machine code (\"provider_unregistered\", \"no_base_url\",
 \"no_api_key\") for a caller that has to branch on it.  Neither ever quotes a
-value out of the configuration."
-  (let ((registration (ignore-errors (provider-registration (pget model :provider)))))
+value out of the configuration.
+
+The credential is the providing API's to judge (PROVIDER-HAS-KEY-P), so an
+API that keeps its own is not judged by the environment-variable rule.  Only a
+provider that *declares* a credential source is asked for one — a stock local
+endpoint registered with a bare :base-url needs no key, and is not refused
+one."
+  (let* ((provider (pget model :provider))
+         (registration (ignore-errors (provider-registration provider))))
     (cond
       ((null registration)
        (values nil "its provider is not registered" "provider_unregistered"))
       ((null (getf registration :base-url))
        (values nil "its provider has no address configured" "no_base_url"))
-      ((and (null (getf registration :api-key))
-            (let ((env (getf registration :api-key-env)))
-              (and env (zerop (length (or (getenv env) ""))))))
-       (values nil (format nil "no API key: set ~a" (getf registration :api-key-env))
+      ((and (or (getf registration :api-key) (getf registration :api-key-env))
+            (not (provider-has-key-p provider)))
+       (values nil (if (getf registration :api-key-env)
+                       (format nil "no API key: set ~a" (getf registration :api-key-env))
+                       "no API key configured for its provider")
                "no_api_key"))
       (t (values t nil nil)))))
 
@@ -72,17 +104,25 @@ value out of the configuration."
     (list :id (pget model :id) :provider (pget model :provider)
           :ok ready :reason reason)))
 
-(defun lane-model-status (model)
+(defun lane-model-status (model &optional (apis *kernel-apis*))
   "MODEL as a lane would see it: the same verdict, and not runnable at all
-when its API is one a lane does not have."
+when its API is one a lane does not have.  APIS is the API set of the lane in
+question — the kernel's by default, which is what a lane boots with before
+anyone has worked out what it ends up with; the swarm's offline check passes
+the set its evaluation of the lane forms ended with."
   (multiple-value-bind (ready reason) (model-readiness model)
-    (if (member (pget model :api) *kernel-apis*)
+    (if (member (pget model :api) apis)
         (list :id (pget model :id) :provider (pget model :provider)
               :ok ready :reason reason)
         (list :id (pget model :id) :provider (pget model :provider)
               :ok nil
               :reason (format nil "its API ~(~a~) comes from an extension: load that extension in the lanes with (evo.swarm:in-lanes ...) in swarm.lisp"
                               (pget model :api))))))
+
+(defun lane-model-entry (status)
+  "A LANE-MODEL-STATUS as the catalog's lane half carries it."
+  (list :id (getf status :id) :provider (getf status :provider)
+        :ok (wire-boolean (getf status :ok)) :reason (getf status :reason)))
 
 (defvar *catalog-lanes-hook* nil
   "The `lanes` half of GET /catalog (CONTRACT §5.6), for a program that runs
@@ -130,30 +170,34 @@ nothing but the entry's own name is quoted."
   (let ((registration (provider-registration key)))
     (list :name (string-downcase (symbol-name key))
           :api (provider-api key)
-          :has-key (wire-boolean (provider-has-key-p registration))
+          :has-key (wire-boolean (provider-has-key-p key))
           :key-env (getf registration :api-key-env))))
 
 (defun catalog-commands ()
   (loop for (name . description) in (evo.command:command-catalog)
         collect (list :name name :description description :args-hint nil)))
 
-(defun lane-catalog (warnings)
-  "The lane half of a swarm's catalog: the models a lane can run, computed
-from the kernel API set without starting one."
+(defun lane-catalog (warnings &optional (apis *kernel-apis*))
+  "The lane half computed from the API set alone (APIS, the kernel's by
+default): every registered model, judged with this session's registries.
+That is what a program that runs lanes but has not worked out what a lane
+would end up with can say — evo-swarm's live coordinator, whose lanes are
+already running the code that would tell it.  Its offline `check` and
+`catalog` evaluate the lane forms instead and pass the result to
+CATALOG-PLIST rather than calling this."
   (list :models (catalog-entries
                  (all-models)
                  (lambda (m) (pget m :id))
-                 (lambda (model)
-                   (let ((status (lane-model-status model)))
-                     (list :id (getf status :id) :provider (getf status :provider)
-                           :ok (wire-boolean (getf status :ok))
-                           :reason (getf status :reason))))
+                 (lambda (model) (lane-model-entry (lane-model-status model apis)))
                  warnings "lane model")))
 
 (defun catalog-plist (agent &key swarm)
   "Everything a client needs to offer this session's choices (CONTRACT §5.6).
 AGENT is the session it describes; SWARM, when given, is the program-specific
-part (the models a lane can run) — evo-swarm passes it."
+half — the models a lane can run — which a program that runs lanes passes in.
+A program that has worked out what a lane ends up with passes that (evo-swarm
+evaluates the lane forms for its offline `catalog`); one that only knows it
+runs lanes passes (LANE-CATALOG warnings), the kernel-API-set answer."
   (let ((warnings nil)
         (state (ignore-errors (fold-state (agent-journal agent)))))
     (let* ((default-id (or (and state (evo.journal:state-model state))
@@ -163,7 +207,7 @@ part (the models a lane can run) — evo-swarm passes it."
              ;; that looks the pair up in MODELS finds it.  A session-level
              ;; override only decides between registrations of one id.
              (lanes (handler-case
-                        (or (and swarm (lane-catalog warnings))
+                        (or swarm
                             (and *catalog-lanes-hook*
                                  (funcall *catalog-lanes-hook* warnings)))
                       (error ()

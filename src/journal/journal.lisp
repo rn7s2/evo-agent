@@ -450,6 +450,15 @@ cached is simply left to be folded on demand."
     (when parent
       (cache-fold journal (pget entry :id) (fold-entry (copy-state parent) entry)))))
 
+(defun empty-state ()
+  "The state a session with nothing in it has: no messages, no model, no
+thinking level, no tools, no goal.  The effective-* chain (EVO.KERNEL) reads
+configuration off a state, so a caller that has to resolve what *configuration
+alone* says — evo-swarm's offline check resolves a lane's settings, and a lane
+has no session of yours — asks with this rather than with a NIL that is not a
+state at all."
+  (make-state))
+
 (defun fold-state (journal &optional (leaf-id (journal-leaf-id journal)))
   "The session state at LEAF-ID: everything is a fold over the root→leaf path.
 Memoised per leaf id (design G1)."

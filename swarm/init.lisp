@@ -350,45 +350,70 @@ coordinator's models as well as the swarm's own settings."
 
 ;;; The baseline, in order.
 
-(defun baseline-forms (lane swarm)
-  "Everything a lane is given, in order:
- 1. the coordinator's providers (keys by variable name only), and its model
-    and thinking level as the lane's defaults — the swarm's --lane-model /
-    --lane-thinking when given (CONTRACT §1, §4.3), else the coordinator's —
-    which IN-LANES may override;
+(defun lane-setup-forms (lane swarm)
+  "The configuration half of a lane's baseline (steps 1–3 of BASELINE-FORMS):
+the providers, models, and model and thinking level the lane ends up with.
+Separated out because evo-swarm's offline `check` and `catalog` evaluate
+exactly this — in a sandbox, without a lane — to answer what a lane would end
+up with.
+
+ 1. the coordinator's providers (keys by variable name only) and its model and
+    thinking level as the lane's defaults — the swarm's --lane-model /
+    --lane-thinking when given (CONTRACT §1, §4.3), else the coordinator's;
  2. every IN-LANES form from swarm.lisp;
- 3. the coordinator's models those forms did not register and whose API the
+ 3. those flags again, over whatever IN-LANES set — a flag beats config
+    everywhere else in evo, and --lane-model / --lane-thinking are config for
+    the lanes.  Only what the flags named is repeated: the coordinator's own
+    model and level stay overridable, and a lane configuration restored from a
+    resumed record — which a flag wrote there in the first place — counts as
+    named;
+ 4. the coordinator's models those forms did not register and whose API the
     lane has (only now: a model whose API an extension defines needs IN-LANES
     to load it first; without that, the model is skipped), then a check that
-    the lane's default model is registered, with an error saying why not;
- 4. the report tool, the lane's prompt note, its tool limit — the swarm's
-    own, last, so IN-LANES cannot lose them;
- 5. a run for any goal continuation its resumed session left queued."
+    the lane's default model is registered, with an error saying why not."
   (let* ((agent evo:*agent*)
          (state (and agent (fold-state (agent-journal agent))))
          (configured (swarm-lane-model swarm))
          (configured-provider (swarm-lane-provider swarm))
+         (configured-thinking (swarm-lane-thinking swarm))
          (model-id (or configured
                        (and state (ignore-errors (effective-model-id state agent)))))
          (provider (or (and configured-provider
                             (provider-key-for configured-provider))
                        (and model-id (effective-model-provider state model-id))))
-         (thinking (or (swarm-lane-thinking swarm)
-                       (and state (effective-thinking state (agent-thinking-override agent)))))
-         (limit (lane-tool-limit lane)))
+         (thinking (or configured-thinking
+                       (and state (effective-thinking state (agent-thinking-override agent))))))
     (append
      (mapcar #'provider-registration-form (provider-keys))
      (when model-id `((evo:set-setting :model ,model-id)))
      (when provider `((evo:set-setting :model-provider ,provider)))
      (when thinking `((evo:set-setting :thinking ,thinking)))
      (lane-code-forms lane swarm)
+     (when configured `((evo:set-setting :model ,configured)))
+     (when (and configured-provider (provider-key-for configured-provider))
+       `((evo:set-setting :model-provider ,(provider-key-for configured-provider))))
+     (when configured-thinking `((evo:set-setting :thinking ,configured-thinking)))
      (mapcar #'model-fill-in-form (all-models))
-     (list (lane-model-check-form lane))
+     (list (lane-model-check-form lane)))))
+
+(defun lane-own-forms (lane swarm)
+  "The swarm's own half of a lane's baseline (steps 4–5 of BASELINE-FORMS),
+last, so IN-LANES cannot lose them: the report tool, the lane's prompt note,
+its tool limit, and a run for any goal continuation its resumed session left
+queued."
+  (let ((limit (lane-tool-limit lane)))
+    (append
      (list (report-tool-form)
            `(evo:register-prompt-note "swarm-worker"
                                       ,(worker-note lane (swarm-workers swarm))))
      (when limit `((evo:set-active-tools evo:*agent* ',limit)))
      '((when (evo.kernel:steering-pending-p evo:*agent*) (evo:request-run))))))
+
+(defun baseline-forms (lane swarm)
+  "Everything a lane is given, in order: LANE-SETUP-FORMS, then what the swarm
+itself adds (LANE-OWN-FORMS)."
+  (append (lane-setup-forms lane swarm)
+          (lane-own-forms lane swarm)))
 
 (defun forms->code (forms)
   "FORMS as source text a lane reads back in EVO.USER."

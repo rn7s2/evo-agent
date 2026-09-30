@@ -283,9 +283,17 @@ restarts.
 The coordinator evaluates this in the lane (`POST /eval`, a form at a time):
 
 1. the coordinator's **providers** (keys by variable name only, below), and
-   its **model** and **thinking level** as the lane's defaults;
+   its **model** and **thinking level** as the lane's defaults — the swarm's
+   `--lane-model` / `--lane-thinking` when the launch named them, else the
+   coordinator's;
 2. the `in-lanes` forms, which override anything from step 1;
-3. the coordinator's **models** the `in-lanes` forms did not register — those
+3. `--lane-model` and `--lane-thinking` again, when the launch named them: a
+   flag beats config everywhere else in evo, so it beats `in-lanes` too. Only
+   what the flags named is repeated, so a lane that inherits the coordinator's
+   model or level is still `in-lanes`'s to override; a lane configuration
+   restored from a resumed swarm counts as named — a flag wrote it there in
+   the first place;
+4. the coordinator's **models** the `in-lanes` forms did not register — those
    whose API the lane has. They come after the forms because a model's API
    may be defined by an extension that `in-lanes` loads: Claude OAuth's
    `:anthropic-oauth-messages`, for one. A model whose API the lane lacks is
@@ -294,9 +302,9 @@ The coordinator evaluates this in the lane (`POST /eval`, a form at a time):
    is registered; if the default is one it skipped, initialization fails
    with a message naming the missing API and saying to load its extension
    with `in-lanes`;
-4. the swarm's own, last, so `in-lanes` cannot lose them: the **`report`
+5. the swarm's own, last, so `in-lanes` cannot lose them: the **`report`
    tool**, the lane's **prompt note**, its **tool limit**;
-5. a run for any goal continuation a resumed lane had queued.
+6. a run for any goal continuation a resumed lane had queued.
 
 **No secret travels as data.** A provider whose key comes from an environment
 variable is registered in the lane with that variable's *name*. One registered
@@ -344,11 +352,16 @@ no swarm keep the running lanes.
 
 ```text
 evo-swarm [--workers N] [--resume [path]] [--model id] [--thinking level]
+          [--lane-model id[@provider]] [--lane-thinking level]
           [--evo path] [--no-userspace] [--no-supervisor]
 
 evo-swarm serve [--host addr] [--port n] [--token-file path] [--allow-remote]
                 [--workers N] [--resume [path]] [--model id] [--thinking level]
+                [--lane-model id[@provider]] [--lane-thinking level]
                 [--evo path] [--no-userspace] [--no-supervisor]
+
+evo-swarm catalog --json       what a swarm launched from here could use
+evo-swarm check --json         whether that launch would work; exit 1 if not
 ```
 
 `--evo` names the evo-agent binary lanes run; without it, `EVO_BINARY`, then
@@ -356,6 +369,32 @@ the one beside `evo-swarm`, then `evo-agent` on `PATH`. The TUI form needs a
 terminal; `evo-swarm serve` does not — see
 [Serving the swarm](#serving-the-swarm). For a headless single agent,
 `evo-agent serve` is still the smaller answer.
+
+### The two offline questions
+
+`catalog` and `check` answer a client — a GUI's New Swarm page — before it
+starts anything, and neither starts a lane, a server or a model call:
+
+- **catalog** is the coordinator's catalog (models, providers, thinking
+  levels, ops, tools, …) plus a `lanes` half: every model as a *lane* would
+  see it, `ok` or with the reason it could not.
+- **check** says whether a launch from here would work — do the models
+  resolve, is each one's API where it runs, are the credentials there — and
+  reports what the launch resolves on its own: the coordinator's effort, the
+  lanes', and the lane count, so a chooser opens on the truth instead of on
+  medium and six. It exits 1 when it found a problem, and each problem
+  carries a machine code (`no_api_key`, `lane_api_missing`, …) beside its
+  sentence.
+
+Both work out the lanes' half by *evaluating* `swarm.lisp`'s `in-lanes` forms
+the way a lane does — in a sandbox of the coordinator's process, with a fresh
+lane's registries (the kernel's APIs and the providers they seed, no models,
+no settings) and the variables a launch puts in a lane's environment. So a
+model an `in-lanes` form set, and an API an extension it loaded defines, are
+reported as that lane would see them, and `--lane-model`/`--lane-thinking` are
+reported over `in-lanes`. Nothing of the evaluation is left behind — the
+coordinator's registries and settings go back exactly as they were — and a
+form that fails becomes a problem in the answer rather than a crash.
 
 Files: `~/.evo/swarm/<swarm-id>/` holds each lane's `lane-N/` directory —
 `sessions/`, `ready.json` (0600: the lane's `port`, `url`, `token`, `epoch`,

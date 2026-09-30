@@ -9536,6 +9536,94 @@ session the child was on rather than the newest one in the folder (E1)."
                  '("--port" "9" "--model" "m" "--ready-file" "/t" "--resume" "--allow-remote"
                    "--watch-stdin" "--thinking" "high")))))
 
+(defclass fixture-credentialed-api (provider-api)
+  ((token-file :initarg :token-file :reader fixture-token-file))
+  (:documentation "A provider API whose credential is not a :api-key and not an
+environment variable — a token in a file, as Anthropic OAuth's is.  The fixture
+for readiness asking the API instead of guessing."))
+
+(defmethod api-credentials-available-p ((api fixture-credentialed-api) registration)
+  "Available when the API's token file exists.  Reads configuration only, like
+every implementation must: no network call, no refresh, and only whether —
+never what."
+  (declare (ignore registration))
+  (let ((file (fixture-token-file api)))
+    (and file (probe-file file) t)))
+
+(defun test-model-credentials ()
+  "Readiness asks the provider's API whether a credential is there
+\(API-CREDENTIALS-AVAILABLE-P): an API that keeps its own — Claude OAuth's token
+in a file — is not judged by a literal :api-key or an environment variable it
+does not use (CONTRACT §5.6)."
+  (let* ((dir (uiop:ensure-directory-pathname
+               (format nil "~a/evo-credentials-~a/" (tmp-dir) (gen-id))))
+         (journal (progn (ensure-directories-exist dir) (make-session-journal dir)))
+         (agent (make-agent :journal journal))
+         (token (format nil "~a/token.sexp" (string-right-trim "/" (namestring dir))))
+         (saved-models evo.provider::*models*)
+         (saved-providers (copy-alist evo.provider::*providers*))
+         (saved-apis (copy-alist evo.provider::*apis*))
+         (saved-settings (capture-settings)))
+    (unwind-protect
+         (progn
+           (register-api :fixture-credential-api
+                         (make-instance 'fixture-credentialed-api :token-file token))
+           (register-provider* :fixture-oauth
+                               :base-url "http://127.0.0.1:2/v1"
+                               :api-key-env "EVO_TEST_OAUTH_TOKEN")
+           (register-model* "fixture-oauth-model" :provider :fixture-oauth
+                            :api :fixture-credential-api
+                            :context-window 200000 :max-output 8000 :effort t)
+           (evo.port:setenv "EVO_TEST_OAUTH_TOKEN" "")
+           (flet ((provider-entry ()
+                    (find "fixture-oauth"
+                          (getf (evo.serve:catalog-plist agent) :providers)
+                          :key (lambda (p) (getf p :name)) :test #'equal)))
+             (check "credentials: an API that keeps its own token is not judged by the env var"
+                    (multiple-value-bind (ready reason code)
+                        (evo.serve:model-readiness (find-model "fixture-oauth-model"))
+                      (and (not ready) (equal "no_api_key" code)
+                           (search "EVO_TEST_OAUTH_TOKEN" reason))))
+             (check "credentials: ...and its provider has no key either"
+                    (eq :false (getf (provider-entry) :has-key)))
+             ;; The credential appears where that API keeps it.
+             (write-file-string token "(:access-token \"sk-ant-oat-fixture\")")
+             (check "credentials: the API's own token makes the model ready"
+                    (multiple-value-bind (ready reason code)
+                        (evo.serve:model-readiness (find-model "fixture-oauth-model"))
+                      (and ready (null reason) (null code))))
+             (check "credentials: ...and the catalog's provider half agrees"
+                    (eq t (getf (provider-entry) :has-key)))
+             (check "credentials: the catalog never quotes the token"
+                    (not (search "sk-ant-oat-fixture"
+                                 (evo.serve:encode-json (evo.serve:catalog-plist agent))))))
+           ;; The plain rule is still the plain rule: an API that says nothing
+           ;; about its own credentials is judged by key and variable.
+           (let ((descriptor (list :api-key-env "EVO_TEST_PLAIN_KEY")))
+             (check "credentials: the plain rule needs a key or a set variable"
+                    (and (not (evo.provider:registration-credentials-available-p descriptor))
+                         (not (evo.provider:registration-credentials-available-p nil))
+                         (evo.provider:registration-credentials-available-p
+                          (list :api-key "literal"))
+                         (progn (evo.port:setenv "EVO_TEST_PLAIN_KEY" "sk-1")
+                                (evo.provider:registration-credentials-available-p descriptor)))))
+           ;; And a provider that declares no credential at all is not refused
+           ;; one: a stock local endpoint registered with a bare :base-url.
+           (register-provider* :fixture-nokey :base-url "http://127.0.0.1:3/v1")
+           (register-model* "fixture-nokey-model" :provider :fixture-nokey
+                            :api :anthropic-messages
+                            :context-window 200000 :max-output 8000)
+           (check "credentials: a provider that declares no key needs none"
+                  (multiple-value-bind (ready reason code)
+                      (evo.serve:model-readiness (find-model "fixture-nokey-model"))
+                    (and ready (null reason) (null code)))))
+      (setf evo.provider::*models* saved-models
+            evo.provider::*providers* saved-providers
+            evo.provider::*apis* saved-apis)
+      (evo.util:restore-settings saved-settings)
+      (evo.port:setenv "EVO_TEST_OAUTH_TOKEN" "")
+      (evo.port:setenv "EVO_TEST_PLAIN_KEY" ""))))
+
 (defun test-catalog ()
   "GET /catalog and the offline `catalog --json` (CONTRACT §5.6): one
 document, per-entry isolation, and never a key."
@@ -9616,8 +9704,12 @@ document, per-entry isolation, and never a key."
                     (null (getf catalog :lanes)))
              (check "catalog: nothing failed to read"
                     (equalp #() (getf catalog :warnings))))
-           ;; The swarm's half: computed from the kernel API set, without a lane.
-           (let* ((catalog (evo.serve:catalog-plist agent :swarm (list :workers 2)))
+           ;; The swarm's half: the program's own.  A program that has not
+           ;; worked out what a lane ends up with passes
+           ;; EVO.SERVE:LANE-CATALOG's answer — the kernel API set, without a
+           ;; lane (evo-swarm evaluates its lane forms and passes that).
+           (let* ((catalog (evo.serve:catalog-plist
+                            agent :swarm (evo.serve:lane-catalog nil)))
                   (lanes (getf catalog :lanes))
                   (model (find "fixture-model" (getf lanes :models)
                                :key (lambda (m) (getf m :id)) :test #'equal)))
@@ -9632,7 +9724,8 @@ document, per-entry isolation, and never a key."
                                       (make-instance 'evo.provider:provider-api))
            (register-model* "extension-model" :provider :fixture :api :fixture-api
                             :context-window 1000 :max-output 100)
-           (let* ((catalog (evo.serve:catalog-plist agent :swarm (list :workers 1)))
+           (let* ((catalog (evo.serve:catalog-plist
+                            agent :swarm (evo.serve:lane-catalog nil)))
                   (model (find "extension-model" (getf (getf catalog :lanes) :models)
                                :key (lambda (m) (getf m :id)) :test #'equal)))
              (check "catalog: a model from an extension's API is not a lane's by default"
@@ -9776,6 +9869,7 @@ document, per-entry isolation, and never a key."
     (test-serve-oplog)
     (test-serve-topics)
     (test-lifecycle)
+    (test-model-credentials)
     (test-catalog)
     (format t "~%~d passed, ~d failed~%" *pass* *fail*)
     (if (zerop *fail*) 0 1)))

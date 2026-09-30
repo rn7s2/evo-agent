@@ -34,10 +34,10 @@
            #:interrupt-scope #:lane-exists-p
            ;; the catalog builder (CONTRACT §5.6) and what readiness means
            #:catalog-plist #:catalog-for-server #:sessions-body
-           #:model-readiness #:model-status #:lane-model-status
+           #:model-readiness #:model-status #:lane-model-status #:lane-model-entry
            ;; the `lanes` half: a program that runs lanes registers it
            #:*catalog-lanes-hook* #:lane-catalog
-           #:*op-catalog* #:*kernel-apis*
+           #:*op-catalog* #:*kernel-apis* #:kernel-api-registry
            ;; ops, for a program that adds its own
            #:register-op #:find-op #:all-ops #:op-error #:op-error-code
            #:op-error-message #:op-fail #:dispatch-op #:answer-op

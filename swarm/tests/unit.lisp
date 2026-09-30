@@ -1318,6 +1318,139 @@ why not — the answer a GUI's chooser needs before it spawns anything."
       (evo.util:restore-settings saved-settings)
       (evo.port:setenv "EVO_TEST_FIXTURE_KEY" ""))))
 
+(defclass lane-plan-fake-api (provider-api) ()
+  (:documentation "An API an extension defines: the fixture for \"a model whose
+API the in-lanes code loaded into the lane\" — and, registered only in the
+coordinator, for one that stays out of it."))
+
+(defun test-lane-plan ()
+  "What a lane would end up with, and both halves of the answers the GUI reads
+(swarm/offline.lisp, CONTRACT §2): the lane's own settings decide its model and
+thinking level, its own code decides which APIs it has, and evaluating it here
+changes nothing about the coordinator."
+  (with-registries ()
+    (register-provider* :stub :base-url "http://127.0.0.1:1" :api-key "LITERAL-SECRET")
+    (register-model* "m-a" :provider :stub :context-window 1000 :max-output 100)
+    (register-model* "m-b" :provider :stub :context-window 1000 :max-output 100)
+    ;; An API only this process has: the coordinator's own extension, which
+    ;; the lanes never load.
+    (register-api :lane-plan-outer (make-instance 'lane-plan-fake-api))
+    (register-provider* :outer :base-url "http://127.0.0.1:8/v1")
+    (register-model* "outer-model" :provider :outer :api :lane-plan-outer
+                     :context-window 1000 :max-output 100)
+    (set-setting :model "m-a")
+    (set-setting :thinking :high)
+    (let* ((session-agent (fresh-agent))
+           (evo:*agent* session-agent)
+           (evo.swarm::*lane-forms* nil)
+           (*swarm* (test-swarm :agent session-agent)))
+      (evo.swarm:in-lanes ()
+        (evo:set-setting :model "m-b")
+        (evo:set-setting :model-provider :stub)
+        (evo:set-setting :thinking :low))
+      (let ((plan (evo.swarm::lane-plan nil session-agent)))
+        (check "lane plan: the lane's own settings name the model"
+               (equal "m-b" (evo.swarm::lane-plan-model-id plan)))
+        (check "lane plan: ...and its provider"
+               (eq :stub (evo.swarm::lane-plan-provider plan)))
+        (check "lane plan: ...and its thinking level"
+               (eq :low (evo.swarm::lane-plan-thinking plan)))
+        (check "lane plan: the in-lanes model is one a lane can run"
+               (getf (evo.swarm::lane-plan-status plan) :ok))
+        (check "lane plan: a lane's literal key is one it has"
+               ;; The key never travels as data: the lane's own environment
+               ;; carries it, and the sandbox answers as that process would.
+               (and (getf (evo.swarm::lane-plan-status plan) :ok)
+                    (not (search "LITERAL-SECRET"
+                                 (evo.swarm::forms->code
+                                  (evo.swarm::lane-setup-forms-for nil session-agent nil)))))))
+      ;; The flags beat the lane's own config, as they do everywhere else in
+      ;; evo — over the in-lanes settings, and over what a resumed record
+      ;; restored (which a flag wrote there in the first place).
+      (let ((plan (evo.swarm::lane-plan '(:lane-model "m-a" :lane-provider :stub
+                                          :lane-thinking :xhigh)
+                                        session-agent)))
+        (check "lane plan: --lane-model beats the in-lanes model"
+               (equal "m-a" (evo.swarm::lane-plan-model-id plan)))
+        (check "lane plan: --lane-thinking beats the in-lanes level"
+               (eq :xhigh (evo.swarm::lane-plan-thinking plan))))
+      (evo:set-custom-state "swarm"
+                            (list :lane-model "m-b" :lane-provider :stub)
+                            session-agent)
+      (check "lane plan: a resumed record's lane model is re-applied too"
+             (equal "m-b" (evo.swarm::lane-plan-model-id
+                           (evo.swarm::lane-plan nil session-agent t))))
+      ;; What a lane's code registers on its own: an API an extension
+      ;; defines, the provider using it, and the model that runs on it.
+      (let ((evo.swarm::*lane-forms* nil))
+        (evo.swarm:in-lanes ()
+          (evo:register-api :lane-plan-fake (make-instance 'lane-plan-fake-api))
+          (evo:register-provider :lane-plan-fake-provider
+                                 :base-url "http://127.0.0.1:9/v1")
+          (evo:register-model "fake-model" :provider :lane-plan-fake-provider
+                              :api :lane-plan-fake
+                              :context-window 1000 :max-output 100)
+          (evo:set-setting :model "fake-model")
+          (evo:set-setting :model-provider :lane-plan-fake-provider))
+        (let* ((plan (evo.swarm::lane-plan nil session-agent))
+               (status (evo.swarm::lane-plan-status plan))
+               (models (getf (evo.swarm::lane-plan-catalog plan) :models))
+               (fake (find "fake-model" models
+                           :key (lambda (m) (getf m :id)) :test #'equal)))
+          (check "lane plan: an API the lane's own code registers is in the lane"
+                 (member :lane-plan-fake (evo.swarm::lane-plan-apis plan)))
+          (check "lane plan: ...so a model using it is one a lane can run"
+                 (and (getf status :ok)
+                      (eq :lane-plan-fake (evo.swarm::lane-plan-api plan))))
+          (check "lane plan: ...and the catalog lists it for lanes"
+                 (and fake (eq t (getf fake :ok)) (null (getf fake :reason))))
+          (check "lane plan: a provider that declares no key is not refused one"
+                 (eq t (getf fake :ok)))
+          (check "lane plan: the models the lane has are listed"
+                 (and (find "m-b" models :key (lambda (m) (getf m :id)) :test #'equal)
+                      (vectorp models)))))
+      ;; A model whose API only the coordinator has is not one a lane can
+      ;; run, however ready it is here.
+      (let ((evo.swarm::*lane-forms* nil))
+        (set-setting :model "outer-model")
+        (set-setting :model-provider :outer)
+        (let* ((plan (evo.swarm::lane-plan nil session-agent))
+               (entry (evo.swarm::check-lane-entry plan))
+               (problem (nth-value 1 (evo.swarm::check-lane-entry plan))))
+          (check "lane plan: a model whose API no lane code loaded is not runnable there"
+                 (and (not (getf entry :ok))
+                      (equal "lane_api_missing" (getf problem :code))
+                      (search "in-lanes" (getf entry :reason))))
+          (check "lane plan: ...and its own reason names the API"
+                 (search "lane-plan-outer" (getf entry :reason)))))
+      ;; A form that fails is a problem, not a crash — and it does not cost
+      ;; the rest of the answer.
+      (set-setting :model "m-a")
+      (set-setting :model-provider nil)
+      (let ((evo.swarm::*lane-forms* nil))
+        (evo.swarm:in-lanes () (error "this swarm.lisp form is broken"))
+        (let* ((plan (evo.swarm::lane-plan nil session-agent))
+               (problem (first (evo.swarm::lane-plan-problems plan))))
+          (check "lane plan: a form that fails becomes a problem"
+                 (equal "lane_config_failed" (getf problem :code)))
+          (check "lane plan: ...and the rest of the answer is still there"
+                 (equal "m-a" (evo.swarm::lane-plan-model-id plan)))))
+      ;; Nothing of the evaluation reached the coordinator: the whole
+      ;; runtime — the registries and the settings — is the one it had.
+      (let ((models (all-models))
+            (providers (copy-alist evo.provider::*providers*))
+            (apis (api-keys))
+            (settings (capture-settings)))
+        (evo.swarm::lane-plan nil session-agent)
+        (check "lane plan: the coordinator's models are untouched"
+               (equal models (all-models)))
+        (check "lane plan: ...its providers"
+               (equal providers evo.provider::*providers*))
+        (check "lane plan: ...its API registry, extension APIs included"
+               (equal apis (api-keys)))
+        (check "lane plan: ...its settings"
+               (equal settings (capture-settings)))))))
+
 (defun run-all ()
   (let ((*pass* 0) (*fail* 0))
     (test-baseline)
@@ -1349,5 +1482,6 @@ why not — the answer a GUI's chooser needs before it spawns anything."
     ;; The two questions the GUI asks before it starts a swarm, answered
     ;; offline (swarm/offline.lisp, CONTRACT §2).
     (test-swarm-check)
+    (test-lane-plan)
     (format t "~%swarm: ~d passed, ~d failed~%" *pass* *fail*)
     (if (zerop *fail*) 0 1)))

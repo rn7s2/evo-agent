@@ -34,7 +34,7 @@
 
 (defpackage :evo.util
   (:use :cl)
-  (:export #:getenv #:env-proxy #:with-proxy #:*request-proxy* #:wire-boolean
+  (:export #:getenv #:*environment-overlay* #:env-proxy #:with-proxy #:*request-proxy* #:wire-boolean
            #:ensure-winhttp-proxy #:iso8601-now #:iso8601-utc
            #:format-local-timestamp #:local-timezone-name
            #:gen-id #:reseed-ids #:pget #:pput #:plist-merge
@@ -67,7 +67,8 @@
            #:journal-path
            #:journal-entries #:journal-leaf-id #:journal-header #:journal-started-p
            #:set-session-header
-           #:append-entry #:find-entry #:entry-path #:fold-state #:fork-session
+           #:append-entry #:find-entry #:entry-path #:fold-state #:empty-state
+           #:fork-session
            #:compaction-entry->messages
            #:add-journal-listener #:remove-journal-listener #:note-journal-append
            #:state-messages #:state-model #:state-model-provider #:state-thinking
@@ -100,6 +101,7 @@
            #:build-request #:parse-stream #:perform-request
            #:map-sse-events
            #:default-provider-key #:default-base-url #:default-api-key-env
+           #:registration-credentials-available-p #:api-credentials-available-p
            #:message-role #:message-content #:message-stop-reason
            #:usage-total-tokens #:message-usage))
 
@@ -224,6 +226,7 @@
                 #:endpoint-path #:auth-headers #:build-request #:parse-stream
                 #:perform-request #:map-sse-events
                 #:default-provider-key #:default-base-url #:default-api-key-env
+                #:api-credentials-available-p
                 #:provider-error #:provider-registration #:json->sexpr)
   (:export #:cat #:normalize-newlines #:crlf-newlines #:with-proxy
            #:register-tool #:register-command #:on #:on-unload #:spawn-task
@@ -246,6 +249,7 @@
            #:endpoint-path #:auth-headers #:build-request #:parse-stream
            #:perform-request #:map-sse-events
            #:default-provider-key #:default-base-url #:default-api-key-env
+           #:api-credentials-available-p
            #:provider-error
            ;; what a provider was registered with, unresolved
            #:provider-registration
