@@ -24,6 +24,10 @@ Usage:
                                          with an active goal and no -p, continues the goal
   evo-agent --events ...                 emit line-delimited sexpr events instead of text
   evo-agent --list-sessions              list sessions for this cwd, last worked in first
+  evo-agent sessions --json              the session list as one JSON document, from the
+                                         index (~/.evo/sessions/index.jsonl); --all every
+                                         directory, --cwd DIR, --program evo-swarm, --rescan
+                                         to rebuild it from the journals
   evo-agent --model <id>                 model id (default: the :model setting from init.lisp)
   evo-agent --thinking <level>           low|medium|high|xhigh|max (default medium)
   evo-agent --no-userspace               boot without init.lisp, post-init.lisp, or extensions (quarantine mode)
@@ -65,6 +69,9 @@ selects the HTTP frontend (:serve t) and admits its own flags."
     (when (equal (first argv) "serve")
       (pop argv)
       (setf (getf opts :serve) t))
+    (when (equal (first argv) "sessions")
+      (pop argv)
+      (setf (getf opts :sessions) t))
     (loop while argv
           for arg = (pop argv)
           do (cond
@@ -79,6 +86,16 @@ selects the HTTP frontend (:serve t) and admits its own flags."
                           :latest)))
                ((string= arg "--events") (setf (getf opts :events) t))
                ((string= arg "--list-sessions") (setf (getf opts :list-sessions) t))
+               ((and (getf opts :sessions) (string= arg "--json"))
+                (setf (getf opts :json) t))
+               ((and (getf opts :sessions) (string= arg "--all"))
+                (setf (getf opts :all) t))
+               ((and (getf opts :sessions) (string= arg "--rescan"))
+                (setf (getf opts :rescan) t))
+               ((and (getf opts :sessions) (string= arg "--cwd"))
+                (setf (getf opts :cwd) (or (pop argv) (error "--cwd needs a directory"))))
+               ((and (getf opts :sessions) (string= arg "--program"))
+                (setf (getf opts :program) (or (pop argv) (error "--program needs a name"))))
                ((string= arg "--image")
                 (setf (getf opts :images)
                       (append (getf opts :images)
@@ -105,6 +122,16 @@ selects the HTTP frontend (:serve t) and admits its own flags."
                ((member arg '("-h" "--help") :test #'string=) (setf (getf opts :help) t))
                ((string= arg "--version") (setf (getf opts :version) t))
                (t (error "Unknown argument: ~a (try --help)" arg))))
+    (when (getf opts :sessions)
+      ;; An offline CLI: it prints one JSON document and exits, so nothing
+      ;; that would open a session belongs on the same command line.
+      (unless (getf opts :json)
+        (error "sessions needs --json — it prints the index as one document"))
+      (dolist (flag '((:prompt . "-p") (:events . "--events") (:images . "--image")
+                      (:serve . "serve") (:goal . "--goal")
+                      (:list-sessions . "--list-sessions")))
+        (when (getf opts (car flag))
+          (error "~a does not combine with sessions" (cdr flag)))))
     (when (getf opts :serve)
       ;; serve is driven over HTTP: a prompt, an event stream on stdout or a
       ;; goal on the command line would be a second, competing driver.
@@ -168,6 +195,22 @@ selects the HTTP frontend (:serve t) and admits its own flags."
       (format *standard-output* "(:type :unprintable-event)~%")))
   (force-output *standard-output*))
 
+(defun cmd-sessions (opts)
+  "`evo-agent sessions --json` (CONTRACT §2): the session index as one JSON
+document, newest first.  Reads ~/.evo/sessions/index.jsonl — scanning the
+journals when it is missing, or when --rescan asks for it.  Never boots a
+session, never opens a listener."
+  (let ((sessions (session-list :rescan (getf opts :rescan)
+                                :cwd (and (getf opts :cwd)
+                                          (namestring (uiop:ensure-directory-pathname
+                                                       (getf opts :cwd))))
+                                :program (getf opts :program)
+                                :all (getf opts :all))))
+    (write-line (evo.journal:json-encode
+                 (list :sessions (coerce sessions 'vector))))
+    (force-output *standard-output*)
+    0))
+
 (defun cmd-list-sessions ()
   (let ((sessions (list-sessions)))
     (if (null sessions)
@@ -180,20 +223,28 @@ selects the HTTP frontend (:serve t) and admits its own flags."
   (:report (lambda (c s) (format s "~a" (usage-error-text c)))))
 
 (defun resolve-journal (opts)
-  "Open or create the session journal per OPTS."
-  (let ((resume (getf opts :resume)))
-    (cond
-      ((null resume) (make-session-journal))
-      ((eq resume :latest)
-       (let ((path (latest-session)))
-         ;; A usage error, not a crash: exit 64 is the code the supervisor
-         ;; never restarts, and restarting cannot conjure a session.
-         (unless path
-           (error 'usage-error
-                  :text (format nil "No sessions to resume for ~a"
-                                (namestring (uiop:getcwd)))))
-         (open-journal path)))
-      (t (open-journal resume)))))
+  "Open or create the session journal per OPTS.  A new session records which
+program opened it (`evo-agent` or `evo-swarm`, the name this process runs
+under); a resumed session that predates the field is stamped with the same, so
+the session list can say whose sessions these are."
+  (let ((resume (getf opts :resume))
+        (program (or (getf opts :program-name) evo.port:*program-name* "evo-agent")))
+    (flet ((stamped (journal)
+             (unless (pget (journal-header journal) :program)
+               (set-session-header journal :program program))
+             journal))
+      (cond
+        ((null resume) (make-session-journal (uiop:getcwd) :program program))
+        ((eq resume :latest)
+         (let ((path (latest-session)))
+           ;; A usage error, not a crash: exit 64 is the code the supervisor
+           ;; never restarts, and restarting cannot conjure a session.
+           (unless path
+             (error 'usage-error
+                    :text (format nil "No sessions to resume for ~a"
+                                  (namestring (uiop:getcwd)))))
+           (stamped (open-journal path))))
+        (t (stamped (open-journal resume)))))))
 
 (defun main (&optional (argv (evo.port:argv)))
   "Exit codes are supervisor protocol: 0 done, 1 error (restart-eligible),
@@ -207,13 +258,24 @@ selects the HTTP frontend (:serve t) and admits its own flags."
         (cond
           ((getf opts :help) (write-line *usage*) 0)
           ((getf opts :version) (write-line "evo-agent 0.1.0") 0)
+          ((getf opts :sessions) (cmd-sessions opts))
           ((getf opts :list-sessions) (cmd-list-sessions) 0)
           ;; One binary, two roles: the plain invocation is the
           ;; supervisor parent; it re-spawns this same binary as the child.
           ((supervised-run-p opts)
            ;; A serve token is minted once per launch, here in the parent,
            ;; so a restarted child keeps the one clients already hold.
-           (when (getf opts :serve)
+           (when (getf opts :sessions)
+      ;; An offline CLI: it prints one JSON document and exits, so nothing
+      ;; that would open a session belongs on the same command line.
+      (unless (getf opts :json)
+        (error "sessions needs --json — it prints the index as one document"))
+      (dolist (flag '((:prompt . "-p") (:events . "--events") (:images . "--image")
+                      (:serve . "serve") (:goal . "--goal")
+                      (:list-sessions . "--list-sessions")))
+        (when (getf opts (car flag))
+          (error "~a does not combine with sessions" (cdr flag)))))
+    (when (getf opts :serve)
              (check-serve-token opts)
              (evo.port:setenv "EVO_SERVE_TOKEN" (evo.serve:resolve-token)))
            (supervise argv))

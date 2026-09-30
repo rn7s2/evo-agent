@@ -210,12 +210,15 @@ messages verbatim — they must survive the summary.")
   (find :compaction (entry-path journal) :from-end t
         :key (lambda (e) (pget e :type))))
 
-(defun compact-now (agent &key hint)
+(defun compact-now (agent &key hint manual)
   "Manual or automatic compaction: summarize everything before the cut,
-retain the tail on the :compaction entry.  Returns the entry."
+retain the tail on the :compaction entry.  MANUAL says a person asked for it
+(/compact, context.compact) rather than the threshold firing; the entry records
+it with the context size it came from and went to.  Returns the entry."
   (let* ((journal (agent-journal agent))
          (state (fold-state journal))
          (messages (evo.journal:state-messages state))
+         (tokens-before (estimate-context-tokens messages))
          (model (effective-model state agent))
          (cut (select-cut messages :max-items (tail-item-cap model)))
          (dropped (subseq messages 0 cut))
@@ -242,19 +245,29 @@ retain the tail on the :compaction entry.  Returns the entry."
                              read-files :test #'equal))
             (all-modified (union (coerce (or (and previous (pget previous :files-modified)) #()) 'list)
                                  modified :test #'equal)))
-        (append-entry journal
-                      (list :type :compaction
-                            :summary summary
-                            :summary-tokens summary-tokens
-                            :retained-tail (coerce
-                                             (loop for m in tail
-                                                   collect (let ((copy (copy-list m)))
-                                                             (remf copy :usage)
-                                                             copy))
-                                             'vector)
-                            :files-read (coerce all-read 'vector)
-                            :files-modified (coerce all-modified 'vector)
-                            :dropped-messages (length dropped)))))))
+        (let ((retained (coerce
+                         (loop for m in tail
+                               collect (let ((copy (copy-list m)))
+                                         (remf copy :usage)
+                                         copy))
+                         'vector)))
+          (append-entry journal
+                        (list :type :compaction
+                              :summary summary
+                              :summary-tokens summary-tokens
+                              :retained-tail retained
+                              :files-read (coerce all-read 'vector)
+                              :files-modified (coerce all-modified 'vector)
+                              :dropped-messages (length dropped)
+                              ;; What a reader needs: how big the context was,
+                              ;; how big it is now, and whether a person asked.
+                              :tokens-before tokens-before
+                              :tokens-after (estimate-context-tokens
+                                             (evo.journal:compaction-entry->messages
+                                              (list :summary summary
+                                                    :summary-tokens summary-tokens
+                                                    :retained-tail retained)))
+                              :manual (and manual t))))))))
 
 (defun overflow-error-p (message)
   "Context-overflow classification for compact+retry-once recovery.  An

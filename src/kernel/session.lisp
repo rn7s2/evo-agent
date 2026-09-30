@@ -25,6 +25,9 @@ registries are seeded."
           (when resumed-p
             (replay-loads (fold-state journal)))))
     (run-hooks :session-start (list :agent agent :resumed resumed-p))
+    ;; The session index is written when its identity is known: here on start,
+    ;; when the file first lands, on a switch and on the way out.
+    (index-session journal)
     agent))
 
 (defun switch-session (agent journal)
@@ -40,6 +43,7 @@ in the new one."
   (replay-loads (fold-state journal))
   (run-hooks :session-start
              (list :agent agent :resumed (journal-started-p journal)))
+  (index-session journal)
   agent)
 
 (defun set-session-model (agent model-id &optional provider)
@@ -105,6 +109,9 @@ when the run settles, serve on shutdown), BEFORE it stops its task, so
 anything an extension holds open on the user's behalf comes down while the
 session still owns it."
   (run-hooks :session-end (list :agent agent))
+  ;; The last word in the index: the session as it ended (its title, how many
+  ;; entries it holds, when it was last worked in).
+  (index-session (agent-journal agent))
   agent)
 
 ;;; The frontend protocol.

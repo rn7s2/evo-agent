@@ -283,7 +283,7 @@ and ESC can interrupt the summarization request."
                         (setf outcome
                               (handler-case
                                   (progn
-                                    (evo.kernel:compact-now agent :hint hint)
+                                    (evo.kernel:compact-now agent :hint hint :manual t)
                                     (if (agent-abort-flag agent)
                                         (progn
                                           (push-event tui (list :type :compact-result
