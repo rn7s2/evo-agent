@@ -18,6 +18,7 @@
   leaf-id         ; current leaf entry id (nil for empty journal)
   started-p       ; t once the file exists on disk
   (pending nil)   ; entries buffered before first flush (reverse order)
+  (listeners nil) ; FUNCTIONS notified after each append, in registration order
   ;; The run thread appends while a frontend folds state: one lock guards
   ;; entries/index/leaf.
   (lock (bt:make-lock "journal"))
@@ -148,41 +149,59 @@ and because an append landing between the copy and the rename would be lost."
 
 (defun append-entry (journal plist &key parent-id id)
   "Append PLIST as a new entry at the leaf (or under PARENT-ID: branching).
-Assigns :parent-id/:timestamp, and an :id unless the caller pre-minted one —
-a frontend that needs to name an entry before it exists (a streaming message,
-a queued input) mints it with GEN-ID and passes it here.  Returns the completed
-entry."
-  (let ((entry nil)
-        (flushed nil))
-    (bt:with-lock-held ((journal-lock journal))
-      (let* ((id (or id (loop for candidate = (gen-id)
-                              unless (gethash candidate (journal-index journal))
-                                return candidate)))
-             (new (append (list :type (pget plist :type)
-                                :id id
-                                :parent-id (or parent-id (journal-leaf-id journal))
-                                :timestamp (iso8601-now))
-                          (loop for (k v) on plist by #'cddr
-                                unless (member k '(:type :id :parent-id :timestamp))
-                                  append (list k v)))))
-        (setf entry new)
-        (validate-journal-value entry) ; fail loudly now, not at deferred flush
-        (journal-add journal entry)
-        (setf (journal-leaf-id journal) (pget entry :id))
-        (cond ((journal-started-p journal)
-               (write-entry journal entry))
-              (t
-               (push entry (journal-pending journal))
-               ;; Nothing is written until the first assistant message exists.
-               (when (assistant-message-entry-p entry)
-                 (flush-pending journal)
-                 (setf flushed t))))
-        (extend-fold-cache journal entry)))
-    ;; Outside the lock: the file exists now, so the session is one the index
-    ;; can name (`sessions` lists it from here on, not only at the end), and
-    ;; reading the path back to do so must not re-enter the journal lock.
-    (when flushed (index-session journal))
+Assigns :id/:parent-id/:timestamp.  Returns the completed entry.
+
+Registered listeners are notified after the entry is part of the journal, with
+the journal lock RELEASED — a listener that folds state (the view model does)
+must be able to read the journal it was told about."
+  (let ((entry (bt:with-lock-held ((journal-lock journal))
+                 (let* ((id (loop for candidate = (gen-id)
+                                  unless (gethash candidate (journal-index journal))
+                                    return candidate))
+                        (entry (append (list :type (pget plist :type)
+                                             :id id
+                                             :parent-id (or parent-id (journal-leaf-id journal))
+                                             :timestamp (iso8601-now))
+                                       (loop for (k v) on plist by #'cddr
+                                             unless (member k '(:type :id :parent-id :timestamp))
+                                               append (list k v)))))
+                   (validate-journal-value entry) ; fail loudly now, not at deferred flush
+                   (journal-add journal entry)
+                   (setf (journal-leaf-id journal) (pget entry :id))
+                   (cond ((journal-started-p journal)
+                          (write-entry journal entry))
+                         (t
+                          (push entry (journal-pending journal))
+                          ;; Nothing is written until the first assistant message exists.
+                          (when (assistant-message-entry-p entry)
+                            (flush-pending journal))))
+                   entry))))
+    (note-journal-append journal entry)
     entry))
+
+(defun add-journal-listener (journal fn)
+  "Call FN (journal entry) after every entry is appended to JOURNAL.  The
+view model subscribes this way; nothing else watches a journal for appends."
+  (bt:with-lock-held ((journal-lock journal))
+    (setf (journal-listeners journal)
+          (append (remove fn (journal-listeners journal) :test #'eq) (list fn))))
+  fn)
+
+(defun remove-journal-listener (journal fn)
+  (bt:with-lock-held ((journal-lock journal))
+    (setf (journal-listeners journal)
+          (remove fn (journal-listeners journal) :test #'eq)))
+  fn)
+
+(defun note-journal-append (journal entry)
+  "Tell JOURNAL's listeners about ENTRY.  The list is copied under the lock and
+the calls happen outside it: a listener folds the journal, which needs the
+lock.  A listener that signals is named and dropped from this notification,
+never from the journal."
+  (dolist (fn (bt:with-lock-held ((journal-lock journal))
+               (copy-list (journal-listeners journal))))
+    (handler-case (funcall fn journal entry)
+      (error (e) (warn "Journal append listener failed: ~a" e)))))
 
 (defun find-entry (journal id)
   (bt:with-lock-held ((journal-lock journal))

@@ -64,7 +64,17 @@
                              ;; must not depend on where it was typed.
                              (:module "command"
                               :serial t
-                              :components ((:file "command")))))))
+                              :components ((:file "command")))
+                             ;; The view model: the items a frontend draws and
+                             ;; the topic state beside them.  Core, because
+                             ;; every frontend renders the same projection, and
+                             ;; because the status-segment registry the TUI and
+                             ;; a GUI both read lives here.
+                             (:module "view"
+                              :serial t
+                              :components ((:file "status")
+                                           (:file "project")
+                                           (:file "view")))))))
 
 (asdf:defsystem "evo"
   :description "evo — a goal-oriented, self-evolving agent."

@@ -123,6 +123,16 @@ Called by bash when a command reaches its yield ceiling."
               :command (job-command oldest)
               :since (job-start-time oldest))))))
 
+(defun running-jobs ()
+  "Every live background job, newest first: plists of :id, :command, :status
+and :started-at (a universal time).  The whole list, for a view that shows one
+row per job rather than a single count."
+  (bt:with-lock-held (*jobs-lock*)
+    (loop for (id . job) in *jobs*
+          collect (list :id id :command (job-command job)
+                        :status (job-status job)
+                        :started-at (job-start-time job)))))
+
 ;;; The `wait` tool.
 
 (defun tool-wait (args)
