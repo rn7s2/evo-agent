@@ -270,7 +270,9 @@ written 0600; a caller that branches on it must treat NIL as \"cannot say\"."
   (ignore-errors
     (logand (sb-posix:stat-mode (sb-posix:stat (namestring path))) #o777))
   #-(and sbcl (not evo-windows))
-  (progn (ignore path) nil))
+  ;; PATH is unused here — there is no mode to read — and returning it would
+  ;; be a lie: NIL is the answer, so say so.
+  (progn path nil))
 
 (defun write-private-file (path string)
   "Write STRING to PATH readable by its owner only.  The file is recreated

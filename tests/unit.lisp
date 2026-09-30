@@ -8157,7 +8157,14 @@ the stream."
            (equalp (com.inuoe.jzon:parse (evo.serve:encode-json back))
                    (com.inuoe.jzon:parse (evo.serve:encode-json item))))
     (check "serve json: nested plists are objects, nested vectors arrays"
-           (equalp '(:path "a.lisp" :count 3) (getf back :args))))
+           ;; The pairs, not their arrangement: JSON gives an object no order,
+           ;; and the plist a decoder builds comes out of an
+           ;; implementation-defined walk of the parser's objects (SBCL's
+           ;; order is insertion order here by accident, ECL's is its own).
+           (let ((args (getf back :args)))
+             (and (equal "a.lisp" (getf args :path))
+                  (equal 3 (getf args :count))
+                  (equal 4 (length args))))))
   ;; A value outside the vocabulary is a document like any other, so the op
   ;; goes out as JSON — degraded by printing the value, never by losing the
   ;; stream (CONTRACT §5.6, R1).
