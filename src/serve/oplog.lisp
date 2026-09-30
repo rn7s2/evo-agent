@@ -301,6 +301,8 @@ rather than waking to find nothing."
   (let ((now (get-internal-real-time)))
     (when (op-log-pending log)
       (max 0.0
-           (/ (loop for entry in (op-log-pending log)
-                    minimize (- (getf entry :deadline) now))
+           ;; REDUCE, not LOOP MINIMIZE: ECL's LOOP expands that clause into
+           ;; a form it then cannot compile here.
+           (/ (reduce #'min (op-log-pending log)
+                      :key (lambda (entry) (- (getf entry :deadline) now)))
               (float internal-time-units-per-second 1.0d0))))))
