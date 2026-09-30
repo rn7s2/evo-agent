@@ -62,16 +62,18 @@ which swarm a session drove without opening the file."
      :started-p nil)))
 
 (defun set-session-header (journal &rest fields)
-  "Update the session header's FIELDS (a plist).  Returns the new header.
-Two fields are written after session creation: a coordinator records its
-:swarm-id, and a session created before :program existed is stamped with the
-frontend that opened it."
+  "Update the session header's FIELDS (a plist).  Returns the new header, and
+writes the session index again — a session's program and swarm id are exactly
+what the index is for.  Two fields are written after session creation: a
+coordinator records its :swarm-id, and a session created before :program
+existed is stamped with the frontend that opened it."
   (let ((header (copy-list (journal-header journal))))
     (loop for (k v) on fields by #'cddr
           do (setf (getf header k) v))
     (setf (journal-header journal) header)
     (when (journal-started-p journal)
       (rewrite-journal-header journal))
+    (index-session journal)
     header))
 
 (defun rewrite-journal-header (journal)
@@ -150,29 +152,37 @@ Assigns :parent-id/:timestamp, and an :id unless the caller pre-minted one —
 a frontend that needs to name an entry before it exists (a streaming message,
 a queued input) mints it with GEN-ID and passes it here.  Returns the completed
 entry."
-  (bt:with-lock-held ((journal-lock journal))
-    (let* ((id (or id (loop for candidate = (gen-id)
-                            unless (gethash candidate (journal-index journal))
-                              return candidate)))
-           (entry (append (list :type (pget plist :type)
+  (let ((entry nil)
+        (flushed nil))
+    (bt:with-lock-held ((journal-lock journal))
+      (let* ((id (or id (loop for candidate = (gen-id)
+                              unless (gethash candidate (journal-index journal))
+                                return candidate)))
+             (new (append (list :type (pget plist :type)
                                 :id id
                                 :parent-id (or parent-id (journal-leaf-id journal))
                                 :timestamp (iso8601-now))
                           (loop for (k v) on plist by #'cddr
                                 unless (member k '(:type :id :parent-id :timestamp))
                                   append (list k v)))))
-      (validate-journal-value entry) ; fail loudly now, not at deferred flush
-      (journal-add journal entry)
-      (setf (journal-leaf-id journal) (pget entry :id))
-      (cond ((journal-started-p journal)
-             (write-entry journal entry))
-            (t
-             (push entry (journal-pending journal))
-             ;; Nothing is written until the first assistant message exists.
-             (when (assistant-message-entry-p entry)
-               (flush-pending journal))))
-      (extend-fold-cache journal entry)
-      entry)))
+        (setf entry new)
+        (validate-journal-value entry) ; fail loudly now, not at deferred flush
+        (journal-add journal entry)
+        (setf (journal-leaf-id journal) (pget entry :id))
+        (cond ((journal-started-p journal)
+               (write-entry journal entry))
+              (t
+               (push entry (journal-pending journal))
+               ;; Nothing is written until the first assistant message exists.
+               (when (assistant-message-entry-p entry)
+                 (flush-pending journal)
+                 (setf flushed t))))
+        (extend-fold-cache journal entry)))
+    ;; Outside the lock: the file exists now, so the session is one the index
+    ;; can name (`sessions` lists it from here on, not only at the end), and
+    ;; reading the path back to do so must not re-enter the journal lock.
+    (when flushed (index-session journal))
+    entry))
 
 (defun find-entry (journal id)
   (bt:with-lock-held ((journal-lock journal))
@@ -497,20 +507,37 @@ one; SWARM-ID is NIL except for a coordinator."
                           (universal->unix-ms (get-universal-time)))
           :entries (journal-entry-count journal))))
 
+(defun json-encode (value)
+  "VALUE as JSON text: a plist (keyword keys) -> object with snake_case keys,
+a list or vector -> array, a string or integer -> itself, NIL -> null.
+
+The core cannot reach serve's encoder (that one belongs to a frontend), and
+what the session index and `sessions --json` write is flat objects of strings,
+numbers and null, so this carries its own."
+  (com.inuoe.jzon:stringify (json-value value)))
+
+(defun json-value (value)
+  (typecase value
+    (null 'null)
+    ((eql t) t)
+    (string value)
+    (integer value)
+    (keyword (substitute #\_ #\- (string-downcase (symbol-name value))))
+    (cons (if (keywordp (car value))
+              (let ((object (make-hash-table :test #'equal)))
+                (loop for (key item) on value by #'cddr
+                      do (setf (gethash (substitute #\_ #\- (string-downcase
+                                                               (symbol-name key)))
+                                        object)
+                               (json-value item)))
+                object)
+              (map 'vector #'json-value value)))
+    (vector (map 'vector #'json-value value))
+    (t (princ-to-string value))))
+
 (defun json-object (plist)
-  "PLIST (keyword keys) as one line of JSON: plist -> object, keyword key ->
-snake_case, NIL -> null.  The index is flat strings and numbers, and the core
-cannot reach serve's encoder (a frontend's), so it carries its own."
-  (com.inuoe.jzon:stringify
-   (let ((object (make-hash-table :test #'equal)))
-     (loop for (key value) on plist by #'cddr
-           do (setf (gethash (substitute #\_ #\- (string-downcase (symbol-name key)))
-                             object)
-                    (cond ((null value) 'null)
-                          ((eq value t) t)
-                          ((stringp value) value)
-                          (t value))))
-     object)))
+  "PLIST (keyword keys) as one line of JSON."
+  (json-encode plist))
 
 (defun normalize-index-record (record)
   "RECORD read from the index with its optional fields nil rather than absent,
@@ -527,8 +554,9 @@ so callers see one shape whichever path produced it."
 
 (defun index-session (journal)
   "Append JOURNAL's row to the session index.  No-op for a session that has
-nothing on disk yet (the index lists sessions, not intents).  Returns the row."
-  (when (journal-started-p journal)
+nothing on disk yet (the index lists sessions, not intents) or that has no
+journal at all.  Returns the row."
+  (when (and journal (journal-started-p journal))
     (let ((record (session-record journal)))
       (handler-case
           (let ((path (session-index-path)))
@@ -541,22 +569,32 @@ nothing on disk yet (the index lists sessions, not intents).  Returns the row."
         (error (e) (warn "Could not write the session index: ~a" e)))
       record)))
 
+(defun index-text-field (object name)
+  "One string field of a parsed index line, or NIL when it is absent — JSON
+null reads back as a symbol, not NIL, and every nullable field here is a
+string."
+  (let ((value (gethash name object)))
+    (and (stringp value) value)))
+
 (defun index-line-record (line)
   "LINE of the index as a record plist, or NIL when it is not one."
   (let ((object (ignore-errors (com.inuoe.jzon:parse line))))
     (when (hash-table-p object)
-      (flet ((field (name) (gethash name object)))
-        (let ((id (field "id")) (path (field "path")))
-          (when (and (stringp id) (stringp path))
-            (list :id id
-                  :path path
-                  :cwd (field "cwd")
-                  :program (field "program")
-                  :swarm-id (field "swarm_id")
-                  :title (field "title")
-                  :created-at (let ((v (field "created_at"))) (and (integerp v) v))
-                  :updated-at (let ((v (field "updated_at"))) (and (integerp v) v))
-                  :entries (let ((v (field "entries"))) (and (integerp v) v)))))))))
+      (let ((id (gethash "id" object))
+            (path (gethash "path" object)))
+        (when (and (stringp id) (stringp path))
+          (list :id id
+                :path path
+                :cwd (index-text-field object "cwd")
+                :program (index-text-field object "program")
+                :swarm-id (index-text-field object "swarm_id")
+                :title (index-text-field object "title")
+                :created-at (let ((v (gethash "created_at" object)))
+                              (and (integerp v) v))
+                :updated-at (let ((v (gethash "updated_at" object)))
+                              (and (integerp v) v))
+                :entries (let ((v (gethash "entries" object)))
+                           (and (integerp v) v))))))))
 
 (defun read-session-index ()
   "Every row of the index, last line per id winning, newest first."

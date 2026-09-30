@@ -305,7 +305,7 @@ arrives, whatever BODY does."
                       (emit-event agent :type :compaction-start)
                       (unwind-protect
                            (handler-case
-                               (progn (compact-now agent :hint hint)
+                               (progn (compact-now agent :hint hint :manual t)
                                       (if (agent-abort-flag agent) :aborted :stop))
                              (error (e)
                                (if (agent-abort-flag agent)

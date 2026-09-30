@@ -66,6 +66,7 @@
            #:journal-entries #:journal-leaf-id #:journal-header #:journal-started-p
            #:set-session-header
            #:append-entry #:find-entry #:entry-path #:fold-state #:fork-session
+           #:compaction-entry->messages
            #:state-messages #:state-model #:state-model-provider #:state-thinking
            #:state-tools
            #:state-goal #:state-loads #:state-custom #:custom-state
@@ -74,7 +75,7 @@
            ;; the session index (~/.evo/sessions/index.jsonl)
            #:session-index-path #:index-session #:read-session-index
            #:scan-sessions #:rebuild-session-index #:session-list
-           #:journal-title #:journal-entry-count #:json-object))
+           #:journal-title #:journal-entry-count #:json-encode #:json-object))
 
 (defpackage :evo.provider
   (:use :cl :evo.util)

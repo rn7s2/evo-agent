@@ -7013,6 +7013,303 @@ one.  Every step boundary the worker announces must restart it."
                (and (not (evo.tui::tui-running tui))
                     (null (evo.tui::step-clock tui))))))))
 
+
+;;; CONTRACT §3 — what the kernel records about injected input, notices, and
+;;; the identity an entry has before it exists.
+
+(defclass start-fixture-api (provider-api) ())
+
+(defmethod endpoint-path ((api start-fixture-api))
+  (declare (ignore api)) "/fixture/start")
+
+(defmethod auth-headers ((api start-fixture-api) config)
+  (declare (ignore api config)) nil)
+
+(defmethod build-request ((api start-fixture-api)
+                          &key model system messages tools thinking-level)
+  (declare (ignore api model system messages tools thinking-level))
+  "{}")
+
+(defmethod perform-request ((api start-fixture-api) url headers body
+                            &key on-event abort-flag abort-cleanup &allow-other-keys)
+  (declare (ignore api url headers body abort-flag abort-cleanup))
+  ;; A live stream announces the message before any of it exists.
+  (when on-event (funcall on-event (list :type :message-start)))
+  (list :content '((:type :text :text "hello there"))
+        :stopped-p t :stop-reason :stop
+        :usage '(:input 10 :output 2 :cache-read 0 :cache-write 0)))
+
+(defun start-fixture-journal ()
+  (let ((dir (uiop:ensure-directory-pathname
+              (format nil "~a/evo-ids-~a/" (tmp-dir) (gen-id)))))
+    (ensure-directories-exist dir)
+    (let ((journal (make-session-journal dir)))
+      (register-api :start-fixture (make-instance 'start-fixture-api))
+      (register-provider* :start-fixture :base-url "https://fixture.invalid")
+      (register-model* "start-fixture-model" :provider :start-fixture
+                       :api :start-fixture :context-window 100000 :max-output 100)
+      (append-entry journal '(:type :model-change :model "start-fixture-model"))
+      journal)))
+
+(defun test-entry-identity ()
+  ;; A queued input is named when it is queued, and the drained entry keeps
+  ;; that name: that is what lets a frontend show a row for input the model
+  ;; has not seen yet, and take it back before it is sent.
+  (let* ((journal (start-fixture-journal))
+         (agent (make-agent :journal journal)))
+    (let ((id (queue-steering agent "what the user typed" :from-user t)))
+      (check "ids: queue-steering returns the entry id it will journal"
+             (stringp id))
+      (check "ids: a queued input carries its origin, or none for a person"
+             (null (pget (first (evo.kernel::agent-steering agent)) :origin)))
+      (evo.kernel::drain-steering agent)
+      (check "ids: the drained entry is the one that was named"
+             (equal id (pget (car (last (entry-path journal))) :id)))
+      (check "ids: it is the user's own turn (no origin)"
+             (null (pget (car (last (entry-path journal))) :origin))))
+    ;; cancel-queued takes back input that has not been drained...
+    (let ((id (queue-steering agent "never mind")))
+      (check "ids: cancel-queued removes queued input" (cancel-queued agent id))
+      (check "ids: ...and draining it journals nothing"
+             (progn (evo.kernel::drain-steering agent)
+                    (not (equal id (pget (car (last (entry-path journal))) :id)))))
+      (check "ids: cancel-queued refuses once it is gone (NIL)"
+             (null (cancel-queued agent id))))
+    ;; ...and an injected turn says who injected it.
+    (let ((id (queue-steering agent "keep going"
+                              :origin (list :kind :goal :event :continue
+                                            :goal-id "g-1" :objective "ship it"))))
+      (evo.kernel::drain-steering agent)
+      (let ((entry (car (last (entry-path journal)))))
+        (check "origins: the entry keeps the id it was queued with"
+               (equal id (pget entry :id)))
+        (check "origins: an injected turn is journaled with its origin"
+               (equal (pget (pget entry :origin) :kind) :goal))
+        (check "origins: ...and the model still reads the same message"
+               (equal "keep going"
+                      (pget (first (pget (pget entry :message) :content)) :text)))))
+    ;; A follow-up keeps its name across the queue it moves to.
+    (let ((id (queue-followup agent "after this" :origin (list :kind :command-note
+                                                               :command "notify"))))
+      (let ((item (evo.kernel::pop-followup agent)))
+        (check "ids: a follow-up keeps its id in the queue item"
+               (equal id (pget item :id)))))))
+
+(defun test-assistant-entry-id ()
+  "The loop mints the assistant entry's id when the attempt starts talking, so
+the :message-start a frontend already drew can name the entry that lands."
+  (let* ((journal (start-fixture-journal))
+         (events nil)
+         (agent (make-agent :journal journal
+                            :events-cb (lambda (ev) (push ev events)))))
+    (queue-steering agent "go" :from-user t)
+    (evo.kernel:run agent)
+    (let* ((events (nreverse events))
+           (start (find :message-start events :key (lambda (e) (pget e :type))))
+           (steering (find :steering events :key (lambda (e) (pget e :type))))
+           (assistant (find :assistant (entry-path journal)
+                            :key (lambda (e) (pget (pget e :message) :role)))))
+      (check "ids: message-start carries the assistant entry id"
+             (and start (stringp (pget start :entry-id))))
+      (check "ids: ...and that is the id the entry is journaled under"
+             (equal (pget start :entry-id) (pget assistant :id)))
+      (check "ids: the steering event carries the user entry's id"
+             (equal (pget steering :entry-id)
+                    (pget (find :user (entry-path journal)
+                                :key (lambda (e) (pget (pget e :message) :role)))
+                          :id))))))
+
+
+;;; Notices: what a frontend shows and the journal keeps.  CONTRACT §3.
+
+(defun test-notices ()
+  ;; A :notice entry is invisible to the model — the fold never reads it —
+  ;; and stays in the file for whoever opens the session later.
+  (let* ((dir (uiop:ensure-directory-pathname
+               (format nil "~a/evo-notice-~a/" (tmp-dir) (gen-id))))
+         (journal (progn (ensure-directories-exist dir) (make-session-journal dir))))
+    (append-entry journal '(:type :message
+                            :message (:role :user :content ((:type :text :text "hi")))))
+    (append-entry journal '(:type :notice :severity :info :text "✓ compacted"
+                            :source :command :data (:tokens-before 1000)))
+    (check "notice: the context fold ignores a :notice entry"
+           (= 1 (length (state-messages (fold-state journal)))))
+    (check "notice: ...while the entry is still in the journal"
+           (eq :notice (pget (car (last (entry-path journal))) :type))))
+  ;; The command layer's host protocol: severity is the whole vocabulary, and
+  ;; only a durable notice is journaled.
+  (let* ((host (fresh-command-host))
+         (journal (agent-journal (fake-host-agent host))))
+    (evo.command:host-notice host "queued, not sent" :severity :warn)
+    (check "notice: an ephemeral notice is shown, not journaled"
+           (and (said-p host "queued, not sent" :warn)
+                (null (entry-path journal))))
+    (evo.command:host-notice host "◆ goal created: ship it"
+                             :durable t :data (list :source :goal))
+    (let ((entry (car (last (entry-path journal)))))
+      (check "notice: a durable notice is journaled" (eq :notice (pget entry :type)))
+      (check "notice: ...with its severity" (eq :info (pget entry :severity)))
+      (check "notice: ...with who produced it" (eq :goal (pget entry :source)))
+      (check "notice: ...with its data" (eq :goal (pget (pget entry :data) :source)))
+      (check "notice: ...and it is the text the frontend showed"
+             (equal "◆ goal created: ship it" (pget entry :text)))))
+  ;; A goal transition is a fact about the session, so /goal journals it.
+  (let ((host (fresh-command-host)))
+    (evo.command:goal-command host "ship the redesign")
+    (check "notice: /goal journals the transition it announces"
+           (let ((entry (car (last (entry-path (agent-journal (fake-host-agent host)))))))
+             (and (eq :notice (pget entry :type))
+                  (eq :goal (pget entry :source))
+                  (search "◆ goal created" (pget entry :text)))))))
+
+;;; The fold cache (design G1): reads between two appends are free, and an
+;;; append extends the parent's state by one entry instead of re-walking.
+
+(defun test-fold-cache ()
+  (let* ((dir (uiop:ensure-directory-pathname
+               (format nil "~a/evo-foldcache-~a/" (tmp-dir) (gen-id))))
+         (journal (progn (ensure-directories-exist dir) (make-session-journal dir))))
+    (let* ((u (append-entry journal '(:type :message
+                                      :message (:role :user :content ((:type :text :text "hi"))))))
+           (a (append-entry journal '(:type :message
+                                      :message (:role :assistant :stop-reason :stop :model "m"
+                                                :usage (:input 1 :output 2 :cache-read 0 :cache-write 0)
+                                                :content ((:type :text :text "hello")))))))
+      (check "fold cache: the same leaf folds once"
+             (eq (fold-state journal) (fold-state journal)))
+      (check "fold cache: two leaf ids are two states"
+             (not (eq (fold-state journal) (fold-state journal (pget u :id)))))
+      (check "fold cache: the parent leaf keeps its own state"
+             (= 1 (length (state-messages (fold-state journal (pget u :id))))))
+      (check "fold cache: the child's state extends it"
+             (= 2 (length (state-messages (fold-state journal (pget a :id))))))
+      (check "fold cache: a cold fold of the same path agrees"
+             (equal (state-messages (fold-state (open-journal (journal-path journal))))
+                    (state-messages (fold-state journal))))
+      (check "fold cache: reading the parent again does not un-cache it"
+             (eq (fold-state journal (pget u :id)) (fold-state journal (pget u :id))))
+      ;; An append extends the cache: no re-walk, and the leaf's state has it.
+      (let ((c (append-entry journal '(:type :message
+                                       :message (:role :assistant :stop-reason :stop :model "m"
+                                                 :usage (:input 1 :output 2 :cache-read 0 :cache-write 0)
+                                                 :content ((:type :text :text "again")))))))
+        (check "fold cache: an append extends the cached state"
+               (= 3 (length (state-messages (fold-state journal (pget c :id))))))
+        (check "fold cache: ...without disturbing the states before it"
+               (and (= 1 (length (state-messages (fold-state journal (pget u :id)))))
+                    (= 2 (length (state-messages (fold-state journal (pget a :id))))))))
+      ;; A leaf move (branching) folds the path it points at, and caches it.
+      (let ((b (append-entry journal '(:type :message
+                                       :message (:role :assistant :stop-reason :stop :model "m"
+                                                 :usage (:input 1 :output 2 :cache-read 0 :cache-write 0)
+                                                 :content ((:type :text :text "branch"))))
+                             :parent-id (pget u :id))))
+        (setf (journal-leaf-id journal) (pget b :id))
+        (check "fold cache: a moved leaf folds its own path"
+               (equal "branch"
+                      (pget (first (pget (car (last (state-messages (fold-state journal))))
+                                         :content)) :text)))))))
+
+;;; The session index and the `sessions` CLI (CONTRACT §2).  The index is a
+;;; cache of the journals: right enough to list, always rebuildable by a scan.
+
+(defun test-session-index ()
+  (let* ((dir (uiop:ensure-directory-pathname
+               (format nil "~a/evo-index-~a/" (tmp-dir) (gen-id))))
+         (journal (progn (ensure-directories-exist dir)
+                         (make-session-journal dir :program "evo-swarm"))))
+    (append-entry journal '(:type :message
+                            :message (:role :user
+                                      :content ((:type :text :text "ship the redesign
+one lane at a time")))))
+    (check "index: nothing is listed before the session has a file"
+           (null (index-session (make-session-journal dir))))
+    (append-entry journal '(:type :message
+                            :message (:role :assistant :stop-reason :stop :model "m"
+                                      :usage (:input 1 :output 2 :cache-read 0 :cache-write 0)
+                                      :content ((:type :text :text "ok")))))
+    (let* ((id (pget (journal-header journal) :id))
+           (row (lambda () (find id (read-session-index)
+                                 :key (lambda (r) (pget r :id)) :test #'equal))))
+      (check "index: the file landing puts the session in the index" (funcall row))
+      (check "index: the title is the first user text, on one line"
+             (equal "ship the redesign one lane at a time" (pget (funcall row) :title)))
+      (check "index: ...the program that opened it"
+             (equal "evo-swarm" (pget (funcall row) :program)))
+      (check "index: ...how many entries it holds"
+             (= 2 (pget (funcall row) :entries)))
+      (check "index: ...the directory it was started in"
+             (equal (namestring dir) (pget (funcall row) :cwd)))
+      (check "index: ...and epoch milliseconds for its times"
+             (and (integerp (pget (funcall row) :created-at))
+                  (plusp (pget (funcall row) :created-at))
+                  (>= (pget (funcall row) :updated-at) (pget (funcall row) :created-at))))
+      (check "index: a session with no swarm says so (null, not missing)"
+             (null (pget (funcall row) :swarm-id)))
+      ;; A header change rewrites the row; the last line for an id wins.
+      (set-session-header journal :swarm-id "20260930T000000-abcd")
+      (check "index: a header change updates the row (last line per id wins)"
+             (and (equal "20260930T000000-abcd" (pget (funcall row) :swarm-id))
+                  (= 1 (length (remove-if-not (lambda (r) (equal id (pget r :id)))
+                                              (read-session-index))))))
+      (check "index: the header is on disk too, and the entries survived"
+             (let ((reopened (open-journal (journal-path journal))))
+               (and (equal "evo-swarm" (pget (journal-header reopened) :program))
+                    (equal "20260930T000000-abcd"
+                           (pget (journal-header reopened) :swarm-id))
+                    (= 2 (length (journal-entries reopened))))))
+      ;; Filters: one directory, one program.
+      (check "index: a list is filtered by directory"
+             (equal (list id) (mapcar (lambda (r) (pget r :id)) (session-list :cwd dir))))
+      (check "index: ...and by program"
+             (equal (list id) (mapcar (lambda (r) (pget r :id))
+                                      (session-list :cwd dir :program "evo-swarm"))))
+      (check "index: a program nothing was opened under lists nothing"
+             (null (session-list :all t :program "no-such-program")))
+      ;; A scan rebuilds the whole thing from the journals on disk.
+      (delete-file (session-index-path))
+      (check "index: a missing index is rebuilt by a scan"
+             (equal (list id) (mapcar (lambda (r) (pget r :id)) (session-list :cwd dir))))
+      (check "index: ...and the rebuild writes it back"
+             (progn (rebuild-session-index)
+                    (equal (list id) (mapcar (lambda (r) (pget r :id))
+                                             (session-list :cwd dir))))))))
+
+(defun test-sessions-cli ()
+  (let* ((dir (uiop:ensure-directory-pathname
+               (format nil "~a/evo-sessions-cli-~a/" (tmp-dir) (gen-id))))
+         (journal (progn (ensure-directories-exist dir)
+                         (make-session-journal dir :program "lane"))))
+    (append-entry journal '(:type :message
+                            :message (:role :user :content ((:type :text :text "fix the bug")))))
+    (append-entry journal '(:type :message
+                            :message (:role :assistant :stop-reason :stop :model "m"
+                                      :usage (:input 1 :output 2 :cache-read 0 :cache-write 0)
+                                      :content ((:type :text :text "ok")))))
+    (let* ((id (pget (journal-header journal) :id))
+           (out (with-output-to-string (*standard-output*)
+                  (check "cli: sessions --json exits 0"
+                         (= 0 (evo.cli:main (list "sessions" "--json" "--all"
+                                                  "--program" "lane")))))))
+      (check "cli: it prints one sessions document"
+             (search "{\"sessions\":[" out))
+      (check "cli: ...naming the session" (search id out))
+      (check "cli: ...with its program, title and times"
+             (and (search "\"program\":\"lane\"" out)
+                  (search "\"title\":\"fix the bug\"" out)
+                  (search "\"entries\":2" out)))
+      (check "cli: a program filter that matches nothing prints an empty list"
+             (let ((empty (with-output-to-string (*standard-output*)
+                            (evo.cli:main (list "sessions" "--json" "--all"
+                                                "--program" "no-such-program")))))
+               (equal "{\"sessions\":[]}" (string-trim '(#\Newline) empty)))))
+    (check "cli: sessions without --json is a usage error"
+           (= 64 (let ((*error-output* (make-string-output-stream)))
+                   (evo.cli:main (list "sessions")))))
+    (check "cli: sessions does not combine with a prompt"
+           (= 64 (let ((*error-output* (make-string-output-stream)))
+                   (evo.cli:main (list "sessions" "--json" "-p" "hi")))))))
+
 ;;; A two-turn run, end to end: turn one answers with a tool call, turn two
 ;;; stops.  One task, two steps — the shape the step clock exists for.
 
@@ -8135,6 +8432,12 @@ became zero after the first reload."
     (test-extension-protocols)
     (test-goal-tools)
     (test-templates)
+    (test-entry-identity)
+    (test-assistant-entry-id)
+    (test-notices)
+    (test-fold-cache)
+    (test-session-index)
+    (test-sessions-cli)
     (test-compaction)
     (test-lore)
     (test-lore-slash-commands)

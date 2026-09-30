@@ -89,9 +89,15 @@ not idling, and the lane's report or finished run is what wakes it
 (defun record-swarm ()
   "Journal the swarm's shape on the coordinator's session (a :custom entry,
 invisible to the model): lanes, their worktrees, the code evaluated into
-them.  Called whenever that shape changes."
+them.  Called whenever that shape changes.  The session header names the
+swarm too, so a session list can say which swarm a session drove without
+opening the file."
   (when (and *swarm* (swarm-agent *swarm*))
-    (ignore-errors (evo:set-custom-state "swarm" (swarm-record) (swarm-agent *swarm*)))))
+    (let ((agent (swarm-agent *swarm*)))
+      (ignore-errors (evo:set-custom-state "swarm" (swarm-record) agent))
+      (ignore-errors (evo.journal:set-session-header (evo.kernel:agent-journal agent)
+                                                    :program "evo-swarm"
+                                                    :swarm-id (swarm-id *swarm*))))))
 
 ;;; Launching.
 
