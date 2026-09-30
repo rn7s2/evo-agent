@@ -35,7 +35,10 @@ Usage:
   evo-agent serve [options]              headless session controlled over HTTP (docs/serve.md)
       --host <addr>                      address to bind (default 127.0.0.1)
       --port <n>                         port to bind (default 8421; 0 picks a free one)
-      --token-file <path>                write the bearer token here (mode 0600)
+      --ready-file <path>                where to publish {port, url, token, session, ...},
+                                         mode 0600, rewritten after every restart
+      --watch-stdin                      EOF on stdin means the driver is gone: shut down
+      --no-http-eval                     do not offer the eval op (eval is RCE)
       --allow-remote                     permit a non-loopback --host
       --resume [path] --model <id> --thinking <level> --no-userspace  as above
   evo-agent --help | --version
@@ -115,8 +118,12 @@ selects the HTTP frontend (:serve t) and admits its own flags."
                 (setf (getf opts :host) (or (pop argv) (error "--host needs an address"))))
                ((and (getf opts :serve) (string= arg "--port"))
                 (setf (getf opts :port) (parse-port (pop argv))))
-               ((and (getf opts :serve) (string= arg "--token-file"))
-                (setf (getf opts :token-file) (or (pop argv) (error "--token-file needs a path"))))
+               ((and (getf opts :serve) (string= arg "--ready-file"))
+                (setf (getf opts :ready-file) (or (pop argv) (error "--ready-file needs a path"))))
+               ((and (getf opts :serve) (string= arg "--watch-stdin"))
+                (setf (getf opts :watch-stdin) t))
+               ((and (getf opts :serve) (string= arg "--no-http-eval"))
+                (setf (getf opts :no-http-eval) t))
                ((and (getf opts :serve) (string= arg "--allow-remote"))
                 (setf (getf opts :allow-remote) t))
                ((member arg '("-h" "--help") :test #'string=) (setf (getf opts :help) t))
@@ -266,7 +273,9 @@ the session list can say whose sessions these are."
            ;; A serve token is minted once per launch, here in the parent,
            ;; so a restarted child keeps the one clients already hold.
            (when (getf opts :serve)
-             (check-serve-token opts)
+             (check-ready-file opts)
+             ;; One token per launch, minted here in the parent, so a
+             ;; restarted child keeps the one clients already hold.
              (evo.port:setenv "EVO_SERVE_TOKEN" (evo.serve:resolve-token)))
            (supervise argv))
           (t (run-cli opts)))
@@ -424,19 +433,20 @@ anything boots so an extension deciding at load time sees it."
        (evo.tui:start-tui agent :resumed-p resumed-p)))
     (t (run-headless opts))))
 
-(defun check-serve-token (opts)
-  "serve needs somewhere for its token to reach the client: a --token-file to
-write it to, or EVO_SERVE_TOKEN naming it.  With neither, the random token
-would lock everybody out, so refuse up front (exit 64)."
-  (unless (or (getf opts :token-file)
+(defun check-ready-file (opts)
+  "serve needs somewhere to publish the port and the token a client must have:
+a --ready file, or EVO_SERVE_TOKEN when the caller already knows the token
+(tests do).  With neither there is no way in, so refuse up front (exit 64)."
+  (unless (or (getf opts :ready-file)
               (plusp (length (getenv "EVO_SERVE_TOKEN"))))
     (error 'usage-error
-           :text "serve needs a way to hand its token over: --token-file <path> (written mode 0600), or set EVO_SERVE_TOKEN")))
+           :text "serve needs a way to hand its port and token over: --ready-file <path> (written mode 0600), or set EVO_SERVE_TOKEN")))
 
 (defun run-serve (opts)
   "The HTTP frontend: validate the bind, bring the session up with the server
-as its frontend, then serve until POST /shutdown."
-  (check-serve-token opts)
+as its frontend, then serve until the server.shutdown op — or, with
+--watch-stdin, until stdin closes."
+  (check-ready-file opts)
   (let ((host (or (getf opts :host) "127.0.0.1")))
     (unless (or (evo.serve:loopback-host-p host) (getf opts :allow-remote))
       (error 'usage-error
@@ -445,7 +455,9 @@ as its frontend, then serve until POST /shutdown."
     (let ((server (evo.serve:make-server :host host
                                          :port (getf opts :port)
                                          :token (evo.serve:resolve-token)
-                                         :token-file (getf opts :token-file))))
+                                         :ready-file (getf opts :ready-file)
+                                         :watch-stdin (getf opts :watch-stdin)
+                                         :eval-enabled (not (getf opts :no-http-eval)))))
       (multiple-value-bind (agent resumed-p) (setup-agent opts :frontend server)
         (evo.serve:serve server agent :resumed-p resumed-p)))))
 

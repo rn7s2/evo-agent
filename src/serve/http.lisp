@@ -207,8 +207,20 @@ anything malformed, oversized, or using a framing this server does not take."
   (finish-output stream))
 
 (defun write-sse-event (stream type data &key id)
-  "One event: optional ID, TYPE, and DATA (a JSON string, one line)."
-  (write-octets stream (format nil "~@[id: ~d~%~]event: ~a~%data: ~a~%~%" id type data))
+  "One event: optional ID, TYPE, and DATA (a JSON string, one line).  The ID
+is a cursor, \"<epoch>.<seq>\", not a number: it is what a client sends back
+in `since` when it reconnects."
+  (write-octets stream (format nil "~@[id: ~a~%~]event: ~a~%data: ~a~%~%" id type data))
+  (finish-output stream))
+
+(defun write-response-octets (stream status octets content-type)
+  "A complete response whose body is bytes — an image, served as it is."
+  (write-head stream status
+              (list (cons "Content-Type" content-type)
+                    (cons "Content-Length" (length octets))
+                    (cons "Cache-Control" "no-store")
+                    (cons "Connection" "close")))
+  (write-sequence octets stream)
   (finish-output stream))
 
 (defun write-sse-comment (stream text)

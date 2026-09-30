@@ -25,25 +25,51 @@
 
 (in-package :evo.serve)
 
-(defun keyword->json-key (keyword)
-  (substitute #\_ #\- (string-downcase (symbol-name keyword))))
+(defun keyword->json-key (key)
+  "KEY — a keyword, or a string for a name that is not an identifier (a topic
+name, \"lane:1\") — as its JSON key."
+  (if (stringp key)
+      key
+      (substitute #\_ #\- (string-downcase (symbol-name key)))))
 
 (defun plist-p (value)
-  "True for a non-empty list of keyword/value pairs."
+  "True for a non-empty list of keyword/value pairs: a plist is an object on
+the wire, anything else (a vector, a list of non-keyword first elements) an
+array.  A name that is not an identifier — a topic, \"lane:1\" — needs
+JSON-OBJECT instead."
   (and (consp value)
        (loop for tail on value by #'cddr
              always (and (keywordp (car tail)) (consp (cdr tail))))))
+
+;;; An object whose keys are not keywords.  A map keyed by topic name cannot
+;;; be a plist (the first element would read as an array), so it says so.
+
+(defstruct (json-object (:constructor %make-json-object))
+  (pairs nil))
+
+(defun json-object (pairs)
+  "PAIRS — a flat list of (key . value) — as a JSON object.  KEY may be a
+keyword or a string."
+  (%make-json-object :pairs pairs))
 
 (defun sexpr->json-value (value)
   "VALUE as the jzon value the mapping above says."
   (cond ((eq value t) t)
         ((null value) 'null)
         ((eq value 'false) nil)
-        ((keywordp value) (string-downcase (symbol-name value)))
+        ;; Enum values are snake_case too (CONTRACT §4: \"lane-report\" on the
+        ;; wire is "lane_report").
+        ((keywordp value) (substitute #\_ #\- (string-downcase (symbol-name value))))
         ((symbolp value) (string-downcase (symbol-name value)))
         ((stringp value) value)
         ((integerp value) value)
         ((realp value) (coerce value 'double-float))
+        ((json-object-p value)
+         (let ((object (make-hash-table :test #'equal)))
+           (loop for (k . v) in (json-object-pairs value)
+                 do (setf (gethash (keyword->json-key k) object)
+                          (sexpr->json-value v)))
+           object))
         ((plist-p value)
          (let ((object (make-hash-table :test #'equal)))
            (loop for (k v) on value by #'cddr
