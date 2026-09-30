@@ -685,6 +685,26 @@ def run_all(server, stub_port, work):
     check("scope swarm on a plain server -> invalid_args (unchanged)",
           reply["ok"] is False and reply["error"]["code"] == "invalid_args", reply)
 
+    # --- input.send names a topic, and a lane is not one a client writes to ----------
+    status, reply, _ = server.op("input.send", {"text": "steer a lane",
+                                                "topic": "lane:1"})
+    check("input.send to a lane topic -> invalid_args, not not_found",
+          reply["ok"] is False and reply["error"]["code"] == "invalid_args", reply)
+    check("and the refusal says whose lane it is",
+          "coordinator" in reply["error"]["message"], reply)
+    status, reply, _ = server.op("input.send", {"text": "steer a lane",
+                                                "topic": "lane:9"})
+    check("a lane that does not exist is refused the same way",
+          reply["ok"] is False and reply["error"]["code"] == "invalid_args", reply)
+    status, reply, _ = server.op("input.send", {"text": "nowhere", "topic": "nope"})
+    check("a topic that is not one -> not_found (unchanged)",
+          reply["ok"] is False and reply["error"]["code"] == "not_found", reply)
+    status, reply, _ = server.op("input.send", {"text": "to the session",
+                                                "topic": "session"})
+    check("input.send to the session topic is the same as without it",
+          reply["ok"] is True and reply["result"]["item_id"], reply)
+    wait_idle(server)
+
     # --- after_run with nothing running is simply now -------------------------------
     status, reply, _ = server.op("input.send", {"text": "after_run and idle",
                                                 "queue": "after_run"})
@@ -961,6 +981,10 @@ def swarm_catalog_check(work, stub_port):
         # The swarm defines its own :lane method (which raises a plain error
         # while looking a lane up); serve's :before method is what makes this
         # not_found rather than op_failed.
+        status, reply, _ = swarm.op("input.send", {"text": "steer a lane",
+                                                   "topic": "lane:1"})
+        check("evo-swarm: input.send to a lane topic -> invalid_args",
+              reply["ok"] is False and reply["error"]["code"] == "invalid_args", reply)
         status, reply, _ = swarm.op("run.interrupt", {"scope": "lane", "lane": 9})
         check("evo-swarm: a lane that does not exist -> not_found, not op_failed",
               reply["ok"] is False and reply["error"]["code"] == "not_found", reply)
