@@ -185,7 +185,6 @@
    #:view #:make-view #:view-attach #:view-on-event #:view-on-append
    #:view-reset #:view-snapshot #:view-items-before #:view-item #:view-media
    #:view-input-queued #:view-input-cancelled
-   #:view-agent #:view-topic
    ;; re-derive the topic state when the fold moved without an append (a
    ;; setting, a model registry change, a hold) — EVO.SERVE's topic sync
    #:view-refresh-state
@@ -208,6 +207,8 @@
   (:import-from :evo.util #:cat #:normalize-newlines #:crlf-newlines #:with-proxy)
   (:import-from :evo.view #:define-status-segment #:remove-status-segment
                 #:status-segments)
+  (:import-from :evo.kernel #:register-hold-predicate
+                #:unregister-hold-predicate #:note-hold-changed)
   (:import-from :evo.provider
                 #:provider-api #:register-api #:find-api #:api-keys
                 #:endpoint-path #:auth-headers #:build-request #:parse-stream
