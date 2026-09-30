@@ -207,7 +207,7 @@ IN-LANES form can name a package an earlier one loaded."
                            (lane-n lane) (lane-error-text e))
                    :style :error)))))
 
-(defun bring-up-lane (lane &key resume)
+(defun bring-up-lane (lane &key resume reset)
   "Launch LANE, wait for it, initialize it, and take its first snapshot.
 Returns T when it came up.  A lane stopped while it came up (the swarm
 quitting, or switched away from by /resume) stops coming up, quietly."
@@ -238,6 +238,12 @@ quitting, or switched away from by /resume) stops coming up, quietly."
        (ignore-errors (mirror-load (lane-mirror lane)))
        (mirror-note-lane-state (lane-mirror lane))
        (swarm-lane-changed)
+       ;; A lane that came back is a lane whose topic every client must
+       ;; re-snapshot: its items are the ones its resumed session has now,
+       ;; not the ones a client applied before it went down (§5.3).
+       (when reset
+         (publish-op (list :op "topic.reset" :topic (lane-topic lane)
+                           :reason "lane_restarted")))
        t))))
 
 (defun clear-lane-ready (lane)
@@ -336,7 +342,7 @@ the lane's own thread, so no new one is started."
     (incf-lane-restarts lane)
     (tell-lane-event lane :crashed :severity :error
                      :detail (format nil "its process exited; restarting it from ~a" log))
-    (if (bring-up-lane lane :resume t)
+    (if (bring-up-lane lane :resume t :reset t)
         (progn (tell-lane-event lane :restarted :severity :warn
                                 :detail "its session was resumed; the task in flight may need re-delegating")
                t)
@@ -411,7 +417,7 @@ session (and the code evaluated into it forgotten).  Picks up a changed cwd
       (dolist (file (directory (merge-pathnames "*.sexp" sessions)))
         (rename-file file (make-pathname :type "sexp-retired" :defaults file)))))
   (record-swarm)
-  (when (bring-up-lane lane :resume (not fresh))
+  (when (bring-up-lane lane :resume (not fresh) :reset t)
     (start-lane-thread lane)
     t))
 

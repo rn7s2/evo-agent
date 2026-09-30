@@ -213,7 +213,8 @@ the swarm's own headless view — when asked for one (:serve)."
                        :host host
                        :port (getf opts :port)
                        :ready-file (getf opts :ready-file)
-                       :watch-stdin (getf opts :watch-stdin))))
+                       :watch-stdin (getf opts :watch-stdin)
+                       :identity *swarm-identity*)))
           (make-instance 'serve-view :server server)))
       (progn
         (unless (evo.port:tty-p)

@@ -35,6 +35,8 @@ Usage:
       --ready-file <path>                publish url, token, epoch and session here (mode 0600)
       --watch-stdin                      shut down cleanly when stdin reaches end of file
       --no-http-eval                     do not offer the eval op (eval is RCE)
+      --as-lane                          this serve is a swarm's lane: its
+                                         journal says the program is lane
       --allow-remote                     permit a non-loopback --host
       --resume [path] --model <id> --thinking <level> --no-userspace  as above
   evo-agent catalog --json [--no-userspace]
@@ -123,6 +125,13 @@ flags."
                 (setf (getf opts :ready-file) (or (pop argv) (error "--ready-file needs a path"))))
                ((and (getf opts :serve) (string= arg "--watch-stdin"))
                 (setf (getf opts :watch-stdin) t))
+               ((and (getf opts :serve) (string= arg "--as-lane"))
+                ;; A lane: a serve process a swarm's coordinator owns.  Its
+                ;; journal says so (CONTRACT §3), so a session list can tell a
+                ;; lane from a coordinator without opening the file.
+                (setf (getf opts :as-lane) t))
+               ((and (getf opts :serve) (string= arg "--no-http-eval"))
+                (setf (getf opts :no-http-eval) t))
                ((and (getf opts :serve) (string= arg "--allow-remote"))
                 (setf (getf opts :allow-remote) t))
                ((member arg '("-h" "--help") :test #'string=) (setf (getf opts :help) t))
@@ -248,7 +257,9 @@ program opened it (`evo-agent` or `evo-swarm`, the name this process runs
 under); a resumed session that predates the field is stamped with the same, so
 the session list can say whose sessions these are."
   (let ((resume (getf opts :resume))
-        (program (or (getf opts :program-name) evo.port:*program-name* "evo-agent")))
+        (program (or (getf opts :program-name)
+                     (and (getf opts :as-lane) "lane")
+                     evo.port:*program-name* "evo-agent")))
     (flet ((stamped (journal)
              (unless (pget (journal-header journal) :program)
                (set-session-header journal :program program))

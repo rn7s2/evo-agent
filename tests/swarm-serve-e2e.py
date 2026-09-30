@@ -1,43 +1,41 @@
 #!/usr/bin/env python3
-"""swarm-serve-e2e.py — `evo-swarm serve` end to end, over HTTP only.
+"""swarm-serve-e2e.py — `evo-swarm serve` on the new protocol, end to end.
 
-The headless swarm, driven exactly as the GUI will drive it: one bearer token,
-`evo serve`'s unchanged protocol for the coordinator, plus the swarm feature —
-GET /lanes, a lane's transcript and live events, and lane-state events on the
-coordinator's own stream.  No terminal: the swarm runs as a `serve` process.
-The "model" is tests/stub-messages.py, which scripts both the coordinator and
-its lanes from what they are sent (`CALL <tool> {json}` becomes that tool call),
-so this needs nothing but python3, git-free, and a built evo-agent + evo-swarm.
+The headless swarm, driven exactly as evo-gui drives it: one ready file, one
+bearer token, and CONTRACT.md's protocol for the coordinator *and* for its
+lanes.  Nothing here knows a lane's address: lanes have their own ready files,
+owned by the coordinator, and reach a client only as the topics `lane:1`,
+`lane:2` … mirrored from each lane's own /snapshot and /stream into the
+coordinator's one op log.  No terminal, no relay, no second port.
+
+The "model" is tests/stub-messages.py, which scripts the coordinator and its
+lanes from what they are sent (`CALL <tool> {json}` becomes that tool call), so
+this needs nothing but python3 and a built evo-agent + evo-swarm.
 
 Covers:
-  * /health names the server a swarm (name, version, features);
-  * the coordinator answers the unchanged protocol (state, journal, transcript,
-    sessions, registry, commands, events), and its transcript records the
-    delegation it made;
-  * auth is required on every route, the swarm's included; a lane is read-only
-    over HTTP, and an unknown lane is 404;
-  * a prompt through /prompt is delegated to a lane;
-  * GET /lanes lists every lane numbered 1..N with its state, task, goal,
-    worktree, branch and restarts, and nothing private;
-  * the lane-state events on the coordinator's /events track that lane working,
-    then idle;
-  * a lane's transcript and live events can be read, and resumed;
-  * lane tokens and URLs are not exposed over HTTP;
-  * /shutdown stops every lane, and `--resume` restores the swarm.
-
-Field names the objective leaves open (an identity field's exact key, a lane
-object's exact keys) are read through PICK, which takes the first present of a
-small set of synonyms — one constant to change, not the test's shape.
+  * the ready file (0600, atomically written) and /health;
+  * the coordinator's protocol: /snapshot with session,swarm,lane:*; /ops;
+    /stream with one subscription carrying every lane; /items paging;
+  * the swarm topic: workers, one row per lane, its state, model, context,
+    task, restarts, last item — and busy/waiting_on_lanes while a lane works;
+  * the lane:N topics: the lane's own items and state, mirrored and republished
+    under the coordinator's cursor;
+  * a delegated task streams on lane:N through that one subscription;
+  * a lane killed with SIGKILL comes back: a lane_event item (crashed, then
+    restarted), topic.reset lane:N, and the exact session it was on;
+  * run.interrupt scope swarm stops the coordinator and every lane;
+  * /ops is idempotent per rid; a bad token is 401; an unknown op is refused
+    with a code, never a crash;
+  * server.shutdown stops every lane, leaves nothing behind, and exits 0.
 
 Usage: tests/swarm-serve-e2e.py [build-dir]     (exit 0 on success; Unix only)
 """
 
-import glob
 import http.client
 import json
 import os
-import shutil
 import signal
+import shutil
 import socket
 import subprocess
 import sys
@@ -76,8 +74,7 @@ def free_port():
 
 
 def pick(obj, *keys):
-    """The first of KEYS present (and not None) in OBJ, else None.  The one
-    place a field-name synonym lives."""
+    """The first of KEYS present (and not None) in OBJ, else None."""
     if not isinstance(obj, dict):
         return None
     for key in keys:
@@ -86,64 +83,118 @@ def pick(obj, *keys):
     return None
 
 
-def has_any(obj, *keys):
-    """Whether OBJ carries any of KEYS — presence, not value."""
-    return isinstance(obj, dict) and any(k in obj for k in keys)
-
-
-def lane_n(lane):
-    return pick(lane, "n", "number", "lane")
-
-
-def lane_state(lane):
-    return (pick(lane, "state", "status") or "")
-
-
-def lane_task(lane):
-    return (pick(lane, "task") or "")
-
-
-def lane_list(body):
-    """The lane objects from a GET /lanes body, whatever its exact shape:
-    a bare array, {lanes: [...]}, or {lanes: {n: {...}}}."""
-    if isinstance(body, list):
-        return body
-    if not isinstance(body, dict):
-        return None
-    lanes = body.get("lanes")
-    if lanes is None and isinstance(body.get("swarm"), dict):
-        lanes = body["swarm"].get("lanes")
-    if lanes is None:
-        return None
-    if isinstance(lanes, dict):
-        return list(lanes.values())
-    return lanes
-
-
-def find_lane(lanes, n):
-    return next((l for l in lanes if str(lane_n(l)) == str(n)), None)
-
-
-def messages_of(body):
-    if isinstance(body, list):
-        return body
-    if isinstance(body, dict):
-        return pick(body, "messages", "transcript")
+def wait_for(predicate, timeout=60, interval=0.1):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            value = predicate()
+        except Exception:
+            value = None
+        if value:
+            return value
+        time.sleep(interval)
     return None
 
 
+# --------------------------------------------------------------------------
+# The protocol, as a client speaks it.
+
+class Topic:
+    """One topic as a client holds it: state plus items, applied op by op."""
+
+    def __init__(self, name):
+        self.name = name
+        self.state = {}
+        self.items = []                 # oldest first
+        self.order = {}
+
+    def item(self, item_id):
+        return self.order.get(item_id)
+
+    def add(self, item, after):
+        item_id = item.get("id")
+        if item_id in self.order:
+            self.order[item_id].update(item)
+            return
+        self.order[item_id] = item
+        if after and after in self.order:
+            index = self.items.index(self.order[after]) + 1
+            self.items.insert(index, item)
+        else:
+            self.items.append(item)
+
+    def apply(self, op):
+        kind = op.get("op")
+        if kind == "item.add":
+            self.add(op.get("item") or {}, op.get("after"))
+        elif kind == "item.append":
+            item = self.order.get(op.get("id"))
+            if item is not None:
+                field = op.get("field") or "text"
+                item[field] = (item.get(field) or "") + (op.get("text") or "")
+        elif kind == "item.patch":
+            item = self.order.get(op.get("id"))
+            if item is not None:
+                item.update(op.get("patch") or {})
+        elif kind == "item.remove":
+            item = self.order.pop(op.get("id"), None)
+            if item is not None:
+                self.items.remove(item)
+        elif kind == "state.patch":
+            self.state.update(op.get("patch") or {})
+        elif kind in ("topic.reset", "stream.reset"):
+            return "reset"
+        return kind
+
+    def texts(self):
+        return " ".join(str(i.get("text") or "") for i in self.items)
+
+    def kinds(self, kind):
+        return [i for i in self.items if i.get("kind") == kind]
+
+
+class View:
+    """Every topic one subscription carries."""
+
+    def __init__(self, names):
+        self.topics = {name: Topic(name) for name in names}
+        self.resets = []                # (topic, reason) in arrival order
+        self.ops = []                   # every op seen, in order
+
+    def apply(self, op):
+        self.ops.append(op)
+        name = op.get("topic")
+        topic = self.topics.get(name)
+        if topic is None:
+            topic = self.topics.setdefault(name, Topic(name))
+        if topic.apply(op) == "reset":
+            self.resets.append((name, op.get("reason")))
+        return topic
+
+    def find(self, kind, topic=None, **fields):
+        for name, held in self.topics.items():
+            if topic and name != topic:
+                continue
+            for item in held.items:
+                if item.get("kind") != kind:
+                    continue
+                if all(item.get(k) == v for k, v in fields.items()):
+                    return item
+        return None
+
+
 class Client:
-    """The swarm, as a client reaches it: one token, one port, HTTP."""
+    """The coordinator, as a client reaches it: one token, one port, HTTP."""
 
     def __init__(self, port, token):
         self.port = port
         self.token = token
+        self.rid = 0
 
     def request(self, method, path, body=None, token=None, headers=None, timeout=30):
         conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=timeout)
-        h = {"Authorization": f"Bearer {self.token if token is None else token}"}
-        if token == "":
-            h = {}
+        auth = self.token if token is None else token
+        h = {} if auth == "" else {"Authorization": f"Bearer {auth}"}
         h.update(headers or {})
         data = None
         if body is not None:
@@ -161,24 +212,30 @@ class Client:
     def get(self, path, **kw):
         return self.request("GET", path, **kw)
 
-    def post(self, path, body=None, **kw):
-        return self.request("POST", path, body if body is not None else {}, **kw)
+    def op(self, name, args=None, op_rid=None):
+        self.rid += 1
+        body = {"rid": op_rid or f"e2e-{self.rid}", "op": name, "args": args or {}}
+        return self.request("POST", "/ops", body=body)
 
-    def command(self, text):
-        return self.post("/command", {"text": text})
+    def snapshot(self, topics="session,swarm,lane:*", items=200):
+        status, body = self.get(f"/snapshot?topics={topics}&items={items}")
+        return body if status == 200 else None
 
-    def stream(self, path, headers=None, timeout=60):
+    def topic_state(self, name):
+        snap = self.snapshot(topics=name, items=1) or {}
+        return (snap.get("topics") or {}).get(name, {}).get("state") or {}
+
+    def stream(self, path, timeout=60):
         """Yield (id, event, data) from an SSE GET until it ends or times out."""
         conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=timeout)
         try:
             h = {"Authorization": f"Bearer {self.token}"}
-            h.update(headers or {})
             conn.request("GET", path, headers=h)
             resp = conn.getresponse()
             if resp.status != 200:
                 yield (None, "http-error", resp.status)
                 return
-            event = {"id": None, "event": None, "data": None}
+            frame = {"id": None, "event": None, "data": None}
             while True:
                 try:
                     line = resp.fp.readline()
@@ -188,109 +245,81 @@ class Client:
                     break
                 line = line.decode(errors="replace").rstrip("\n")
                 if line == "":
-                    if event["event"]:
+                    if frame["event"]:
                         try:
-                            yield (event["id"], event["event"], json.loads(event["data"]))
+                            yield (frame["id"], frame["event"], json.loads(frame["data"]))
                         except ValueError:
-                            yield (event["id"], event["event"], event["data"])
-                    event = {"id": None, "event": None, "data": None}
+                            yield (frame["id"], frame["event"], frame["data"])
+                    frame = {"id": None, "event": None, "data": None}
                 elif line.startswith(":"):
                     continue
                 else:
                     key, _, value = line.partition(": ")
-                    event[key] = int(value) if key == "id" else value
+                    frame[key] = value
         finally:
             conn.close()
 
 
 class Collector(threading.Thread):
-    """Read an SSE stream in the background until a stop event (or the end)."""
+    """Follow one subscription in the background, applying its ops to a VIEW."""
 
-    def __init__(self, client, path, stop_types=(), headers=None, timeout=60):
+    def __init__(self, client, topics="session,swarm,lane:*", timeout=120):
         super().__init__(daemon=True)
         self.client = client
-        self.path = path
-        self.stop_types = set(stop_types)
-        self.headers = headers
+        self.path = f"/stream?topics={topics}"
         self.timeout = timeout
-        self.events = []
+        self.view = View(topics.split(","))
+        self.hello = None
         self.error = None
+        self.stop = threading.Event()
 
     def run(self):
         try:
-            for eid, etype, data in self.client.stream(self.path, headers=self.headers,
-                                                       timeout=self.timeout):
-                self.events.append((eid, etype, data))
-                if etype in self.stop_types:
-                    break
-        except Exception as e:                      # a stream that dies is the test's to see
+            for _, etype, data in self.client.stream(self.path, timeout=self.timeout):
+                if self.stop.is_set():
+                    return
+                if etype == "http-error":
+                    self.error = f"HTTP {data}"
+                    return
+                if etype != "op" or not isinstance(data, dict):
+                    continue
+                if data.get("op") == "hello":
+                    self.hello = data
+                    continue
+                self.view.apply(data)
+        except Exception as e:                          # a stream that dies is the test's to see
             self.error = e
-
-    def types(self):
-        return [e[1] for e in self.events]
-
-    def ids(self):
-        return [e[0] for e in self.events if e[0] is not None]
-
-
-class Stub:
-    """tests/stub-messages.py: the scripted model both agents talk to."""
-
-    def __init__(self):
-        self.port = free_port()
-        self.proc = subprocess.Popen([sys.executable,
-                                      os.path.join(ROOT, "tests", "stub-messages.py"),
-                                      str(self.port)], stdout=subprocess.PIPE, text=True)
-        assert self.proc.stdout.readline().startswith("stub listening")
-
-    def requests(self):
-        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
-        conn.request("GET", "/_requests")
-        data = json.loads(conn.getresponse().read())
-        conn.close()
-        return data
-
-    def find(self, role, needle, after=0.0):
-        """The first request by ROLE whose last user text contains NEEDLE and
-        that arrived at or after AFTER — a wall-clock time taken before the
-        prompt, so a stale request from an earlier step is not mistaken for
-        this one's."""
-        for r in self.requests():
-            if r["role"] == role and needle in r["last_user"] and r["time"] >= after:
-                return r
-        return None
 
 
 class Swarm:
-    """One `evo-swarm serve` process, its token, and what it answers."""
+    """One `evo-swarm serve` process: its ready file, its token, its log."""
 
-    def __init__(self, home, proj, env, token_file, workers=LANES, resume=False):
-        self.port = free_port()
-        self.token_file = token_file
-        args = [SWARM, "serve", "--port", str(self.port),
-                "--token-file", token_file, "--workers", str(workers), "--evo", EVO]
+    def __init__(self, home, proj, env, ready_file, workers=LANES, resume=False):
+        self.ready_file = ready_file
+        args = [SWARM, "serve", "--port", "0", "--ready-file", ready_file,
+                "--watch-stdin", "--workers", str(workers), "--evo", EVO]
         if resume:
             args.append("--resume")
-        self.log = open(token_file + ".log", "w")
-        self.proc = subprocess.Popen(args, cwd=proj, env=env, stdin=subprocess.DEVNULL,
+        self.args = args
+        self.log_path = ready_file + ".log"
+        self.log = open(self.log_path, "w")
+        self.proc = subprocess.Popen(args, cwd=proj, env=env, stdin=subprocess.PIPE,
                                      stdout=self.log, stderr=subprocess.STDOUT,
                                      start_new_session=True)
-        self.token = None
+        self.ready = None
         self.client = None
 
-    def wait_ready(self, timeout=90):
-        """The token file, then /health, under one deadline: T once the swarm
-        answers, F once it exits or the deadline passes."""
+    def wait_ready(self, timeout=120):
         deadline = time.time() + timeout
         while time.time() < deadline:
-            if os.path.exists(self.token_file) and os.path.getsize(self.token_file) > 0:
-                self.token = open(self.token_file).read().strip()
-                self.client = self.client or Client(self.port, self.token)
+            if os.path.exists(self.ready_file) and os.path.getsize(self.ready_file):
                 try:
-                    if self.client.get("/health", timeout=5)[0] == 200:
-                        return True
-                except OSError:
-                    pass
+                    self.ready = json.load(open(self.ready_file))
+                except ValueError:
+                    self.ready = None
+                if self.ready:
+                    self.client = Client(self.ready["port"], self.ready["token"])
+                    return True
             if self.proc.poll() is not None:
                 return False
             time.sleep(0.1)
@@ -308,122 +337,279 @@ class Swarm:
                 os.killpg(self.proc.pid, signal.SIGKILL)
             except OSError:
                 self.proc.kill()
+            self.proc.wait(timeout=10)
 
-    def log_tail(self, lines=40):
+    def log_tail(self, lines=60):
         try:
-            with open(self.log.name, errors="replace") as f:
+            with open(self.log_path, errors="replace") as f:
                 return "".join(f.readlines()[-lines:])
         except OSError:
             return ""
 
 
 def lane_dirs(home):
-    return sorted(glob.glob(os.path.join(home, "swarm", "*", "lane-*")),
-                  key=lambda d: int(d.rsplit("-", 1)[1]))
+    return sorted(
+        (d for d in _lane_dir_candidates(home)),
+        key=lambda d: int(d.rsplit("-", 1)[1]))
 
 
-def lane_health(directory):
-    """A lane's /health status, read from its own url+token on disk, or None
-    when it does not answer — how the test tells a stopped lane from a live one
-    without the swarm's HTTP API ever handing out a lane's address."""
-    try:
-        port = int(open(os.path.join(directory, "url")).read().strip().rsplit(":", 1)[1])
-        token = open(os.path.join(directory, "token")).read().strip()
-    except (OSError, ValueError):
-        return None
-    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=3)
-    try:
-        conn.request("GET", "/health", headers={"Authorization": f"Bearer {token}"})
-        resp = conn.getresponse()
-        resp.read()
-        return resp.status
-    except OSError:
-        return None
-    finally:
-        conn.close()
+def _lane_dir_candidates(home):
+    import glob
+    return glob.glob(os.path.join(home, "swarm", "*", "lane-*"))
 
 
-def lane_secrets(home):
-    """Every lane's token, for the no-secrets check."""
-    out = []
-    for d in lane_dirs(home):
+def lane_ready(home, n):
+    """One lane's ready file — its own address, its own session."""
+    import glob
+    for path in glob.glob(os.path.join(home, "swarm", "*", f"lane-{n}", "ready.json")):
         try:
-            out.append(open(os.path.join(d, "token")).read().strip())
-        except OSError:
-            pass
-    return out
-
-
-def tree_secret_leaks(home):
-    """Files under EVO_HOME (except the deliberate init source) containing the
-literal provider secret."""
-    leaks = []
-    for path in glob.glob(os.path.join(home, "**", "*"), recursive=True):
-        if os.path.isfile(path) and path != os.path.join(home, "init.lisp"):
-            try:
-                if SECRET in open(path, errors="replace").read():
-                    leaks.append(path)
-            except OSError:
-                pass
-    return leaks
-
-
-def wait_for(predicate, timeout=30, interval=0.1):
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        try:
-            value = predicate()
-        except Exception:
-            value = None
-        if value:
-            return value
-        time.sleep(interval)
+            return json.load(open(path))
+        except (OSError, ValueError):
+            return None
     return None
 
 
-def get_lanes(client):
-    status, body = client.get("/lanes")
-    if status != 200:
+def lane_session_file(home, n):
+    """The lane's journal, as its ready file named it — the file a restart
+    must resume, and the proof that the session reached disk."""
+    ready = lane_ready(home, n) or {}
+    path = (ready.get("session") or {}).get("path")
+    return path if path and os.path.exists(path) else None
+
+
+def lane_pids(home):
+    """Every lane process still alive, read from the lanes' own ready files."""
+    pids = []
+    for directory in lane_dirs(home):
+        path = os.path.join(directory, "ready.json")
+        try:
+            pids.append(json.load(open(path))["pid"])
+        except (OSError, ValueError, KeyError):
+            pass
+    return pids
+
+
+def alive(pid):
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def swarm_rows(state):
+    lanes = (state or {}).get("lanes") or []
+    return {int(pick(row, "n") or 0): row for row in lanes}
+
+
+def lane_state(client, n):
+    return client.topic_state(f"lane:{n}")
+
+
+# --------------------------------------------------------------------------
+
+def run_checks(swarm, stub, home, work, proj):
+    client = swarm.client
+
+    # --- the ready file and /health ----------------------------------------
+    mode = os.stat(swarm.ready_file).st_mode & 0o777
+    check("the ready file is mode 0600", mode == 0o600, oct(mode))
+    check("the ready file names the port, the url, the token and the session",
+          all(swarm.ready.get(k) for k in ("port", "url", "token", "epoch", "pid"))
+          and (swarm.ready.get("session") or {}).get("path"),
+          swarm.ready)
+    check("...and the program", swarm.ready.get("program") == "evo-swarm",
+          swarm.ready.get("program"))
+    status, health = client.get("/health")
+    check("GET /health is 200 and says evo-swarm",
+          status == 200 and health.get("program") == "evo-swarm", health)
+    check("...with the epoch and pid its ready file named",
+          health.get("epoch") == swarm.ready["epoch"]
+          and health.get("pid") == swarm.ready["pid"], health)
+
+    # --- auth --------------------------------------------------------------
+    check("no token -> 401", client.get("/snapshot?topics=session", token="")[0] == 401)
+    check("wrong token -> 401", client.get("/snapshot?topics=session", token="x")[0] == 401)
+    status, _ = client.request("POST", "/ops", body={"rid": "auth-1", "op": "input.send",
+                                                     "args": {"text": "hi"}}, token="")
+    check("no token -> 401 on /ops", status == 401, status)
+    check("an unknown route is 404", client.get("/lanes")[0] == 404)
+
+    # --- /ops --------------------------------------------------------------
+    status, reply = client.op("nonsense.op", {}, op_rid="bad-op")
+    check("/ops refuses an unknown op with a code, HTTP 200",
+          status == 200 and reply.get("ok") is False
+          and (reply.get("error") or {}).get("code"), reply)
+    status, reply = client.op("input.send", {"text": "hello"}, op_rid="dupe")
+    first = reply
+    status, again = client.op("input.send", {"text": "hello"}, op_rid="dupe")
+    check("a retried rid is answered from the cache, not acted on twice",
+          again == first and first.get("ok"), (first, again))
+    check("...and the reply carries an item id and a cursor",
+          first.get("ok") and (first.get("result") or {}).get("item_id")
+          and isinstance(first.get("seq"), int), first)
+
+    # --- the swarm topic and the lane topics --------------------------------
+    lanes = wait_for(lambda: _all_idle(client), 120)
+    check(f"the snapshot carries session, swarm and lane:1..{LANES}",
+          lanes is not None, client.snapshot())
+    state = client.topic_state("swarm")
+    rows = swarm_rows(state)
+    check("the swarm topic names its id and workers",
+          state.get("id") and state.get("workers") == LANES, state)
+    check("...one row per lane, numbered 1..N, every one idle",
+          sorted(rows) == list(range(1, LANES + 1))
+          and all(row.get("state") == "idle" for row in rows.values()), state)
+    check("...with a model, a context and a last item per lane",
+          all(row.get("model") is not None and row.get("context") is not None
+              for row in rows.values()), state)
+    check("...and a live pid each (a lane is a process)",
+          all(row.get("pid") and alive(row["pid"]) for row in rows.values()), state)
+    check("the swarm is not busy and not waiting", not state["status"].get("busy")
+          and not state["status"].get("waiting_on_lanes"), state["status"])
+    one = lane_state(client, 1)
+    check("lane 1's own topic carries its items and its state",
+          one.get("status") == "idle" and one.get("session", {}).get("id"), one)
+
+    # --- one subscription carries every lane --------------------------------
+    collector = Collector(client)
+    collector.start()
+    check("the stream opens with hello {epoch, seq}",
+          wait_for(lambda: collector.hello, 20) is not None, collector.hello)
+
+    # --- a delegated task ---------------------------------------------------
+    status, reply = client.op("input.send",
+                              {"text": f'CALL delegate {{"lane":1,"task":"{TASK}"}}'})
+    check("the coordinator accepts the prompt", reply.get("ok"), reply)
+    delegated = wait_for(lambda: stub.find("lane 1", "e2e lane work"), 60)
+    check("the coordinator delegated it to lane 1",
+          delegated and delegated.get("system_has_report_note"), delegated)
+    working = wait_for(lambda: (_lane_row(client, 1).get("state") == "working"
+                                and _lane_row(client, 1)), 60)
+    check("the swarm topic shows lane 1 working on the task",
+          working is not None and TASK in (working.get("task") or ""), working)
+    busy = wait_for(lambda: client.topic_state("swarm")["status"].get("busy") == 1, 30)
+    check("...and the swarm is busy while it works", busy is not None)
+    check("...and waiting_on_lanes, because the coordinator has nothing to do",
+          wait_for(lambda: client.topic_state("swarm")["status"]
+                   .get("waiting_on_lanes"), 30) is not None)
+    check("...and the lane's own topic says running",
+          lane_state(client, 1).get("status") == "running", lane_state(client, 1))
+    streamed = wait_for(lambda: "slow1" in collector.view.topics["lane:1"].texts(), 60)
+    check("the delegated work streams on topic lane:1 through that one subscription",
+          streamed is not None, collector.view.topics["lane:1"].texts()[:200])
+    check("...as item.add + item.append ops, not one row per delta",
+          any(op.get("op") == "item.append" and op.get("topic") == "lane:1"
+              for op in collector.view.ops),
+          sorted({op.get("op") for op in collector.view.ops}))
+
+    # --- paging, both ways ---------------------------------------------------
+    lane_items = client.snapshot(topics="lane:1", items=2)["topics"]["lane:1"]
+    ids = [i.get("id") for i in lane_items.get("items") or []]
+    check("a lane's snapshot takes the newest N items", len(ids) <= 2 and ids, ids)
+    status, body = client.get(f"/items?topic=lane:1&before={ids[0]}&limit=5")
+    check("GET /items pages backwards through a lane",
+          status == 200 and (body.get("items") or []), body)
+    status, body = client.get(f"/items/{ids[-1]}?topic=lane:1")
+    check("GET /items/<id> returns one item whole",
+          status == 200 and (body.get("item") or {}).get("id") == ids[-1], body)
+    check("paging a topic nobody registered is empty, not an error",
+          client.get("/items?topic=nope&limit=5")[0] in (200, 404))
+
+    # --- killing a lane -----------------------------------------------------
+    # Wait for the run to settle first: a session reaches disk when its first
+    # assistant message lands, which is also when "resumes its exact session"
+    # is a claim worth making.
+    settled = wait_for(lambda: (_lane_row(client, 1)
+                                if _lane_row(client, 1).get("state") == "idle"
+                                and lane_session_file(home, 1) else None), 120)
+    check("the lane's run settles and its session reaches disk",
+          settled is not None, _lane_row(client, 1))
+    before = lane_state(client, 1)
+    session_id = (before.get("session") or {}).get("id")
+    session_file = lane_session_file(home, 1)
+    pid = _lane_row(client, 1)["pid"]
+    restarts = _lane_row(client, 1)["restarts"]
+    os.kill(pid, signal.SIGKILL)
+    check("the lane's process is gone", wait_for(lambda: not alive(pid), 30))
+    back = wait_for(lambda: (_lane_row(client, 1)
+                             if _lane_row(client, 1).get("state") == "idle"
+                             and _lane_row(client, 1).get("restarts") > restarts
+                             else None), 180)
+    check("the coordinator restarts it and it comes back idle", back is not None,
+          _lane_row(client, 1))
+    check("...with a new process", back and back["pid"] != pid, back)
+    check("...on the exact session it was on",
+          (lane_state(client, 1).get("session") or {}).get("id") == session_id
+          and lane_session_file(home, 1) == session_file,
+          (lane_state(client, 1).get("session"), session_id, session_file))
+    resumed = wait_for(lambda: (_lane_row(client, 1)
+                                if client.snapshot(topics="lane:1", items=200
+                                                   )["topics"]["lane:1"]["items"]
+                                else None), 30)
+    items = (client.snapshot(topics="lane:1", items=200)["topics"]["lane:1"]["items"])
+    check("...with the work it had already done still in its items",
+          any("e2e lane work" in json.dumps(i) for i in items),
+          json.dumps(items)[-300:])
+    check("...and a topic.reset lane:1, so every client re-snapshots it",
+          wait_for(lambda: any(t == "lane:1" and r == "lane_restarted"
+                               for t, r in collector.view.resets), 60) is not None,
+          collector.view.resets)
+    event = wait_for(lambda: collector.view.find("lane_event", topic="session"), 30)
+    check("...and the coordinator is told, as a lane_event item",
+          event is not None and pick(event, "lane") == 1, event)
+    check("...naming the crash and the restart",
+          event and pick(event, "event") in ("crashed", "restarted"), event)
+    check("...which it hears as a message with a :lane-event origin",
+          _lane_event_origins(client), _lane_event_origins(client)[:1])
+
+    # --- run.interrupt with scope swarm -------------------------------------
+    status, reply = client.op("input.send",
+                              {"text": f'CALL delegate {{"lane":2,"task":"{TASK}"}}'})
+    check("a second task is delegated to lane 2", reply.get("ok"), reply)
+    check("...and lane 2 starts working",
+          wait_for(lambda: _lane_row(client, 2).get("state") == "working", 60) is not None)
+    status, reply = client.op("run.interrupt", {"scope": "swarm"})
+    check("run.interrupt scope swarm is answered",
+          status == 200 and reply.get("ok"), reply)
+    interrupted = (reply.get("result") or {}).get("interrupted") or []
+    check("...naming the session and every lane", "session" in interrupted
+          and any(str(i).startswith("lane:") for i in interrupted), interrupted)
+    check("...and every lane stops",
+          wait_for(lambda: all(_lane_row(client, n).get("state") in ("idle", "down")
+                               for n in range(1, LANES + 1)), 60) is not None,
+          [_lane_row(client, n) for n in range(1, LANES + 1)])
+    check("...while the swarm says it is no longer busy",
+          wait_for(lambda: not client.topic_state("swarm")["status"].get("busy"), 30)
+          is not None)
+
+    collector.stop.set()
+
+
+def _all_idle(client):
+    rows = swarm_rows(client.topic_state("swarm"))
+    if len(rows) != LANES:
         return None
-    return lane_list(body)
+    return rows if all(r.get("state") == "idle" for r in rows.values()) else None
 
 
-def wait_lane_state(client, n, want, timeout=30):
-    def ready():
-        lanes = get_lanes(client)
-        lane = find_lane(lanes, n) if lanes else None
-        return lane if lane is not None and lane_state(lane) == want else None
-    return wait_for(ready, timeout)
+def _lane_row(client, n):
+    return swarm_rows(client.topic_state("swarm")).get(n) or {}
 
 
-def events_until(client, since, upto, timeout=20, cap=8000):
-    """Replay the coordinator's log from SINCE to UPTO (a cursor), inclusive."""
+def _lane_event_origins(client):
+    """The coordinator's own journal: a lane's crash is a message whose origin
+    says :lane-event, so nothing has to parse the prose a model reads."""
+    status, body = client.get("/debug/journal")
+    if status != 200:
+        return []
+    entries = body.get("entries") or []
     out = []
-    for eid, etype, data in client.stream(f"/events?since={since}", timeout=timeout):
-        out.append((eid, etype, data))
-        if (upto is not None and eid is not None and eid >= upto) or len(out) >= cap:
-            break
+    for entry in entries:
+        origin = entry.get("origin") or (entry.get("message") or {}).get("origin")
+        if isinstance(origin, dict) and origin.get("kind") == "lane_event":
+            out.append(origin)
     return out
-
-
-def lane_state_events(events):
-    out = []
-    for eid, etype, data in events:
-        if etype == "lane-state":
-            out.append((eid, pick(data, "lane", "n", "number"),
-                        (pick(data, "state", "status") or ""), data))
-    return out
-
-
-def lanes_all_idle(client):
-    """The lanes once every one of them is idle, else None — what a caller
-    waits on when it needs the swarm settled."""
-    lanes = get_lanes(client)
-    return lanes if lanes and all(lane_state(l) == "idle" for l in lanes) else None
-
-
-def lane_numbers(lanes):
-    return sorted(int(lane_n(l)) for l in (lanes or []) if lane_n(l) is not None)
 
 
 def main():
@@ -444,214 +630,96 @@ def main():
                 ':max-output 8000 :effort t)\n'
                 '(evo:set-setting :model "stub-a")\n')
 
-    env = dict(os.environ, EVO_HOME=home, EVO_BINARY=EVO, TERM="xterm-256color")
-    for var in ("EVO_SERVE_TOKEN", "EVO_SUPERVISED_CHILD", "EVO_NO_SUPERVISOR",
-                "EVO_SESSIONS_DIR", "EVO_SERVE_WATCH_PID", "ANTHROPIC_API_KEY"):
-        env.pop(var, None)
+    # A lane must not inherit this process's supervision or session: a foreign
+    # EVO_SESSIONS_DIR would put the swarm's journals in someone else's home.
+    env = {k: v for k, v in os.environ.items()
+           if not k.startswith(("EVO_", "ANTHROPIC_"))}
+    env.update(HOME=home, EVO_HOME=home, EVO_BINARY=EVO, TERM="xterm-256color")
 
-    first = Swarm(home, proj, env, os.path.join(work, "token-1"))
-    second = None
+    swarm = Swarm(home, proj, env, os.path.join(work, "ready.json"))
     try:
-        if not first.wait_ready():
-            print(f"swarm-serve-e2e: `evo-swarm serve` did not come up (exit {first.proc.poll()}) — "
-                  "the feature is not implemented yet; this test awaits it.")
-            failed += 1
+        if not swarm.wait_ready():
+            print("swarm-serve-e2e: `evo-swarm serve` did not come up "
+                  f"(exit {swarm.proc.poll()})")
+            failed_early = True
         else:
-            run_first(first, stub, home, work)
-            # --- shutdown stops every lane ---------------------------------------
-            session_before = first.client.get("/journal")[1]["path"]
-            dirs = lane_dirs(home)
-            check(f"{LANES} lane directories", len(dirs) == LANES, dirs)
-            check("every lane answers before shutdown",
-                  all(lane_health(d) == 200 for d in dirs), [lane_health(d) for d in dirs])
-            status, reply = first.client.post("/shutdown")
-            check("shutdown accepted", status == 200 and reply.get("ok"), reply)
-            code = first.wait(timeout=30)
-            check("the swarm exits 0 after shutdown (supervisor included)", code == 0, code)
-            check("every lane is gone after shutdown",
-                  wait_for(lambda: all(lane_health(d) is None for d in dirs), 30),
-                  [(d, lane_health(d)) for d in dirs])
-            leaks = tree_secret_leaks(home)
-            check("no provider secret is written to a journal, log or lane file",
-                  not leaks, leaks)
-            check("the token file is removed on clean exit", not os.path.exists(first.token_file))
+            failed_early = False
+            run_checks(swarm, stub, home, work, proj)
 
-            # --- --resume restores the swarm -------------------------------------
-            second = Swarm(home, proj, env, os.path.join(work, "token-2"), resume=True)
-            check("`evo-swarm serve --resume` comes up", second.wait_ready())
-            if second.client:
-                status, health = second.client.get("/health")
-                check("the resumed swarm names itself a swarm again",
-                      status == 200 and pick(health, "name", "server") == "evo-swarm", health)
-                check("resume reuses the same swarm",
-                      len(glob.glob(os.path.join(home, "swarm", "*"))) == 1)
-                resumed = wait_for(lambda: lanes_all_idle(second.client), 120)
-                check("every lane comes back up", resumed is not None, get_lanes(second.client))
-                check("the lane numbering is 1..N",
-                      lane_numbers(resumed) == list(range(1, LANES + 1)), lane_numbers(resumed))
-                body = wait_for(lambda: ("e2e lane work"
-                                         in json.dumps(second.client.get("/lanes/1/transcript")[1])
-                                         or None), 30)
-                check("a lane's session was resumed", bool(body),
-                      json.dumps(second.client.get("/lanes/1/transcript")[1])[-400:])
-                path = second.client.get("/journal")[1]["path"]
-                check("the coordinator resumed its own session",
-                      os.path.realpath(path) == os.path.realpath(session_before),
-                      (path, session_before))
-                dirs = lane_dirs(home)
-                check("the resumed swarm stops its lanes too",
-                      second.client.post("/shutdown")[0] == 200
-                      and second.wait(timeout=30) == 0
-                      and wait_for(lambda: all(lane_health(d) is None for d in dirs), 30))
+        # --- shutdown ---------------------------------------------------------
+        dirs = lane_dirs(home)
+        check(f"{LANES} lane directories", len(dirs) == LANES, dirs)
+        pids = lane_pids(home)
+        check("every lane published a ready file of its own, all alive",
+              len(pids) == LANES and all(alive(p) for p in pids), pids)
+        check("the coordinator owns them: they are not supervised by it",
+              all(p != swarm.ready["pid"] for p in pids), pids)
+        status, reply = swarm.client.op("server.shutdown", {})
+        check("server.shutdown is accepted", status == 200 and reply.get("ok"), reply)
+        code = swarm.wait(timeout=30)
+        check("the swarm exits 0 (supervisor included)", code == 0, code)
+        check("every lane process is gone with it",
+              wait_for(lambda: not any(alive(p) for p in pids), 30),
+              [(p, alive(p)) for p in pids])
+        check("the ready file is removed on clean exit",
+              not os.path.exists(swarm.ready_file))
+        check("no lane is orphaned (a lane's stdin is the coordinator's pipe)",
+              wait_for(lambda: not any(alive(p) for p in lane_pids(home)), 20))
+        leaks = _secret_leaks(home)
+        check("no provider secret is written to a journal, log or lane file",
+              not leaks, leaks)
     except BaseException as e:
         failed += 1
         print(f"FAIL aborted: {e!r}")
     finally:
-        for s in (first, second):
-            if s is not None:
-                s.kill()
+        swarm.kill()
         stub.proc.kill()
-        for s in (first, second):
-            if s is not None:
-                s.log.close()
+        swarm.log.close()
     if failed:
-        print(first.log_tail())
+        print(swarm.log_tail())
     else:
         shutil.rmtree(work, ignore_errors=True)
     print(f"\nswarm-serve-e2e: {passed} passed, {failed} failed")
     return 1 if failed else 0
 
 
-def run_first(swarm, stub, home, work):
-    c = swarm.client
+def _secret_leaks(home):
+    leaks = []
+    for root, _dirs, files in os.walk(home):
+        for name in files:
+            path = os.path.join(root, name)
+            if path == os.path.join(home, "init.lisp"):
+                continue
+            try:
+                if SECRET in open(path, errors="replace").read():
+                    leaks.append(path)
+            except OSError:
+                pass
+    return leaks
 
-    # --- auth, on the unchanged protocol and on the swarm routes -------------
-    check("no token -> 401", c.get("/state", token="")[0] == 401)
-    check("wrong token -> 401", c.get("/state", token="not-the-token")[0] == 401)
-    check("unknown endpoint -> 404", c.get("/nope")[0] == 404)
-    check("no token -> 401 on /lanes", c.get("/lanes", token="")[0] == 401)
-    check("wrong token -> 401 on /lanes", c.get("/lanes", token="nope")[0] == 401)
-    check("no token -> 401 on a lane's transcript",
-          c.get("/lanes/1/transcript", token="")[0] == 401)
-    check("no token -> 401 on a lane's events",
-          c.get("/lanes/1/events", token="")[0] == 401)
 
-    # --- /health names the server a swarm ------------------------------------
-    status, health = c.get("/health")
-    check("GET /health is 200", status == 200, health)
-    check("health names it evo-swarm", pick(health, "name", "server") == "evo-swarm", health)
-    check("health carries a version", isinstance(pick(health, "version"), str)
-          and pick(health, "version") != "", health)
-    features = pick(health, "features") or []
-    check("health lists the swarm feature", "swarm" in features, health)
+class Stub:
+    """tests/stub-messages.py: the scripted model both agents talk to."""
 
-    # --- the coordinator, through the unchanged protocol ---------------------
-    status, state = c.get("/state")
-    check("GET /state works and the coordinator is idle",
-          status == 200 and state.get("status") == "idle", state)
-    check("state resolves the coordinator's model", state.get("model") == "stub-a", state)
-    status, journal = c.get("/journal")
-    check("GET /journal works", status == 200 and journal.get("entries") is not None, journal)
-    status, sessions = c.get("/sessions")
-    check("GET /sessions names the pending coordinator session",
-          status == 200 and sessions.get("current", "").endswith(".sexp"), sessions)
-    status, registry = c.get("/registry")
-    check("GET /registry lists the model", status == 200
-          and "stub-a" in json.dumps(registry), registry)
-    status, reply = c.command("/model")
-    check("POST /command runs a slash command", status == 200
-          and reply.get("choices", {}).get("items"), reply)
+    def __init__(self):
+        self.port = free_port()
+        self.proc = subprocess.Popen([sys.executable,
+                                      os.path.join(ROOT, "tests", "stub-messages.py"),
+                                      str(self.port)], stdout=subprocess.PIPE, text=True)
+        assert self.proc.stdout.readline().startswith("stub listening")
 
-    # --- /lanes: every lane, its panel fields, nothing private ---------------
-    lanes = wait_for(lambda: lanes_all_idle(c), 120)
-    check(f"GET /lanes lists {LANES} lanes, every one idle", lanes is not None, get_lanes(c))
-    check("the lane numbering is 1..N",
-          lane_numbers(lanes) == list(range(1, LANES + 1)), lane_numbers(lanes))
-    check("every lane carries goal, worktree, branch and restart fields",
-          bool(lanes) and all(all(has_any(l, *keys) for keys in (
-              ("goal", "goal_status"), ("worktree",), ("branch",), ("restarts",)))
-                              for l in lanes), lanes)
-    text = json.dumps(get_lanes(c))
-    secrets = lane_secrets(home)
-    check(f"exactly {LANES} lane tokens on disk, one per lane",
-          len(secrets) == LANES and len(set(secrets)) == LANES, secrets)
-    check("no lane token reaches the client", all(t not in text for t in secrets), secrets)
-    check("no lane URL reaches the client", "http" not in text, text[:200])
-    check("a lane is read-only over HTTP (POST /lanes -> 405)", c.post("/lanes")[0] == 405)
-    check("a lane's transcript is read-only (POST -> 405)",
-          c.post("/lanes/1/transcript")[0] == 405)
-    check("an unknown lane's transcript is 404", c.get("/lanes/99/transcript")[0] == 404)
-    check("an unknown lane's events is 404", c.get("/lanes/99/events")[0] == 404)
-    check("a bad lane-event cursor is 400 before streaming",
-          c.get("/lanes/1/events?since=abc")[0] == 400)
-    check("a negative lane-event cursor is 400 before streaming",
-          c.get("/lanes/1/events?since=-1")[0] == 400)
+    def requests(self):
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+        conn.request("GET", "/_requests")
+        data = json.loads(conn.getresponse().read())
+        conn.close()
+        return data
 
-    # --- a prompt is delegated to a lane -------------------------------------
-    t0 = time.time()
-    collector = Collector(c, "/lanes/1/events", stop_types=("settled",), timeout=60)
-    collector.start()
-    status, reply = c.post("/prompt", {"text": f'CALL delegate {{"lane":1,"task":"{TASK}"}}'})
-    check("POST /prompt starts the coordinator's run",
-          status == 200 and reply.get("task"), reply)
-    delegated = wait_for(lambda: stub.find("lane 1", "e2e lane work", t0), 30)
-    check("the coordinator delegated the task to lane 1 (worker prompt note)",
-          delegated and delegated["system_has_report_note"], delegated)
-    working = wait_lane_state(c, 1, "working", 30)
-    check("GET /lanes shows lane 1 working on the task",
-          working is not None and "e2e lane work" in lane_task(working), working)
-    check("the coordinator's own transcript recorded the delegation",
-          wait_for(lambda: ("e2e lane work" in json.dumps(c.get("/transcript")[1]) or None), 30)
-          is not None, json.dumps(c.get("/transcript")[1])[-400:])
-
-    # --- the lane's live events, and its transcript --------------------------
-    collector.join(timeout=60)
-    check("lane 1's live event stream relays its run",
-          "settled" in collector.types() and collector.error is None,
-          (collector.types()[:8], collector.error))
-    check("...carrying its streamed text",
-          "text-delta" in collector.types(), collector.types()[:12])
-    live_ids = collector.ids()
-    check("...with event ids", bool(live_ids), live_ids)
-
-    idle = wait_lane_state(c, 1, "idle", 30)
-    check("GET /lanes shows lane 1 idle again", idle is not None, get_lanes(c))
-
-    status, transcript = c.get("/lanes/1/transcript")
-    msgs = messages_of(transcript)
-    check("GET /lanes/1/transcript returns the lane's messages",
-          status == 200 and isinstance(msgs, list) and msgs, transcript)
-    body = json.dumps(transcript)
-    check("the lane's transcript has the task and its answer",
-          "e2e lane work" in body and "slow" in body, body[-400:])
-
-    # --- the lane's events are resumable -------------------------------------
-    if len(live_ids) >= 2:
-        pivot, last = live_ids[0], live_ids[-1]
-        resumed = []
-        for eid, etype, data in c.stream(f"/lanes/1/events?since={pivot}", timeout=15):
-            resumed.append((eid, etype, data))
-            if (eid is not None and eid >= last) or len(resumed) >= 8000:
-                break
-        resumed_ids = [e[0] for e in resumed if e[0] is not None]
-        check("lane 1's events resume after a given id",
-              bool(resumed_ids) and all(i > pivot for i in resumed_ids)
-              and last in resumed_ids, (pivot, last, resumed_ids[:8]))
-    else:
-        check("lane 1's events resume after a given id", False, live_ids)
-
-    # --- lane-state events on the coordinator's stream -----------------------
-    upto = c.get("/state")[1].get("cursor")
-    events = events_until(c, 0, upto)
-    tracked = [e for e in lane_state_events(events) if str(e[1]) == "1"]
-    states = [e[2] for e in tracked]
-    check("the coordinator's stream carries lane-state events for lane 1",
-          "working" in states and "idle" in states, tracked)
-    check("...working before idle",
-          ("working" in states and "idle" in states
-           and states.index("working") < states.index("idle")), states)
-    check("...the working event names the task",
-          any("e2e lane work" in json.dumps(e[3]) for e in tracked), tracked)
+    def find(self, role, needle):
+        for r in self.requests():
+            if r["role"] == role and needle in r["last_user"]:
+                return r
+        return None
 
 
 if __name__ == "__main__":
