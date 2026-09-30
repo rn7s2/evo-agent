@@ -505,23 +505,25 @@ did not register it; a lane whose default model is missing says why."
            (null (view-publish view (list :type :lane-state))))))
 
 (defun test-serve-view ()
-  "A serve view says through the command layer's host protocol and publishes
-through serve's own log: the call site never names the server's internals."
+  "A serve view says through the command layer's host protocol, which lands as
+a notice item on the server's op log; an event it publishes goes to the
+server's topic providers rather than to a log of its own, because what only a
+machine reads is a topic now (CONTRACT §7) — a lane's state is queried at GET
+/lanes."
   (let* ((server (evo.serve:make-server :port 0 :token "t"))
          (view (make-instance 'serve-view :server server)))
     (check "serve view: it names its server" (eq server (serve-view-server view)))
     (view-say view "lane 2 is working" :style :notice)
     (view-publish view (list :type :lane-state :lane 2 :state :working))
-    (let ((events (evo.serve::events-after (evo.serve::server-log server) 0)))
-      (check "serve view: a notice is one :output event on the server's log"
-             (and (= 2 (length events))
-                  (equal "output" (second (first events)))
-                  (search "\"lane 2 is working\"" (third (first events)))
-                  (search "\"style\":\"notice\"" (third (first events)))))
-      (check "serve view: a published event keeps its own type and fields"
-             (and (equal "lane-state" (second (second events)))
-                  (search "\"lane\":2" (third (second events)))
-                  (search "\"state\":\"working\"" (third (second events))))))
+    (let ((ops (evo.serve::op-log-ops-after (evo.serve::server-oplog server) 0)))
+      (check "serve view: a notice is one item op, kept whole"
+             (and (= 1 (length ops))
+                  (search "\"op\":\"item.add\"" (second (first ops)))
+                  (search "\"text\":\"lane 2 is working\"" (second (first ops)))
+                  (search "\"severity\":\"warn\"" (second (first ops)))))
+      (check "serve view: a published event is the providers' business, not the log's"
+             (not (search "lane-state" (reduce (lambda (a op) (concatenate 'string a (second op)))
+                                               ops :initial-value "")))))
     (check "serve view: a repaint is nothing to do" (null (view-repaint view)))))
 
 (defun test-record ()

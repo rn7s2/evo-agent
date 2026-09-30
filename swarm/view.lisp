@@ -84,7 +84,10 @@ client drives."))
   nil)
 
 (defmethod view-publish ((view serve-view) event)
-  (evo.serve:server-publish (serve-view-server view) event))
+  ;; A kernel event reaches a client through the server's topics now, not
+  ;; through an event log: hand it to every provider and let the view publish
+  ;; the ops it projects (CONTRACT §7).
+  (evo.serve:topic-on-event (serve-view-server view) event))
 
 (defmethod view-run ((view serve-view) agent resumed-p)
   (evo.serve:serve (serve-view-server view) agent :resumed-p resumed-p))
