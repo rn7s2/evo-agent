@@ -23,8 +23,8 @@
     text))
 
 (defun lane-aged (ms)
-  "How long ago MS (epoch milliseconds) was, in the TUI's short form."
-  (and ms (evo.tui:short-duration (max 0 (- (now-ms) ms)))))
+  "How long ago MS (epoch milliseconds) was, in the shared short form."
+  (and ms (evo.view:short-duration (max 0 (- (evo.view:now-ms) ms)))))
 
 (defun lane-status-line (lane)
   (destructuring-bind (&key n state task pid worktree branch restarts reports model &allow-other-keys)
@@ -60,8 +60,8 @@
   (with-swarm-lock ()
     (setf (lane-task lane) task
           (lane-state lane) :working
-          (lane-task-started lane) (now-ms)
-          (lane-step-started lane) (now-ms)))
+          (lane-task-started lane) (evo.view:now-ms)
+          (lane-step-started lane) (evo.view:now-ms)))
   (swarm-lane-changed)
   (record-swarm))
 

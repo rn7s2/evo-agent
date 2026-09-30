@@ -110,7 +110,7 @@ coordinator's own supervision."
 it, design §7.2), a port of its own choosing announced in its ready file, and
 stdin a pipe we hold (EOF = the coordinator is gone).  With RESUME it continues
 its exact session (CONTRACT §8), never a bare --resume."
-  (append (list "serve" "--no-userspace" "--no-supervisor"
+  (append (list "serve" "--no-userspace" "--no-supervisor" "--as-lane"
                 "--port" "0"
                 "--ready-file" (namestring (ready-file-path lane))
                 "--watch-stdin")

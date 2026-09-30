@@ -9,10 +9,6 @@
 
 (in-package :evo.swarm)
 
-(defun now-ms ()
-  "Wall-clock milliseconds since the Unix epoch — the only clock on the wire."
-  (* 1000 (- (get-universal-time) 2208988800)))
-
 (defstruct (lane (:constructor %make-lane))
   "One worker lane — an `evo-agent serve` process the coordinator owns.  Every
 slot is guarded by the swarm's lock: the lane's mirror thread, the coordinator's
