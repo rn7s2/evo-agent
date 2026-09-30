@@ -154,28 +154,34 @@ Assigns :id/:parent-id/:timestamp.  Returns the completed entry.
 Registered listeners are notified after the entry is part of the journal, with
 the journal lock RELEASED — a listener that folds state (the view model does)
 must be able to read the journal it was told about."
-  (let ((entry (bt:with-lock-held ((journal-lock journal))
-                 (let* ((id (loop for candidate = (gen-id)
-                                  unless (gethash candidate (journal-index journal))
-                                    return candidate))
-                        (entry (append (list :type (pget plist :type)
-                                             :id id
-                                             :parent-id (or parent-id (journal-leaf-id journal))
-                                             :timestamp (iso8601-now))
-                                       (loop for (k v) on plist by #'cddr
-                                             unless (member k '(:type :id :parent-id :timestamp))
-                                               append (list k v)))))
-                   (validate-journal-value entry) ; fail loudly now, not at deferred flush
-                   (journal-add journal entry)
-                   (setf (journal-leaf-id journal) (pget entry :id))
-                   (cond ((journal-started-p journal)
-                          (write-entry journal entry))
-                         (t
-                          (push entry (journal-pending journal))
-                          ;; Nothing is written until the first assistant message exists.
-                          (when (assistant-message-entry-p entry)
-                            (flush-pending journal))))
-                   entry))))
+  (let ((entry nil)
+        (flushed nil))
+    (bt:with-lock-held ((journal-lock journal))
+      (let* ((id (or id (loop for candidate = (gen-id)
+                              unless (gethash candidate (journal-index journal))
+                                return candidate)))
+             (new (append (list :type (pget plist :type)
+                                :id id
+                                :parent-id (or parent-id (journal-leaf-id journal))
+                                :timestamp (iso8601-now))
+                          (loop for (k v) on plist by #'cddr
+                                unless (member k '(:type :id :parent-id :timestamp))
+                                  append (list k v)))))
+        (setf entry new)
+        (validate-journal-value entry) ; fail loudly now, not at deferred flush
+        (journal-add journal entry)
+        (setf (journal-leaf-id journal) (pget entry :id))
+        (cond ((journal-started-p journal)
+               (write-entry journal entry))
+              (t
+               (push entry (journal-pending journal))
+               ;; Nothing is written until the first assistant message exists.
+               (when (assistant-message-entry-p entry)
+                 (flush-pending journal)
+                 (setf flushed t))))
+        (extend-fold-cache journal entry)))
+    ;; Outside the lock: a listener folds the journal it was told about, and
+    ;; the session index reads the path back — both need the lock themselves.
     (note-journal-append journal entry)
     entry))
 
