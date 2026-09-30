@@ -283,7 +283,22 @@ the session list can say whose sessions these are."
                     :text (format nil "No sessions to resume for ~a"
                                   (namestring (uiop:getcwd)))))
            (stamped (open-journal path))))
-        (t (stamped (open-journal resume)))))))
+        (t (stamped (reopen-resumed-journal resume program)))))))
+
+(defun reopen-resumed-journal (path program)
+  "The journal `--resume PATH` names.
+
+A path that is not on disk is a usage error for a person, who mistyped it.
+For a supervised restart it is the session the child reported before it died,
+and a session nothing was journalled to yet (an idle server) has no file: the
+supervisor passes the path anyway, and the session has to come back at exactly
+that path rather than as a brand-new journal (CONTRACT §1, F4)."
+  (cond
+    ((probe-file path) (open-journal path))
+    ((plusp (evo.kernel:supervisor-restarts))
+     (evo.journal:reopen-session path :program program))
+    (t (error 'usage-error
+              :text (format nil "No session file at ~a" path)))))
 
 (defun main (&optional (argv (evo.port:argv)))
   "Exit codes are supervisor protocol: 0 done, 1 error (restart-eligible),

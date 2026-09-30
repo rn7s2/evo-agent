@@ -57,15 +57,20 @@ same one (`--port 0` is chosen once, not once per life)."
     (write-supervisor-state "bound-port" (princ-to-string port))))
 
 (defun supervisor-current-session ()
-  "The journal path the supervisor's child last reported, when it is still a
-file on disk; NIL otherwise (nothing to resume — restart fresh).  Read by the
-supervisor, from its own state directory."
+  "The journal path the supervisor's child last reported, or NIL when it
+reported none — restart fresh.  Read by the supervisor, from its own state
+directory.
+
+The path is taken as reported, on disk or not: a session nothing has been
+journalled to yet has no file, and it is exactly the session an idle server
+must come back to (CONTRACT §1, F4).  Asking for the file here started a
+brand-new journal instead, so a client's session id changed under it on a
+restart."
   (let ((file (supervisor-state-file "current-session")))
     (when file
       (let ((text (ignore-errors (read-file-string file))))
         (when (and text (plusp (length (string-trim '(#\Space #\Newline #\Return #\Tab) text))))
-          (let ((path (string-trim '(#\Space #\Newline #\Return #\Tab) text)))
-            (and (probe-file path) path)))))))
+          (string-trim '(#\Space #\Newline #\Return #\Tab) text))))))
 
 (defun supervisor-bound-port ()
   "The port the supervisor's child reported binding, or NIL."

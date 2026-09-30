@@ -315,6 +315,12 @@ mistyped flag cannot be fixed by trying it again."
           ((getf opts :catalog) (cmd-catalog opts))
           ((getf opts :check) (cmd-check opts))
           ((evo.cli:supervised-run-p opts)
+           (when (getf opts :serve)
+             (evo.cli:check-serve-ready opts)
+             ;; One token per launch, minted here in the parent, so the
+             ;; coordinator's restarts keep the one its clients hold
+             ;; (the same rule evo-agent's frontend follows).
+             (evo.port:setenv "EVO_SERVE_TOKEN" (evo.serve:resolve-token)))
            (evo.cli:supervise argv :restart-argv #'restart-argv))
           (t (run-swarm opts)))
       (evo.cli:usage-error (e)
