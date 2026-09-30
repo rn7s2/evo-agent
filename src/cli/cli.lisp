@@ -34,6 +34,7 @@ Usage:
       --port <n>                         port to bind (default 8421; 0 picks a free one)
       --ready-file <path>                publish url, token, epoch and session here (mode 0600)
       --watch-stdin                      shut down cleanly when stdin reaches end of file
+      --no-http-eval                     do not offer the eval op (eval is RCE)
       --allow-remote                     permit a non-loopback --host
       --resume [path] --model <id> --thinking <level> --no-userspace  as above
   evo-agent catalog --json [--no-userspace]
