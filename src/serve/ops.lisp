@@ -288,6 +288,19 @@ one in flight (CONTRACT §5.5)."
 
 ;;; Ops: the run and the goal.
 
+(defgeneric lane-exists-p (server lane)
+  (:documentation "Whether SERVER has lane LANE (a number).
+
+Ask the program, not the topics: the coordinator mirrors a lane as \"lane:N\"
+only once that lane is up, and a program's lanes are its own list — evo-swarm
+answers this from its own lanes.  serve's answer is NIL, which is the truth
+for a server that runs none, and it is what makes run.interrupt of a lane that
+is not there NOT_FOUND (CONTRACT §5.5) instead of an op that failed while
+looking it up.")
+  (:method ((server server) lane)
+    (declare (ignore server lane))
+    nil))
+
 (defgeneric interrupt-scope (server scope lane)
   (:documentation "Interrupt SCOPE (:session, :swarm or :lane) on SERVER and
 return the topic names that were interrupted (\"session\", \"lane:2\"), for
@@ -311,18 +324,17 @@ extends this with the scopes it owns.")
                (op-fail "invalid_args" "this server has no such interrupt scope")))))))
 
 (defmethod interrupt-scope :before ((server server) (scope (eql :lane)) lane)
-  "Which lanes exist is a question serve can answer on its own — they are its
-topics, since the coordinator mirrors each lane as \"lane:N\" — so the answer
-for one this server does not have belongs here: NOT_FOUND, the caller named
-something absent (CONTRACT §5.5), not the failed op that a program's own
-method would raise while looking it up.
+  "Whether the lane exists is asked of the program (LANE-EXISTS-P), and an
+answer of no is NOT_FOUND here: the caller named something absent (CONTRACT
+§5.5), not the failed op that a program's own method would raise while looking
+it up.
 
 Running before every primary method (the swarm defines its own for :lane) is
 what makes the code serve's to own: a program's :lane method only ever sees a
 lane it has."
   (unless (and lane (integerp lane))
     (op-fail "invalid_args" "scope lane takes a lane number"))
-  (unless (topic-provider server (format nil "lane:~d" lane))
+  (unless (lane-exists-p server lane)
     (op-fail "not_found" "no such lane on this server")))
 
 (defun op-run-interrupt (server args)
@@ -330,9 +342,14 @@ lane it has."
                                                        :default "session"))
                         :keyword))
          (lane (op-arg args :lane :type :number))
-         (interrupted (interrupt-scope server scope lane))
-         (interrupted (if (listp interrupted) interrupted (list interrupted))))
-    (list :interrupted (coerce interrupted 'vector))))
+         (interrupted (interrupt-scope server scope lane)))
+    ;; An array either way.  A scope that interrupted nothing — an idle
+    ;; session, an idle lane — says so with [], and a method that reports its
+    ;; one result as a bare string still becomes one (CONTRACT §5.5).
+    (list :interrupted (coerce (cond ((null interrupted) '())
+                                     ((listp interrupted) interrupted)
+                                     (t (list interrupted)))
+                               'vector))))
 
 (defun op-goal-set (server args)
   (let* ((objective (op-arg args :objective :required t))
