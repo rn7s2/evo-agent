@@ -29,6 +29,8 @@ Covers the redesign's protocol (CONTRACT §5):
     serve defines and swarm/main.lisp registers (skipped if it is not built)
   * the small truths: `queued`, has_more, result {}, truncated, usage,
     the default model's provider
+  * the caller's environment cannot reach the child: HOME and EVO_HOME are the
+    test's, and no supervisor marker is inherited
   * every documented boolean is a boolean (notice.durable, compaction.manual,
     tool result.truncated, state.model.ready, the catalog's flags, ok/queued)
 
@@ -84,7 +86,13 @@ class Server:
         self.baby = baby
 
     def start(self, args=(), stdin_pipe=False):
-        env = dict(os.environ, EVO_HOME=os.path.join(self.work, "home"))
+        # The test isolates itself completely: its own home for HOME and
+        # EVO_HOME, so nothing about the machine running it — the caller's
+        # skills, templates, settings — can reach the child.  (A real HOME
+        # left a /command scan of the caller's skill directory in the path,
+        # which made one call slow enough to trip a serve bug: see below.)
+        home = os.path.join(self.work, "home")
+        env = dict(os.environ, EVO_HOME=home, HOME=home)
         # A test's child must inherit nothing about who ran the test.  The
         # supervisor's own markers are the dangerous ones: a child that thinks
         # it is a supervised child of somebody else, watching somebody else's
@@ -418,6 +426,12 @@ def run_all(server, stub_port, work):
         " :leaked :clean)"})
     check("the server's environment is this test's, not a supervisor's",
           (reply.get("result") or {}).get("values") == [":clean"], reply)
+    status, reply, _ = server.op("eval", {"code":
+        "(if (string= (string-right-trim \"/\" (or (evo.util:getenv \"HOME\") \"\"))"
+        " (string-right-trim \"/\" (namestring (evo.util:evo-home))))"
+        " :this-test :someone-elses)"})
+    check("the server's HOME is this test's home, not the caller's",
+          (reply.get("result") or {}).get("values") == [":this-test"], reply)
     status, reply, _ = server.op("model.set", {"id": "stub-a"})
     check("model.set journals the choice", reply["ok"] and reply["result"]["model"]["id"] == "stub-a",
           reply)
@@ -684,6 +698,12 @@ def run_all(server, stub_port, work):
     status, reply, _ = server.op("run.interrupt", {"scope": "swarm"})
     check("scope swarm on a plain server -> invalid_args (unchanged)",
           reply["ok"] is False and reply["error"]["code"] == "invalid_args", reply)
+    # A call that takes seconds is still a call.  The wait must not read a
+    # condition variable's wake as an answer: a spurious one used to answer
+    # 503 "the session thread did not answer" for a call that was merely slow.
+    status, reply, _ = server.op("eval", {"code": "(progn (sleep 3) :slept)"})
+    check("a slow call answers rather than 503ing",
+          status == 200 and reply["ok"] and reply["result"]["values"] == [":slept"], reply)
 
     # --- input.send names a topic, and a lane is not one a client writes to ----------
     status, reply, _ = server.op("input.send", {"text": "steer a lane",
@@ -985,6 +1005,9 @@ def swarm_catalog_check(work, stub_port):
                                                    "topic": "lane:1"})
         check("evo-swarm: input.send to a lane topic -> invalid_args",
               reply["ok"] is False and reply["error"]["code"] == "invalid_args", reply)
+        status, reply, _ = swarm.op("run.interrupt", {"scope": "lane", "lane": 1})
+        check("evo-swarm: a lane that is idle reports an empty array",
+              reply["ok"] and reply["result"]["interrupted"] == [], reply)
         status, reply, _ = swarm.op("run.interrupt", {"scope": "lane", "lane": 9})
         check("evo-swarm: a lane that does not exist -> not_found, not op_failed",
               reply["ok"] is False and reply["error"]["code"] == "not_found", reply)

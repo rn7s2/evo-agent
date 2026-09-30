@@ -168,6 +168,14 @@ running something."
   (let ((result (ignore-errors (lane-op lane "run.interrupt" (list :scope "session")))))
     (and (getf result :interrupted) t)))
 
+(defmethod evo.serve:lane-exists-p ((server evo.serve::server) lane)
+  "The lanes are this program's, so this server's lanes are the swarm's: a
+number the swarm has a lane for is one run.interrupt can name.  serve asks
+before every :lane method runs, which is what makes an unknown lane NOT_FOUND
+rather than the failed op this file's own method would raise looking it up."
+  (declare (ignore server))
+  (and (integerp lane) (find-lane lane) t))
+
 (defmethod evo.serve:interrupt-scope ((server evo.serve::server) (scope (eql :lane)) lane)
   "One lane, stopped now; the coordinator is told, queued after its current
 run.  No other lane is touched.  A lane that was not running anything is not

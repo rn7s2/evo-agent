@@ -231,16 +231,23 @@ signals is re-signalled in the caller.  503 once the server is stopping."
   (let ((promise (make-promise)))
     (unless (post server (list :call fn promise))
       (http-fail 503 "server is shutting down"))
-    (bt:with-lock-held ((promise-lock promise))
-      (loop until (or (promise-done promise)
-                      (stopping-p server))
-            do (bt:condition-wait (promise-cv promise) (promise-lock promise)
-                                  :timeout *call-timeout*)
-               (unless (promise-done promise)
-                 (http-fail 503 "the session thread did not answer")))
-      (when (promise-condition promise)
-        (error (promise-condition promise)))
-      (promise-value promise))))
+    (let ((deadline (+ (get-internal-real-time)
+                       (* *call-timeout* internal-time-units-per-second))))
+      (bt:with-lock-held ((promise-lock promise))
+        (loop until (or (promise-done promise)
+                        (stopping-p server))
+              do (bt:condition-wait (promise-cv promise) (promise-lock promise)
+                                    :timeout *call-timeout*)
+                 ;; A condition variable wakes with nothing to report sometimes
+                 ;; — SBCL's does — and "the session thread did not answer" is
+                 ;; the deadline, never a wake that is not the answer: a call
+                 ;; that is still running is still running.
+                 (unless (or (promise-done promise) (stopping-p server))
+                   (when (>= (get-internal-real-time) deadline)
+                     (http-fail 503 "the session thread did not answer"))))
+        (when (promise-condition promise)
+          (error (promise-condition promise)))
+        (promise-value promise)))))
 
 ;;; Idempotency: a retried rid gets the reply it already got, and nothing else
 ;;; happens.

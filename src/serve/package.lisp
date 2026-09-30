@@ -31,7 +31,7 @@
            #:publish-op #:publish-state-patch #:publish-item-add
            #:op-now-ms
            ;; the interrupt scopes the program owns (CONTRACT §5.5)
-           #:interrupt-scope
+           #:interrupt-scope #:lane-exists-p
            ;; the catalog builder (CONTRACT §5.6) and what readiness means
            #:catalog-plist #:catalog-for-server #:sessions-body
            #:model-readiness #:model-status #:lane-model-status
