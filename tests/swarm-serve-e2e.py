@@ -658,8 +658,11 @@ def run_checks(swarm, stub, home, work, proj, held):
     check("run.interrupt scope swarm is answered",
           status == 200 and reply.get("ok"), reply)
     interrupted = (reply.get("result") or {}).get("interrupted") or []
-    check("...naming the session and every lane", "session" in interrupted
-          and any(str(i).startswith("lane:") for i in interrupted), interrupted)
+    # Only lane 2 is working (lane 1 came back idle from its restart): an idle
+    # lane's own run.interrupt answers [] and stops nothing, so it is not named.
+    check("...naming the session and the lane that was working",
+          "session" in interrupted and "lane:2" in interrupted, interrupted)
+    check("...and not the idle lane", "lane:1" not in interrupted, interrupted)
     check("...and every lane stops",
           wait_for(lambda: all(_lane_row(client, n).get("state") in ("idle", "down")
                                for n in range(1, LANES + 1)), 60) is not None,
@@ -676,8 +679,7 @@ def run_checks(swarm, stub, home, work, proj, held):
           note is not None, [i for i in collector.view.topics["session"].items
                              if i.get("kind") == "user"][-3:])
     check("...as a human_action item naming the lanes that were stopped",
-          note is not None and 1 in (note.get("lanes") or [])
-          and 2 in (note.get("lanes") or []), note)
+          note is not None and (note.get("lanes") or []) == [2], note)
     check("...which was queued as after-run input, not steered into a run",
           note is not None and note.get("queue") == "after_run", note)
 
