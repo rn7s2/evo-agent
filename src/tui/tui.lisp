@@ -955,7 +955,11 @@ wrapped between two rules, and the model status line under the editbox."
   (evo.command:with-refusals-shown (tui)
     (evo.command:rewind-command tui)))
 
-;;; Slash-command completion (Tab).
+;;; Slash-command completion (Tab).  What the caret is on — a /command word
+;;; anywhere in prose, or a symbol inside /eval's content — is
+;;; EVO.COMMAND:COMPLETION-TARGET's answer, the same one serve's `complete`
+;;; op hands a GUI; what is left here is the popup: rendering, selection, and
+;;; splicing the choice in.
 
 (defparameter *tui-builtin-commands*
   '(("help" . "commands and keys")
@@ -974,61 +978,37 @@ extension commands, builtins, skills, prompt templates (first wins)."
 
 (defparameter *completion-max-rows* 6)
 
-(defun command-word-p (eb)
-  "The buffer is a single line holding just a /command word being typed."
-  (let ((line (first (eb-lines eb))))
-    (and (= 1 (length (eb-lines eb)))
-         (plusp (length line))
-         (char= (char line 0) #\/)
-         (not (find #\Space line)))))
+(defun eb-cursor-offset (eb)
+  "The caret as a character offset into (EB-TEXT EB) — the way
+EVO.COMMAND:COMPLETION-TARGET takes one, newlines counted."
+  (+ (eb-col eb)
+     (loop for line in (subseq (eb-lines eb) 0 (eb-line eb))
+           sum (1+ (length line)))))
 
-(defparameter *symbol-completion-command* "eval"
-  "The command whose content completes against the image rather than
-against a name list.  Its content is Lisp being typed into the running
-image, so the candidates are that image's own functions and variables —
-EVO.EVAL decides what qualifies, the popup only renders it.")
-
-(defun symbol-completion-buffer-p (eb)
-  "The buffer is an invocation of the symbol-completing command, past its
-command word (the space is what ends the word and starts the content)."
-  (let* ((line (first (eb-lines eb)))
-         (space (position #\Space line)))
-    (and space
-         (plusp (length line))
-         (char= (char line 0) #\/)
-         (string-equal *symbol-completion-command* (subseq line 1 space)))))
-
-(defun symbol-token-at-cursor (eb)
-  "The symbol token being typed at the cursor: (values TOKEN START), or NIL
-when the cursor is not in completable content.  The command word itself is
-never completed over — on the first line the content starts after it."
-  (when (symbol-completion-buffer-p eb)
-    (let* ((line (eb-current-line eb))
-           (end (eb-col eb))
-           (start (evo.eval:token-start line end)))
-      (unless (and (zerop (eb-line eb))
-                   (<= start (position #\Space (first (eb-lines eb)))))
-        (values (subseq line start end) start)))))
+(defun completion-target-at-point (eb)
+  "What the caret in EB is on, from the command layer's one answer:
+(values KIND START END), EVO.COMMAND:COMPLETION-TARGET."
+  (evo.command:completion-target (eb-text eb) (eb-cursor-offset eb)))
 
 (defun completion-target (eb)
   "What the cursor sits on: (values PREFIX KIND), KIND being :command for a
 /command word or :symbol for content inside the symbol-completing command.
-NIL when there is nothing to complete."
-  (if (command-word-p eb)
-      (values (subseq (first (eb-lines eb)) 1) :command)
-      (let ((token (symbol-token-at-cursor eb)))
-        (when token (values token :symbol)))))
+NIL when there is nothing to complete.  PREFIX is what is typed before the
+caret, which is what the candidates are filtered by."
+  (multiple-value-bind (kind start end) (completion-target-at-point eb)
+    (declare (ignore end))
+    (when kind
+      (values (subseq (eb-text eb) start (eb-cursor-offset eb)) kind))))
 
 (defun completion-matches (tui kind prefix)
   "Candidates for PREFIX as (name . description).  The command list is
 fixed for the popup's lifetime and cached; symbols are asked of the image
 on every keystroke, since evaluating can define more of them."
-  (ecase kind
-    (:command
-     (remove-if-not (lambda (entry) (string-prefix-p prefix (car entry)))
-                    (or (tui-complete-candidates tui)
-                        (setf (tui-complete-candidates tui) (all-commands)))))
-    (:symbol (evo.eval:completions-for prefix))))
+  (evo.command:completion-items
+   kind prefix
+   (and (eq kind :command)
+        (or (tui-complete-candidates tui)
+            (setf (tui-complete-candidates tui) (all-commands))))))
 
 (defun completion-context (tui)
   "Live popup state: (values prefix matches kind) while something is being
@@ -1101,20 +1081,35 @@ plus an overflow indicator."
      (when (> n window)
        (list (dim (format nil "  … ~d/~d" (1+ index) n)))))))
 
+(defun replace-buffer-range (eb start end replacement)
+  "Replace characters START..END of the buffer's text with REPLACEMENT, the
+caret landing just after it."
+  (let* ((text (eb-text eb))
+         (new (concatenate 'string (subseq text 0 start) replacement
+                           (subseq text end)))
+         (caret (+ start (length replacement))))
+    (eb-set-text eb new)
+    ;; EB-SET-TEXT leaves the caret at the very end: walk the lines back to
+    ;; the replacement's, which is where typing continues.
+    (loop for line in (eb-lines eb)
+          for i from 0
+          when (<= caret (length line))
+            do (setf (eb-line eb) i (eb-col eb) caret)
+               (return)
+          else do (decf caret (1+ (length line))))))
+
 (defun accept-completion (tui name kind)
-  "Put NAME in the buffer: a command replaces the whole word and opens its
-argument; a symbol replaces just the token under the cursor, leaving the
-rest of the form — and the closing parens — alone."
+  "Put NAME in the buffer: a command replaces the word and opens its
+argument — a space, where the next thing goes; a symbol replaces just the
+token under the cursor, leaving the rest of the form — and the closing
+parens — alone."
   (let ((eb (tui-editor tui)))
-    (if (eq kind :command)
-        (eb-set-text eb (format nil "/~a " name))
-        (multiple-value-bind (token start) (symbol-token-at-cursor eb)
-          (declare (ignore token))
-          (let ((line (eb-current-line eb)))
-            (setf (eb-current-line eb)
-                  (concatenate 'string (subseq line 0 start) name
-                               (subseq line (eb-col eb)))
-                  (eb-col eb) (+ start (length name))))))))
+    (multiple-value-bind (target-kind start end) (completion-target-at-point eb)
+      (when (eq target-kind kind)
+        (replace-buffer-range eb start end
+                              (if (eq kind :command)
+                                  (concatenate 'string name " ")
+                                  name))))))
 
 (defun complete-at-point (tui)
   "Tab: accept the popup's highlighted candidate — a /command word, or a

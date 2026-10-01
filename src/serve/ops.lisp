@@ -458,7 +458,7 @@ put on it.  HOST-NOTICE maps :warn to :notice, so a warning reads as one here
 rather than as the every-line-is-info it used to be."
   (case style (:error :error) (:notice :warn) (t :info)))
 
-;;; Ops: extensions, eval, shutdown.
+;;; Ops: extensions, eval, completion, shutdown.
 
 (defun op-extension-load (server args)
   (declare (ignore server))
@@ -486,6 +486,31 @@ rather than as the every-line-is-info it used to be."
         (list :value (evo.eval::format-result values output condition)
               :values (mapcar #'evo.eval::print-value values)
               :output output)))))
+
+;;; complete: what a caret in a buffer could become.
+;;;
+;;; A client that draws an input box asks this instead of evaluating code to
+;;; read a name list: EVO.COMMAND:COMPLETION-TARGET decides what the caret is
+;;; on and what a candidate's name would replace, and the candidates come
+;;; from the command catalog and the image.  Read-only, and it needs nothing
+;;; idle — typing does not wait for a turn.
+
+(defun op-complete (server args)
+  (declare (ignore server))
+  (let ((text (op-arg args :text :required t))
+        (cursor (op-arg args :cursor :required t :type :number)))
+    (unless (and (integerp cursor) (<= 0 cursor (length text)))
+      (op-fail "invalid_args" "cursor is not a position in text"))
+    (multiple-value-bind (kind start end)
+        (evo.command:completion-target text cursor)
+      (list :kind kind
+            :start start
+            :end end
+            :items (coerce (loop for (name . description) in
+                                 (and kind (evo.command:completion-items
+                                            kind (subseq text start cursor)))
+                                 collect (list :name name :description description))
+                           'vector)))))
 
 (defun op-server-shutdown (server args)
   (declare (ignore args))
@@ -544,6 +569,9 @@ rather than as the every-line-is-info it used to be."
   (register-op "extension.load" #'op-extension-load
                :args '(:path (:type "string" :required t)))
   (register-op "eval" #'op-eval :args '(:code (:type "string" :required t)))
+  (register-op "complete" #'op-complete
+               :args '(:text (:type "string" :required t)
+                        :cursor (:type "integer" :required t)))
   (register-op "server.shutdown" #'op-server-shutdown :args nil)
   t)
 

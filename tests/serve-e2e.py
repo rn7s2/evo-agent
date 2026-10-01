@@ -519,6 +519,41 @@ def run_all(server, stub_port, work):
     check("catalog: required arguments are named",
           cancel_schema["args"]["required"] == ["item_id"]
           and cancel_schema["precondition"] == "none", cancel_schema)
+    complete_schema = next(o for o in catalog["ops"] if o["name"] == "complete")
+    check("catalog: the completion op is offered with its schema",
+          complete_schema["args"]["properties"]["text"]["type"] == "string"
+          and complete_schema["args"]["properties"]["cursor"]["type"] == "integer"
+          and complete_schema["args"]["required"] == ["text", "cursor"]
+          and complete_schema["precondition"] == "none", complete_schema)
+
+    # --- complete: a client's input box, answered without evaluating code -----
+    # It used to take an `eval` op and a hand-built Lisp form calling
+    # evo.eval:completions-for — remote code execution to read a name list,
+    # and nothing at all under --no-http-eval.
+    status, reply, _ = server.op("complete", {"text": "run /comp now", "cursor": 9})
+    result = reply.get("result") or {}
+    check("complete names the command word at the caret",
+          reply["ok"] and result.get("kind") == "command"
+          and result.get("start") == 5 and result.get("end") == 9, reply)
+    check("complete offers the commands the catalog lists",
+          any(i["name"] == "compact" for i in result.get("items", [])), result)
+    check("complete's items are {name, description} objects",
+          all(set(i) == {"name", "description"} and isinstance(i["description"], str)
+              for i in result.get("items", [])), result)
+    status, reply, _ = server.op("complete", {"text": "/eval (evo:all-too", "cursor": 18})
+    result = reply.get("result") or {}
+    check("complete completes /eval symbols, no eval op needed",
+          reply["ok"] and result.get("kind") == "symbol"
+          and result.get("start") == 7
+          and any(i["name"] == "evo:all-tools" for i in result.get("items", [])), reply)
+    status, reply, _ = server.op("complete", {"text": "hello there", "cursor": 3})
+    result = reply.get("result") or {}
+    check("nothing at the caret to complete: a null kind and no items",
+          result.get("kind") is None and result.get("start") is None
+          and result.get("items") == [], reply)
+    status, reply, _ = server.op("complete", {"text": "x", "cursor": 9})
+    check("a cursor outside the text -> invalid_args",
+          reply["ok"] is False and reply["error"]["code"] == "invalid_args", reply)
 
     # --- the first snapshot: empty session, one seq for every topic -----------
     snap = server.snapshot("session,swarm,lane:*")
@@ -675,6 +710,13 @@ def run_all(server, stub_port, work):
     item_id = reply["result"]["item_id"]
     check("input.send while running queues, and says so",
           reply["ok"] and item_id != first_id and reply["result"]["queued"] is True, reply)
+    # complete is read-only and needs nothing idle: a client's input box keeps
+    # answering while a turn runs (its precondition is `none`).
+    busy = server.snapshot("session")["topics"]["session"]["state"]["status"]
+    status, reply, _ = server.op("complete", {"text": "/comp", "cursor": 5})
+    check("complete answers while the session is busy",
+          busy == "running" and reply["ok"]
+          and (reply["result"] or {}).get("kind") == "command", (busy, reply))
     status, reply, _ = server.op("input.cancel", {"item_id": item_id})
     check("a queued input can be cancelled", status == 200 and reply["ok"], reply)
     check("input.cancel answers an object, not null", reply["result"] == {}, reply)
@@ -1083,6 +1125,15 @@ def eval_gate_check(server):
     status, reply, _ = server.op("eval", {"code": "(+ 1 1)"})
     check("--no-http-eval answers unknown_op",
           reply["ok"] is False and reply["error"]["code"] == "unknown_op", reply)
+    # Completion is a read, not an evaluation: the gate is about running code,
+    # and a client's input box does not need to.
+    check("--no-http-eval keeps complete in the catalog",
+          any(o["name"] == "complete" for o in catalog["ops"]), catalog["ops"])
+    status, reply, _ = server.op("complete", {"text": "/comp", "cursor": 5})
+    check("complete works with eval gated off",
+          reply["ok"] and (reply["result"] or {}).get("kind") == "command"
+          and any(i["name"] == "compact" for i in (reply["result"] or {}).get("items", [])),
+          reply)
     # This server resumed the session but no model is registered in it (the
     # registration was this process's), so the model gate says so and the
     # notice it leaves is the ephemeral one.

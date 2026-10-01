@@ -415,7 +415,9 @@ A client reads a **snapshot** and applies the **ops** that follow it:
   `{ok, seq, result|error}`. `input.send`, `input.cancel`, `run.interrupt`,
   `goal.*`, `model.set` / `thinking.set` / `language.set`, `session.*`,
   `context.compact`, `lore.add` / `memory.request`, `command.run` (any slash
-  command), `extension.load`, `eval` (`--no-http-eval` removes it) and
+  command), `complete` (what a caret in an input box could become — the TUI's
+  own completion rules, read-only, and needing no `eval`), `extension.load`,
+  `eval` (`--no-http-eval` removes it) and
   `server.shutdown`. `rid` is idempotent, so a retry after a dropped connection
   never double-sends a prompt; failures are codes in a 200 reply (`busy`,
   `already_sent`, `unknown_op`, …), never HTTP statuses a client has to guess

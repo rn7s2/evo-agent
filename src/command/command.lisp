@@ -900,6 +900,110 @@ builtins, skills, prompt templates."
          :key #'car :test #'string= :from-end t)
         #'string< :key #'car))
 
+;;; Completion: what a cursor sits on, and what could go there.
+;;;
+;;; A frontend hands in the whole input and the caret as a character offset
+;;; into it; what could be completed there, and which range a candidate's
+;;; name replaces, is decided here — once — so the TUI's popup and a GUI
+;;; through serve's `complete` op answer the same thing instead of each
+;;; re-implementing evo's own token rules.
+
+(defparameter *symbol-completion-command* "eval"
+  "The command whose argument content completes against the running image:
+its text is Lisp being typed there, so the candidates are that image's own
+functions and variables (EVO.EVAL:COMPLETIONS-FOR) rather than a name list.")
+
+(defun completion-space-p (char)
+  "Whitespace, as a command word's boundary."
+  (member char '(#\Space #\Tab #\Newline #\Return) :test #'char=))
+
+(defun completion-word-char-p (char)
+  "A character a /command word may hold after its slash.  A second \"/\" is
+none of them, which is what keeps a path from being completed as a command."
+  (or (alphanumericp char)
+      (member char '(#\: #\_ #\-) :test #'char=)))
+
+(defun completion-run-start (text cursor test)
+  "Where the run of characters satisfying TEST around the caret begins: the
+first index at or before CURSOR whose character does not satisfy it."
+  (let ((i cursor))
+    (loop while (and (plusp i) (funcall test (char text (1- i)))) do (decf i))
+    i))
+
+(defun completion-run-end (text cursor test)
+  "Where the run of characters satisfying TEST around the caret ends: the
+first index at or after CURSOR whose character does not satisfy it."
+  (let ((i cursor)
+        (n (length text)))
+    (loop while (and (< i n) (funcall test (char text i))) do (incf i))
+    i))
+
+(defun command-completion (text cursor)
+  "The /command word at CURSOR in TEXT, as (values START END); NIL when the
+caret is not in one.  A command word begins with \"/\" at the start of the
+text or after whitespace — anywhere in prose, not only on a line of its own
+— and runs on in letters, digits, \":\", \"_\" and \"-\".  START is just
+past the slash: a candidate's NAME is typed without it."
+  (let* ((start (completion-run-start text cursor #'completion-word-char-p))
+         (slash (1- start)))
+    (when (and (>= slash 0)
+               (char= (char text slash) #\/)
+               (or (zerop slash) (completion-space-p (char text (1- slash)))))
+      (values start (completion-run-end text cursor #'completion-word-char-p)))))
+
+(defun symbol-content-start (text)
+  "Where the symbol-completing command's content begins in TEXT — just past
+the space that ends its command word — or NIL when TEXT does not begin with
+that invocation.  The command word itself is not content to complete over."
+  (let* ((line (subseq text 0 (position #\Newline text)))
+         (space (position #\Space line)))
+    (when (and space
+               (plusp (length line))
+               (char= (char line 0) #\/)
+               (string-equal *symbol-completion-command* (subseq line 1 space)))
+      (1+ space))))
+
+(defun symbol-completion (text cursor)
+  "The symbol token at CURSOR when the caret is in the symbol-completing
+command's content, as (values START END); NIL otherwise.  The token's own
+boundaries are EVO.EVAL's: what a symbol may hold and what ends one is the
+reading of Lisp, which /eval already owns."
+  (let ((content (symbol-content-start text)))
+    (when content
+      (let ((start (evo.eval:token-start text cursor)))
+        (when (>= start content)
+          (values start (evo.eval:token-end text cursor)))))))
+
+(defun completion-target (text cursor)
+  "What a caret is on, frontend-independently: (values KIND START END) for
+TEXT with the caret at CURSOR, a character offset counted in Lisp characters
+(a client whose offsets are UTF-16 converts first).  KIND is :command for a
+/command word the caret is inside, :symbol for a token inside the
+symbol-completing command's content, and NIL — with START and END NIL — when
+the caret sits on nothing completable.  START..END is the range a chosen
+candidate's NAME replaces: for a command it is the word after the slash, so
+a name is never typed with one.  The token or word holding the caret is the
+whole one, so a caret in the middle replaces the unit it is in rather than
+leaving half of it behind."
+  (let ((cursor (max 0 (min cursor (length text)))))
+    (multiple-value-bind (start end) (command-completion text cursor)
+      (if start
+          (values :command start end)
+          (multiple-value-bind (start end) (symbol-completion text cursor)
+            (if start
+                (values :symbol start end)
+                (values nil nil nil)))))))
+
+(defun completion-items (kind prefix &optional commands)
+  "Candidates for PREFIX as (name . description): the commands a client can
+type, or the image's own answer for a symbol.  COMMANDS, when given, is the
+command list to filter instead of asking for it — a frontend that caches it
+for the life of a popup, as the TUI does."
+  (ecase kind
+    (:command (remove-if-not (lambda (entry) (string-prefix-p prefix (car entry)))
+                             (or commands (command-catalog))))
+    (:symbol (evo.eval:completions-for prefix))))
+
 ;;; State: what a frontend shows about the session, derived from the fold.
 
 (defun session-summary (agent)
