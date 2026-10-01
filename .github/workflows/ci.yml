@@ -201,6 +201,9 @@ jobs:
               Invoke-WebRequest -Uri $url -OutFile $msi -MaximumRetryCount 3 -RetryIntervalSec 10
               $p = Start-Process msiexec.exe -ArgumentList '/i', "`"$msi`"", '/qn', '/norestart' -Wait -PassThru
               if ($p.ExitCode -ne 0) { throw "msiexec exited $($p.ExitCode)" }
+              # Actions ends a pwsh step with `exit $LASTEXITCODE`, which
+              # still holds choco's failure: the fallback succeeded.
+              $global:LASTEXITCODE = 0
             }
           }
           $sbclHome = @(
