@@ -56,7 +56,7 @@
               (format-todos todos)))))
 
 (evo:register-tool "todo"
-  :description "Replace your whole todo checklist (shown to the user as your visible plan). Use it for multi-step work: set the list up front, keep exactly one item in-progress, mark items done as you finish them, and update it whenever the plan changes."
+  :description "Replace your whole todo checklist (shown to the user as your visible plan). Use it for multi-step work: set the list up front, keep exactly one item in-progress, mark items done as you finish them, and update it whenever the plan changes. After each meaningful piece of work, check the list and bring it up to date before moving on."
   :schema '(:object
             (:items :type :array
              :description "The complete new checklist (replaces the old one)"
