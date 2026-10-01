@@ -316,6 +316,24 @@ def apply_ops(items, state, ops):
     return items, state
 
 
+def bad_effort_levels(models, ladder, where):
+    """The model entries whose effort_levels is not what the catalog promises.
+
+    Every model object states the levels it takes — a list, in ladder order,
+    drawn from thinking_levels — and [] for a model with no effort parameter.
+    A list, never null: `reasoning` says a model can be asked to think, and
+    this is what a client offers it without branching on the field's type."""
+    bad = []
+    for model in models:
+        levels = model.get("effort_levels")
+        if not isinstance(levels, list):
+            bad.append(f"{where}[{model.get('id')}].effort_levels={levels!r}")
+        elif levels != [level for level in ladder if level in levels]:
+            bad.append(f"{where}[{model.get('id')}].effort_levels={levels!r}"
+                       " is not a subset of thinking_levels in ladder order")
+    return bad
+
+
 def non_bools(items=(), state=None, catalog=None):
     """The documented boolean fields that are not JSON booleans.
 
@@ -468,6 +486,9 @@ def run_all(server, stub_port, work):
     check("catalog: with the hook set, lanes.models is an object to read",
           isinstance(lanes, dict) and isinstance(lanes.get("models"), list)
           and [m["id"] for m in lanes["models"]] == ["stub-a"], lanes)
+    bad = bad_effort_levels(lanes["models"], hooked["thinking_levels"], "lanes.models")
+    check("catalog: a lane's model states its levels too, the same way",
+          not bad, bad)
     check("catalog: a lane model's ok is a boolean, beside its id and provider",
           all(isinstance(m.get("ok"), bool) and m.get("provider")
               for m in lanes["models"]), lanes)
@@ -483,6 +504,12 @@ def run_all(server, stub_port, work):
     check("catalog: thinking levels and languages",
           catalog["thinking_levels"] == ["low", "medium", "high", "xhigh", "max"]
           and catalog["languages"], catalog["thinking_levels"])
+    # What each model takes, as a list rather than a range: the stub declares
+    # every level, and the shape is the one every client reads.
+    bad = bad_effort_levels(catalog["models"], catalog["thinking_levels"], "models")
+    check("catalog: every model states the effort levels it takes",
+          not bad and catalog["models"][0]["effort_levels"] == catalog["thinking_levels"],
+          bad or catalog["models"][0])
     op_schema = next(o for o in catalog["ops"] if o["name"] == "input.send")
     check("catalog: an op carries its argument schema",
           op_schema["args"]["properties"]["text"]["type"] == "string"

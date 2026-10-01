@@ -35,6 +35,7 @@
            ;; the catalog builder (CONTRACT §5.6) and what readiness means
            #:catalog-plist #:catalog-for-server #:sessions-body
            #:model-readiness #:model-status #:lane-model-status #:lane-model-entry
+           #:model-effort-levels
            ;; the `lanes` half: a program that runs lanes registers it
            #:*catalog-lanes-hook* #:lane-catalog
            #:*op-catalog* #:*kernel-apis* #:kernel-api-registry

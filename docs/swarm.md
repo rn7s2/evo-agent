@@ -377,7 +377,8 @@ starts anything, and neither starts a lane, a server or a model call:
 
 - **catalog** is the coordinator's catalog (models, providers, thinking
   levels, ops, tools, …) plus a `lanes` half: every model as a *lane* would
-  see it, `ok` or with the reason it could not.
+  see it — `ok` or with the reason it could not — and, on every model in
+  either half, the levels that model accepts (`effort_levels`).
 - **check** says whether a launch from here would work — do the models
   resolve, is each one's API where it runs, are the credentials there — and
   reports what the launch resolves on its own: the coordinator's effort, the
