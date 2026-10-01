@@ -13,6 +13,9 @@ and answers from the last user turn, so a test script decides what the
   "SLOW" in the text            -> 60 text deltas, 0.1 s apart (6 s)
   text starting "CALL <tool> {json}"
                                 -> one tool_use call to <tool> with that JSON
+  text starting "THINK "        -> a thinking block ("Thinking about: <the rest
+                                   of the prompt>." in a few deltas, signed),
+                                   then text "ok: <the prompt>"
   a leading "DELAY<n> "         -> wait n seconds first (then the rest applies)
   anything else                 -> text "ok: <the first 40 chars>"
 
@@ -59,6 +62,12 @@ def last_user(messages):
             texts = [block_text(b) for b in content]
             return " ".join(texts), has_result, (texts[-1] if texts else "")
     return "", False, ""
+
+
+def thinking_deltas(text, parts=3):
+    """`text` in a few roughly equal pieces, so it streams like a model's."""
+    step = max(1, -(-len(text) // parts))
+    return [text[i:i + step] for i in range(0, len(text), step)]
 
 
 def system_text(system):
@@ -128,6 +137,21 @@ class Handler(BaseHTTPRequestHandler):
         except (BrokenPipeError, ConnectionResetError):
             pass  # evo interrupted the request: exactly what a test wants
 
+    def thinking_block(self, thinking):
+        """Stream one signed thinking block at index 0; the next index is 1."""
+        self.sse("content_block_start", {
+            "type": "content_block_start", "index": 0,
+            "content_block": {"type": "thinking", "thinking": "", "signature": ""}})
+        for piece in thinking_deltas(thinking):
+            self.sse("content_block_delta", {
+                "type": "content_block_delta", "index": 0,
+                "delta": {"type": "thinking_delta", "thinking": piece}})
+        self.sse("content_block_delta", {
+            "type": "content_block_delta", "index": 0,
+            "delta": {"type": "signature_delta", "signature": "stub-signature"}})
+        self.sse("content_block_stop", {"type": "content_block_stop", "index": 0})
+        return 1
+
     def respond(self, model, text, has_result, record):
         self.sse("message_start", {
             "type": "message_start",
@@ -135,6 +159,8 @@ class Handler(BaseHTTPRequestHandler):
                         "model": model, "content": [],
                         "usage": {"input_tokens": 10, "output_tokens": 0}}})
         tool = None
+        thinking = None
+        reply = None
         stripped = text.strip()
         if stripped.startswith("DELAY") and not has_result:
             head, _, rest = stripped.partition(" ")
@@ -160,8 +186,8 @@ class Handler(BaseHTTPRequestHandler):
         elif "TOOL:" in text:
             name = text.split("TOOL:", 1)[1].split()[0]
             tool = (name, {})
-        else:
-            reply = None
+        elif stripped.startswith("THINK "):
+            thinking = "Thinking about: " + stripped[6:].strip() + "."
 
         if tool:
             name, args = tool
@@ -175,21 +201,22 @@ class Handler(BaseHTTPRequestHandler):
             self.sse("content_block_stop", {"type": "content_block_stop", "index": 0})
             stop = "tool_use"
         else:
+            index = self.thinking_block(thinking) if thinking else 0
             self.sse("content_block_start", {
-                "type": "content_block_start", "index": 0,
+                "type": "content_block_start", "index": index,
                 "content_block": {"type": "text", "text": ""}})
             if reply is None and "SLOW" in text:
                 for i in range(60):
                     self.sse("content_block_delta", {
-                        "type": "content_block_delta", "index": 0,
+                        "type": "content_block_delta", "index": index,
                         "delta": {"type": "text_delta", "text": f"slow{i} "}})
                     time.sleep(0.1)
             else:
                 reply = reply or ("ok: " + text[:40])
                 self.sse("content_block_delta", {
-                    "type": "content_block_delta", "index": 0,
+                    "type": "content_block_delta", "index": index,
                     "delta": {"type": "text_delta", "text": reply}})
-            self.sse("content_block_stop", {"type": "content_block_stop", "index": 0})
+            self.sse("content_block_stop", {"type": "content_block_stop", "index": index})
             stop = "end_turn"
         self.sse("message_delta", {"type": "message_delta",
                                    "delta": {"stop_reason": stop},
