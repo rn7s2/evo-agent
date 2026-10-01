@@ -441,15 +441,22 @@ goal, and only from the state that move makes sense in."
                         (and (plusp (length rest)) rest))))
       (unless (evo.command:dispatch-command server text)
         (op-fail "not_found" "no such command")))
-    (list :notices (coerce (loop for (style text) in (reverse (reply-output *reply*))
-                                 collect (list :severity (notice-severity style)
-                                               :text text))
+    ;; REPLY-OUTPUT holds (:style … :text …) plists, one per line the command
+    ;; said, newest first — read them as the plists they are: a loop over
+    ;; (style text) would bind :STYLE and :TEXT and put the keywords on the
+    ;; wire as the line's text.
+    (list :notices (coerce (loop for line in (reverse (reply-output *reply*))
+                                 collect (list :severity (notice-severity (getf line :style))
+                                               :text (getf line :text)))
                            'vector)
           :data (reply-data *reply*)
           :choices (reply-choices *reply*))))
 
 (defun notice-severity (style)
-  (case style (:error :error) (:success :info) (:notice :info) (t :info)))
+  "The severity a command's line carries in the reply, from the style the host
+put on it.  HOST-NOTICE maps :warn to :notice, so a warning reads as one here
+rather than as the every-line-is-info it used to be."
+  (case style (:error :error) (:notice :warn) (t :info)))
 
 ;;; Ops: extensions, eval, shutdown.
 
