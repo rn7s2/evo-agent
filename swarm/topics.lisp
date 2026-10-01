@@ -184,9 +184,13 @@ item (§3) — under that same id."
 
 (defun interrupt-lane-now (lane)
   "Stop LANE's run through its own run.interrupt.  Returns T when it was
-running something."
+running something.  The lane answers {interrupted: [...]}, always an array
+(CONTRACT §5.5): an idle lane's is [], which decodes to #() — a vector, so
+non-NIL — and must count as nothing stopped."
   (let ((result (ignore-errors (lane-op lane "run.interrupt" (list :scope "session")))))
-    (and (getf result :interrupted) t)))
+    (let ((interrupted (getf result :interrupted)))
+      (and (typep interrupted 'sequence)
+           (plusp (length interrupted))))))
 
 (defmethod evo.serve:lane-exists-p ((server evo.serve::server) lane)
   "The lanes are this program's, so this server's lanes are the swarm's: a
