@@ -546,6 +546,22 @@ def run_all(server, stub_port, work):
           reply["ok"] and result.get("kind") == "symbol"
           and result.get("start") == 7
           and any(i["name"] == "evo:all-tools" for i in result.get("items", [])), reply)
+    status, reply, _ = server.op("complete", {"text": "/eval (list 1 / 2)", "cursor": 15})
+    result = reply.get("result") or {}
+    check("a lone slash inside /eval content answers as a symbol",
+          reply["ok"] and result.get("kind") == "symbol"
+          and not any(i["name"] == "compact" for i in result.get("items", [])), reply)
+    status, reply, _ = server.op("complete",
+                                 {"text": '/eval (format nil "see /comp")', "cursor": 28})
+    result = reply.get("result") or {}
+    check("a string's /word inside /eval content completes as a symbol too",
+          reply["ok"] and result.get("kind") == "symbol"
+          and result.get("items") == [], reply)
+    status, reply, _ = server.op("complete", {"text": "/eval (list 1 / 2)", "cursor": 3})
+    check("...while the /eval word itself still completes as a command",
+          reply["ok"] and (reply["result"] or {}).get("kind") == "command"
+          and any(i["name"] == "eval" for i in (reply["result"] or {}).get("items", [])),
+          reply)
     status, reply, _ = server.op("complete", {"text": "hello there", "cursor": 3})
     result = reply.get("result") or {}
     check("nothing at the caret to complete: a null kind and no items",

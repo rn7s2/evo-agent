@@ -963,16 +963,16 @@ that invocation.  The command word itself is not content to complete over."
                (string-equal *symbol-completion-command* (subseq line 1 space)))
       (1+ space))))
 
-(defun symbol-completion (text cursor)
-  "The symbol token at CURSOR when the caret is in the symbol-completing
-command's content, as (values START END); NIL otherwise.  The token's own
+(defun symbol-completion (text cursor content)
+  "The symbol token at CURSOR in TEXT when CONTENT — where the
+symbol-completing command's content begins — is non-NIL and the caret is at
+or past it, as (values START END); NIL otherwise.  The token's own
 boundaries are EVO.EVAL's: what a symbol may hold and what ends one is the
 reading of Lisp, which /eval already owns."
-  (let ((content (symbol-content-start text)))
-    (when content
-      (let ((start (evo.eval:token-start text cursor)))
-        (when (>= start content)
-          (values start (evo.eval:token-end text cursor)))))))
+  (when (and content (>= cursor content))
+    (let ((start (evo.eval:token-start text cursor)))
+      (when (>= start content)
+        (values start (evo.eval:token-end text cursor))))))
 
 (defun completion-target (text cursor)
   "What a caret is on, frontend-independently: (values KIND START END) for
@@ -984,15 +984,23 @@ the caret sits on nothing completable.  START..END is the range a chosen
 candidate's NAME replaces: for a command it is the word after the slash, so
 a name is never typed with one.  The token or word holding the caret is the
 whole one, so a caret in the middle replaces the unit it is in rather than
-leaving half of it behind."
-  (let ((cursor (max 0 (min cursor (length text)))))
-    (multiple-value-bind (start end) (command-completion text cursor)
-      (if start
-          (values :command start end)
-          (multiple-value-bind (start end) (symbol-completion text cursor)
-            (if start
-                (values :symbol start end)
-                (values nil nil nil)))))))
+leaving half of it behind.
+
+The content of the symbol-completing command is Lisp, so inside it — at or
+past where its content begins — only a symbol is completed: a \"/word\" in a
+list or a string is a token there, never a slash command.  Everywhere else,
+the command word itself included, a command word completes as one."
+  (let* ((cursor (max 0 (min cursor (length text))))
+         (content (symbol-content-start text)))
+    (if (and content (>= cursor content))
+        (multiple-value-bind (start end) (symbol-completion text cursor content)
+          (if start
+              (values :symbol start end)
+              (values nil nil nil)))
+        (multiple-value-bind (start end) (command-completion text cursor)
+          (if start
+              (values :command start end)
+              (values nil nil nil))))))
 
 (defun completion-items (kind prefix &optional commands)
   "Candidates for PREFIX as (name . description): the commands a client can
