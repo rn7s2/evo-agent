@@ -1146,7 +1146,9 @@ with scope lane or swarm, mediated through serve's hook."
                  (lambda (lane op args &key timeout)
                    (declare (ignore lane timeout))
                    (push (list op args) ops)
-                   (and interrupted (list :interrupted t))))
+                   ;; What a lane's serve really answers: an array either
+                   ;; way, [] when it was idle (CONTRACT §5.5).
+                   (list :interrupted (if interrupted (vector "session") (vector)))))
            (check "interrupt: scope lane stops exactly that lane"
                   (equal '("lane:1") (evo.serve:interrupt-scope server :lane 1)))
            (check "interrupt: ...through that lane's own run.interrupt"
@@ -1195,6 +1197,24 @@ with scope lane or swarm, mediated through serve's hook."
                   (null (evo.serve:interrupt-scope server :lane 1)))
            (check "interrupt: an idle swarm is not reported either"
                   (null (evo.serve:interrupt-scope server :swarm nil)))
+           ;; Only the lane that was running is named: the others answered
+           ;; [] and stopped nothing.
+           (setf ops nil)
+           (setf (symbol-function 'evo.swarm::lane-op)
+                 (lambda (lane op args &key timeout)
+                   (declare (ignore timeout))
+                   (push (list op args) ops)
+                   (list :interrupted (if (= (evo.swarm::lane-n lane) 2)
+                                          (vector "session")
+                                          (vector)))))
+           (check "interrupt: scope swarm names only the lanes it stopped"
+                  (equal '("lane:2") (evo.serve:interrupt-scope server :swarm nil)))
+           (check "interrupt: ...and so does the coordinator's note"
+                  (let ((queued (evo.kernel::agent-followups agent)))
+                    (and (= 1 (length queued))
+                         (search "[human] stopped lane 2 (interrupt)"
+                                 (followup-text (first queued))))))
+           (setf (evo.kernel::agent-followups agent) nil)
            (check "interrupt: ...and the coordinator hears nothing about it"
                   (null (evo.kernel::agent-followups agent)))
            (check "interrupt: an unknown lane is a refusal"
