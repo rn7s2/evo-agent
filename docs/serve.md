@@ -236,7 +236,7 @@ Error codes: `busy`, `not_quiescent`, `no_task`, `goal_state`, `already_sent`,
 `GET /catalog` is the whole of what a client can offer, in one document:
 
 ```json
-{"models":[{"id","provider","name","api","context_window","reasoning","images","ready","reason"}],
+{"models":[{"id","provider","name","api","context_window","reasoning","effort_levels","images","ready","reason"}],
  "providers":[{"name","api","has_key","key_env"}],
  "default_model":{"id","provider"}|null,
  "thinking_levels":["low","medium","high","xhigh","max"],
@@ -266,6 +266,18 @@ as `:anthropic-messages`.
 `lanes` — the models a lane can run — is the one half a program adds. For a
 server that runs no lanes the key is *absent*, not null: absent reads as "not
 a swarm", where null reads as an object that is not there.
+
+**`effort_levels` is the list of levels a model takes, not a range.**
+`reasoning` says a model *can* be asked to think; `effort_levels` says what to
+offer it: the levels that registration declared, in ladder order and spelled
+the way `thinking_levels` spells them, because a model's ladder need not be a
+run of levels (`["low","high","max"]` is one a provider offers). An empty list
+is a model with no effort parameter at all — never null, and never the field
+left out, so a client's menu can state the levels without branching. Every
+model object in every document carries it: `models[]`, a program's
+`lanes.models[]`, and the `model` and `lane_model` of `evo-swarm check --json`.
+Which thinking *mode* the model uses does not change it: one whose adapter
+decides for itself still takes the levels it declared.
 
 ## The seams a program adds
 

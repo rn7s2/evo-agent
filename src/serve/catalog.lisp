@@ -70,6 +70,23 @@ decides for itself when to think."
            (eq (evo.provider:model-thinking-mode model) :adaptive))
        t))
 
+(defun model-effort-levels (model)
+  "The effort levels MODEL accepts, as the documents say them: the model's own
+subset, in ladder order, spelled the way `thinking_levels` spells the same
+levels — and an empty list, never null, for a model with no effort parameter at
+all.  A client offers exactly what is here: a list, not a range, because a
+model's ladder need not be a run of levels.
+
+MODEL may be NIL — a caller that could not resolve one — which reads as no
+levels; the entry's `ok` and `reason` are what say why.  The subset is the
+registration's own (NORMALIZE-EFFORT): NIL is a model that takes no effort
+parameter, T every level, and a list a subset.  Which thinking *mode* the model
+uses does not change it: an adapter that decides for itself still takes the
+levels it declared, and one that takes none has an empty list either way."
+  (coerce (mapcar (lambda (level) (string-downcase (symbol-name level)))
+                  (and model (evo.provider:model-effort model)))
+          'vector))
+
 (defun model-readiness (model)
   "Whether a session could run MODEL now: (values ready reason code).  REASON
 is a short sentence naming what is missing — a provider, its address, or the
@@ -99,32 +116,40 @@ one."
       (t (values t nil nil)))))
 
 (defun model-status (model)
-  "MODEL as a launch-time verdict: (:id :provider :ok :reason).  :PROVIDER is
-the provider's NAME (REGISTRY-NAME): a provider is not an enum, and a client
-hands the value back to `--model id@provider`."
+  "MODEL as a launch-time verdict: (:id :provider :ok :reason :effort-levels).
+:PROVIDER is the provider's NAME (REGISTRY-NAME): a provider is not an enum, and
+a client hands the value back to `--model id@provider`.  :EFFORT-LEVELS is what
+the model takes, as MODEL-EFFORT-LEVELS spells it."
   (multiple-value-bind (ready reason) (model-readiness model)
     (list :id (pget model :id) :provider (registry-name (pget model :provider))
-          :ok ready :reason reason)))
+          :ok ready :reason reason
+          :effort-levels (model-effort-levels model))))
 
 (defun lane-model-status (model &optional (apis *kernel-apis*))
-  "MODEL as a lane would see it: the same verdict, and not runnable at all
-when its API is one a lane does not have.  APIS is the API set of the lane in
-question — the kernel's by default, which is what a lane boots with before
-anyone has worked out what it ends up with; the swarm's offline check passes
-the set its evaluation of the lane forms ended with."
+  "MODEL as a lane would see it: the same verdict — :id, :provider, :ok,
+:reason and :effort-levels — and not runnable at all when its API is one a lane
+does not have.  APIS is the API set of the lane in question — the kernel's by
+default, which is what a lane boots with before anyone has worked out what it
+ends up with; the swarm's offline check passes the set its evaluation of the
+lane forms ended with."
   (multiple-value-bind (ready reason) (model-readiness model)
     (if (member (pget model :api) apis)
         (list :id (pget model :id) :provider (registry-name (pget model :provider))
-              :ok ready :reason reason)
+              :ok ready :reason reason
+              :effort-levels (model-effort-levels model))
         (list :id (pget model :id) :provider (registry-name (pget model :provider))
               :ok nil
               :reason (format nil "its API ~(~a~) comes from an extension: load that extension in the lanes with (evo.swarm:in-lanes ...) in swarm.lisp"
-                              (pget model :api))))))
+                              (pget model :api))
+              :effort-levels (model-effort-levels model)))))
 
 (defun lane-model-entry (status)
   "A LANE-MODEL-STATUS as the catalog's lane half carries it."
   (list :id (getf status :id) :provider (getf status :provider)
-        :ok (wire-boolean (getf status :ok)) :reason (getf status :reason)))
+        :ok (wire-boolean (getf status :ok)) :reason (getf status :reason)
+        ;; What the model takes travels with it: a client's model menu states
+        ;; the levels, and the lane half is the half that menu reads.
+        :effort-levels (getf status :effort-levels)))
 
 (defvar *catalog-lanes-hook* nil
   "The `lanes` half of GET /catalog (CONTRACT §5.6), for a program that runs
@@ -166,6 +191,10 @@ nothing but the entry's own name is quoted."
           :context-window (pget model :context-window)
           ;; The verdicts are Lisp booleans; the document's are JSON ones.
           :reasoning (wire-boolean (model-reasoning-p model))
+          ;; And exactly which levels it takes: a list of names in ladder
+          ;; order, empty for a model with no effort parameter.  `reasoning`
+          ;; says a model can be asked to think; this says what to offer it.
+          :effort-levels (model-effort-levels model)
           :images (wire-boolean (ignore-errors (evo.provider:model-vision-p model)))
           :ready (wire-boolean ready)
           :reason reason)))

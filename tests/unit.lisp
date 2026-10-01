@@ -9856,6 +9856,32 @@ document, per-entry isolation, and never a key."
                         (and (eq t (getf model :ready))
                              (not (search "sk-fixture-secret-1" json)))))
                (evo.port:setenv "EVO_TEST_FIXTURE_KEY" ""))
+             ;; What each model takes, as a list a chooser can state rather
+             ;; than a range it has to guess: every level, a subset, nothing.
+             (register-model* "effort-all" :provider :fixture :api :anthropic-messages
+                              :context-window 1000 :max-output 100 :effort t)
+             (register-model* "effort-subset" :provider :fixture :api :anthropic-messages
+                              :context-window 1000 :max-output 100
+                              ;; Declared out of ladder order on purpose: what
+                              ;; travels is the ladder's order, not the form's.
+                              :effort '(:max :low :high))
+             (register-model* "effort-none" :provider :fixture :api :anthropic-messages
+                              :context-window 1000 :max-output 100)
+             (let ((catalog (evo.serve:catalog-plist agent)))
+               (flet ((levels (id)
+                        (getf (find id (getf catalog :models)
+                                    :key (lambda (m) (getf m :id)) :test #'equal)
+                              :effort-levels)))
+                 (check "catalog: a model that takes every level lists all of them"
+                        (equalp #("low" "medium" "high" "xhigh" "max")
+                                (levels "effort-all")))
+                 (check "catalog: a subset is listed as that subset, in ladder order"
+                        (equalp #("low" "high" "max") (levels "effort-subset")))
+                 (check "catalog: a model with no effort parameter lists none — [] on the wire, never null"
+                        (let ((json (evo.serve:encode-json catalog)))
+                          (and (equalp #() (levels "effort-none"))
+                               (search "\"effort_levels\":[]" json)
+                               (not (search "\"effort_levels\":null" json)))))))
              (let ((provider (find "fixture" (getf catalog :providers)
                                    :key (lambda (p) (getf p :name)) :test #'equal)))
                (check "catalog: a provider says whether it has a key, never the key"
@@ -9902,7 +9928,16 @@ document, per-entry isolation, and never a key."
                     (and lanes (vectorp (getf lanes :models))))
              (check "catalog: a model the kernel API set has is offered to lanes"
                     (and model (eq :false (getf model :ok))
-                         (search "EVO_TEST_FIXTURE_KEY" (getf model :reason)))))
+                         (search "EVO_TEST_FIXTURE_KEY" (getf model :reason))))
+             ;; ...and the lane half states the levels the same way the
+             ;; coordinator's does: a client reading either sees one shape.
+             (check "catalog: a lane model lists the levels it takes, like the coordinator's"
+                    (and (equalp #("low" "medium" "high" "xhigh" "max")
+                                 (getf model :effort-levels))
+                         (equalp (getf model :effort-levels)
+                                 (getf (find "fixture-model" (getf catalog :models)
+                                             :key (lambda (m) (getf m :id)) :test #'equal)
+                                       :effort-levels)))))
            ;; A model whose API an extension defined is not one a lane can run
            ;; until that extension is loaded into it.
            (evo.provider:register-api :fixture-api

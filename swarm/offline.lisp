@@ -37,25 +37,29 @@
 
 (defun check-model-entry (ref agent)
   "One half of `check`: REF (ID[@PROVIDER]) when the launch names a model, else
-the session's own.  Returns the entry {:id :provider :ok :reason} as its value
-and the problem it found — a plist, or NIL — as a second one.  Two values, not
-a list the caller pushes onto: PUSH only ever grew this function's own
-binding, so every problem a check found was thrown away by the caller that
-asked for it."
+the session's own.  Returns the entry {:id :provider :ok :reason
+:effort-levels} as its value and the problem it found — a plist, or NIL — as a
+second one.  Two values, not a list the caller pushes onto: PUSH only ever
+grew this function's own binding, so every problem a check found was thrown
+away by the caller that asked for it."
   (multiple-value-bind (model reason code)
       (if ref
           (handler-case (values (find-model-ref ref) nil nil)
             (error () (values nil "no registered model matches it" "model_unresolved")))
           (session-model-entry agent))
     (if (null model)
-        (values (list :id ref :provider nil :ok nil :reason reason)
+        (values (list :id ref :provider nil :ok nil :reason reason
+                      ;; A model that did not resolve has no levels to offer;
+                      ;; an empty list, so the entry's shape never changes.
+                      :effort-levels (evo.serve:model-effort-levels nil))
                 (check-problem (or code "model_unresolved")
                                (format nil "the model ~@[~a ~]the swarm would run is not usable: ~a"
                                        ref reason)))
         (multiple-value-bind (ready why why-code) (evo.serve:model-readiness model)
           (values (list :id (getf model :id)
                         :provider (registry-name (getf model :provider))
-                        :ok ready :reason why)
+                        :ok ready :reason why
+                        :effort-levels (evo.serve:model-effort-levels model))
                   (unless ready
                     (check-problem (or why-code "model_unready")
                                    (format nil "the model ~a cannot run: ~a"
@@ -69,7 +73,8 @@ counts as present only if that same code registered it in the lane.  The entry
 and the problem, as CHECK-MODEL-ENTRY returns them."
   (let ((status (lane-plan-status plan)))
     (values (list :id (getf status :id) :provider (getf status :provider)
-                  :ok (getf status :ok) :reason (getf status :reason))
+                  :ok (getf status :ok) :reason (getf status :reason)
+                  :effort-levels (getf status :effort-levels))
             (unless (getf status :ok)
               (check-problem
                (lane-plan-problem-code plan)
@@ -146,6 +151,7 @@ whether the number is even legal."
   ready       ; whether the lane could authenticate and run it
   reason      ; why not, when it could not — never a credential
   thinking    ; the rung a lane's settings end on, or NIL
+  effort-levels ; the levels that model takes, as the catalog spells them
   apis        ; the provider APIs the lane's registry ended with, in order
   models      ; every registered model as LANE-MODEL-STATUS judges it
   problems)   ; what the lane's forms could not do
@@ -233,6 +239,11 @@ fail, which is exactly what `check` exists to report."
               :reason reason
               :thinking (effective-thinking lane-state nil)
               :apis apis
+              ;; The levels the lane's own model takes.  The model is the
+              ;; lane's, so the declaration is the one its forms left behind;
+              ;; DECLARED, the coordinator's copy of the same id, is what
+              ;; answers when the lane has no registration of its own.
+              :effort-levels (evo.serve:model-effort-levels (or model declared))
               ;; The models the *lane* has, not the coordinator's: what the
               ;; fill-ins registered, plus whatever its in-lanes code
               ;; registered on its own.
@@ -242,28 +253,38 @@ fail, which is exactly what `check` exists to report."
 
 (defun lane-plan-status (plan)
   "PLAN's model as a lane would see it, in LANE-MODEL-STATUS's shape
-\(:id :provider :ok :reason).  A model whose API the lane's own code did not
-load is not runnable there, however ready it is here."
+\(:id :provider :ok :reason :effort-levels).  A model whose API the lane's own
+code did not load is not runnable there, however ready it is here.  The levels
+are the ones the lane's own registration declares — the same list the lane half
+of the catalog carries for that model, whether or not the lane can run it."
   (let ((id (lane-plan-model-id plan))
         (api (lane-plan-api plan))
+        ;; Whether a lane could run it or not, a model that resolves has the
+        ;; levels it was registered with: a client's menu states them either
+        ;; way, and an entry without them would be a shape that changes.
+        (levels (lane-plan-effort-levels plan))
         ;; The wire name, not the keyword: the check document and the catalog
         ;; must agree with the providers[].name they sit next to.
         (provider (registry-name (lane-plan-provider plan))))
     (cond
       ((null id)
        (list :id nil :provider nil :ok nil
-             :reason (or (lane-plan-reason plan) "the lanes' forms name no model")))
+             :reason (or (lane-plan-reason plan) "the lanes' forms name no model")
+             :effort-levels levels))
       ((null api)
        (list :id id :provider provider :ok nil
-             :reason (or (lane-plan-reason plan) "no registered model matches it")))
+             :reason (or (lane-plan-reason plan) "no registered model matches it")
+             :effort-levels levels))
       ((member api (lane-plan-apis plan))
        (list :id id :provider provider
              :ok (and (lane-plan-ready plan) t)
-             :reason (lane-plan-reason plan)))
+             :reason (lane-plan-reason plan)
+             :effort-levels levels))
       (t
        (list :id id :provider provider :ok nil
              :reason (format nil "its API ~(~a~) comes from an extension: load that extension in the lanes with (evo.swarm:in-lanes ...) in swarm.lisp"
-                             api))))))
+                             api)
+             :effort-levels levels)))))
 
 (defun lane-plan-problem-code (plan)
   "Why PLAN's lane model is not runnable, as the machine code a chooser

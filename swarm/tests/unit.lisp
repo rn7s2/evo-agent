@@ -1330,7 +1330,11 @@ why not — the answer a GUI's chooser needs before it spawns anything."
                                :base-url "http://127.0.0.1:1/v1"
                                :api-key-env "EVO_TEST_FIXTURE_KEY")
            (register-model* "fixture-model" :provider :fixture :api :anthropic-messages
-                            :context-window 200000 :max-output 8000)
+                            :context-window 200000 :max-output 8000
+                            ;; A model that offers a subset of the ladder, in
+                            ;; another order: what the answer says is the
+                            ;; subset the model takes, in the ladder's order.
+                            :effort '(:max :low))
            (setf agent (make-agent :journal journal))
            (evo.port:setenv "EVO_TEST_FIXTURE_KEY" "")
            (multiple-value-bind (entry problem)
@@ -1347,6 +1351,14 @@ why not — the answer a GUI's chooser needs before it spawns anything."
              (check "check: an unknown model name is reported, not signalled"
                     (and (equal "no-such-model" (getf entry :id))
                          (not (getf entry :ok))))
+             (check "check: a model that did not resolve lists no levels — [] , not null"
+                    (and (equalp #() (getf entry :effort-levels))
+                         (search "\"effort_levels\":["
+                                 (evo.serve:encode-json
+                                  (evo.swarm::check-entry-wire entry)))
+                         (not (search "\"effort_levels\":null"
+                                      (evo.serve:encode-json
+                                       (evo.swarm::check-entry-wire entry))))))
              (check "check: ...as model_unresolved"
                     (equal "model_unresolved" (getf problem :code))))
            (evo.port:setenv "EVO_TEST_FIXTURE_KEY" "sk-1")
@@ -1354,6 +1366,15 @@ why not — the answer a GUI's chooser needs before it spawns anything."
                (evo.swarm::check-model-entry "fixture-model" agent)
              (check "check: with a key present the model is ok"
                     (and (getf entry :ok) (null (getf entry :reason)) (null problem))))
+           (multiple-value-bind (entry problem)
+               (evo.swarm::check-model-entry "fixture-model" agent)
+             (declare (ignore problem))
+             (check "check: a model names the effort levels it takes, in ladder order"
+                    (equalp #("low" "max") (getf entry :effort-levels)))
+             (check "check: ...and they are the same list the catalog carries"
+                    (equalp (getf entry :effort-levels)
+                            (evo.serve:model-effort-levels
+                             (find-model "fixture-model" :fixture)))))
            (check "check: --model ID@PROVIDER resolves that registration"
                   (getf (evo.swarm::check-model-entry "fixture-model@fixture" agent) :ok))
            (check "check: an unresolvable ID@PROVIDER is a problem, not a crash"
@@ -1452,14 +1473,16 @@ thinking level, its own code decides which APIs it has, and evaluating it here
 changes nothing about the coordinator."
   (with-registries ()
     (register-provider* :stub :base-url "http://127.0.0.1:1" :api-key "LITERAL-SECRET")
-    (register-model* "m-a" :provider :stub :context-window 1000 :max-output 100)
-    (register-model* "m-b" :provider :stub :context-window 1000 :max-output 100)
+    (register-model* "m-a" :provider :stub :context-window 1000 :max-output 100
+                     :effort t)
+    (register-model* "m-b" :provider :stub :context-window 1000 :max-output 100
+                     :effort '(:medium :high))
     ;; An API only this process has: the coordinator's own extension, which
     ;; the lanes never load.
     (register-api :lane-plan-outer (make-instance 'lane-plan-fake-api))
     (register-provider* :outer :base-url "http://127.0.0.1:8/v1")
     (register-model* "outer-model" :provider :outer :api :lane-plan-outer
-                     :context-window 1000 :max-output 100)
+                     :context-window 1000 :max-output 100 :effort '(:high))
     (set-setting :model "m-a")
     (set-setting :thinking :high)
     (let* ((session-agent (fresh-agent))
@@ -1479,6 +1502,17 @@ changes nothing about the coordinator."
                (eq :low (evo.swarm::lane-plan-thinking plan)))
         (check "lane plan: the in-lanes model is one a lane can run"
                (getf (evo.swarm::lane-plan-status plan) :ok))
+        (check "lane plan: the lane model's effort levels travel with the verdict"
+               (and (equalp #("medium" "high")
+                            (getf (evo.swarm::lane-plan-status plan) :effort-levels))
+                    (equalp #("medium" "high")
+                            (getf (evo.swarm::check-lane-entry plan) :effort-levels))))
+        (check "lane plan: ...and the lane half of the catalog carries the same ones"
+               (equalp #("medium" "high")
+                       (getf (find "m-b"
+                                   (getf (evo.swarm::lane-plan-catalog plan) :models)
+                                   :key (lambda (m) (getf m :id)) :test #'equal)
+                             :effort-levels)))
         (check "lane plan: a lane's literal key is one it has"
                ;; The key never travels as data: the lane's own environment
                ;; carries it, and the sandbox answers as that process would.
@@ -1495,7 +1529,10 @@ changes nothing about the coordinator."
         (check "lane plan: --lane-model beats the in-lanes model"
                (equal "m-a" (evo.swarm::lane-plan-model-id plan)))
         (check "lane plan: --lane-thinking beats the in-lanes level"
-               (eq :xhigh (evo.swarm::lane-plan-thinking plan))))
+               (eq :xhigh (evo.swarm::lane-plan-thinking plan)))
+        (check "lane plan: ...and the levels reported are that model's own"
+               (equalp #("low" "medium" "high" "xhigh" "max")
+                       (getf (evo.swarm::lane-plan-status plan) :effort-levels))))
       (evo:set-custom-state "swarm"
                             (list :lane-model "m-b" :lane-provider :stub)
                             session-agent)
@@ -1528,6 +1565,8 @@ changes nothing about the coordinator."
                  (and fake (eq t (getf fake :ok)) (null (getf fake :reason))))
           (check "lane plan: a provider that declares no key is not refused one"
                  (eq t (getf fake :ok)))
+          (check "lane plan: a model with no effort parameter lists no levels"
+                 (equalp #() (getf fake :effort-levels)))
           (check "lane plan: the models the lane has are listed"
                  (and (find "m-b" models :key (lambda (m) (getf m :id)) :test #'equal)
                       (vectorp models)))))
@@ -1544,7 +1583,11 @@ changes nothing about the coordinator."
                       (equal "lane_api_missing" (getf problem :code))
                       (search "in-lanes" (getf entry :reason))))
           (check "lane plan: ...and its own reason names the API"
-                 (search "lane-plan-outer" (getf entry :reason)))))
+                 (search "lane-plan-outer" (getf entry :reason)))
+          ;; The levels are the registration's, not the verdict's: a client's
+          ;; menu states them whether or not the lane can run the model.
+          (check "lane plan: ...and a model the lane cannot run still states its levels"
+                 (equalp #("high") (getf entry :effort-levels)))))
       ;; A form that fails is a problem, not a crash — and it does not cost
       ;; the rest of the answer.
       (set-setting :model "m-a")
