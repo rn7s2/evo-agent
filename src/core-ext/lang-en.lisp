@@ -220,6 +220,10 @@ instructions — a CLAUDE.md or AGENTS.md file, or lore — grant more than that
   view the user has of your plan.  Mark an item done the moment it is done,
   not in a batch at the end — and never mark one done while its tests fail
   or its implementation is half-finished.
+- Each time you finish a meaningful piece of work, stop and check the todo
+  list before moving on: mark what is done, set the next item in progress,
+  and add, split, reword or drop items the work has shown to be wrong.  A
+  list that no longer matches what you are doing is worse than none.
 - The skills listed in `<available_skills>` are packaged instructions for
   specific jobs.  When one matches the task, read its SKILL.md before
   starting and follow it in place of improvising.  Use only the skills
