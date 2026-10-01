@@ -170,8 +170,8 @@ jobs:
 
       # The installer comes from SourceForge, whose download host goes down
       # for hours at a time (HTTP 522): keep the installed tree in the Actions
-      # cache so a green run makes the next ones independent of it, and give
-      # a cold install a few tries before failing the job.
+      # cache so a green run makes the next ones independent of it, and on a
+      # cold install fall back to the same release's MSI on GitHub.
       - name: Cache SBCL
         id: sbcl-cache
         uses: actions/cache@v4
@@ -186,16 +186,22 @@ jobs:
       # and contribs) through the files GitHub does re-read between steps.
       - name: Install SBCL
         shell: pwsh
+        env:
+          SBCL_FALLBACK: 2.6.8
         run: |
           if ('${{ steps.sbcl-cache.outputs.cache-hit }}' -ne 'true') {
-            $ok = $false
-            foreach ($attempt in 1..3) {
-              choco install sbcl --no-progress -y
-              if ($LASTEXITCODE -eq 0) { $ok = $true; break }
-              Write-Host "choco install sbcl failed (attempt $attempt); retrying in 60 s"
-              Start-Sleep -Seconds 60
+            choco install sbcl --no-progress -y
+            if ($LASTEXITCODE -ne 0) {
+              # Chocolatey's package downloads from SourceForge only. The same
+              # release's Windows MSI is also published on GitHub by roswell's
+              # sbcl_bin; install that instead of failing on a mirror outage.
+              Write-Host "choco install sbcl failed; installing SBCL $env:SBCL_FALLBACK from GitHub"
+              $msi = Join-Path $env:RUNNER_TEMP 'sbcl.msi'
+              $url = "https://github.com/roswell/sbcl_bin/releases/download/$env:SBCL_FALLBACK/sbcl-$env:SBCL_FALLBACK-x86-64-windows-binary.msi"
+              Invoke-WebRequest -Uri $url -OutFile $msi -MaximumRetryCount 3 -RetryIntervalSec 10
+              $p = Start-Process msiexec.exe -ArgumentList '/i', "`"$msi`"", '/qn', '/norestart' -Wait -PassThru
+              if ($p.ExitCode -ne 0) { throw "msiexec exited $($p.ExitCode)" }
             }
-            if (-not $ok) { exit 1 }
           }
           $sbclHome = @(
             "$env:ProgramFiles\Steel Bank Common Lisp",
