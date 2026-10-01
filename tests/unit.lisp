@@ -3116,9 +3116,8 @@ but it takes DELAY, which is what makes the asynchrony observable."
     (multiple-value-bind (prefix kind) (evo.tui::completion-target eb)
       (check "eval content completes symbols" (eq :symbol kind))
       (check "token stops at the open paren" (equal "evo:all-too" prefix)))
-    (multiple-value-bind (token start) (evo.tui::symbol-token-at-cursor eb)
-      (check "token start is where it began" (= start 7))
-      (check "token is what was typed" (equal "evo:all-too" token)))
+    (check "the caret's offset is a position in the text it is in"
+           (= (evo.tui::eb-cursor-offset eb) (length (evo.tui::eb-text eb))))
     ;; Tab splices the completion in place, leaving the rest of the form.
     (evo.tui::eb-insert-text eb ")")
     (evo.tui::eb-move eb :left)
@@ -3133,8 +3132,8 @@ but it takes DELAY, which is what makes the asynchrony observable."
     (evo.tui::eb-insert-text eb "/eval (car x)")
     (evo.tui::eb-move eb :home)
     (dotimes (i 3) (evo.tui::eb-move eb :right))
-    (check "no symbol completion inside the command word"
-           (null (evo.tui::symbol-token-at-cursor eb)))
+    (check "the command word of an invocation is a command word, not content"
+           (eq :command (nth-value 1 (evo.tui::completion-target eb))))
     (evo.tui::eb-move eb :end)
     (check "no popup after a closing paren"
            (null (evo.tui::completion-context tui))))
@@ -3223,6 +3222,104 @@ but it takes DELAY, which is what makes the asynchrony observable."
     (check "candidates are sorted" (equal names (sort (copy-list names) #'string<)))
     (check "candidates are unique"
            (= (length names) (length (remove-duplicates names :test #'string=))))))
+
+;;; Completion targets: what a caret sits on, frontend-independently.  The
+;;; rules live in EVO.COMMAND:COMPLETION-TARGET — the TUI's popup renders
+;;; them, serve's `complete` op hands the same answer to a GUI — so both
+;;; frontends agree by construction, and this is where the rules are pinned.
+
+(defun target-of (text cursor)
+  "(KIND START END) as a list, for comparing whole answers."
+  (multiple-value-list (evo.command:completion-target text cursor)))
+
+(defun test-completion-target ()
+  ;; A /command word: at the start of the input, and — better than the old
+  ;; one-line rule — anywhere in prose.
+  (check "a command word at the start of the input"
+         (equal '(:command 1 5) (target-of "/expo" 5)))
+  (check "a command word in the middle of prose"
+         (equal '(:command 5 9) (target-of "run /expo now" 9)))
+  (check "a command word after a newline is in prose too"
+         (equal '(:command 3 5) (target-of (format nil "a~c/he" #\Newline) 5)))
+  (check "a bare slash is a command word with an empty name"
+         (equal '(:command 1 1) (target-of "/" 1)))
+  ;; Not path-like: a second slash ends the word, wherever it is.
+  (check "a path is not a command word"
+         (equal '(nil nil nil) (target-of "/usr/local" 10)))
+  (check "a path in prose is not one either"
+         (equal '(nil nil nil) (target-of "see /usr/local" 14)))
+  (check "a trailing slash is not a command word"
+         (equal '(nil nil nil) (target-of "/foo/" 5)))
+  (check "a slash that follows a word is not a command word"
+         (equal '(nil nil nil) (target-of "a/he" 4)))
+  ;; The whole unit, not the half behind the caret: what a candidate's name
+  ;; replaces is the word or token the caret is in.
+  (check "a caret inside a command word takes the whole word"
+         (equal '(:command 1 5) (target-of "/expo" 3)))
+  (check "a caret inside an /eval token takes the whole token"
+         (equal '(:symbol 7 15) (target-of "/eval (all-tool x)" 12)))
+  ;; /eval content completes symbols — package qualifiers included, and the
+  ;; token's boundaries are the reader's, not the command word's.
+  (check "an /eval token completes as a symbol"
+         (equal '(:symbol 7 18) (target-of "/eval (evo:all-too" 18)))
+  (check "a double-colon qualifier is one token"
+         (equal '(:symbol 7 15) (target-of "/eval (evo::all" 15)))
+  (check "a symbol token holds characters a command word does not"
+         (equal '(:symbol 7 10) (target-of "/eval (*x* 2)" 9)))
+  (check "the command word of an invocation is not content"
+         (equal '(:command 1 5) (target-of "/eval (car x)" 3)))
+  ;; Nothing to complete.
+  (check "an empty input completes nothing" (equal '(nil nil nil) (target-of "" 0)))
+  (check "plain prose completes nothing"
+         (equal '(nil nil nil) (target-of "hello there" 11)))
+  (check "a caret past the end is clamped into the text"
+         (equal '(:command 1 5) (target-of "/expo" 99)))
+  (check "a command that is not the symbol one completes no symbols"
+         (equal '(nil nil nil) (target-of "/lore car" 9)))
+  (check "content on a later line still completes"
+         (equal '(:symbol 13 16) (target-of (format nil "/eval (foo~c  bar"
+                                                    #\Newline) 16))))
+
+(defun test-serve-complete-op ()
+  "The `complete` op: the shared target and its candidates, on the wire."
+  (flet ((complete (text cursor)
+           (evo.serve::op-complete nil (list :text text :cursor cursor)))
+         (names (result)
+           (mapcar (lambda (item) (getf item :name))
+                   (coerce (getf result :items) 'list))))
+    (let ((result (complete "run /comp now" 9)))
+      (check "the op names the command word it found"
+             (eq :command (getf result :kind)))
+      (check "the op reports the range a name replaces"
+             (and (= 5 (getf result :start)) (= 9 (getf result :end))))
+      (check "the op offers the commands the catalog lists"
+             (member "compact" (names result) :test #'string=))
+      (check "the op offers only what the prefix matches"
+             (every (lambda (name) (string-prefix-p "comp" name)) (names result))))
+    (let ((result (complete "/eval (evo:all-too" 18)))
+      (check "the op completes an /eval symbol like the TUI does"
+             (and (eq :symbol (getf result :kind))
+                  (= 7 (getf result :start))
+                  (= 18 (getf result :end))
+                  ;; The name is the whole replacement text, package
+                  ;; qualifier included — accepting it replaces the token as
+                  ;; typed.
+                  (member "evo:all-tools" (names result) :test #'string=)))
+      (check "a symbol candidate says what it is"
+             (equal "function"
+                    (getf (find "evo:all-tools" (coerce (getf result :items) 'list)
+                                :key (lambda (item) (getf item :name))
+                                :test #'string=)
+                          :description))))
+    (let ((result (complete "hello there" 5)))
+      (check "nothing completable: a null kind and no items"
+             (and (null (getf result :kind))
+                  (null (getf result :start))
+                  (null (getf result :end))
+                  (equalp #() (getf result :items)))))
+    (check-signals "a cursor outside the text is invalid_args"
+                   (complete "x" 9))
+    (check-signals "text is required" (evo.serve::op-complete nil nil))))
 
 ;;; Goal budgets (default: no limit)
 
@@ -9907,6 +10004,20 @@ document, per-entry isolation, and never a key."
                       (and op
                            (equal "object" (getf (getf op :args) :type))
                            (stringp (getf op :precondition)))))
+             (check "catalog: the completion op is offered with its schema"
+                    ;; A client draws its input box from this: the whole text
+                    ;; and the caret, answered with candidates — no eval, and
+                    ;; nothing it must implement of evo's own token rules.
+                    (let* ((op (find "complete" (getf catalog :ops)
+                                     :key (lambda (o) (getf o :name)) :test #'equal))
+                           (schema (getf op :args))
+                           (properties (getf schema :properties)))
+                      (and op
+                           (equal "object" (getf schema :type))
+                           (equal "string" (getf (getf properties :text) :type))
+                           (equal "integer" (getf (getf properties :cursor) :type))
+                           (equalp #("text" "cursor") (getf schema :required))
+                           (equal "none" (getf op :precondition)))))
              (check "catalog: commands, skills and tools are listed"
                     (and (plusp (length (getf catalog :commands)))
                          (vectorp (getf catalog :skills))
@@ -10057,6 +10168,8 @@ document, per-entry isolation, and never a key."
     (test-eval-tool)
     (test-eval-completion)
     (test-eval-completion-source)
+    (test-completion-target)
+    (test-serve-complete-op)
     (test-base64)
     (test-image-media-types)
     (test-attach-image)

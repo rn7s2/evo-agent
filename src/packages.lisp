@@ -280,7 +280,7 @@
            #:single-form #:eval-form
            ;; completion source: the image's own answer to "what could this
            ;; half-typed token be?", which frontends render.
-           #:token-start #:completions-for #:symbol-kind))
+           #:token-start #:token-end #:completions-for #:symbol-kind))
 
 ;; The command layer: what a slash command does to the session, once, for
 ;; every frontend (src/command/command.lisp).  Frontends implement its HOST
@@ -301,6 +301,10 @@
            ;; dispatch
            #:dispatch-command #:parse-command #:builtin-command
            #:command-catalog #:*builtin-commands* #:template-names
+           ;; completion: what a caret sits on, and what could go there —
+           ;; one answer for every frontend (the TUI's popup, serve's
+           ;; `complete` op).
+           #:completion-target #:completion-items #:*symbol-completion-command*
            ;; the commands, callable directly
            #:goal-command #:set-model #:model-select #:thinking-command
            #:set-language #:language-select #:lore-command #:compact-command

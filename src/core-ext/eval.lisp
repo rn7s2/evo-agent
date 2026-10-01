@@ -149,6 +149,16 @@ part of the token, so a package qualifier completes as one piece.")
           do (decf i))
     i))
 
+(defun token-end (text start)
+  "Index where the symbol token beginning at START in TEXT ends: its first
+delimiter, or the end of the text."
+  (let ((i (max 0 start))
+        (n (length text)))
+    (loop while (and (< i n)
+                     (not (member (char text i) *token-delimiters*)))
+          do (incf i))
+    i))
+
 (defun split-qualifier (token)
   "TOKEN split at its package marker: (values PACKAGE NAME MARKER), MARKER
 being \":\", \"::\", or NIL when TOKEN names no package.  An empty PACKAGE

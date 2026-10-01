@@ -224,12 +224,51 @@ does nothing a second time. A client branches on `error.code` alone.
 | `context.compact` | `{hint?}` → `{task_id}`. Needs an idle session. |
 | `lore.add` / `memory.request` | `{scope:"project"\|"global", text}` / `{text}` |
 | `command.run` | `{name, args}` → `{notices:[…], data:{…}, choices:{title,index,items:[…]}\|null}` — every other slash command, builtin, skill, template or extension command. It is resolved exactly as the TUI resolves one. |
-| `extension.load` / `eval` | `{path}` / `{code}` → `{value}`. `eval` is remote code execution; the token is the gate, and `--no-http-eval` removes it. |
+| `complete` | `{text, cursor}` → `{kind, start, end, items:[{name, description}]}` — what the caret in an input box could become, so a client never re-implements evo's token rules and never evaluates code to read a name list. Read-only, needs nothing idle, and is not gated by `--no-http-eval`. See *Completion* below. |
+| `extension.load` / `eval` | `{path}` / `{code}` → `{value}`. `eval` is remote code execution; the token is the gate, and `--no-http-eval` removes it. Completion does not need it — that is `complete`. |
 | `server.shutdown` | `{}` — the session ends cleanly and the process exits 0. |
 
 Error codes: `busy`, `not_quiescent`, `no_task`, `goal_state`, `already_sent`,
 `unknown_op`, `invalid_args`, `not_found`, `model_not_ready`, `op_failed`,
 `shutting_down`.
+
+### Completion
+
+`complete` is what an input box asks on every keystroke: what the caret is on,
+and what could replace it. Before it, the only way to get the list was the
+`eval` op with a hand-built Lisp form calling `evo.eval:completions-for` — a
+read that was remote code execution, and nothing at all under
+`--no-http-eval`. `complete` is a read.
+
+```json
+{"rid": "6f1c…", "op": "complete", "args": {"text": "run /comp now", "cursor": 9}}
+{"rid": "6f1c…", "ok": true, "seq": 1043,
+ "result": {"kind": "command", "start": 5, "end": 9,
+            "items": [{"name": "compact", "description": "compact the context"},
+                      {"name": "compact-now", "description": "…"}]}}
+```
+
+- `cursor` is a character offset into `text`, counted as Lisp characters. A
+  client whose offsets are UTF-16 (JavaScript, a browser textarea) converts
+  its own before asking. A cursor outside the text is `invalid_args`.
+- `kind` is `"command"` when the caret is inside a `/command` word, `"symbol"`
+  when it is inside the content of `/eval`, and `null` when the caret is on
+  nothing completable — then `start`, `end` and `items` are null or empty.
+- `start..end` is the range of `text` a chosen item's `name` replaces. For a
+  command it is the word *after* the slash, so a name never carries one; for a
+  symbol it is the token, package qualifier included.
+- A command word starts with `/` at the start of the text or after whitespace
+  — anywhere in the text, not only on a line of its own — and runs on in
+  letters, digits, `:`, `_` and `-`. A second slash ends it, so a path is
+  never completed as a command.
+- Nothing is hidden or pre-selected away: a candidate list whose only entry is
+  the word already typed still comes back whole. Whether to show a popup for
+  it is the client's choice, not the server's.
+- Precondition `none`, and no `--no-http-eval` gate: typing does not wait for
+  a turn, and reading the candidates is not evaluation.
+
+The rules are the TUI's own (`EVO.COMMAND:COMPLETION-TARGET`, the same call
+the Tab popup makes), so the two frontends agree by construction.
 
 ### The catalog
 
