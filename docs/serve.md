@@ -254,6 +254,11 @@ read that was remote code execution, and nothing at all under
 - `kind` is `"command"` when the caret is inside a `/command` word, `"symbol"`
   when it is inside the content of `/eval`, and `null` when the caret is on
   nothing completable — then `start`, `end` and `items` are null or empty.
+- Inside `/eval`'s content the text is Lisp, and the content wins: only
+  symbols complete there, so a `/word` in a list (`/eval (list 1 / 2)`) or in
+  a string (`/eval (format nil "see /comp")`) is a token and never a command.
+  The `/eval` word itself is before the content, and completes as a command
+  like a command word anywhere else in the text.
 - `start..end` is the range of `text` a chosen item's `name` replaces. For a
   command it is the word *after* the slash, so a name never carries one; for a
   symbol it is the token, package qualifier included.

@@ -3152,6 +3152,17 @@ but it takes DELAY, which is what makes the asynchrony observable."
     (evo.tui::eb-set-text eb "/lore car")
     (check "other commands do not complete symbols"
            (null (evo.tui::completion-target eb))))
+  ;; The content is Lisp: a "/word" in it is a token, so no command popup
+  ;; offers itself inside a list or a string.
+  (let* ((tui (evo.tui::make-tui))
+         (eb (evo.tui::tui-editor tui)))
+    (evo.tui::eb-insert-text eb "/eval (list 1 / 2)")
+    (check "a lone slash in /eval content is a symbol token"
+           (eq :symbol (nth-value 1 (evo.tui::completion-target eb))))
+    (evo.tui::eb-set-text eb "/eval (format nil \"see /comp\")")
+    (check "a string's /word in /eval content opens no command popup"
+           (and (eq :symbol (nth-value 1 (evo.tui::completion-target eb)))
+                (null (evo.tui::completion-context tui)))))
   ;; A whole symbol name completes itself out of existence: nothing left to
   ;; choose, so no popup to capture up/down, and tab has nothing to say.
   (let* ((tui (evo.tui::make-tui))
@@ -3268,6 +3279,15 @@ but it takes DELAY, which is what makes the asynchrony observable."
          (equal '(:symbol 7 10) (target-of "/eval (*x* 2)" 9)))
   (check "the command word of an invocation is not content"
          (equal '(:command 1 5) (target-of "/eval (car x)" 3)))
+  ;; Inside that content the text is Lisp, so only symbols complete there: a
+  ;; "/word" in a list or in a string is a token, never a slash command.
+  (check "a lone slash in /eval content is a symbol token, not a command"
+         (equal '(:symbol 14 15) (target-of "/eval (list 1 / 2)" 15)))
+  (check "a string's /word in /eval content stays a symbol token"
+         (equal '(:symbol 23 28)
+                (target-of "/eval (format nil \"see /comp\")" 28)))
+  (check "...and the /eval word itself still completes as a command"
+         (equal '(:command 1 5) (target-of "/eval (list 1 / 2)" 3)))
   ;; Nothing to complete.
   (check "an empty input completes nothing" (equal '(nil nil nil) (target-of "" 0)))
   (check "plain prose completes nothing"
@@ -3311,6 +3331,22 @@ but it takes DELAY, which is what makes the asynchrony observable."
                                 :key (lambda (item) (getf item :name))
                                 :test #'string=)
                           :description))))
+    ;; Inside /eval's content a "/word" is a token: the candidates are the
+    ;; image's own slash-named symbols (CL has //, /// and /=), never the
+    ;; command catalog a command word would have offered.
+    (let ((result (complete "/eval (list 1 / 2)" 15)))
+      (check "a lone slash in /eval content answers as a symbol"
+             (eq :symbol (getf result :kind)))
+      (check "...with no command in its candidates"
+             (not (member "compact" (names result) :test #'string=))))
+    (let ((result (complete "/eval (format nil \"see /comp\")" 28)))
+      (check "a string's /word in /eval content completes as a symbol too"
+             (and (eq :symbol (getf result :kind))
+                  (null (names result)))))
+    (let ((result (complete "/eval (list 1 / 2)" 3)))
+      (check "the /eval word itself still completes as a command"
+             (and (eq :command (getf result :kind))
+                  (member "eval" (names result) :test #'string=))))
     (let ((result (complete "hello there" 5)))
       (check "nothing completable: a null kind and no items"
              (and (null (getf result :kind))
