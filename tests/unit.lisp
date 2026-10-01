@@ -8734,6 +8734,40 @@ the stream."
            (and (evo.serve::op-available-p server "input.send")
                 (not (evo.serve::op-available-p server "eval"))))))
 
+(defun test-serve-command-run-notices ()
+  "command.run answers a command's lines as `notices`: the line's own text,
+and the severity of the style it was said with.
+
+The bug this is here for: REPLY-OUTPUT holds (:style … :text …) plists and
+the op walked them as (style text), so STYLE was the keyword :style and TEXT
+the keyword :plain.  Every reply sent the word \"plain\" where a line should
+have been, and no line could ever be anything but :info."
+  (let ((server (evo.serve:make-server :token "t"))
+        (saved (evo.kernel::capture-runtime-catalog)))
+    (unwind-protect
+         (progn
+           (setf (evo.serve:server-agent server) (make-agent))
+           (evo:register-command "notice-probe"
+                                 (lambda (ctx)
+                                   (let ((host (getf ctx :host)))
+                                     (evo.command:host-notice host "a plain line")
+                                     (evo.command:host-notice host "a warning"
+                                                              :severity :warn)
+                                     (evo.command:host-notice host "a failure"
+                                                              :severity :error)
+                                     nil))
+                                 :description "Say three lines, one of each severity.")
+           (let* ((reply (evo.serve::dispatch-op server "r1" "command.run"
+                                                 (list :name "notice-probe")))
+                  (notices (getf (getf reply :result) :notices)))
+             (check "command.run: a line's text comes back, not the word plain"
+                    (equal '("a plain line" "a warning" "a failure")
+                           (map 'list (lambda (n) (getf n :text)) notices)))
+             (check "command.run: each notice carries its line's severity"
+                    (equal '(:info :warn :error)
+                           (map 'list (lambda (n) (getf n :severity)) notices)))))
+      (evo.kernel:install-runtime-catalog saved))))
+
 (defun getf-call (calls)
   "The arguments the fallback provider was called with, for the message above."
   (getf (second (first calls)) :items))
@@ -10020,6 +10054,7 @@ document, per-entry isolation, and never a key."
     (test-serve-http)
     (test-serve-oplog)
     (test-serve-topics)
+    (test-serve-command-run-notices)
     (test-lifecycle)
     (test-model-credentials)
     (test-registry-names)

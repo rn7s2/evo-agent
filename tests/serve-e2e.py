@@ -783,9 +783,33 @@ def run_all(server, stub_port, work):
     status, reply, _ = server.op("command.run", {"name": "thinking", "args": "high"})
     check("command.run switches the thinking level",
           reply["ok"] and reply["result"]["data"]["thinking"] == "high", reply)
+    notices = reply["result"]["notices"]
+    check("command.run answers the line the command said, not its style keyword",
+          len(notices) == 1 and notices[0]["text"].startswith("thinking"), notices)
     snap = server.snapshot("session")
     check("the state follows the command", snap["topics"]["session"]["state"]["thinking"] == "high",
           snap["topics"]["session"]["state"]["thinking"])
+    # A command's lines carry their own text and the severity of the style they
+    # were said with.  The reply keeps them as (:style … :text …) plists, and
+    # reading one as (style text) sent the keywords "style" and "plain" as the
+    # line's text, with every severity an info.
+    status, reply, _ = server.op("eval", {"code": """
+        (progn
+          (evo:register-command
+           "notice-probe"
+           (lambda (ctx)
+             (let ((host (getf ctx :host)))
+               (evo.command:host-notice host "a plain line")
+               (evo.command:host-notice host "a failure" :severity :error)
+               nil)))
+          :registered)"""})
+    check("command.run: the probe command is registered", reply["ok"], reply)
+    status, reply, _ = server.op("command.run", {"name": "notice-probe"})
+    notices = (reply.get("result") or {}).get("notices")
+    check("command.run: each notice is the line, in the order it was said",
+          [n["text"] for n in notices or []] == ["a plain line", "a failure"], notices)
+    check("command.run: an error line reads as an error, a plain one as info",
+          [n["severity"] for n in notices or []] == ["info", "error"], notices)
     status, reply, _ = server.op("command.run", {"name": "nonsense"})
     check("command.run of an unknown command -> not_found",
           reply["error"]["code"] == "not_found", reply)
