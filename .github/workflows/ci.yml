@@ -168,6 +168,17 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # The installer comes from SourceForge, whose download host goes down
+      # for hours at a time (HTTP 522): keep the installed tree in the Actions
+      # cache so a green run makes the next ones independent of it, and give
+      # a cold install a few tries before failing the job.
+      - name: Cache SBCL
+        id: sbcl-cache
+        uses: actions/cache@v4
+        with:
+          path: C:\Program Files\Steel Bank Common Lisp
+          key: sbcl-windows-choco-v1
+
       # Chocolatey's SBCL is an installer, not a shimmed package: it puts
       # sbcl.exe somewhere the *machine* PATH knows about, and the runner
       # process does not re-read that mid-job.  So find it and publish the
@@ -176,8 +187,16 @@ jobs:
       - name: Install SBCL
         shell: pwsh
         run: |
-          choco install sbcl --no-progress -y
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ('${{ steps.sbcl-cache.outputs.cache-hit }}' -ne 'true') {
+            $ok = $false
+            foreach ($attempt in 1..3) {
+              choco install sbcl --no-progress -y
+              if ($LASTEXITCODE -eq 0) { $ok = $true; break }
+              Write-Host "choco install sbcl failed (attempt $attempt); retrying in 60 s"
+              Start-Sleep -Seconds 60
+            }
+            if (-not $ok) { exit 1 }
+          }
           $sbclHome = @(
             "$env:ProgramFiles\Steel Bank Common Lisp",
             "${env:ProgramFiles(x86)}\Steel Bank Common Lisp"
