@@ -467,6 +467,53 @@ line2")))
 
 ;;; Timeouts and proxy env detection
 
+(defun test-launch-child-piped ()
+  "LAUNCH-CHILD-PIPED must give the child a pipe on stdin — never the parent's
+own stdin — and hand the write end back.  ECL used to fall back to inheriting
+this process's stdin (returning NIL for the stream), which made every
+`evo-agent serve --watch-stdin` lane of an evo-swarm TUI read the terminal:
+the keys the human typed went to the lanes and the TUI looked hung."
+  #-evo-windows
+  (let* ((out-file (format nil "~a/evo-pipe-~a.out" (tmp-dir) (gen-id 8)))
+         (stub (let ((path (format nil "~a/evo-pipe-~a" (tmp-dir) (gen-id 8))))
+                 (with-open-file (out path :direction :output :if-exists :supersede)
+                   (format out "#!/bin/sh~%read x; echo \"$x\" > ~a; cat >/dev/null; echo eof >> ~a~%"
+                           out-file out-file))
+                 (uiop:run-program (list "/bin/chmod" "+x" path) :ignore-error-status t)
+                 path)))
+    (multiple-value-bind (process stdin)
+        (evo.port:launch-child-piped stub nil)
+      (unwind-protect
+           (progn
+             (check "launch-child-piped returns a stdin stream" stdin)
+             (when stdin
+               (write-line "hello-pipe" stdin)
+               (finish-output stdin)
+               (let ((found nil))
+                 (dotimes (i 20 (declare fixnum i)) (declare (ignore i))
+                   (sleep 0.1)
+                   (when (probe-file out-file) (setf found t) (return)))
+                 (check "the child read what was written to the pipe" found))
+               (when (probe-file out-file)
+                 (check "the child received the right line"
+                        (equal "hello-pipe"
+                               (string-trim '(#\Newline #\Return #\Space)
+                                            (uiop:read-file-string out-file)))))
+               ;; Closing the pipe is EOF for a --watch-stdin child.
+               (ignore-errors (close stdin))
+               (setf stdin nil)
+               (evo.port:process-wait process)
+               (when (probe-file out-file)
+                 (let ((text (uiop:read-file-string out-file)))
+                   (check "closing the pipe delivers EOF to the child"
+                          (search "eof" text))))))
+        (when stdin (ignore-errors (close stdin)))
+        (when (evo.port:process-alive-p process)
+          (ignore-errors (evo.port:process-kill-tree process)))
+        (ignore-errors (evo.port:process-wait process))
+        (ignore-errors (delete-file out-file))
+        (ignore-errors (delete-file stub))))))
+
 (defun test-port-timeout ()
   (check "portable timeout returns completed value"
          (= (evo.port:call-with-timeout 1 (lambda () 42)) 42))
@@ -10213,6 +10260,7 @@ document, per-entry isolation, and never a key."
     (test-retired-off-level)
     (test-kimi-provider)
     (test-port-timeout)
+    (test-launch-child-piped)
     (test-port-unsetenv)
     (test-env-proxy)
     (test-claude-oauth-proxy-guards)
