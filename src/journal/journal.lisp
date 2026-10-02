@@ -681,7 +681,7 @@ string."
 
 (defun index-line-record (line)
   "LINE of the index as a record plist, or NIL when it is not one."
-  (let ((object (ignore-errors (com.inuoe.jzon:parse line))))
+  (let ((object (ignore-errors (evo.util:parse-json line))))
     (when (hash-table-p object)
       (let ((id (gethash "id" object))
             (path (gethash "path" object)))

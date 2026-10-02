@@ -211,7 +211,7 @@ may answer a single request with a one-event stream instead of plain JSON."
              (when data
                (let ((payload (evo.util:string-join (string #\Newline) (nreverse data))))
                  (setf data nil)
-                 (let ((json (handler-case (com.inuoe.jzon:parse payload) (error () nil))))
+                 (let ((json (handler-case (evo.util:parse-json payload) (error () nil))))
                    (when json (push json payloads)))))))
       (dolist (raw (uiop:split-string text :separator (string #\Newline)))
         (let ((line (string-right-trim '(#\Return) raw)))
@@ -232,7 +232,7 @@ result/error message of an SSE stream.  NIL for an empty body (a notification's
                       (or (nth-value 1 (mcp-jget m "result"))
                           (nth-value 1 (mcp-jget m "error"))))
                     (mcp-sse-payloads text)))
-          (t (handler-case (com.inuoe.jzon:parse text)
+          (t (handler-case (evo.util:parse-json text)
                (error ()
                  (error 'mcp-error
                         :text (format nil "invalid JSON in response: ~a"

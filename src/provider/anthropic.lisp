@@ -63,7 +63,7 @@ effort parameter."
                       ;; hand the model a corrupted copy of its own call.
                       "input" (let ((raw (pget block :arguments-json))
                                     (args (pget block :arguments)))
-                                (or (and raw (handler-case (jzon:parse raw)
+                                (or (and raw (handler-case (evo.util:parse-json raw)
                                                (error () nil)))
                                     (and args (sexpr->json args))
                                     (jobj)))))
@@ -222,7 +222,7 @@ apply."
         (in-tokens 0) (out-tokens 0) (cache-read 0) (cache-write 0))
     (labels ((emit (&rest ev) (when on-event (funcall on-event ev)))
              (handle (event-type data)
-               (let* ((obj (ignore-errors (jzon:parse data)))
+               (let* ((obj (ignore-errors (evo.util:parse-json data)))
                       (type (or event-type (and obj (jget obj "type")))))
                  (when obj
                    (cond
@@ -317,7 +317,7 @@ apply."
                                  (let* ((raw (sse-block-input-json block))
                                         (args (cond ((zerop (length raw)) nil)
                                                     (t (handler-case
-                                                           (json->sexpr (jzon:parse raw))
+                                                           (json->sexpr (evo.util:parse-json raw))
                                                          (error () :parse-error))))))
                                    (append (list :type :tool-call
                                                  :id (sse-block-id block)

@@ -47,7 +47,8 @@
            #:count-substring #:string-replace
            #:read-file-string #:write-file-string
            #:read-file-octets #:write-file-octets
-           #:octets->base64 #:base64->octets))
+           #:octets->base64 #:base64->octets
+           #:parse-json #:*max-json-string-length*))
 
 ;; Images in: clipboard grabs, file attachments, media-type sniffing.  Builds
 ;; the :image content blocks the provider adapters already know how to encode

@@ -59,7 +59,7 @@ somebody was looking at yesterday.")
   "Parse PATH as the IDE state JSON.  Returns a plist, or NIL on any problem —
 a half-written or malformed file must never break a turn."
   (ignore-errors
-    (let ((parsed (com.inuoe.jzon:parse (evo.util:read-file-string path))))
+    (let ((parsed (evo.util:parse-json (evo.util:read-file-string path))))
       (and (hash-table-p parsed)
            (evo:json->sexpr parsed)))))
 

@@ -439,6 +439,32 @@ NTFS at all (it names an alternate data stream)."
   (let ((s (string-right-trim "/\\" (namestring (uiop:ensure-directory-pathname cwd)))))
     (map 'string (lambda (c) (if (member c '(#\/ #\\ #\:)) #\- c)) s)))
 
+;;; JSON
+;;;
+;;; One parse, one limit.  The payloads evo moves are larger than the parser
+;;; expects to see *inside a single string*, and a document refused for that is
+;;; not a malformed one.
+
+(defparameter *max-json-string-length* (1- array-dimension-limit)
+  "Longest string one JSON document may carry, for every parse in evo.
+
+JZON caps a string at 1 MiB unless told otherwise — smaller than what evo's own
+protocol puts inside one string: an image going to a provider or arriving at
+`input.send` is base64 in a string, a tool call's arguments can be a file's
+whole content, and an MCP payload is whatever a server answers.  A document that
+big is not malformed; the default was too small, and a parse that failed for its
+size used to be reported as though the JSON were wrong.  What may arrive at all
+is the transport's own cap (serve's *MAX-BODY-BYTES*); this one is the parser's,
+and it is as long as a string can be.")
+
+(defun parse-json (source)
+  "SOURCE parsed as JSON, with the string limit evo's payloads need.
+
+SOURCE is whatever JZON:PARSE takes: JSON text as a string, octets, or a stream.
+Every parse in evo goes through here, so the limit is one place rather than a
+number copied around (see *MAX-JSON-STRING-LENGTH*)."
+  (com.inuoe.jzon:parse source :max-string-length *max-json-string-length*))
+
 ;;; Safe sexpr IO (journal format rules)
 ;;;
 ;;; Journals are data, not code: read with *read-eval* nil into a sandbox
