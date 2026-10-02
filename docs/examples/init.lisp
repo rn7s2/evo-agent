@@ -165,40 +165,13 @@
 
 ;;; Theme.  :dark (the default) or :light — the /theme command toggles it
 ;;; live.  It must MATCH your terminal's background: evo paints colours legible
-;;; for that background (and the LaTeX-math renderer, which reads :theme, sets
-;;; its glyph colour from it), so :light on a dark terminal is unreadable.
+;;; for that background, so :light on a dark terminal is unreadable.
 ;; (evo:set-setting :theme :light)
 ;; A conditional default — e.g. light only when run via the evo-vscode webview
-;; (its terminal palette already follows VS Code; :theme only drives evo's own
-;; colours and the math glyph colour, so match it to your VS Code theme):
+;; (its terminal palette already follows VS Code; :theme drives evo's own
+;; colours, so match it to your VS Code theme):
 ;; (when (uiop:getenv "EVO_WEBVIEW")
 ;;   (evo:set-setting :theme :light))
-
-;;; Math rendering (extensions/300-latex-math.lisp).  LaTeX in agent output —
-;;; $…$, $$…$$, \(…\), \[…\] — renders as a real typeset image inline, with
-;;; inline formulas baseline-aligned with the prose around them.  Needs a
-;;; LaTeX toolchain (latex + dvipng) and a kitty-graphics terminal.  In VS Code,
-;;; run evo through the evo-vscode extension (crisp, device resolution);
-;;; kitty/Ghostty/WezTerm work out of the box.  Absent the toolchain it stays
-;;; off and shows source.  Prerequisites and calibration: docs/math.md.  The
-;;; three geometry settings below are AUTO-DETECTED in the evo-vscode webview;
-;;; set them (CSS px, via tests/math-calibrate.py) only for other terminals:
-;;
-;; (evo:set-setting :math-cell-px 18)            ; terminal row height, CSS px
-;; (evo:set-setting :math-cell-w-px 9)           ; terminal col width, CSS px
-;; (evo:set-setting :math-dpi 110)               ; 110 ≈ prose size; 220 = 2x
-;;
-;;; The rest has working defaults:
-;;
-;; (evo:set-setting :math t)                     ; master on/off (default t)
-;; (evo:set-setting :math-baseline-frac 0.8)     ; baseline position in a row
-;; (evo:set-setting :math-snap-px 2)             ; nudge <= Npx to save a row
-;; (evo:set-setting :math-x-advance :terminal)   ; :terminal (exact) | :manual
-;; (evo:set-setting :math-pixel-align t)         ; sub-cell baseline offset
-;; (evo:set-setting :math-inline-mode :aligned)  ; :aligned | :break | :raw
-;; (evo:set-setting :math-foreground nil)        ; xcolor name; nil = :theme
-;; (evo:set-setting :math-border "1pt")          ; whitespace around a formula
-;; (evo:set-setting :math-max-bytes 786432)      ; largest PNG to emit
 
 ;;; MCP servers (extensions/500-mcp.lisp).  Each server listed here is
 ;;; contacted at startup over Streamable HTTP and its tools are registered as

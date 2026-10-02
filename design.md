@@ -707,10 +707,10 @@ because extensions must not name a frontend: *is a person at a terminal?*
 (`evo:frontend-interactive-p`) and *will somebody start a run for input
 queued off-thread?* (`evo:request-run`). The CLI binds the answering object
 (`evo.kernel:*frontend*`) before the session boots, so load-time decisions see
-it: the LaTeX renderer's prompt note and the IDE bridge's status-line poller
-exist only under an interactive frontend, and a notification reply steers the
-TUI and a served session alike. Every frontend announces `:session-end` on its
-way out, before its task stops.
+it: the IDE bridge's status-line poller exists only under an interactive
+frontend, and a notification reply steers the TUI and a served session alike.
+Every frontend announces `:session-end` on its way out, before its task
+stops.
 
 ### 14.1 Todo lists (D14)
 

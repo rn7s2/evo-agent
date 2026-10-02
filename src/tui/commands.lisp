@@ -16,7 +16,7 @@
   /help                this list
   /goal [text]         show, create, or refine the goal; /goal pause|resume
   /todo                toggle the todo panel
-  /theme [dark|light]  switch the light/dark theme (math colours follow it)
+  /theme [dark|light]  switch the light/dark theme
   /model [id]          pick the model from a list, or set it directly
   /thinking [level]    low·medium·high·xhigh·max (changing it mid-session
                        drops the provider prompt cache)
@@ -107,8 +107,8 @@ ctrl+v."
 
 (defun theme-command (tui args)
   "Set or toggle the TUI light/dark theme.  The theme is the shared :theme
-setting (also settable in init.lisp); extensions read it — the LaTeX-math
-renderer, for one, picks its glyph colour from it.  Applies to new output;
+setting (also settable in init.lisp); the TUI's own palette resolves through it
+(src/tui/term.lisp), and extensions read it too.  Applies to new output;
 already-painted scrollback keeps its colours."
   (let* ((cur (setting :theme :dark))
          (new (cond ((string-equal args "light") :light)

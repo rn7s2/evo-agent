@@ -37,9 +37,8 @@
 ;;;; EVO_SUPERVISED_CHILD, EVO_NO_SUPERVISOR, EVO_VERBOSE, EVO_RECOVERY,
 ;;;; EVO_SERVE_TOKEN, EVO_SERVE_WATCH_PID, EVO_SUPERVISOR_STATE_DIR,
 ;;;; EVO_SUPERVISOR_PID, EVO_SUPERVISOR_RESTARTS, EVO_HEARTBEAT_FILE,
-;;;; EVO_BABY_EVO, EVO_BINARY, EVO_PID, EVO_IDE_CONTEXT, EVO_MATH_DEFAULT,
-;;;; EVO_WEBVIEW — and whatever a lane, a supervisor or a serve child adds
-;;;; beside them.
+;;;; EVO_BABY_EVO, EVO_BINARY, EVO_PID, EVO_IDE_CONTEXT, EVO_WEBVIEW — and
+;;;; whatever a lane, a supervisor or a serve child adds beside them.
 
 (defpackage :evo.test-env
   (:use :cl)

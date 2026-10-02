@@ -96,7 +96,6 @@
                                            (:file "input")
                                            (:file "editor")
                                            (:file "render")
-                                           (:file "math")
                                            (:file "markdown")
                                            (:file "tui")
                                            (:file "commands")))

@@ -21,10 +21,6 @@
            ;; it — the muted style the core's segments wear.
            #:dim
            #:request-repaint #:request-run #:tui-live-p #:post-notice
-           ;; Math rendering seam — an extension installs a rasterizer here
-           ;; (see extensions/300-latex-math.lisp and docs/extension-api.md).
-           #:register-math-renderer #:*math-renderer* #:*math-enabled*
-           #:*math-live-preview* #:md-split-math #:render-math-span
            ;; Prose-styler seam — an extension restyles plain prose words here
            ;; (see extensions/350-bionic-reader.lisp and docs/extension-api.md).
            #:register-prose-styler #:*prose-styler* #:*prose-styling-suppressed*
