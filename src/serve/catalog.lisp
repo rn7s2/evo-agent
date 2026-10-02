@@ -235,6 +235,21 @@ runs lanes passes (LANE-CATALOG warnings), the kernel-API-set answer."
         (state (ignore-errors (fold-state (agent-journal agent)))))
     (let* ((default-id (or (and state (evo.journal:state-model state))
                              (setting :model)))
+             ;; The effort this session's next turn runs on, DEFAULT-MODEL's
+             ;; counterpart: the journaled /thinking choice, the :thinking
+             ;; setting, then medium — the chain EFFECTIVE-THINKING applies,
+             ;; normalized, so an :off retired from the ladder reads as the
+             ;; weakest live rung.  A fresh session (nothing journaled) is
+             ;; therefore what a launch from here would start on, which is the
+             ;; answer a client has no other way to get: evo-agent has no
+             ;; `check` subcommand.  No state to fold — a journal that would
+             ;; not read — leaves the same chain without its journal rung.
+             (default-thinking (string-downcase
+                                (symbol-name
+                                 (if state
+                                     (evo.kernel:effective-thinking state)
+                                     (or (normalize-thinking-level (setting :thinking))
+                                         :medium)))))
              ;; The provider is the one the *model* is registered under — the
              ;; same answer /catalog gives for the model itself — so a client
              ;; that looks the pair up in MODELS finds it.  A session-level
@@ -266,6 +281,7 @@ runs lanes passes (LANE-CATALOG warnings), the kernel-API-set answer."
                          :default-model (and default-id
                                             (list :id default-id
                                                   :provider (registry-name default-provider)))
+                         :default-thinking default-thinking
                          ;; Exactly the levels the session accepts, in the
                          ;; order /thinking takes them: the ladder has no off
                          ;; rung — the CLI, /thinking and evo-swarm all refuse

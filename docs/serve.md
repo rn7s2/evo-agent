@@ -283,6 +283,7 @@ the Tab popup makes), so the two frontends agree by construction.
 {"models":[{"id","provider","name","api","context_window","reasoning","effort_levels","images","ready","reason"}],
  "providers":[{"name","api","has_key","key_env"}],
  "default_model":{"id","provider"}|null,
+ "default_thinking":"low|medium|high|xhigh|max",
  "thinking_levels":["low","medium","high","xhigh","max"],
  "languages":[{"code","name"}],
  "ops":[{"name","args":{…schema…},"precondition":"none|idle|quiescent"}],
@@ -294,6 +295,17 @@ the Tab popup makes), so the two frontends agree by construction.
 It never contains a key. The builder is total: an entry that raises is dropped
 and named in `warnings`, because one broken extension must not cost a client
 the whole catalog.
+
+**`default_model` and `default_thinking` are what this session resolves next.**
+The model is the journaled `/model` choice, then the `:model` setting; the level
+is the journaled `/thinking` choice, then the `:thinking` setting, then
+`medium`, normalized onto the ladder (a retired `:off` from an old journal or
+init.lisp reads as the weakest live rung, not as a word no adapter knows) and
+spelled the way `thinking_levels` spells its rungs. So a session nothing has run
+in yet states the launch default — which is the only place a client can learn it
+from `evo-agent`: unlike `evo-swarm`, it has no `check` subcommand to report the
+effort a launch would start on, and a page whose effort control hard-coded
+`medium` would sit there while the user's init.lisp said `:max`.
 
 **A provider — and an API — is a name, not an enum.** Every `provider` field
 (a model's, the default model's, a lane model's, and the `model` of a

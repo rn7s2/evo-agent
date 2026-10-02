@@ -10029,6 +10029,33 @@ document, per-entry isolation, and never a key."
                     ;; off rung to offer (a retired :off normalizes onto low).
                     (equalp #("low" "medium" "high" "xhigh" "max")
                             (getf catalog :thinking-levels)))
+             ;; `default_thinking`: the level this session resolves next, the
+             ;; one fact a client launching an evo-agent cannot ask for — it
+             ;; has no `check` subcommand to report the effort a launch would
+             ;; start on.  Read it again for each setting, since the document
+             ;; is built from the state, not from a cache.
+             (let ((saved (capture-settings)))
+               (unwind-protect
+                    (flet ((default-thinking ()
+                             (getf (evo.serve:catalog-plist agent) :default-thinking)))
+                      (check "catalog: the default thinking is what a fresh session runs on"
+                             (equal "medium" (default-thinking)))
+                      (set-setting :thinking :max)
+                      (check "catalog: the default thinking states the :thinking setting, as the ladder spells it"
+                             (equal "max" (default-thinking)))
+                      (set-setting :thinking :off)
+                      (check "catalog: a retired :off setting reads as the weakest live rung"
+                             (equal "low" (default-thinking)))
+                      (set-setting :thinking :high)
+                      (append-entry journal '(:type :thinking-change :thinking :xhigh))
+                      (check "catalog: a journaled choice outranks the setting, as the default model's does"
+                             (equal "xhigh" (default-thinking)))
+                      ;; A /thinking the journal does not recognize is not a
+                      ;; word the document quotes: it folds, like everywhere else.
+                      (append-entry journal '(:type :thinking-change :thinking :sideways))
+                      (check "catalog: a journaled level off the ladder is not quoted"
+                             (equal "high" (default-thinking))))
+                 (evo.util:restore-settings saved)))
              (check "catalog: the default language pack is listed first"
                     (equal "en" (getf (aref (getf catalog :languages) 0) :code)))
              (check "catalog: the ops carry their argument schema and precondition"

@@ -510,6 +510,14 @@ def run_all(server, stub_port, work):
     check("catalog: every model states the effort levels it takes",
           not bad and catalog["models"][0]["effort_levels"] == catalog["thinking_levels"],
           bad or catalog["models"][0])
+    # The effort a session started here would run on.  Nothing is journaled in
+    # this server and no --thinking was passed, so it is the default the ladder
+    # ends at — and it is a rung of that ladder, never a word of its own.
+    check("catalog: the default thinking is what a fresh session runs on",
+          catalog["default_thinking"] == "medium", catalog.get("default_thinking"))
+    check("catalog: the default thinking is a rung of the ladder",
+          catalog["default_thinking"] in catalog["thinking_levels"],
+          catalog.get("default_thinking"))
     op_schema = next(o for o in catalog["ops"] if o["name"] == "input.send")
     check("catalog: an op carries its argument schema",
           op_schema["args"]["properties"]["text"]["type"] == "string"
@@ -874,6 +882,12 @@ def run_all(server, stub_port, work):
     snap = server.snapshot("session")
     check("the state follows the command", snap["topics"]["session"]["state"]["thinking"] == "high",
           snap["topics"]["session"]["state"]["thinking"])
+    # ...and so does the catalog, which a client that only reads it has to
+    # agree with: the level this session resolves next, not a launch default
+    # frozen at boot.
+    status, after = server.get("/catalog")
+    check("catalog: the default thinking follows the session's own level",
+          after["default_thinking"] == "high", after.get("default_thinking"))
     # A command's lines carry their own text and the severity of the style they
     # were said with.  The reply keeps them as (:style … :text …) plists, and
     # reading one as (style text) sent the keywords "style" and "plain" as the
