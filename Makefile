@@ -87,7 +87,9 @@ integration: build
 # drives the state file the editor plugin writes), background jobs on the
 # status line, the activity clock restarting on every step, switching the
 # system prompt's language, and the MCP client against a stub server
-# (tests/mcp-server.py, needs python3).
+# (tests/mcp-server.py, needs python3).  Each script clears the caller's own
+# EVO_* variables before it spawns anything (tests/clean_env.tcl), so it means
+# the same thing run from a shell, from CI, and from inside a session.
 tui-test: build
 	tests/tui.exp
 	tests/interrupt.exp

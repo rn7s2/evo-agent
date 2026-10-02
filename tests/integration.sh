@@ -31,11 +31,25 @@ if [ -z "$EVO_TEST_BASE_URL" ] || [ -z "$EVO_TEST_API_KEY" ] || [ -z "$EVO_TEST_
     exit 1
 fi
 
-# The supervisor passes these to its child; if THIS script is itself launched
-# from inside a supervised evo (e.g. an agent's bash tool), they leak in and
-# every evo we spawn thinks it is already the supervised child — no supervisor,
-# so the crash-recovery test can't work.  Scrub them for a clean slate.
-unset EVO_SUPERVISED_CHILD EVO_HEARTBEAT_FILE
+# A test run gets a regular environment (the rule this repo's runners share;
+# tests/env.lisp for the Lisp ones): drop EVERY EVO_* variable inherited from
+# the session that started this script, not just the supervisor's.  The
+# supervisor passes its own to its child — if THIS script is launched from
+# inside a supervised evo (an agent's bash tool), they leak in and every evo we
+# spawn thinks it is already the supervised child, with no supervisor, so the
+# crash-recovery test cannot work — and an inherited EVO_SESSIONS_DIR would put
+# this run's journals in the caller's sessions directory.  Kept: EVO_HOME (set
+# below) and the EVO_TEST_* knobs above.
+_cleared=
+for _name in $(env | sed -n 's/^\(EVO_[A-Za-z0-9_]*\)=.*/\1/p'); do
+    case $_name in
+        EVO_HOME | EVO_TEST_*) ;;
+        *) unset "$_name"; _cleared="$_cleared $_name" ;;
+    esac
+done
+if [ -n "$_cleared" ]; then
+    echo ";; env: unset$_cleared — a test run gets a regular environment"
+fi
 
 repo=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 evo="$repo/build/evo-agent"

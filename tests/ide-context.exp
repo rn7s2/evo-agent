@@ -11,6 +11,7 @@
 set timeout 60
 
 set repo [file dirname [file dirname [file normalize $argv0]]]
+source [file join $repo tests clean_env.tcl]
 set scratch [exec mktemp -d /tmp/evo-ide.XXXXXX]
 set env(EVO_HOME) "$scratch/home"
 file mkdir $env(EVO_HOME)
@@ -41,9 +42,7 @@ puts $f {(evo:set-setting :model "ide-test-model")}
 puts $f {(evo:register-provider :anthropic :base-url "http://127.0.0.1:9/dead" :api-key "none")}
 close $f
 
-foreach v {EVO_SUPERVISED_CHILD EVO_HEARTBEAT_FILE} {
-    if {[info exists env($v)]} { unset env($v) }
-}
+clean_session_env
 
 set workdir "$scratch/work"
 file mkdir $workdir
