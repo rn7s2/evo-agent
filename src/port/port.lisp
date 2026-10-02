@@ -251,6 +251,27 @@ block the rest of shutdown."
     value)
   #+ecl (ext:setenv name value))
 
+(defun unsetenv (name)
+  "Remove environment variable NAME from this process.
+
+Removed, not set to an empty string: an empty value is still a value, and the
+readers of a variable that means "this process is a supervised child" test for
+presence, not for words."
+  #+(and sbcl (not evo-windows)) (sb-posix:unsetenv name)
+  ;; The two copies SETENV above describes both have an unsetter: a null Win32
+  ;; value removes the variable, and which C-runtime call does it depends on
+  ;; the SB-POSIX the build has (an empty value would leave the runtime's copy
+  ;; behind, which is the asymmetry SETENV exists to close).
+  #+(and sbcl evo-windows)
+  (let ((unset (find-fbound-symbol "SB-POSIX" "UNSETENV"))
+        (putenv (find-fbound-symbol "SB-POSIX" "PUTENV")))
+    (%set-environment-variable name nil)
+    (cond (unset (ignore-errors (funcall unset name)))
+          ;; The C runtime's own copy, which is the one GETENV reads: `putenv`
+          ;; with an empty value is how the CRT is told to drop a variable.
+          (putenv (ignore-errors (funcall putenv (format nil "~a=" name))))))
+  #+ecl (ext:setenv name nil))
+
 ;;; Secrets on disk.
 
 (defun chmod-private (path)

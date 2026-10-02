@@ -614,6 +614,14 @@ make tui-test       # expect-driven TUI under a pty: image paste
                     #       terminal sends it, model routing, the IDE bridge
 ```
 
+Every runner above starts from a regular environment whatever started it: the
+`EVO_*` variables of the session that ran `make` are unset before a suite loads
+(`tests/env.lisp`, and `tests/clean_env.py` for the Python suites), so the answer
+is the same from a shell, from CI, and from inside a running evo session — an
+evo-swarm lane, which is where agents run it. `EVO_HOME` and the `EVO_TEST_*`
+knobs listed above are kept; a new knob a suite must be *told* through the
+environment is named `EVO_TEST_*` for the same reason.
+
 `make swarm-serve-test` drives `evo-swarm serve` end to end over HTTP only, no
 backend and no terminal: serve's protocol for the coordinator, the `swarm` and
 `lane:N` topics through one stream, a delegated task on a lane, a lane killed

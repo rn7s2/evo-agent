@@ -64,6 +64,10 @@ install: build install-home
 # the TUI or the CLI (tests/core-only.lisp), and evo without the swarm
 # (tests/evo-only.lisp): each layer builds on the one below, never the other
 # way round.  Then evo's suite, then the swarm's.
+#
+# Every runner clears the running session's own EVO_* variables first, so the
+# result does not depend on what started it (tests/env.lisp): the same counts
+# come out of a shell, out of CI, and out of an evo-swarm lane.
 test:
 	$(RUN_SCRIPT) tests/core-only.lisp $(STDIN_GUARD)
 	$(RUN_SCRIPT) tests/evo-only.lisp $(STDIN_GUARD)

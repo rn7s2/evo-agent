@@ -53,6 +53,8 @@ import threading
 import time
 import uuid
 
+from clean_env import clean  # the environment a test's children start from
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 EVO = os.path.abspath(sys.argv[1]) if len(sys.argv) > 1 else os.path.join(ROOT, "build", "evo-agent")
 SWARM = os.path.join(ROOT, "build", "evo-swarm")
@@ -95,17 +97,13 @@ class Server:
         # left a /command scan of the caller's skill directory in the path,
         # which made one call slow enough to trip a serve bug: see below.)
         home = os.path.join(self.work, "home")
-        env = dict(os.environ, EVO_HOME=home, HOME=home)
-        # A test's child must inherit nothing about who ran the test.  The
-        # supervisor's own markers are the dangerous ones: a child that thinks
-        # it is a supervised child of somebody else, watching somebody else's
-        # pid, in somebody else's sessions directory, with somebody else's
-        # token.  Only what this test made, and the flags it passes.
-        for var in ("EVO_SERVE_TOKEN", "EVO_SESSIONS_DIR", "ANTHROPIC_API_KEY",
-                    "EVO_SUPERVISED_CHILD", "EVO_HEARTBEAT_FILE",
-                    "EVO_SERVE_WATCH_PID", "EVO_RECOVERY", "EVO_PID",
-                    "EVO_NO_SUPERVISOR"):
-            env.pop(var, None)
+        # A test's child must inherit nothing about who ran the test: the
+        # supervisor's markers are the dangerous ones — a child that thinks it
+        # is a supervised child of somebody else, watching somebody else's pid,
+        # in somebody else's sessions directory, with somebody else's token —
+        # and so is a provider key, when every model here is a stub.  Only what
+        # this test made, and the flags it passes (tests/clean_env.py).
+        env = clean(EVO_HOME=home, HOME=home)
         # Set (not inherited): this suite drives the session process itself.
         env["EVO_NO_SUPERVISOR"] = "1"
         if os.path.exists(self.ready):
