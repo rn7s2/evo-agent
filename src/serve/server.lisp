@@ -609,15 +609,16 @@ the operator of this process can see it."
     listener))
 
 (defun announce-startup (server resumed-p)
-  "What the TUI does when it comes up: an active goal picks itself back up,
-and a model that does not resolve is said now rather than at the first op."
+  "What the TUI does when it comes up: an active goal picks itself back up.
+A model that does not resolve is NOT said here: it is a normal state while a
+session's configuration lands — a lane is told its model after it listens —
+and the gate says it at the run that needs one."
   (let* ((agent (server-agent server))
          (goal (current-goal agent)))
-    (cond ((and goal (eq (pget goal :status) :active))
-           (queue-steering agent (goal-continuation-for agent goal)
-                           :origin (goal-origin goal :continue))
-           (start-run server))
-          (t (model-ready-p server)))
+    (when (and goal (eq (pget goal :status) :active))
+      (queue-steering agent (goal-continuation-for agent goal)
+                      :origin (goal-origin goal :continue))
+      (start-run server))
     (server-notice server (if resumed-p "session resumed" "session ready")
                    :severity :info :source :serve)))
 
