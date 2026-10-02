@@ -5,7 +5,9 @@
 .vscode/
 
 /build/
-__pycache__/          # the python suites import their neighbours
+# The python suites import their neighbours, which leaves bytecode behind.
+__pycache__/
+*.pyc
 *.fasl
 *.fas
 *.fasc
