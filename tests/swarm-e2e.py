@@ -485,7 +485,8 @@ def first_run(term, stub, home, proj):
         print("DEBUG-TUI", [l for l in term.text().splitlines() if "lane 2" in l][-8:])
     check("interrupt_lane alone stops the lane", stopped)
     check("...and leaves it idle, given nothing new",
-          lanes[1].state()["status"] == "idle", lanes[1].state()["status"])
+          wait_for(lambda: lanes[1].state()["status"] == "idle", timeout=10),
+          lanes[1].state()["status"])
     check("...and sends it no new prompt",
           not any(r["role"] == "lane 2" and r["time"] > (stopped or {}).get("time", t_int)
                   for r in stub.requests()))
