@@ -563,23 +563,24 @@ and unix-kill(2); on Windows taskkill /T takes the whole tree in one call."
 
 (defun process-input-stream (process)
   "The stream writing to PROCESS's standard input, for a process launched
-with :INPUT :STREAM.  NIL when this implementation does not hand the pipe
-back (see LAUNCH-CHILD-PIPED)."
+with :INPUT :STREAM."
   #+sbcl (sb-ext:process-input process)
-  #+ecl (declare (ignore process))
-  #+ecl nil)
+  #+ecl (ext:external-process-input process))
 
 (defun launch-child-piped (program args &rest keys)
   "Launch PROGRAM with a pipe on its standard input, as LAUNCH-CHILD does
 otherwise: (values PROCESS INPUT).  INPUT is the write end — what the child
 reads on input arrives from it, and closing it is the end-of-file a
---watch-stdin child stops on.  Where the implementation will not hand the pipe
-back (ECL's RUN-PROGRAM returns its stream instead of the process when it
-makes one), the child inherits this process's stdin and INPUT is NIL: best
-effort, and the caller decides what to do without it."
-  #+sbcl (let ((process (apply #'launch-child program args :input :stream keys)))
-           (values process (ignore-errors (process-input-stream process))))
-  #+ecl (values (apply #'launch-child program args :input t keys) nil))
+--watch-stdin child stops on.
+
+Never the parent's own stdin, on any implementation: a child that inherits
+it reads the terminal.  ECL used to fall back to exactly that, and every
+`evo-agent serve --watch-stdin` lane of an evo-swarm TUI then sat reading
+the coordinator's tty, so the keys the human typed went to the lanes and the
+TUI looked hung.  ECL's RUN-PROGRAM does hand the pipe back — on its process
+object, which LAUNCH-CHILD returns."
+  (let ((process (apply #'launch-child program args :input :stream keys)))
+    (values process (ignore-errors (process-input-stream process)))))
 
 (defun process-wait (process)
   "Block until PROCESS exits.  Returns (values STATUS CODE): STATUS is
