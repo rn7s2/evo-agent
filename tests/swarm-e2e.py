@@ -398,6 +398,12 @@ def first_run(term, stub, home, proj):
               [m["id"] for m in cat["models"]] == ["stub-a", "stub-swarm"]
               and cat["default_model"]["id"] == "stub-swarm",
               (cat["models"], cat["default_model"]))
+        # The effort a session started here would run on, and for a lane that
+        # is what its own launch left it at — the same meaning the coordinator's
+        # document has, stated the same way.
+        check(f"lane {lane.n} catalog: the default thinking is the level its own state reports",
+              cat.get("default_thinking") == lane.state().get("thinking"),
+              (cat.get("default_thinking"), lane.state().get("thinking")))
         check(f"lane {lane.n} baseline: core tools and the report tool",
               {"read", "write", "edit", "bash", "report"} <= set(lane.tools()))
         names = lane.tools()

@@ -542,6 +542,21 @@ def run_checks(swarm, stub, home, work, proj, held):
     check("lane 1's own topic carries its items and its state",
           one.get("status") == "idle" and one.get("session", {}).get("id"), one)
 
+    # --- the coordinator's catalog -------------------------------------------
+    # GET /catalog on an evo-swarm server: the swarm's own half (lanes.models)
+    # and, beside the default model, the effort a session started here would
+    # run on.
+    status, cat = client.get("/catalog")
+    check("the coordinator's catalog carries the swarm's lanes half",
+          status == 200 and isinstance((cat.get("lanes") or {}).get("models"), list),
+          sorted(cat))
+    check("catalog: the coordinator's default thinking is a rung of its own ladder",
+          cat.get("default_thinking") in (cat.get("thinking_levels") or []),
+          (cat.get("default_thinking"), cat.get("thinking_levels")))
+    check("catalog: ...and it is the level the session's own state reports",
+          cat.get("default_thinking") == client.topic_state("session").get("thinking"),
+          (cat.get("default_thinking"), client.topic_state("session").get("thinking")))
+
     # --- a lane the client was already holding ------------------------------
     check_held_lanes_are_announced(swarm, held)
 
