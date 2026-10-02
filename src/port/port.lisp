@@ -254,9 +254,9 @@ block the rest of shutdown."
 (defun unsetenv (name)
   "Remove environment variable NAME from this process.
 
-Removed, not set to an empty string: an empty value is still a value, and the
-readers of a variable that means "this process is a supervised child" test for
-presence, not for words."
+Removed, not set to an empty string: an empty value is still a value, and a
+reader that asks whether this process is a supervised child tests for presence,
+not for words."
   #+(and sbcl (not evo-windows)) (sb-posix:unsetenv name)
   ;; The two copies SETENV above describes both have an unsetter: a null Win32
   ;; value removes the variable, and which C-runtime call does it depends on
