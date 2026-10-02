@@ -18,6 +18,7 @@ if {[catch {exec which python3}]} {
 }
 
 set repo [file dirname [file dirname [file normalize $argv0]]]
+source [file join $repo tests clean_env.tcl]
 set scratch [exec mktemp -d /tmp/evo-mcp.XXXXXX]
 set portfile "$scratch/port"
 set server [exec python3 "$repo/tests/mcp-server.py" $portfile &]
@@ -42,9 +43,7 @@ if {$port eq ""} {
 set env(EVO_HOME) "$scratch/home"
 file mkdir "$env(EVO_HOME)/extensions"
 exec cp "$repo/extensions/500-mcp.lisp" "$env(EVO_HOME)/extensions/"
-foreach v {EVO_SUPERVISED_CHILD EVO_HEARTBEAT_FILE} {
-    if {[info exists env($v)]} { unset env($v) }
-}
+clean_session_env
 
 # A model must be registered for the TUI to start; it is never called.  Three
 # servers: the stub twice — once with headers as an alist, once as a keyword

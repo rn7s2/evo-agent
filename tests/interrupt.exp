@@ -13,6 +13,7 @@
 set timeout 180
 
 set repo [file dirname [file dirname [file normalize $argv0]]]
+source [file join $repo tests clean_env.tcl]
 set scratch [exec mktemp -d /tmp/evo-interrupt.XXXXXX]
 set env(EVO_HOME) "$scratch/home"
 file mkdir $env(EVO_HOME)
@@ -28,9 +29,7 @@ if {$base_url eq "" || $api_key eq "" || $model eq ""} {
     puts stderr "interrupt.exp: set EVO_TEST_BASE_URL, EVO_TEST_API_KEY and EVO_TEST_MODEL (dev values in project memory)"
     exit 1
 }
-foreach v {EVO_SUPERVISED_CHILD EVO_HEARTBEAT_FILE} {
-    if {[info exists env($v)]} { unset env($v) }
-}
+clean_session_env
 
 set f [open "$env(EVO_HOME)/init.lisp" w]
 puts $f "(evo:register-model \"$model\" :provider :anthropic :api :anthropic-messages :context-window 1000000 :max-output 64000)"
