@@ -150,9 +150,16 @@ anything malformed, oversized, or using a framing this server does not take."
           (when (minusp length) (http-fail 400 "bad Content-Length"))
           (when (> length *max-body-bytes*)
             (http-fail 413 "request body over ~d bytes" *max-body-bytes*))
-          (let ((octets (make-array length :element-type '(unsigned-byte 8))))
-            (unless (= length (read-sequence octets stream))
-              (http-fail 400 "request body shorter than its Content-Length"))
+          (let ((octets (make-array length :element-type '(unsigned-byte 8)))
+                (got 0))
+            ;; A socket hands back what has arrived, not what was asked for, so
+            ;; one READ-SEQUENCE is not the body: read until it is all here, and
+            ;; refuse only when the peer really sent less than it promised.
+            (loop while (< got length)
+                  for read = (read-sequence octets stream :start got)
+                  do (when (= read got)
+                       (http-fail 400 "request body shorter than its Content-Length"))
+                     (setf got read))
             (%make-request
              :method method :path path :query query :headers headers
              :body (handler-case (flexi-streams:octets-to-string

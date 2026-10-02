@@ -5666,7 +5666,25 @@ selection journals the provider, and every resolution point honours it."
            (equalp (base64->octets (octets->base64 bytes)) bytes)))
   (check "base64 decode ignores whitespace"
          (equalp (base64->octets (format nil "Zm9v~%YmFy")) (string->octets "foobar")))
-  (check-signals "base64 decode rejects junk" (base64->octets "Zm9v!!")))
+  (check-signals "base64 decode rejects junk" (base64->octets "Zm9v!!"))
+  ;; A picture's worth, which is what makes this an image client's hot path:
+  ;; the accumulator used to keep every bit it had ever carried, so each
+  ;; ASH/LOGIOR walked a bignum that grew with the string and the decode cost
+  ;; four times as much for every doubling (852 KB of base64: a minute).  The
+  ;; bound is a hundred times what a scan needs and a fraction of what the
+  ;; quadratic needed, so it says which one this is without being about the
+  ;; machine's speed.
+  (let* ((bytes (make-array (* 2 1024 1024) :element-type '(unsigned-byte 8)))
+         (string (progn (dotimes (i (length bytes))
+                          (setf (aref bytes i) (mod (* i 31) 251)))
+                        (octets->base64 bytes)))
+         (started (get-internal-real-time))
+         (decoded (base64->octets string))
+         (seconds (/ (- (get-internal-real-time) started)
+                     (float internal-time-units-per-second 1d0))))
+    (check "base64 decodes a 2 MB payload exactly" (equalp decoded bytes))
+    (check (format nil "base64 decodes 2.7 MB of text in one pass (~,3fs)" seconds)
+           (< seconds 2.0))))
 
 (defun test-image-media-types ()
   (check "sniff png" (equal (evo.media:sniff-media-type (hex->octets *png-1x1-hex*))
@@ -8195,6 +8213,18 @@ the stream."
               (equal "{\"ok\":false}" (evo.serve:encode-json (list :ok 'evo.serve::false)))))
   (check "serve json: a ratio is a number"
          (search "\"delay\":0.5" (evo.serve:encode-json (list :delay 1/2))))
+  ;; An image rides in a request body as base64 inside one string, and JZON's
+  ;; own default caps a string at 1 MiB: a picture past ~760 KB of pixels was
+  ;; refused, and the refusal said the body was not valid JSON — it was valid,
+  ;; and it was the size, and this is the request that has to work.
+  (let* ((picture (make-string (* 2 1024 1024) :initial-element #\A))
+         (body (format nil "{\"text\":\"look\",\"images\":[{\"name\":\"big.png\",\"data\":\"~a\"}]}"
+                       picture))
+         (request (request-from (format nil "POST /ops HTTP/1.1~%Content-Length: ~d~%~%~a"
+                                        (length (octets-of body)) body))))
+    (check "serve json: a 2 MiB string in a request body parses"
+           (let ((parsed (evo.serve::request-json request)))
+             (equal picture (pget (aref (pget parsed :images) 0) :data)))))
   ;; An item and a state round-trip through the wire exactly.
   (let* ((item (list :id "e_1" :kind :tool :ts 1759000000000
                      :call-id "tc_1" :name "edit" :args (list :path "a.lisp" :count 3)

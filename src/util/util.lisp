@@ -384,23 +384,42 @@ Returns TEXT itself when there is nothing to change."
              (incf j 4))
     out))
 
+(defparameter +base64-values+
+  (let ((table (make-array 256 :element-type '(signed-byte 8) :initial-element -1)))
+    (loop for i from 0 below (length +base64-alphabet+)
+          do (setf (aref table (char-code (char +base64-alphabet+ i))) i))
+    table)
+  "Char code -> its six bits, or -1 for a byte that is not in the alphabet.
+Decoding is on the path of every image a client sends, once per character of a
+payload that is megabytes long: a table lookup, not POSITION over the alphabet
+per character, is what keeps that a scan rather than sixty-four of them.")
+
 (defun base64->octets (string)
   "Decode STRING (standard alphabet; whitespace ignored) into a byte vector."
-  (let ((out (make-array (* 3 (ceiling (length string) 4))
-                         :element-type '(unsigned-byte 8) :fill-pointer 0))
-        (acc 0) (bits 0))
-    (loop for char across string
-          for value = (position char +base64-alphabet+)
-          do (cond (value
-                    (setf acc (logior (ash acc 6) value))
-                    (incf bits 6)
-                    (when (>= bits 8)
-                      (decf bits 8)
-                      (vector-push (ldb (byte 8 bits) acc) out)))
-                   ((or (char= char #\=) (member char '(#\Space #\Tab #\Newline #\Return)))
-                    nil)
-                   (t (error "base64->octets: invalid character ~s" char))))
-    (coerce out '(simple-array (unsigned-byte 8) (*)))))
+  (let* ((n (length string))
+         (out (make-array (ceiling (* 3 n) 4) :element-type '(unsigned-byte 8)))
+         (j 0) (acc 0) (bits 0))
+    (dotimes (i n)
+      (let* ((char (char string i))
+             (code (char-code char))
+             (value (if (< code 256) (aref +base64-values+ code) -1)))
+        (cond ((minusp value)
+               (unless (or (char= char #\=)
+                           (member char '(#\Space #\Tab #\Newline #\Return)))
+                 (error "base64->octets: invalid character ~s" char)))
+              (t
+               ;; The accumulator holds at most the twelve bits one group can
+               ;; carry; the mask is what keeps it a fixnum.  It used to keep
+               ;; every bit it had ever carried, so each ASH/LOGIOR walked a
+               ;; bignum that grew with the string — the decode of an 850 KB
+               ;; image cost a minute, quadratic in its length.
+               (setf acc (logand (logior (ash acc 6) value) #xFFF))
+               (incf bits 6)
+               (when (>= bits 8)
+                 (decf bits 8)
+                 (setf (aref out j) (ldb (byte 8 bits) acc))
+                 (incf j))))))
+    (if (= j (length out)) out (subseq out 0 j))))
 
 (defun evo-home ()
   "Global evo directory (~/.evo/, overridable with EVO_HOME for tests)."

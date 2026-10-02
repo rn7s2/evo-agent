@@ -40,9 +40,11 @@ Covers the redesign's protocol (CONTRACT §5):
 Usage: tests/serve-e2e.py [path/to/evo-agent]    (exit 0 on success)
 """
 
+import base64
 import http.client
 import json
 import os
+import random
 import shutil
 import socket
 import stat
@@ -52,6 +54,7 @@ import tempfile
 import threading
 import time
 import uuid
+import zlib
 
 from clean_env import clean  # the environment a test's children start from
 
@@ -131,7 +134,9 @@ class Server:
         return self.info
 
     def request(self, method, path, body=None, token=None, headers=None, timeout=30,
-                raw_body=None):
+                raw_body=None, binary=False):
+        """One request; the reply as (status, JSON-or-bytes).  BINARY asks for
+        the body as it came — /media answers with a picture, not with JSON."""
         conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=timeout)
         h = {} if token == "" else {"Authorization": f"Bearer {self.token if token is None else token}"}
         h.update(headers or {})
@@ -142,8 +147,11 @@ class Server:
             h["Content-Type"] = "application/json"
         conn.request(method, path, body=data, headers=h)
         resp = conn.getresponse()
-        payload = resp.read().decode()
+        payload = resp.read()
         conn.close()
+        if binary:
+            return resp.status, payload, None
+        payload = payload.decode()
         try:
             return resp.status, json.loads(payload)
         except ValueError:
@@ -1029,6 +1037,62 @@ def run_all(server, stub_port, work):
     check("every reply's ok — and input.send's queued — is a boolean", not bad, bad[:4])
 
 
+def big_image_check(server, stub_port):
+    """A picture big enough to matter: ~2.3 MB of pixels, ~3 MB of base64.
+
+    Two things used to break here, both on the image path only.  One string in
+    the body crossed JZON's own 1 MiB default cap, so an image past ~760 KB of
+    pixels was refused — as "body is not valid JSON", which it was not.  And the
+    base64 decode kept its accumulator growing into a bignum, so the cost was
+    quadratic in the payload: 533 KB of base64 took 13 s of the server's time.
+
+    The picture comes back whole: the item's own /media bytes, compared to the
+    pixels that went in."""
+    server.start()
+    register_stub_model(server, stub_port)
+    png = noise_png(2_300_000)
+    data = base64.b64encode(png).decode()
+    body = json.dumps({"rid": "big-image", "op": "input.send",
+                       "args": {"text": "look at this",
+                                "images": [{"name": "big.png",
+                                            "media_type": "image/png",
+                                            "data": data}]}}).encode()
+    started = time.time()
+    status, reply = server.request("POST", "/ops", raw_body=body)
+    elapsed = time.time() - started
+    check("a 3 MB base64 image is accepted, not called invalid JSON",
+          status == 200 and reply.get("ok"), (status, str(reply)[:200]))
+    check(f"and answered while it is still fast ({elapsed:.2f}s)", elapsed < 5.0, elapsed)
+    item_id = (reply.get("result") or {}).get("item_id")
+    status, got, _ = server.request("GET", f"/media/{item_id}/0?topic=session",
+                                    binary=True)
+    check("the image comes back byte for byte", status == 200 and got == png,
+          (status, len(got) if isinstance(got, (bytes, str)) else got))
+    server.op("server.shutdown", {})
+    check("the server that took a big image shuts down cleanly", server.wait_exit() == 0)
+
+
+def noise_png(approx_bytes):
+    """A PNG of about APPROX_BYTES: random pixels, stored (level 0), so it does
+    not compress — a picture an image client would really send."""
+    width = 1024
+    rows = max(1, approx_bytes // (width * 3))
+    rng = random.Random(20261002)
+    raw = bytearray()
+    for _ in range(rows):
+        raw.append(0)                       # the row's own filter byte
+        raw.extend(rng.randbytes(width * 3))
+
+    def chunk(tag, payload):
+        return (len(payload).to_bytes(4, "big") + tag + payload
+                + (zlib.crc32(tag + payload) & 0xFFFFFFFF).to_bytes(4, "big"))
+
+    ihdr = (width.to_bytes(4, "big") + rows.to_bytes(4, "big")
+            + bytes([8, 2, 0, 0, 0]))       # 8-bit truecolour
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr)
+            + chunk(b"IDAT", zlib.compress(bytes(raw), 0)) + chunk(b"IEND", b""))
+
+
 def idle_cpu_check(server):
     """An idle server waits for work; it does not burn a core waiting.
 
@@ -1293,6 +1357,7 @@ def main():
         restart_check(server)
         server.op("server.shutdown", {})
         server.wait_exit()
+        big_image_check(server, stub_port)
         idle_cpu_check(server)
         stdin_eof_check(server, stub_port)
         shutdown_with_stream_check(server, stub_port)
