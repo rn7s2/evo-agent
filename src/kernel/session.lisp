@@ -119,14 +119,14 @@ session still owns it."
 ;;; The frontend protocol.
 ;;;
 ;;; Some extensions produce input off-thread (a notification's reply field) or
-;;; exist only for a person looking at a terminal (a LaTeX renderer's prompt
-;;; note, a status-line poller).  They need two answers from whatever frontend
-;;; this session runs under, and the core cannot name one: is a human attached,
-;;; and will somebody start a run for input queued outside a run?  A frontend
-;;; answers by specializing these generics on its own object and binding
-;;; *FRONTEND* to it before the session boots, so an extension's load-time
-;;; decision already sees it.  No frontend (print mode, event mode, a bare
-;;; core in the unit suite) answers NIL to both.
+;;; exist only for a person looking at a terminal (a status-line poller).
+;;; They need two answers from whatever frontend this session runs under, and
+;;; the core cannot name one: is a human attached, and will somebody start a
+;;; run for input queued outside a run?  A frontend answers by specializing
+;;; these generics on its own object and binding *FRONTEND* to it before the
+;;; session boots, so an extension's load-time decision already sees it.  No
+;;; frontend (print mode, event mode, a bare core in the unit suite) answers
+;;; NIL to both.
 
 (defvar *frontend* nil
   "The frontend object this session runs under, or NIL for none.  Set by the

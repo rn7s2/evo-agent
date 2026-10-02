@@ -256,7 +256,7 @@ This is the evolution engine. Four mechanisms make it work:
   fixing or removing a file, never by surgery on opaque state.
 
 Seed corpus: [docs/](docs/) (extension API, journal format, self-extension
-guide, serve, swarm, math) and example extensions — git-checkpoint and
+guide, serve, swarm) and example extensions — git-checkpoint and
 permission-gate ([extensions/examples/](extensions/examples/)).
 
 ### Core extensions
@@ -326,35 +326,12 @@ self-contained and replayable with no side files to lose. Oversized images are
 downscaled first (`sips`, ImageMagick) rather than rejected, and a model
 registered without vision gets a named placeholder instead of a 400.
 
-### Math rendering
-
-LaTeX math in agent output — `$…$`, `$$…$$`, `\(…\)`, `\[…\]` — renders as a
-real typeset image inline in scrollback, the way KaTeX/MathJax draw it, not an
-ASCII approximation: inline formulas sit ON the prose baseline (pixel-exact,
-via the formula's own reported baseline metrics) and flow with the text, which
-wraps by formula rather than through one; display equations get their own
-block. The split is deliberate: the TUI core only *finds* the math and *places*
-whatever a renderer returns (falling back to the raw LaTeX source), and the
-bundled `extensions/300-latex-math.lisp` is the renderer — it rasterizes each
-formula with the LaTeX toolchain (`latex` + `dvipng`) and emits it via the
-kitty graphics protocol (in VS Code, run evo through the
-[evo-vscode](https://github.com/rn7s2/evo-vscode) extension for crisp
-device-resolution images; kitty/Ghostty/WezTerm render it out of the box). So
-the heavy, optional, platform-bound half is an
-extension; with it absent, math is just shown as source. It stays off unless
-the toolchain is present, caches every formula by content hash, registers a
-system-prompt note asking the agent to write real LaTeX while rendering is
-active, and never paints an image into the managed bottom region (the live
-preview shows source; the image lands only when the line reaches scrollback).
-Prerequisites, calibration, and settings: [docs/math.md](docs/math.md); the
-renderer seam: [docs/extension-api.md](docs/extension-api.md#math-rendering-evotui).
-
 ### Bionic reading
 
 Agent prose can be shown "bionic reading" style — the leading letters of each
 word bolded, so the eye fixates on the stem and skims the rest. It rides the
-same kind of seam as math: the TUI core hands each run of plain prose (never
-`code`, link URLs, or already-bold text) to a pluggable `*prose-styler*`, and
+same kind of seam: the TUI core hands each run of plain prose (never `code`,
+link URLs, or already-bold text) to a pluggable `*prose-styler*`, and
 the bundled `extensions/350-bionic-reader.lisp` is one such styler. It only
 touches runs of ASCII Latin letters, so English is bolded while accented Latin,
 CJK, Cyrillic and other scripts pass through untouched. On by default with the
@@ -754,7 +731,6 @@ src/tui/                 EVO.TUI — the interactive frontend (system `evo`);
   input.lisp
   editor.lisp
   render.lisp
-  math.lisp
   markdown.lisp
   tui.lisp
   commands.lisp
@@ -781,7 +757,6 @@ extensions/              vendored user extensions — copied ACTIVE into
                          ~/.evo/extensions by `make install-home`:
   020-claude-oauth-provider.lisp     Claude Pro/Max OAuth provider
   020-kimi-provider.lisp             Kimi Code K3 endpoint + models
-  300-latex-math.lisp                LaTeX math rendered as inline images
   350-bionic-reader.lisp             bionic reading for agent prose (ASCII)
   360-baby-evo.lisp                  macOS notification when evo goes idle
   400-efficiency.lisp                working/reasoning prompt section

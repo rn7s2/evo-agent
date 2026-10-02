@@ -253,8 +253,8 @@ its generation is replaced. Two calls cover that:
 ```
 
 Registrations the kernel *can* see (tools, commands, models, providers, APIs,
-prompt notes, hooks, and the TUI's status segments, math renderer and prose
-styler) are withdrawn for you.
+prompt notes, hooks, and the TUI's status segments and prose styler) are
+withdrawn for you.
 
 `extensions/900-ide-context.lisp` is the worked example: a tracked poller, a
 named `:user-message` hook and a named status segment — all of it withdrawn
@@ -444,54 +444,6 @@ background task's news, a watcher's output — painted by the TUI thread, which
 owns the screen: `(evo.tui:post-notice "sync done" :style :dim)`, styles
 `:plain :dim :notice :success :error`.  It returns NIL when no TUI is up.
 
-## Math rendering (evo.tui)
-
-Agent output that contains LaTeX math — `$…$`, `$$…$$`, `\(…\)`, `\[…\]` — is
-found and *placed* by the TUI core, but *drawn* by whatever renderer an
-extension installs. Install one:
-
-```lisp
-;; FN is (LATEX DISPLAY-P) -> (values ESCAPE TOTAL-ROWS ASCENT-ROWS COLS
-;; ADVANCE), or NIL to fall back to source.  DISPLAY-P is T for $$…$$ / \[…\]
-;; block math, NIL for inline.  ESCAPE is spliced verbatim into scrollback —
-;; it is where a terminal-graphics escape goes.  TOTAL-ROWS is the terminal
-;; rows the image spans and ASCENT-ROWS how many sit above the formula's
-;; baseline: the core reserves the rows and sits the formula's baseline on
-;; the text baseline.  COLS is its width in cells, used to wrap the line by
-;; formula and (without ADVANCE) to step the cursor past it; ADVANCE :self
-;; declares that ESCAPE itself leaves the cursor stepped past the image
-;; (exact, where COLS is an estimate).  Only ESCAPE is required — a renderer
-;; returning a bare string gets one row on the baseline.
-(evo.tui:register-math-renderer
-  (lambda (latex display-p) (my-rasterize latex display-p)))
-```
-
-The bundled `extensions/300-latex-math.lisp` is exactly such a renderer: it
-rasterizes each formula with the LaTeX toolchain (`latex` + `dvipng`, baseline
-metrics from `--depth`/`--height`) and emits it over the kitty graphics
-protocol, so formulas render the way KaTeX/MathJax would — inline math
-baseline-aligned with the prose around it, pixel-exact via a sub-cell offset.
-It is off unless the toolchain is present, is configured by settings (`:math`,
-`:math-dpi`, `:math-cell-px`, …), and exposes `/math status | on | off |
-clear-cache`. Prerequisites (a kitty-graphics terminal — in VS Code, the
-[evo-vscode](https://github.com/rn7s2/evo-vscode) webview — and a TeX
-installation) and calibration live in [docs/math.md](math.md).
-
-Four rules the seam guarantees, so a renderer stays simple and safe:
-
-- **Off by default.** With no renderer installed (`evo.tui:*math-enabled*` nil)
-  the markdown renderer is byte-for-byte what it was — math is left as source.
-- **Owned by your file.** A renderer installed while your file loads is
-  taken out again when `/reload` disposes that generation (if it is still the
-  one installed), so deleting the file switches math off.
-- **Source is the fallback.** A renderer that returns `nil`, signals, or is
-  absent yields the literal `$…$` text; a bad formula never takes down the
-  render thread.
-- **Never in the managed region.** The live streaming preview renders math as
-  its own source (the bottom region strips control bytes and counts columns);
-  an image is only emitted when a finished line reaches scrollback. So a
-  renderer only ever has to produce the escape — the TUI decides *when*.
-
 ## Prose styling (evo.tui)
 
 The inline markdown renderer emits some text verbatim — the words *between*
@@ -506,13 +458,13 @@ markers, outside `code` spans, link URLs, and already-bold text (a heading or
   (lambda (text) (my-restyle text)))
 ```
 
-It is a peer of the math seam, with the same guarantees:
+It is off by default and owned by the file that installed it:
 
 - **Off by default.** With no styler installed (`*prose-styler*` nil) the
   markdown renderer is byte-for-byte what it was — zero impact until an
   extension opts in.
-- **Owned by your file**, like the math renderer: `/reload` takes it out
-  with the generation that installed it.
+- **Owned by your file.** `/reload` takes it out with the generation that
+  installed it.
 - **Source is the fallback.** A styler that returns `nil` or signals yields
   the original run; it can never take down the render thread.
 - **Only ever plain prose.** Code spans, link URLs and bold text never reach
@@ -533,17 +485,17 @@ An extension that changes what the agent should *do* — not just how output is
 shown — can ride guidance in every system prompt:
 
 ```lisp
-(evo:register-prompt-note "latex-math"
-  "## Mathematical notation
-Write mathematics as LaTeX: `$...$` inline, `$$...$$` for display equations.")
-(evo:register-prompt-note "latex-math" nil)   ; withdraw
+(evo:register-prompt-note "house-style"
+  "## House style
+Answer in prose; use a list only when the order matters.")
+(evo:register-prompt-note "house-style" nil)   ; withdraw
 ```
 
 Notes are named: re-registering a name replaces its text (an extension
 reloaded at session start stays idempotent), `nil` withdraws it (a feature
-toggled off stops steering the agent). The bundled math renderer does exactly
-this — registered while rendering is usable, withdrawn on `/math off` — so
-the agent writes real LaTeX precisely when the terminal will render it.
+toggled off stops steering the agent). The bundled
+[`extensions/400-efficiency.lisp`](../extensions/400-efficiency.lisp) does
+exactly this: registered on load, withdrawn with the file's generation.
 
 A note may be a **function of the active language pack** instead of a string,
 called while the prompt is built, so long guidance follows `/lang` rather than
@@ -656,13 +608,12 @@ questions about it are an extension's:
 ```
 
 Ask the first before offering something only a person at a screen can use —
-`extensions/300-latex-math.lisp` withholds its "your LaTeX renders as images"
-prompt note headless, `extensions/900-ide-context.lisp` starts its
-status-line poller only for an interactive frontend. Use the second for input
-that arrives off-thread — `extensions/360-baby-evo.lisp` steers a
-notification's reply and asks for a run, and it works the same in the TUI and
-in serve. The answer is known before any extension loads, so a
-load-time decision is safe.
+`extensions/900-ide-context.lisp` starts its status-line poller only for an
+interactive frontend, and `extensions/360-baby-evo.lisp` offers its reply
+field only where somebody can answer it. Use the second for input that
+arrives off-thread — that same extension steers a notification's reply and
+asks for a run, and it works the same in the TUI and in serve. The answer is
+known before any extension loads, so a load-time decision is safe.
 
 A frontend answers by specializing `evo.kernel:frontend-interactive-p` and
 `evo.kernel:frontend-request-run` on its own object and binding

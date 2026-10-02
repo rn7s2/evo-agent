@@ -174,8 +174,7 @@ when posted, NIL when no TUI is running."
 
 (defun flush-partial (tui)
   (when (plusp (length (tui-partial tui)))
-    (let ((rendered (md-render-line (tui-partial tui) (tui-md tui))))
-      (when rendered (scroll tui rendered)))     ; NIL = suppressed (math block)
+    (scroll tui (md-render-line (tui-partial tui) (tui-md tui)))
     (setf (tui-partial tui) "")))
 
 (defun refresh-goal (tui &key (reset-goal-run-tokens t))
@@ -470,9 +469,8 @@ the activity line has one row."
            (concatenate 'string (tui-partial tui) (pget event :text)))
      (loop for pos = (position #\Newline (tui-partial tui))
            while pos
-           do (let ((rendered (md-render-line (subseq (tui-partial tui) 0 pos)
-                                              (tui-md tui))))
-                (when rendered (scroll tui rendered)))  ; NIL = suppressed
+           do (scroll tui (md-render-line (subseq (tui-partial tui) 0 pos)
+                                          (tui-md tui)))
               (setf (tui-partial tui) (subseq (tui-partial tui) (1+ pos))))
      (setf (tui-dirty tui) t))
     (:thinking-delta
@@ -964,7 +962,7 @@ wrapped between two rules, and the model status line under the editbox."
 (defparameter *tui-builtin-commands*
   '(("help" . "commands and keys")
     ("todo" . "toggle the todo panel")
-    ("theme" . "switch the light/dark theme (math colours follow it)")
+    ("theme" . "switch the light/dark theme")
     ("image" . "attach an image (path, or the clipboard)")
     ("quit" . "exit")
     ("exit" . "same as /quit"))

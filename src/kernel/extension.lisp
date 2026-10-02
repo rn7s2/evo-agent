@@ -444,8 +444,9 @@ because the alternative is a reload that hangs forever."
   "Append TEXT (a self-contained markdown snippet) to every system prompt,
 under the name NAME.  Re-registering NAME replaces its text — idempotent
 across extension reloads — and NIL TEXT removes it.  For extensions that
-change what the agent should DO: e.g. the LaTeX-math renderer asks the
-agent to write formulas as LaTeX because they now render as images.
+change what the agent should DO rather than how its output looks: e.g. the
+bundled 400-efficiency.lisp asks the agent to ask for the one thing only the
+user knows instead of grinding on a guess.
 
 TEXT may instead be a function of the active language pack (a plist; its
 :code is the language) returning the snippet, so a note can follow /lang
