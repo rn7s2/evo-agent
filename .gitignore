@@ -5,6 +5,7 @@
 .vscode/
 
 /build/
+__pycache__/          # the python suites import their neighbours
 *.fasl
 *.fas
 *.fasc

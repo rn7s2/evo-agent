@@ -104,6 +104,12 @@ body that is not an object."
   (let ((body (string-trim '(#\Space #\Tab #\Newline #\Return) (request-body request))))
     (when (plusp (length body))
       (let ((value (handler-case (decode-json body)
+                     ;; A document the parser refuses for its size is not a
+                     ;; malformed one: say which it is, so a client sending a
+                     ;; picture it is allowed to send is not told its JSON is
+                     ;; wrong (413 Content Too Large).
+                     (com.inuoe.jzon:json-parse-limit-error ()
+                       (http-fail 413 "request body is over the JSON parser's limit"))
                      (error () (http-fail 400 "body is not valid JSON")))))
         (unless (listp value)
           (http-fail 400 "body must be a JSON object"))

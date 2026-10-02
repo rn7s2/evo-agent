@@ -130,9 +130,11 @@ rather than being left to guess.
 ## Requests and replies
 
 HTTP/1.1, loopback, one request per connection (`Connection: close`). Request
-bodies are JSON objects with a `Content-Length` (chunked uploads get `411`).
-Replies are JSON; `/stream` is Server-Sent Events. Keys and enum values are
-snake_case (`lane_report`, `after_run`). Times are epoch **milliseconds**.
+bodies are JSON objects with a `Content-Length` (chunked uploads get `411`), up
+to 64 MiB — an image rides in one as base64, so the cap is the body's own and
+not a string's (`413` past it). Replies are JSON; `/stream` is Server-Sent
+Events. Keys and enum values are snake_case (`lane_report`, `after_run`). Times
+are epoch **milliseconds**.
 
 | Status | When |
 |---|---|
