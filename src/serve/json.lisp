@@ -163,18 +163,13 @@ and a value can be a secret)."
   "VALUE (a sexpr) as JSON text."
   (com.inuoe.jzon:stringify (sexpr->json-value value)))
 
-(defparameter *max-json-string-length* (1- array-dimension-limit)
-  "Longest string one parsed document may carry.  JZON caps a string at 1 MiB
-by default, which is smaller than one picture: `input.send` carries an image's
-bytes as base64 inside a single string, so the default refused every image past
-about 760 KB of pixels — and it was answered as invalid JSON, which it is not.
-The request body has its own cap, and that is the real limit on what arrives
-(*MAX-BODY-BYTES*, http.lisp); this one is the parser's, and it is the largest
-string the implementation can build.")
-
 (defun decode-json (text)
-  "JSON TEXT as a sexpr (objects as keyword plists).  Signals on bad JSON."
-  (json->sexpr (com.inuoe.jzon:parse text :max-string-length *max-json-string-length*)))
+  "JSON TEXT as a sexpr (objects as keyword plists).  Signals on bad JSON.
+
+The parse is EVO.UTIL:PARSE-JSON: a body evo accepts carries an image's bytes
+inside one string, and the parser's own default string limit is smaller than
+one picture (see EVO.UTIL:*MAX-JSON-STRING-LENGTH*)."
+  (json->sexpr (evo.util:parse-json text)))
 
 (defun event->json (event)
   "EVENT (an --events plist) as one line of JSON.  An event holding a value

@@ -460,7 +460,7 @@ or NIL."
   (when body
     (ignore-errors
      (let* ((j (etypecase body
-                (string (com.inuoe.jzon:parse body))
+                (string (evo.util:parse-json body))
                 (hash-table body)))
             (err (gethash "error" j)))
        ;; Anthropic error shape: {"error": {"type": "...", "message": "..."}}
@@ -481,7 +481,7 @@ Claude Code's own error reader picks apart."
   (when body
     (ignore-errors
      (let* ((j (etypecase body
-                (string (com.inuoe.jzon:parse body))
+                (string (evo.util:parse-json body))
                 (hash-table body)))
             (err (gethash "error" j)))
        (typecase err
@@ -606,7 +606,7 @@ request arrives or 120 seconds elapse."
                  (error "Token exchange failed: HTTP ~a~@[: ~a~]"
                         (dexador.error:response-status e)
                         (claude-oauth--extract-error resp-body))))))
-         (json (com.inuoe.jzon:parse response)))
+         (json (evo.util:parse-json response)))
     (let ((access (gethash "access_token" json))
           (refresh (gethash "refresh_token" json))
           (expires-in (gethash "expires_in" json))
@@ -667,7 +667,7 @@ without a scope parameter, leaving the grant as it was."
              (claude-oauth--invalid-scope ()
                (format *error-output* "~&[claude-oauth] Token endpoint refused the refresh scope; retrying without one.~%")
                (claude-oauth--post-refresh refresh-token nil))))
-         (json (com.inuoe.jzon:parse response)))
+         (json (evo.util:parse-json response)))
     (let ((access (gethash "access_token" json))
           (refresh (gethash "refresh_token" json))
           (expires-in (gethash "expires_in" json))

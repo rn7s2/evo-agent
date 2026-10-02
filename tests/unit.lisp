@@ -8190,6 +8190,160 @@ became zero after the first reload."
   (handler-case (progn (funcall thunk) nil)
     (evo.serve::http-error (e) (evo.serve::http-error-status e))))
 
+;;; JSON string limit (EVO.UTIL:*MAX-JSON-STRING-LENGTH*)
+;;;
+;;; JZON caps one string at 1 MiB unless it is told otherwise, and evo's
+;;; payloads are larger than that *inside a single string*: an image, a file's
+;;; whole content in a tool call, whatever a server answers with.  Every parse
+;;; in evo goes through EVO.UTIL:PARSE-JSON so the limit lives in one place;
+;;; these are the paths that carry such a string, and each of them lost one to
+;;; the default — a dropped event, an :arguments-error, an empty tool call, a
+;;; session missing from the index list.
+
+(defparameter *json-limit-payload* (make-string (* 2 1024 1024) :initial-element #\x)
+  "Two MiB of JSON string: past JZON's 1 MiB default, and cheap to build.")
+
+(defmacro nil-on-error (form)
+  "FORM's value, or NIL when it signals.  A check that a payload parses should
+report a regression as a failure, not stop the rest of the suite."
+  `(handler-case ,form (error () nil)))
+
+(defun test-json-string-limit ()
+  "A string past the parser's default, on the paths that carry one."
+  ;; provider: one event can hold a block that long, and it must be read rather
+  ;; than dropped (the parse used to lose the event without a word).
+  (let* ((stream (format nil (cat "event: content_block_start~%"
+                                  "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}~%~%"
+                                  "event: content_block_delta~%"
+                                  "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"~a\"}}~%~%"
+                                  "event: content_block_stop~%"
+                                  "data: {\"type\":\"content_block_stop\",\"index\":0}~%~%"
+                                  "event: message_stop~%data: {\"type\":\"message_stop\"}~%~%")
+                         *json-limit-payload*))
+         (result (with-input-from-string (in stream) (parse-sse-stream in))))
+    (check "provider: a 2 MiB SSE event is parsed, not dropped"
+           (equal *json-limit-payload* (pget (first (pget result :content)) :text))))
+  ;; provider: a tool call's arguments are a file's whole content, streamed as
+  ;; one partial_json delta and parsed at content_block_stop.
+  (let* ((stream (format nil (cat "event: content_block_start~%"
+                                  "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"tc_big\",\"name\":\"bash\"}}~%~%"
+                                  "event: content_block_delta~%"
+                                  "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":~s}}~%~%"
+                                  "event: content_block_stop~%"
+                                  "data: {\"type\":\"content_block_stop\",\"index\":0}~%~%"
+                                  "event: message_stop~%data: {\"type\":\"message_stop\"}~%~%")
+                         (format nil "{\"content\":\"~a\"}" *json-limit-payload*)))
+         (block (first (pget (with-input-from-string (in stream) (parse-sse-stream in))
+                             :content))))
+    (check "provider: 2 MiB tool arguments parse, with no :arguments-error"
+           (and (null (pget block :arguments-error))
+                (equal *json-limit-payload*
+                       (pget (pget block :arguments) :content)))))
+  ;; kernel: the same call replayed from a journal — the model's own raw text is
+  ;; what runs, and refusing to parse it would run an empty object instead.
+  (unwind-protect
+       (progn
+         (evo.kernel:register-tool*
+          :name "json-limit-probe" :description "probe"
+          :schema '(:object (:path :type :string :description "p"))
+          :arguments :json :source :extension
+          :execute (lambda (args) (declare (ignore args)) "ok"))
+         (let* ((raw (format nil "{\"files\":{\"big.txt\":\"~a\"}}" *json-limit-payload*))
+                (tool (find-tool "json-limit-probe"))
+                ;; No plist to fall back on: the raw text is all there is, so a
+                ;; parse that fails is an empty object for the tool.
+                (parsed (evo.kernel:tool-call-arguments
+                         tool
+                         (list :type :tool-call :id "tc_big" :name "json-limit-probe"
+                               :arguments-json raw)
+                         nil)))
+           (check "kernel: 2 MiB arguments parse from the raw text"
+                  (equal *json-limit-payload*
+                         (nil-on-error
+                          (gethash "big.txt" (gethash "files" parsed)))))))
+    (remhash "json-limit-probe" evo.kernel::*tool-registry*))
+  ;; journal: an index line with a long field is still a record — a line the
+  ;; parser refuses is a session missing from `evo sessions list`.
+  (let ((record (evo.journal::index-line-record
+                 (format nil "{\"id\":\"s_1\",\"path\":\"/tmp/~a\"}"
+                         *json-limit-payload*))))
+    (check "journal: a 2 MiB index line still reads as a record"
+           (and (equal "s_1" (pget record :id))
+                (= (+ 5 (length *json-limit-payload*)) (length (pget record :path)))))))
+
+(defun extension-function (name)
+  "A function a bundled extension defines, looked up by NAME.
+
+UNIT.LISP is compiled before any extension is loaded, so calling one by name
+would be a compile-time warning and, if the load ever moved, a call that is
+simply missing."
+  (or (symbol-function (find-symbol name :evo.user))
+      (error "extension function ~a is not loaded" name)))
+
+(defun test-json-string-limit-extensions ()
+  "The same limit on the parse sites that live in bundled extensions."
+  (let* ((saved-models evo.provider::*models*)
+         (saved-providers (copy-alist evo.provider::*providers*))
+         (tmp (merge-pathnames (format nil "evo-json-limit-~a.json" (evo.util:gen-id))
+                               (uiop:temporary-directory))))
+    (unwind-protect
+         (progn
+           ;; MCP: a server's answer is whatever the server sends, and it may
+           ;; arrive as plain JSON or as a one-event stream.
+           (evo.kernel:load-extension*
+            (merge-pathnames "extensions/500-mcp.lisp" (uiop:getcwd)) :record nil)
+           (let* ((message (format nil (cat "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":"
+                                            "{\"content\":[{\"type\":\"text\",\"text\":\"~a\"}]}}")
+                                   *json-limit-payload*))
+                  (parsed (nil-on-error
+                           (funcall (extension-function "MCP-RESPONSE-MESSAGE")
+                                    message "application/json"))))
+             (check "mcp: a 2 MiB response body parses"
+                    (equal *json-limit-payload*
+                           (nil-on-error
+                            (gethash "text"
+                                     (aref (gethash "content" (gethash "result" parsed))
+                                           0)))))
+             (check "mcp: the same message as a 2 MiB SSE payload parses"
+                    (let ((streamed (nil-on-error
+                                     (funcall (extension-function "MCP-RESPONSE-MESSAGE")
+                                              (format nil "event: message~%data: ~a~%~%" message)
+                                              "text/event-stream"))))
+                      (equal *json-limit-payload*
+                             (nil-on-error
+                              (gethash "text"
+                                       (aref (gethash "content"
+                                                      (gethash "result" streamed))
+                                             0)))))))
+           ;; ide-context: the state file is read whole, and a parse that gives
+           ;; up silently turns a turn's context into no context.
+           (evo.kernel:load-extension*
+            (merge-pathnames "extensions/900-ide-context.lisp" (uiop:getcwd)) :record nil)
+           (evo.util:write-file-string
+            tmp
+            (format nil "{\"file\":\"/src/a.rs\",\"selection\":\"~a\"}"
+                    *json-limit-payload*))
+           (check "ide-context: a 2 MiB state file parses"
+                  (equal *json-limit-payload*
+                         (pget (nil-on-error
+                                (funcall (extension-function "IDE-CONTEXT-PARSE")
+                                         (namestring tmp)))
+                               :selection)))
+           ;; claude-oauth: an endpoint's error body is parsed to say what went
+           ;; wrong, and swallowing it would report nothing at all.
+           (evo.kernel:load-extension*
+            (merge-pathnames "extensions/020-claude-oauth-provider.lisp" (uiop:getcwd))
+            :record nil)
+           (check "claude-oauth: a 2 MiB error body is read"
+                  (equal *json-limit-payload*
+                         (nil-on-error
+                          (funcall (extension-function "CLAUDE-OAUTH--EXTRACT-ERROR")
+                                  (format nil "{\"error\":{\"message\":\"~a\"}}"
+                                          *json-limit-payload*))))))
+      (ignore-errors (delete-file tmp))
+      (setf evo.provider::*models* saved-models
+            evo.provider::*providers* saved-providers))))
+
 (defun test-serve-json ()
   "The encoder is the wire: snake_case keys and values, plists as objects,
 vectors as arrays, and a value it cannot express degrades instead of killing
@@ -10148,6 +10302,8 @@ document, per-entry isolation, and never a key."
     (test-reload-generation-ordering)
     (test-command-layer)
     (test-frontend-protocol)
+    (test-json-string-limit)
+    (test-json-string-limit-extensions)
     (test-serve-json)
     (test-serve-http)
     (test-serve-oplog)

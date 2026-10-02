@@ -192,7 +192,7 @@ before this existed), so a :json tool degrades to lossy rather than broken."
   (if (eq (tool-arguments tool) :plist)
       args
       (let ((raw (and (eq args (pget call :arguments)) (pget call :arguments-json))))
-        (or (and raw (handler-case (jzon:parse raw) (error () nil)))
+        (or (and raw (handler-case (evo.util:parse-json raw) (error () nil)))
             (and args (evo.provider::sexpr->json args))
             (make-hash-table :test #'equal)))))
 
