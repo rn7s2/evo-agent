@@ -48,6 +48,8 @@ tools (on its run thread) and the TUI's status segment all read or write it."
   server                ; the coordinator's serve server, or NIL (the TUI)
   lane-model lane-provider   ; what the lanes run (CONTRACT §1, §4.3), or NIL
   lane-thinking
+  prompt-notes           ; --prompt-note paths this launch was given: registered
+                         ; on the coordinator, and passed to every lane
   (coordinator-busy nil)  ; is the coordinator's session running a task right now
   (lock (bt:make-lock "evo-swarm"))
   (stopping nil)

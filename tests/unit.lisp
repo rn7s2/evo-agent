@@ -3538,6 +3538,82 @@ a lint that can go blind without saying so is worse than none."
       (setf evo.kernel::*prompt-notes* saved
             evo.kernel::*prompt-languages* saved-languages))))
 
+;;; `--prompt-note` (docs/serve.md): a serve flag that puts a client's own file
+;;; in every system prompt this launch builds.  Nothing here is frontend
+;;; specific — the file is markdown and the kernel's own registry takes it —
+;;; and a swarm passes the flag on to its lanes.
+
+(defun test-serve-prompt-note ()
+  (let* ((saved evo.kernel::*prompt-notes*)
+         (dir (uiop:ensure-directory-pathname
+               (format nil "~a/evo-prompt-note-~a/" (tmp-dir) (gen-id))))
+         (file (merge-pathnames "gui-renderer.md" dir)))
+    (unwind-protect
+         (progn
+           (setf evo.kernel::*prompt-notes* nil)
+           (ensure-directories-exist file)
+           (write-file-string file "The GUI renders LaTeX itself: MARKER-9.\n")
+           (let ((opts (evo.cli::parse-args
+                        (list "serve" "--prompt-note" (namestring file)))))
+             (check "cli: --prompt-note is read at parse time, named for its file"
+                    (equal (list :path (namestring file) :name "gui-renderer.md"
+                                 :text "The GUI renders LaTeX itself: MARKER-9.\n")
+                           (first (getf opts :prompt-notes)))))
+           (check "cli: --prompt-note repeats, in order"
+                  (equal (mapcar (lambda (note) (getf note :name))
+                                 (getf (evo.cli::parse-args
+                                        (list "serve"
+                                              "--prompt-note" (namestring file)
+                                              "--prompt-note" (namestring file)))
+                                       :prompt-notes))
+                         '("gui-renderer.md" "gui-renderer.md")))
+           (check-signals "cli: --prompt-note without a path is an error"
+                          (evo.cli::parse-args '("serve" "--prompt-note")))
+           (check-signals "cli: --prompt-note outside serve is unknown"
+                          (evo.cli::parse-args (list "--prompt-note" (namestring file))))
+           (check-signals "cli: --prompt-note refuses a file that is not there"
+                          (evo.cli::parse-args
+                           '("serve" "--prompt-note" "/nowhere/at/all/gone.md")))
+           (check-signals "cli: ...and one that is a directory, not a file"
+                          (evo.cli::parse-args
+                           (list "serve" "--prompt-note" (namestring dir))))
+           ;; Registration: what a session does with the flag it was given.
+           (evo.cli::register-prompt-notes
+            (evo.cli::parse-args (list "serve" "--prompt-note" (namestring file))))
+           (check "cli: a registered --prompt-note rides in the system prompt"
+                  (search "MARKER-9" (build-system-prompt nil)))
+           (check "cli: it is registered under the file's own name"
+                  (equal '("gui-renderer.md")
+                         (mapcar #'car (evo.kernel::prompt-notes-snapshot))))
+           ;; Registered after the userspace boots, so a client that asked for a
+           ;; note means it to stand over an extension's of the same name.
+           (evo:register-prompt-note "gui-renderer.md" "extension's own words")
+           (evo.cli::register-prompt-notes
+            (evo.cli::parse-args (list "serve" "--prompt-note" (namestring file))))
+           (let ((prompt (build-system-prompt nil)))
+             (check "cli: the launch's note is the one that stands"
+                    (and (search "MARKER-9" prompt)
+                         (not (search "extension's own words" prompt)))))
+           (check "cli: two files of the same name leave the last one"
+                  (let ((second (merge-pathnames "gui-renderer.md" (merge-pathnames "b/" dir))))
+                    (ensure-directories-exist second)
+                    (write-file-string second "SECOND-FILE\n")
+                    (evo.cli::register-prompt-notes
+                     (evo.cli::parse-args
+                      (list "serve" "--prompt-note" (namestring file)
+                            "--prompt-note" (namestring second))))
+                    (let ((prompt (build-system-prompt nil)))
+                      (and (search "SECOND-FILE" prompt)
+                           (not (search "MARKER-9" prompt))))))
+           (check "cli: a serve restart keeps every --prompt-note"
+                  (equal '("--port" "9" "--prompt-note" "/a.md" "--prompt-note" "/b.md")
+                         (evo.cli::serve-restart-flags
+                          '("--port" "9" "--prompt-note" "/a.md" "--model" "m"
+                            "--prompt-note" "/b.md" "--resume")))))
+      (setf evo.kernel::*prompt-notes* saved)
+      (ignore-errors (uiop:delete-directory-tree dir :validate t
+                                                 :if-does-not-exist :ignore)))))
+
 #| Prompt language packs: the prompt's own words are a registry, English is
 just the pack that ships as a core extension, and what the user picked
 (journaled) beats the :language setting beats the default. |#
@@ -10204,6 +10280,7 @@ document, per-entry isolation, and never a key."
     (test-input-history)
     (test-line-endings)
     (test-prompt-notes)
+    (test-serve-prompt-note)
     (test-prompt-languages)
     (test-goal-budget)
     (test-session-operations)

@@ -32,7 +32,7 @@ reverse works too.
 
 ```text
 evo-agent serve [--host <addr>] [--port <n>] --ready-file <path> [--watch-stdin]
-                [--allow-remote] [--no-http-eval]
+                [--allow-remote] [--no-http-eval] [--prompt-note <path> …]
                 [--resume [path]] [--model <id>] [--thinking <level>]
                 [--no-userspace] [--no-supervisor]
 ```
@@ -45,6 +45,7 @@ evo-agent serve [--host <addr>] [--port <n>] --ready-file <path> [--watch-stdin]
 | `--watch-stdin` | Shut down cleanly when stdin closes. The parent that started the session holds the write end, so EOF means it is gone — which is immediate and immune to pid reuse. This is how a swarm's lanes follow their coordinator. |
 | `--no-http-eval` | Do not offer the `eval` operation (it is remote code execution, by design). |
 | `--allow-remote` | Permit a non-loopback `--host`. |
+| `--prompt-note` | Add this markdown file to every system prompt this session builds — the client's own words to the agent, for a client that renders the output itself. Repeatable, one file per flag. The note is registered under the **file's own name** (so two files of the same name leave the last one, and an extension's note of that name is replaced), and it is registered *after* the userspace boots: a note the launch was given is the one that stands. The bytes are read once, at startup. |
 | `--resume`, `--model`, `--thinking`, `--no-userspace`, `--no-supervisor` | As for plain `evo-agent`. |
 
 **The ready file** is the one place a client learns how to talk to a session,
@@ -66,7 +67,9 @@ http://127.0.0.1:8421/ (ready file …)`, and serves until the
 `server.shutdown` operation, which exits 0. A port it cannot bind is a usage
 error (exit 64), which the supervisor never restarts. `-p`, `--events`,
 `--image` and `--goal` are refused: serve has exactly one driver, and it is
-HTTP.
+HTTP. A `--prompt-note` path that is not a readable file is refused the same
+way: the client asked for that note, and a session that booted without it would
+be one the client does not know it is reading.
 
 ## Environment
 
@@ -113,8 +116,11 @@ file and rewrites it after every restart. The restarted child is given
 `--resume <the journal it was on>` and the port it had bound — a bare
 `--resume` (whatever was last worked in) is only ever typed by a human — plus
 the server flags (`--host`, `--port`, `--ready-file`, `--allow-remote`,
-`--no-userspace`), and never `--model`/`--thinking`, which the journal already
-carries and which would override a `/model` switch made since. Repeated fast
+`--no-userspace`, and every `--prompt-note`), and never `--model`/`--thinking`,
+which the journal already carries and which would override a `/model` switch
+made since. A note is not journalled, so the command line is the only place a
+restarted child can learn it from — it re-reads the same files, and a file that
+changed or went away between the two is what the child sees. Repeated fast
 boot failures quarantine to `--no-userspace`.
 
 A restart is a new **epoch**: the op log starts again at seq 1, and any client

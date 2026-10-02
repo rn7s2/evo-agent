@@ -12,7 +12,10 @@ F4  an idle server — one that has answered nothing, whose journal was never
     the path it promised when it finally has something to say;
 T1  the bearer token is minted once, in the parent: a client that held the URL
     and token keeps working across a restart.  evo-agent's frontend and
-    evo-swarm's coordinator both.
+    evo-swarm's coordinator both;
+N1  a client's `--prompt-note` file — a serve flag that is not journalled, so
+    the command line is the only place a restarted child can learn it from —
+    is on the restarted child's command line and in its system prompt.
 
 Both binaries, over HTTP only, with no backend.  Needs build/evo-agent and
 build/evo-swarm beside each other.
@@ -102,9 +105,12 @@ def get(port, path, token):
     return status
 
 
-def op(port, token, name, args, timeout=30):
+def op(port, token, name, args, timeout=30, rid="r1"):
+    # RID is the op log's key: two calls with the same one are one op, and the
+    # second is answered from the cache (CONTRACT §5.5).  A test that asks two
+    # different questions has to say which is which.
     conn = http.client.HTTPConnection("127.0.0.1", port, timeout=timeout)
-    conn.request("POST", "/ops", body=json.dumps({"rid": "r1", "op": name, "args": args}).encode(),
+    conn.request("POST", "/ops", body=json.dumps({"rid": rid, "op": name, "args": args}).encode(),
                  headers={"Authorization": "Bearer " + token, "Content-Type": "application/json"})
     raw = conn.getresponse().read()
     conn.close()
@@ -144,7 +150,14 @@ def case_agent(work):
     os.makedirs(proj)
     ready = os.path.join(work, "ready.json")
     log = open(os.path.join(work, "agent.log"), "w")
-    parent = subprocess.Popen([EVO, "serve", "--port", "0", "--ready-file", ready],
+    # A client's own prompt note (`--prompt-note`, docs/serve.md): written
+    # before the launch, and never journalled — the restarted child is given
+    # the flag again, which is the only way it can still know the note.
+    note = os.path.join(work, "gui-renderer.md")
+    with open(note, "w") as f:
+        f.write("The client renders your output itself: NOTE-MARKER-RESTART.\n")
+    parent = subprocess.Popen([EVO, "serve", "--port", "0", "--ready-file", ready,
+                               "--prompt-note", note],
                               cwd=proj, env=base_env(home), stdout=log,
                               stderr=subprocess.STDOUT, text=True,
                               start_new_session=True)
@@ -189,6 +202,14 @@ def case_agent(work):
               not argv2.rstrip().endswith("--resume") and "--resume --" not in argv2, argv2)
         check("the restarted child has a new epoch", second["epoch"] != first["epoch"],
               (first["epoch"], second["epoch"]))
+        check("N1: the restarted child is given the --prompt-note flag again",
+              f"--prompt-note {note}" in argv2 or f"--prompt-note {os.path.realpath(note)}" in argv2,
+              argv2)
+        noted = op(second["port"], second["token"], "eval", {"code":
+            '(if (search "NOTE-MARKER-RESTART" (evo.kernel:build-system-prompt nil)) :in :absent)'},
+            rid="n1")
+        check("N1: ...and the note is in the restarted child's system prompt",
+              (noted.get("result") or {}).get("values") == [":in"], noted)
         check("T1: the token is the one the client already holds",
               second["token"] == first["token"], (first["token"][:16], second["token"][:16]))
         check("T1: the client's old URL and token still answer",

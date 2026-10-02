@@ -26,6 +26,9 @@ Usage:
       --ready-file <path>        write the ready file (port, token, session) here
       --watch-stdin              shut down when stdin reaches EOF
       --allow-remote             permit a non-loopback --host
+      --prompt-note <path>       add this markdown file to every system prompt
+                                 of the launch: the coordinator's and each
+                                 lane's (repeatable)
   evo-swarm --workers <n>        how many lanes (default: the :swarm-workers
                                  setting, else 6)
   evo-swarm --resume [path]      resume the coordinator session (default: the
@@ -124,6 +127,18 @@ settings for the swarm, lane count, tool limits, prompt notes, and
                 (setf (getf opts :json) t))
                ((and (getf opts :serve) (string= arg "--allow-remote"))
                 (setf (getf opts :allow-remote) t))
+               ;; A client's own system-prompt addition (docs/serve.md), read
+               ;; by the same function the agent's serve reads it with: the
+               ;; coordinator registers it, and every lane is launched with it
+               ;; (LANE-LAUNCH-ARGS), because a lane's transcript is a client's
+               ;; to show too.
+               ((and (getf opts :serve) (string= arg "--prompt-note"))
+                (setf (getf opts :prompt-notes)
+                      (append (getf opts :prompt-notes)
+                              (list (evo.cli:prompt-note-argument
+                                     (or (pop argv)
+                                         (error 'evo.cli:usage-error
+                                                :text "--prompt-note needs a path")))))))
                ((member arg '("-h" "--help") :test #'string=) (setf (getf opts :help) t))
                ((string= arg "--version") (setf (getf opts :version) t))
                (t (error 'evo.cli:usage-error
@@ -149,7 +164,10 @@ because the child that comes back must open the same door for the clients
 that hold its URL and token.  --model and --thinking are not: the journal
 already carries the session's, and re-passing them would override a /model
 switch made since.  --lane-model and --lane-thinking are kept: they describe
-the swarm, not the session, and an unchanged replay only re-records them."
+the swarm, not the session, and an unchanged replay only re-records them.
+--prompt-note is serve's flag, so the shared layer keeps it (and it must be
+kept: a note is not journalled, so the command line is the only place a
+restarted coordinator — and the lanes it starts again — can learn it from)."
   (let* ((serve (equal (first argv) "serve"))
          (args (if serve (rest argv) argv))
          (kept (loop while args
@@ -159,6 +177,8 @@ the swarm, not the session, and an unchanged replay only re-records them."
                        append (if args (list arg (pop args)) (list arg))
                      when (equal arg "--no-userspace")
                        collect arg
+                     ;; --prompt-note is kept by the shared layer below, with
+                     ;; the rest of serve's flags.
                      when (member arg '("--resume" "--model" "--thinking") :test #'equal)
                        do (when (and args (not (string-prefix-p "-" (first args))))
                             (pop args)))))
@@ -267,6 +287,12 @@ frontend; only the TUI gets a status-line segment."
                           6)))
         (setf *swarm* (make-swarm :agent agent :workers workers
                                   :evo-binary evo-binary :record record
+                                  ;; The launch's own --prompt-note files: the
+                                  ;; coordinator's notes, and what every lane is
+                                  ;; started with.  Not in the record: a note
+                                  ;; describes this launch (which client is
+                                  ;; reading), not the session on disk.
+                                  :prompt-notes (evo.cli:prompt-note-paths opts)
                                   :view view :server server))
         ;; The flags override what a resumed record restored, and are
         ;; re-recorded: lane configuration is swarm data, not a user file.

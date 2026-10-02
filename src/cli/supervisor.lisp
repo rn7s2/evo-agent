@@ -23,10 +23,12 @@
   (- (get-universal-time)
      (or (ignore-errors (file-write-date path)) start-time)))
 
-(defparameter *serve-restart-flags* '("--host" "--port" "--ready-file")
+(defparameter *serve-restart-flags* '("--host" "--port" "--ready-file" "--prompt-note")
   "serve flags a restarted child keeps, each with its value.  The bound port
 is substituted for `--port 0` once the child has reported it (PIN-BOUND-PORT,
-CONTRACT §1).")
+CONTRACT §1).  `--prompt-note` is repeatable, and every occurrence is kept —
+each one is re-read by the child that comes back, which is what makes a note
+survive a restart.")
 
 (defparameter *serve-restart-switches*
   '("--allow-remote" "--no-userspace" "--watch-stdin" "--no-http-eval"

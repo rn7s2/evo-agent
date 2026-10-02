@@ -42,6 +42,10 @@ Usage:
       --as-lane                          write the session as a lane's, not a person's
       --no-http-eval                     do not offer the eval op (eval is RCE)
       --allow-remote                     permit a non-loopback --host
+      --prompt-note <path>               add this markdown file to every system prompt the
+                                         session builds (repeatable; the note is named for
+                                         the file, and a path that cannot be read is a
+                                         usage error)
       --resume [path] --model <id> --thinking <level> --no-userspace  as above
   evo-agent catalog --json [--no-userspace]
                                          print what this session can use (models, providers,
@@ -142,6 +146,15 @@ flags."
                 (setf (getf opts :program-name) "lane"))
                ((and (getf opts :serve) (string= arg "--allow-remote"))
                 (setf (getf opts :allow-remote) t))
+               ;; A client's own system-prompt addition (docs/serve.md): a file
+               ;; per flag, read here so a path that is wrong is a usage error
+               ;; before anything boots.
+               ((and (getf opts :serve) (string= arg "--prompt-note"))
+                (setf (getf opts :prompt-notes)
+                      (append (getf opts :prompt-notes)
+                              (list (prompt-note-argument
+                                     (or (pop argv)
+                                         (error "--prompt-note needs a path")))))))
                ((member arg '("-h" "--help") :test #'string=) (setf (getf opts :help) t))
                ((string= arg "--version") (setf (getf opts :version) t))
                (t (error "Unknown argument: ~a (try --help)" arg))))
@@ -179,6 +192,50 @@ key prepends a cons the caller's own variable does not see."
     (setf (getf opts :model) id)
     (when provider (setf (getf opts :model-provider) provider))
     opts))
+
+;;; System-prompt notes from the command line (`--prompt-note`, docs/serve.md).
+;;;
+;;; A client that renders the agent's output itself — a GUI with its own
+;;; renderer, say — needs the agent to be told so: the note says what the
+;;; session is running under, and it rides in every system prompt of that
+;;; session.  Nothing here is frontend-specific: the file is markdown, the
+;;; kernel's own REGISTER-PROMPT-NOTE takes it, and a program that launches
+;;; another (a swarm's lanes) passes the same flag on.
+
+(defun prompt-note-argument (path)
+  "One `--prompt-note PATH`, read now: a plist of the note's :PATH, the :NAME
+it is registered under (the file's own name) and its :TEXT.
+
+Read here rather than at registration, so a path the client got wrong is a
+usage error before anything boots — exit 64, which the supervisor never
+restarts — and so the file is read once per launch rather than once per prompt.
+A directory, an unreadable file and a missing one are all the same thing to a
+client: not a note."
+  (let ((file (probe-file path)))
+    (unless file
+      (error 'usage-error :text (format nil "--prompt-note: no file at ~a" path)))
+    (list :path path
+          :name (file-namestring file)
+          :text (handler-case (read-file-string file)
+                  (error (e)
+                    (error 'usage-error
+                           :text (format nil "--prompt-note: cannot read ~a: ~a"
+                                         path e)))))))
+
+(defun prompt-note-paths (opts)
+  "The `--prompt-note` paths OPTS was given, in order — what a program that
+launches another process with the same notes (a swarm's lanes) puts on its
+command line."
+  (mapcar (lambda (note) (getf note :path)) (getf opts :prompt-notes)))
+
+(defun register-prompt-notes (opts)
+  "Register every `--prompt-note` file with the kernel, so its markdown rides in
+every system prompt this session builds.  A note is named for its file, and
+REGISTER-PROMPT-NOTE replaces by name: two files of the same name leave the
+last one.  Called after the userspace boots, so the launch's own note is the
+one that stands if an extension registered the same name."
+  (dolist (note (getf opts :prompt-notes))
+    (evo.kernel:register-prompt-note (getf note :name) (getf note :text))))
 
 ;;; Print-mode rendering.
 
@@ -453,6 +510,9 @@ anything boots so an extension deciding at load time sees it."
     ;; session's :load entries.
     (boot-session agent :resumed-p resumed-p
                         :no-userspace (getf opts :no-userspace))
+    ;; The launch's own --prompt-note files, after the userspace: a client that
+    ;; asked for one means it to stand, whatever an extension registered.
+    (register-prompt-notes opts)
     ;; Journal explicit model/thinking choices so resume preserves them.
     (when (getf opts :model)
       (set-session-model agent (getf opts :model) (getf opts :model-provider)))
