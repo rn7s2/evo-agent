@@ -93,15 +93,27 @@ endings therefore stay mixed."
          (values (normalize-newlines old) (normalize-newlines new)))
         (t (values old new))))
 
+(defun edit-arg (args key alias)
+  "ARGS' KEY, or ALIAS when KEY is absent.  Models trained on other harnesses
+often call the edit tool with old_text/new_text; taking those as the schema's
+names costs nothing, and refusing them made the model retry blind."
+  (let ((value (getf args key args)))
+    (if (eq value args) (getf args alias) value)))
+
 (defun tool-edit (args)
   (let* ((path (pget args :path))
-         (old (pget args :old-string))
-         (new (pget args :new-string))
+         (old (edit-arg args :old-string :old-text))
+         (new (edit-arg args :new-string :new-text))
          (all (pget args :replace-all)))
     (unless (and path (probe-file path))
       (error "File not found: ~a" path))
     (unless (and (stringp old) (plusp (length old)))
       (error "old_string must be a non-empty string"))
+    ;; A missing replacement used to reach string-replace as NIL and fail with
+    ;; "NIL is not of type VECTOR", which tells the model nothing.  An empty
+    ;; string is a valid replacement (it deletes OLD); absent is not.
+    (unless (stringp new)
+      (error "new_string must be a string (use \"\" to delete old_string)"))
     (let ((content (read-file-string path)))
       (multiple-value-setq (old new) (eol-respelled old new content))
       (let ((n (count-substring old content)))
