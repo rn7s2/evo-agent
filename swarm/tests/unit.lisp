@@ -788,6 +788,43 @@ and what a restarted coordinator keeps."
   (check "serve: a bad flag is a usage error, not a crash"
          (handler-case (progn (evo.swarm::parse-args '("serve" "--wat")) nil)
            (evo.cli:usage-error () t)))
+  ;; `--prompt-note`: the agent's own flag, read by the agent's own reader (the
+  ;; coordinator registers it, and LANE-LAUNCH-ARGS passes it on).
+  (let* ((dir (uiop:ensure-directory-pathname
+               (format nil "~a/evo-swarm-note-~a/" (tmp-dir) (gen-id))))
+         (note (merge-pathnames "gui-renderer.md" dir)))
+    (unwind-protect
+         (progn
+           (ensure-directories-exist note)
+           (write-file-string note "Render it yourself.\n")
+           (check "serve: --prompt-note is read like the agent's serve reads it"
+                  (equal (list :path (namestring note) :name "gui-renderer.md"
+                               :text "Render it yourself.\n")
+                         (first (getf (evo.swarm::parse-args
+                                       (list "serve" "--prompt-note" (namestring note)))
+                                      :prompt-notes))))
+           (check "serve: --prompt-note repeats"
+                  (= 2 (length (getf (evo.swarm::parse-args
+                                      (list "serve" "--prompt-note" (namestring note)
+                                            "--prompt-note" (namestring note)))
+                                     :prompt-notes))))
+           (check "serve: --prompt-note outside serve is unknown"
+                  (handler-case
+                      (progn (evo.swarm::parse-args
+                              (list "--prompt-note" (namestring note)))
+                             nil)
+                    (evo.cli:usage-error () t)))
+           (check "serve: --prompt-note refuses a path that is not there"
+                  (handler-case
+                      (progn (evo.swarm::parse-args
+                              '("serve" "--prompt-note" "/nowhere/at/all.md"))
+                             nil)
+                    (evo.cli:usage-error () t)))
+           (check "serve: --prompt-note needs a path"
+                  (handler-case (progn (evo.swarm::parse-args '("serve" "--prompt-note")) nil)
+                    (evo.cli:usage-error () t))))
+      (ignore-errors (uiop:delete-directory-tree dir :validate t
+                                                 :if-does-not-exist :ignore))))
   (check "serve: loopback needs no --allow-remote"
          (equal "127.0.0.1" (evo.swarm::check-serve-host "127.0.0.1" '(:serve t))))
   (check "serve: another address is refused without --allow-remote"
@@ -799,7 +836,10 @@ and what a restarted coordinator keeps."
                '("serve" "--workers" "4" "--model" "m" "--evo" "/x/evo"
                  "--thinking" "high" "--no-userspace" "--resume" "/old"
                  "--host" "127.0.0.1" "--port" "9000" "--ready-file" "/tmp/ready.json"
-                 "--watch-stdin" "--allow-remote"))))
+                 "--watch-stdin" "--allow-remote"
+                 ;; notes are not journalled, so the command line is the only
+                 ;; place a restarted coordinator can learn them from.
+                 "--prompt-note" "/w/a.md" "--prompt-note" "/w/b.md"))))
     (check "serve: a restarted coordinator keeps the swarm's own flags"
            (and (equal "serve" (first argv))
                 (member "--workers" argv :test #'equal)
@@ -813,7 +853,12 @@ and what a restarted coordinator keeps."
     (check "serve: ...and does not re-pass the session's model or thinking"
            (notany (lambda (a) (member a '("--model" "--thinking") :test #'equal)) argv))
     (check "serve: ...nor a bare --resume"
-           (not (member "--resume" argv :test #'equal)))))
+           (not (member "--resume" argv :test #'equal)))
+    (check "serve: ...and every --prompt-note"
+           (equal '("--prompt-note" "/w/a.md" "--prompt-note" "/w/b.md")
+                  (loop for rest on argv
+                        when (equal (first rest) "--prompt-note")
+                          collect (first rest) and collect (second rest))))))
 
 (defun test-serve-exit-codes ()
   "`evo-swarm`'s exit code for a command line that cannot start anything: 64,
@@ -1277,6 +1322,25 @@ a pipe we hold, and an exact --resume."
                        (second (member "--ready-file" args :test #'equal)))))
     (check "launch: stdin is a pipe, so EOF is the coordinator going away"
            (member "--watch-stdin" args :test #'equal))
+    ;; A client's own system-prompt notes reach the lanes: a lane's transcript
+    ;; is a client's to show too, and the flag is the only carrier (notes are
+    ;; not journalled).  Every launch goes through here — a lane that crashed
+    ;; and came back is launched by the same call.
+    (setf (evo.swarm::swarm-prompt-notes *swarm*)
+          (list "/w/gui-renderer.md" "/w/theme.md"))
+    (check "launch: the launch's --prompt-note files are passed to the lane, in order"
+           (equal '("--prompt-note" "/w/gui-renderer.md" "--prompt-note" "/w/theme.md")
+                  (loop for rest on (evo.swarm::lane-launch-args lane :resume nil)
+                        when (equal (first rest) "--prompt-note")
+                          collect (first rest) and collect (second rest))))
+    (check "launch: a lane with no notes is launched without the flag"
+           (let ((saved (evo.swarm::swarm-prompt-notes *swarm*)))
+             (unwind-protect
+                  (progn (setf (evo.swarm::swarm-prompt-notes *swarm*) nil)
+                         (not (member "--prompt-note"
+                                      (evo.swarm::lane-launch-args lane :resume nil)
+                                      :test #'equal)))
+               (setf (evo.swarm::swarm-prompt-notes *swarm*) saved))))
     (check "launch: a fresh lane resumes nothing"
            (not (member "--resume" args :test #'equal)))
     (let ((session (merge-pathnames "sessions/s.sexp" (evo.swarm::lane-dir lane))))

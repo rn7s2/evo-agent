@@ -114,6 +114,13 @@ its exact session (CONTRACT §8), never a bare --resume."
                 "--port" "0"
                 "--ready-file" (namestring (ready-file-path lane))
                 "--watch-stdin")
+          ;; The launch's own --prompt-note files: the coordinator's notes and
+          ;; its lanes' are the same ones, because a client that renders the
+          ;; agent's output itself is reading the lanes' transcripts too.  On
+          ;; every launch, so a lane that crashed and came back is still being
+          ;; read by that client.
+          (loop for note in (swarm-prompt-notes *swarm*)
+                append (list "--prompt-note" note))
           ;; The exact session it was on, never "whatever is newest in this
           ;; directory" (CONTRACT §8).  A lane directory from before ready
           ;; files existed has a session but no path: its own sessions
@@ -433,10 +440,13 @@ session (and the code evaluated into it forgotten).  Picks up a changed cwd
     (setf (lane-mirror lane) (make-mirror lane))
     lane))
 
-(defun make-swarm (&key agent workers evo-binary record view server)
+(defun make-swarm (&key agent workers evo-binary record view server prompt-notes)
   "A swarm for AGENT: from RECORD (a resumed coordinator journal's) when
 given, else a new one of WORKERS lanes.  VIEW is how its coordinator is shown
-and run (view.lisp); SERVER is its op log, when the coordinator is served."
+and run (view.lisp); SERVER is its op log, when the coordinator is served.
+PROMPT-NOTES are the launch's `--prompt-note` paths: this process's own, from
+its command line, never RECORD's — a note describes the client reading, and it
+is not journalled."
   (let* ((id (or (getf record :id) (format nil "~a-~a" (session-file-stamp) (gen-id 4))))
          (swarm (%make-swarm :id id
                              :dir (uiop:ensure-directory-pathname
@@ -450,7 +460,8 @@ and run (view.lisp); SERVER is its op log, when the coordinator is served."
                              :agent agent
                              :lane-model (getf record :lane-model)
                              :lane-provider (getf record :lane-provider)
-                             :lane-thinking (getf record :lane-thinking))))
+                             :lane-thinking (getf record :lane-thinking)
+                             :prompt-notes prompt-notes)))
     (setf (swarm-lanes swarm)
           (if record
               (loop for r across (getf record :lanes)
@@ -506,6 +517,10 @@ running lanes along.  Either way the session then records the swarm it has."
       (setf *swarm* (make-swarm :agent agent :record record
                                 :workers (swarm-workers old)
                                 :evo-binary (swarm-evo-binary old)
+                                ;; This launch's --prompt-note files, on the
+                                ;; swarm that takes over: they describe the
+                                ;; client reading, which has not changed.
+                                :prompt-notes (swarm-prompt-notes old)
                                 :view (swarm-view old)
                                 :server (swarm-server old)))
       (ensure-directories-exist (swarm-dir *swarm*))

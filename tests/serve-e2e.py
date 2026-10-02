@@ -27,6 +27,9 @@ Covers the redesign's protocol (CONTRACT §5):
     — before a turn and after one, with a stream open
   * GET /catalog on a live evo-swarm carries `lanes.models[]`, from the hook
     serve defines and swarm/main.lisp registers (skipped if it is not built)
+  * `--prompt-note`: a client's own markdown file, registered at boot and
+    riding in the system prompt the session builds — and a path that is not
+    there refusing to start the server at all (exit 64)
   * the small truths: `queued`, has_more, result {}, truncated, usage,
     the default model's provider
   * the caller's environment cannot reach the child: HOME and EVO_HOME are the
@@ -1183,6 +1186,63 @@ def eval_gate_check(server):
     check("the gated server still shuts down cleanly", server.wait_exit() == 0)
 
 
+def prompt_note_check(work):
+    """`--prompt-note`: a client's own note, and the file that carries it.
+
+    A GUI that renders the agent's output itself has to say so, and evo has no
+    business knowing what the renderer is: the client writes the markdown, the
+    flag names the file, and the kernel's own prompt-note registry puts it in
+    every system prompt this session builds.  Two files, both of them in the
+    prompt; and a path that is not there refuses to start rather than booting a
+    session without the note the client asked for."""
+    notes = os.path.join(work, "notes")
+    os.makedirs(notes, exist_ok=True)
+    first = os.path.join(notes, "gui-renderer.md")
+    second = os.path.join(notes, "theme.md")
+    with open(first, "w") as f:
+        f.write("The client renders your output itself: NOTE-MARKER-ONE.\n")
+    with open(second, "w") as f:
+        f.write("Say what changed in the first line: NOTE-MARKER-TWO.\n")
+
+    server = Server(os.path.join(work, "noted"))
+    os.makedirs(os.path.join(server.work, "home"), exist_ok=True)
+    os.makedirs(os.path.join(server.work, "proj"), exist_ok=True)
+    try:
+        server.start(args=["--prompt-note", first, "--prompt-note", second])
+        for marker in ("NOTE-MARKER-ONE", "NOTE-MARKER-TWO"):
+            status, reply, _ = server.op("eval", {"code":
+                f'(if (search "{marker}" (evo.kernel:build-system-prompt nil)) :in :absent)'})
+            check(f"--prompt-note: {marker} rides in the system prompt",
+                  status == 200 and (reply.get("result") or {}).get("values") == [":in"], reply)
+        status, reply, _ = server.op("eval", {"code":
+            "(mapcar (function car) evo.kernel::*prompt-notes*)"})
+        check("--prompt-note: each file is a note named for it, in order",
+              status == 200
+              and (reply.get("result") or {}).get("values") == ['("gui-renderer.md" "theme.md")'],
+              reply)
+        server.op("server.shutdown", {})
+        check("the noted server shuts down cleanly", server.wait_exit() == 0)
+    finally:
+        server.stop()
+
+    missing = os.path.join(notes, "not-here.md")
+    bad = Server(os.path.join(work, "noted-bad"))
+    os.makedirs(os.path.join(bad.work, "home"), exist_ok=True)
+    os.makedirs(os.path.join(bad.work, "proj"), exist_ok=True)
+    try:
+        try:
+            bad.start(args=["--prompt-note", missing])
+            check("--prompt-note refuses a path that is not there", False, "it started anyway")
+        except SystemExit:
+            check("--prompt-note refuses a path that is not there, with exit 64",
+                  bad.proc.wait() == 64, bad.proc.returncode)
+            log = open(bad.log_path, errors="replace").read()
+            check("--prompt-note: the refusal names the file it could not read",
+                  missing in log and "no file at" in log, log[-300:])
+    finally:
+        bad.stop()
+
+
 def restart_check(server):
     """A restart is a new epoch: a cursor from the old process is told to
     re-snapshot, in band (CONTRACT §5.3) — pids are never compared."""
@@ -1240,6 +1300,7 @@ def main():
         shutdown_with_stream_check(server, stub_port)
         eval_gate_check(server)
         swarm_catalog_check(work, stub_port)
+        prompt_note_check(work)
     except BaseException as e:
         failed += 1
         print(f"FAIL aborted: {e!r}")

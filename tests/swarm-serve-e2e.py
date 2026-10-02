@@ -16,6 +16,10 @@ Covers:
   * the ready file (0600, atomically written) and /health;
   * the coordinator's protocol: /snapshot with session,swarm,lane:*; /ops;
     /stream with one subscription carrying every lane; /items paging;
+  * a client's own `--prompt-note` file: in the coordinator's system prompt
+    and in each lane's, because a lane's transcript is that client's to show
+    too (the one check here that talks to a lane's own port, which its ready
+    file names — a lane's prompt is the only place its note can be read);
   * the swarm topic: workers, one row per lane, its state, model, context,
     task, restarts, last item — and busy/waiting_on_lanes while a lane works;
   * the lane:N topics: the lane's own items and state, mirrored and republished
@@ -56,6 +60,9 @@ LANES = 2
 # tenth of a second apart: an ~8 s working window to observe and to watch live.
 TASK = "DELAY2 SLOW e2e lane work"
 RECORD = "the report is the item"
+# What the client's own --prompt-note file says, word for word: the marker in a
+# system prompt is the proof the flag reached that process.
+NOTE_MARKER = "NOTE-MARKER-GUI"
 
 passed = 0
 failed = 0
@@ -302,10 +309,13 @@ class Collector(threading.Thread):
 class Swarm:
     """One `evo-swarm serve` process: its ready file, its token, its log."""
 
-    def __init__(self, home, proj, env, ready_file, workers=LANES, resume=False):
+    def __init__(self, home, proj, env, ready_file, workers=LANES, resume=False,
+                 notes=()):
         self.ready_file = ready_file
         args = [SWARM, "serve", "--port", "0", "--ready-file", ready_file,
                 "--watch-stdin", "--workers", str(workers), "--evo", EVO]
+        for note in notes:
+            args += ["--prompt-note", note]
         if resume:
             args.append("--resume")
         self.args = args
@@ -479,6 +489,32 @@ def check_held_lanes_are_announced(swarm, held):
 
 # --------------------------------------------------------------------------
 
+def prompt_note_check(swarm, home):
+    """A client's own system-prompt note, in the coordinator and in every lane.
+
+    evo-gui renders the agent's output itself and says so with `--prompt-note`,
+    a serve flag that is generic on evo's side: a markdown file, registered in
+    the kernel's prompt-note registry.  The coordinator has it because the
+    launch named it; each lane has it because the swarm puts the same flag on
+    the lane's own command line — the lane's transcript is shown by the same
+    client.  This reads a lane's prompt through the lane's own port (the ready
+    file the coordinator owns names it): a lane's prompt is the only place its
+    note can be read, and the topic it publishes carries items, not prompts."""
+    question = {"code": f'(if (search "{NOTE_MARKER}" (evo.kernel:build-system-prompt nil)) :in :absent)'}
+    status, reply = swarm.client.op("eval", question, op_rid="note-coordinator")
+    check("--prompt-note: the coordinator's system prompt carries it",
+          status == 200 and (reply.get("result") or {}).get("values") == [":in"], reply)
+    for n in range(1, LANES + 1):
+        ready = lane_ready(home, n) or {}
+        if not ready.get("port"):
+            check(f"--prompt-note: lane {n}'s ready file names its port", False, ready)
+            continue
+        lane = Client(ready["port"], ready["token"])
+        status, reply = lane.op("eval", question, op_rid=f"note-lane-{n}")
+        check(f"--prompt-note: lane {n}'s system prompt carries it",
+              status == 200 and (reply.get("result") or {}).get("values") == [":in"], reply)
+
+
 def run_checks(swarm, stub, home, work, proj, held):
     client = swarm.client
 
@@ -559,6 +595,9 @@ def run_checks(swarm, stub, home, work, proj, held):
 
     # --- a lane the client was already holding ------------------------------
     check_held_lanes_are_announced(swarm, held)
+
+    # --- the client's own note, here and in every lane ----------------------
+    prompt_note_check(swarm, home)
 
     # --- one subscription carries every lane --------------------------------
     collector = Collector(client)
@@ -768,7 +807,14 @@ def main():
            if not k.startswith(("EVO_", "ANTHROPIC_"))}
     env.update(HOME=home, EVO_HOME=home, EVO_BINARY=EVO, TERM="xterm-256color")
 
-    swarm = Swarm(home, proj, env, os.path.join(work, "ready.json"))
+    # The client's own note (`--prompt-note`, docs/serve.md): a file this test
+    # writes, which the launch reads for the coordinator and passes to every
+    # lane.  Written before the swarm starts, because the flag is read at boot.
+    note = os.path.join(work, "gui-renderer.md")
+    with open(note, "w") as f:
+        f.write(f"The client renders your output itself: {NOTE_MARKER}.\n")
+
+    swarm = Swarm(home, proj, env, os.path.join(work, "ready.json"), notes=[note])
     try:
         if not swarm.wait_ready():
             print("swarm-serve-e2e: `evo-swarm serve` did not come up "

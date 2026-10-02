@@ -33,6 +33,7 @@ the coordinator holds:
 ```text
 evo-agent serve --no-userspace --no-supervisor --as-lane --port 0
                 --ready-file <lane>/ready.json --watch-stdin
+                [--prompt-note <path> …]
 ```
 
 A lane the coordinator brings back adds `--resume <its exact session>` — never a
@@ -145,9 +146,17 @@ Input always goes to the coordinator; lanes are only watched.
 terminal, driven over HTTP through [serve's protocol](serve.md) — the same
 `/health`, `/snapshot`, `/stream`, `/ops` and `/items`, and a `/catalog` whose
 `lanes` half is this program's. It takes the agent's serve flags
-(`--host`, `--port`, `--token-file`, `--allow-remote`, `--ready-file`,
-`--watch-stdin`) and evo-swarm's (`--workers`, `--evo`, `--resume`, …). The
+(`--host`, `--port`, `--ready-file`, `--watch-stdin`, `--allow-remote`,
+`--prompt-note`) and evo-swarm's (`--workers`, `--evo`, `--resume`, …). The
 swarm code is the same code either way; only the frontend differs.
+
+`--prompt-note` is the one that crosses into the lanes: the coordinator
+registers the files as its own prompt notes, and every lane is launched with
+the same flags on its command line — a client that renders the agent's output
+itself is reading the lanes' transcripts too. A lane that crashes and is
+restarted by the coordinator gets them again, since every launch is built from
+the swarm's own arguments ([serve.md](serve.md#starting-it) is the flag's own
+documentation).
 
 `GET /health` says which server it is — its `program` and its `version`,
 beside the epoch, pid and session-loop age every server reports:
@@ -355,7 +364,8 @@ evo-swarm [--workers N] [--resume [path]] [--model id] [--thinking level]
           [--lane-model id[@provider]] [--lane-thinking level]
           [--evo path] [--no-userspace] [--no-supervisor]
 
-evo-swarm serve [--host addr] [--port n] [--token-file path] [--allow-remote]
+evo-swarm serve [--host addr] [--port n] [--ready-file path] [--allow-remote]
+                [--watch-stdin] [--prompt-note path …]
                 [--workers N] [--resume [path]] [--model id] [--thinking level]
                 [--lane-model id[@provider]] [--lane-thinking level]
                 [--evo path] [--no-userspace] [--no-supervisor]

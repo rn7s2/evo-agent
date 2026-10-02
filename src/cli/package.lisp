@@ -9,4 +9,7 @@
            ;; flags a restarted child keeps.
            #:parse-port #:*serve-default-port* #:check-serve-ready
            #:serve-restart-flags #:pin-bound-port #:exact-session-args
-           #:set-model-opt #:cmd-catalog))
+           #:set-model-opt #:cmd-catalog
+           ;; `--prompt-note`: the same flag, read the same way, and the paths
+           ;; a swarm hands on to the lanes it starts.
+           #:prompt-note-argument #:prompt-note-paths))
