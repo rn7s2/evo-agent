@@ -10100,6 +10100,11 @@ document, per-entry isolation, and never a key."
                                :key (lambda (m) (getf m :id)) :test #'equal)))
              (check "catalog: a swarm's catalog lists the lanes' models"
                     (and lanes (vectorp (getf lanes :models))))
+             ;; The same document, one field further: `evo-swarm catalog --json`
+             ;; prints this, and a client launching a single agent reads the
+             ;; same word out of `evo-agent catalog --json`.
+             (check "catalog: a swarm's document states the default thinking too"
+                    (equal "medium" (getf catalog :default-thinking)))
              (check "catalog: a model the kernel API set has is offered to lanes"
                     (and model (eq :false (getf model :ok))
                          (search "EVO_TEST_FIXTURE_KEY" (getf model :reason))))

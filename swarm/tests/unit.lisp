@@ -1413,6 +1413,18 @@ why not — the answer a GUI's chooser needs before it spawns anything."
                          (multiple-value-list
                           (evo.swarm::check-thinking '(:thinking :off :lane-thinking :off)
                                                      agent nil))))
+           ;; The other document a launch's client reads before it spawns
+           ;; anything: the catalog states the same effort as a word, so a
+           ;; page's control opens on it rather than hard-coding medium.
+           (check "catalog: the document states the default thinking check reports"
+                  (equal "high" (getf (evo.serve:catalog-plist agent) :default-thinking)))
+           (check "catalog: ...the same level check names for the coordinator"
+                  (equal (getf (evo.serve:catalog-plist agent) :default-thinking)
+                         (nth-value 0 (evo.swarm::check-thinking nil agent nil))))
+           (evo.util:set-setting :thinking :off)
+           (check "catalog: a retired :off setting is the weakest live rung, not the word"
+                  (equal "low" (getf (evo.serve:catalog-plist agent) :default-thinking)))
+           (evo.util:set-setting :thinking :high)
            ;; A resumed swarm restored its own lane thinking; the flags, when
            ;; given, still win over it (as run-swarm applies them).
            (evo:set-custom-state "swarm" (list :lane-thinking :xhigh) agent)
@@ -1513,6 +1525,18 @@ changes nothing about the coordinator."
                                    (getf (evo.swarm::lane-plan-catalog plan) :models)
                                    :key (lambda (m) (getf m :id)) :test #'equal)
                              :effort-levels)))
+        ;; The document `evo-swarm catalog --json` prints is CATALOG-PLIST with
+        ;; this half, and it states the effort a launch from here would start
+        ;; on — the coordinator's own chain, not a lane's, which is the level
+        ;; this same document's `lanes` half is silent about.
+        (let ((document (evo.serve:catalog-plist
+                         session-agent :swarm (evo.swarm::lane-plan-catalog plan))))
+          (check "lane plan: the swarm's document states the coordinator's default thinking"
+                 (equal "high" (getf document :default-thinking)))
+          (check "lane plan: ...which the lanes' own level does not move"
+                 (and (eq :low (evo.swarm::lane-plan-thinking plan))
+                      (find "m-b" (getf (getf document :lanes) :models)
+                            :key (lambda (m) (getf m :id)) :test #'equal))))
         (check "lane plan: a lane's literal key is one it has"
                ;; The key never travels as data: the lane's own environment
                ;; carries it, and the sandbox answers as that process would.
