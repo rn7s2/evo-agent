@@ -14,7 +14,7 @@
 (defpackage :evo.port
   (:use :cl)
   (:export #:exit-lisp #:add-exit-hook #:run-exit-hooks
-           #:argv #:runtime-pathname #:environ #:setenv #:getpid
+           #:argv #:runtime-pathname #:environ #:setenv #:unsetenv #:getpid
            #:*program-name*
            #:call-with-timeout #:timeout-error
            #:launch-child #:launch-child-piped #:process-input-stream

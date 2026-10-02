@@ -46,6 +46,8 @@ import tempfile
 import threading
 import time
 
+from clean_env import clean  # the environment a test's children start from
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BUILD = os.path.abspath(sys.argv[1]) if len(sys.argv) > 1 else os.path.join(ROOT, "build")
 SWARM = os.path.join(BUILD, "evo-swarm")
@@ -763,10 +765,10 @@ def main():
                 '(evo:set-setting :model "stub-a")\n')
 
     # A lane must not inherit this process's supervision or session: a foreign
-    # EVO_SESSIONS_DIR would put the swarm's journals in someone else's home.
-    env = {k: v for k, v in os.environ.items()
-           if not k.startswith(("EVO_", "ANTHROPIC_"))}
-    env.update(HOME=home, EVO_HOME=home, EVO_BINARY=EVO, TERM="xterm-256color")
+    # EVO_SESSIONS_DIR would put the swarm's journals in someone else's home,
+    # and a foreign EVO_BINARY would run a lane on somebody else's build
+    # (tests/clean_env.py — the same rule the Lisp runners apply).
+    env = clean(HOME=home, EVO_HOME=home, EVO_BINARY=EVO, TERM="xterm-256color")
 
     swarm = Swarm(home, proj, env, os.path.join(work, "ready.json"))
     try:

@@ -477,6 +477,21 @@ line2")))
                nil)
            (evo.port:timeout-error () t))))
 
+(defun test-port-unsetenv ()
+  (let ((name (format nil "EVO_TEST_UNSETENV_~a" (gen-id 8))))
+    (evo.port:setenv name "1")
+    (check "a variable set is set" (equal "1" (getenv name)))
+    (evo.port:unsetenv name)
+    ;; Removed, not emptied: a reader that asks "is this process a supervised
+    ;; child?" tests for presence, and "" is present.  A test runner clears a
+    ;; session's variables before a suite loads (tests/env.lisp), which is what
+    ;; makes `make test` answer the same from inside a session as outside it.
+    (check "an unset variable is gone, not empty" (null (getenv name)))
+    (check "and gone from the environment children inherit"
+           (notany (lambda (entry)
+                     (eql 0 (search (format nil "~a=" name) entry)))
+                   (evo.port:environ)))))
+
 (defun test-env-proxy ()
   (let ((saved (mapcar (lambda (v) (cons v (getenv v)))
                        '("HTTPS_PROXY" "https_proxy" "HTTP_PROXY" "http_proxy"
@@ -10157,6 +10172,7 @@ document, per-entry isolation, and never a key."
     (test-retired-off-level)
     (test-kimi-provider)
     (test-port-timeout)
+    (test-port-unsetenv)
     (test-env-proxy)
     (test-claude-oauth-proxy-guards)
     (test-claude-oauth-auto-refresh)

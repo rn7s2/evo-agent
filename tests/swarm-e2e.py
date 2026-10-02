@@ -43,6 +43,8 @@ import termios
 import threading
 import time
 
+from clean_env import clean  # the environment a test's children start from
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BUILD = os.path.abspath(sys.argv[1]) if len(sys.argv) > 1 else os.path.join(ROOT, "build")
 SWARM = os.path.join(BUILD, "evo-swarm")
@@ -339,10 +341,11 @@ def main():
     # Neither --evo nor EVO_BINARY: the swarm must find evo-agent beside its
     # own binary, where the build puts it — the path a real install takes.
     # (swarm-serve-e2e.py covers the explicit override.)
-    env = dict(os.environ, EVO_HOME=home, TERM="xterm-256color")
-    for var in ("EVO_SERVE_TOKEN", "EVO_SUPERVISED_CHILD", "EVO_NO_SUPERVISOR",
-                "EVO_SESSIONS_DIR", "EVO_SERVE_WATCH_PID", "ANTHROPIC_API_KEY"):
-        env.pop(var, None)
+    # The swarm, its lanes and their servers start from a regular environment:
+    # nothing of the session this test was started from — its supervision, its
+    # sessions directory, its token — and no provider key, since every model
+    # here is a stub (tests/clean_env.py).
+    env = clean(EVO_HOME=home, TERM="xterm-256color")
 
     term = Terminal(["--workers", str(LANES)], proj, env)
     try:
