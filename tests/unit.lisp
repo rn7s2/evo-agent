@@ -3267,6 +3267,27 @@ a lint that can go blind without saying so is worse than none."
       (check "write did not double any endings"
              (= (count #\Return raw) (count #\Newline raw))))
     (ignore-errors (delete-file path)))
+  ;; The edit tool's arguments: a missing replacement is a clear refusal, not
+  ;; a type error from deep inside string-replace; old_text/new_text (what
+  ;; models used to other harnesses send) are taken as the schema's names; an
+  ;; empty replacement deletes.
+  (let ((path (format nil "~a/evo-edit-~a.txt" (tmp-dir) (gen-id))))
+    (evo.kernel::tool-write (list :path path :content (format nil "one two three~%")))
+    (let ((message (handler-case
+                       (progn (evo.kernel::tool-edit (list :path path :old-string "two"))
+                              nil)
+                     (error (e) (princ-to-string e)))))
+      (check "edit without new_string names the missing argument"
+             (and message (search "new_string must be a string" message)))
+      (check "and leaves the file alone"
+             (equal (read-file-string path) (format nil "one two three~%"))))
+    (evo.kernel::tool-edit (list :path path :old-text "two" :new-text "2"))
+    (check "edit takes old_text/new_text as old_string/new_string"
+           (equal (read-file-string path) (format nil "one 2 three~%")))
+    (evo.kernel::tool-edit (list :path path :old-string " 2" :new-string ""))
+    (check "an empty new_string deletes"
+           (equal (read-file-string path) (format nil "one three~%")))
+    (ignore-errors (delete-file path)))
   (let ((fresh (format nil "~a/evo-lf-~a.txt" (tmp-dir) (gen-id))))
     (evo.kernel::tool-write (list :path fresh :content (format nil "a~%b~%")))
     (check "a new file is written LF" (null (find #\Return (read-file-string fresh))))
