@@ -265,8 +265,12 @@ T when the lane could be reached."
            (window (if (> n items) (nthcdr (- n items) all) all)))
       (list :state (mirror-state mirror)
             :items (coerce window 'vector)
+            ;; Older items exist when the mirror let some go, when the lane
+            ;; said it holds more than it sent, or when this window cuts the
+            ;; mirror short.  MIRROR-HAS-MORE is a boolean, not a plist.
             :has-more (and (or (plusp (mirror-dropped mirror))
-                               (and (getf (mirror-has-more mirror) t) (> n items)))
+                               (mirror-has-more mirror)
+                               (> n items))
                            t)))))
 
 (defmethod evo.serve:topic-items-before ((mirror mirror) before limit)

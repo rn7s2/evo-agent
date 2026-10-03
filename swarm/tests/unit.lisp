@@ -969,7 +969,19 @@ one out of the supervisor.)"
              (equal '("x2" "x3" "x4")
                     (mapcar (lambda (i) (getf i :id)) (evo.swarm::mirror-items mirror))))
       (check "mirror: has_more says the rest are below"
-             (getf (evo.serve:topic-snapshot mirror :items 200) :has-more)))))
+             (getf (evo.serve:topic-snapshot mirror :items 200) :has-more)))
+    ;; A lane whose own snapshot said has_more (a long session): the mirror
+    ;; holds that as a boolean, and its snapshot must still answer — it once
+    ;; signalled "malformed property list: T" and served the topic as a 500.
+    (setf (evo.swarm::mirror-dropped mirror) 0
+          (evo.swarm::mirror-has-more mirror) t)
+    (let ((snapshot (handler-case (evo.serve:topic-snapshot mirror :items 200)
+                      (error () :failed))))
+      (check "mirror: a lane that has more below snapshots, and says so"
+             (and (listp snapshot) (eq t (getf snapshot :has-more)))))
+    (setf (evo.swarm::mirror-has-more mirror) nil)
+    (check "mirror: a window that cuts the mirror short has more below"
+           (getf (evo.serve:topic-snapshot mirror :items 1) :has-more))))
 
 (defun test-mirror-rebuild ()
   "A lane's process restarting, or its journal moving, is a topic.reset: its
