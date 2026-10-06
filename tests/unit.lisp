@@ -10246,6 +10246,8 @@ document, per-entry isolation, and never a key."
     (test-registry)
     (test-registry-concurrency)
     (test-apis)
+    (test-responses)
+    (test-responses-extra)
     (test-extension-apis)
     (test-model-picker-labels)
     (test-same-id-multi-provider)

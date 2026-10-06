@@ -1,7 +1,7 @@
 ;;;; core.lisp — provider infrastructure shared by all APIs: the JSON
 ;;;; bridge, the handoff pass, the SSE transport loop, HTTP + retry, and
-;;;; API dispatch in call-provider.  The bundled wire adapter lives in
-;;;; anthropic.lisp (protocol: api.lisp).
+;;;; API dispatch in call-provider. Bundled wire adapters live in
+;;;; anthropic.lisp and openai-responses.lisp (protocol: api.lisp).
 ;;;;
 ;;;; One unified message model; stateless replay (full history each request);
 ;;;; hand-rolled SSE; errors are data — this layer never signals into the
@@ -162,7 +162,7 @@ never from further back."
             (if (eq (pget block :type) :image) (image-placeholder-block block) block))
           content))
 
-(defun handoff-pass (messages target-model-id &key (vision t))
+(defun handoff-pass (messages target-model-id &key (vision t) api provider)
   "Rewrite MESSAGES for a request to TARGET-MODEL-ID.  VISION nil degrades
 image blocks to text, so a session that collected screenshots survives a
 switch to a text-only model instead of failing every turn from then on."
@@ -188,7 +188,10 @@ switch to a text-only model instead of failing every turn from then on."
                     (content (remove-if
                               (lambda (block)
                                 (and (eq (pget block :type) :thinking)
-                                     (not same-model)))
+                                     (or (not same-model)
+                                         (and (pget block :responses-item-json)
+                                              (not (and (eq api :openai-responses)
+                                                        (equal provider (pget m :provider))))))))
                               (message-content m)))
                     (orphans (loop for block in content
                                    when (and (eq (pget block :type) :tool-call)

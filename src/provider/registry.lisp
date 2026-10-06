@@ -61,7 +61,7 @@ degrades instead of failing."
 (defun register-model* (id &key provider (api :anthropic-messages)
                              context-window max-output
                              (vision t) effort (thinking-mode :effort-only)
-                             max-input-items)
+                             max-input-items responses-options)
   "Register (or replace, keeping position) a model.  A model's identity is
 its (id, provider) pair: the same id under different providers (direct vs.
 proxy) are distinct, both selectable models; re-registering the same pair
@@ -91,7 +91,8 @@ time, not mid-run."
                      :vision (and vision t)
                      :thinking-mode thinking-mode
                      :effort (normalize-effort id effort)
-                     :max-input-items max-input-items))
+                     :max-input-items max-input-items
+                     :responses-options responses-options))
         (tail (member t *models*
                       :key (lambda (m) (and (string= (pget m :id) id)
                                             (equal (pget m :provider) provider))))))
