@@ -61,7 +61,10 @@ the tail after it is estimated."
         (if (null blocks)
             1
             (flet ((n (type) (count type blocks :key (lambda (b) (pget b :type)))))
-              (+ (n :thinking) (n :tool-call) (min 1 (n :text)))))
+              (+ (n :thinking) (n :tool-call)
+                 (if (eq (pget message :api) :openai-responses)
+                     (n :text)
+                     (min 1 (n :text))))))
         1)))
 
 (defun count-input-items (messages)

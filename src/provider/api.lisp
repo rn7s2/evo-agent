@@ -1,10 +1,10 @@
 ;;;; api.lisp — the provider-API protocol and its registry.
 ;;;;
 ;;;; A provider API is one wire protocol, implemented as a CLOS class with
-;;;; methods for request building and stream parsing.  One ships bundled:
-;;;; the Anthropic Messages API (anthropic.lisp), which also drives every
-;;;; Messages-compatible third-party endpoint (Kimi Code, DeepSeek, ...).
-;;;; It is registered at load time; an extension registers its own the
+;;;; methods for request building and stream parsing. Bundled adapters are
+;;;; Anthropic Messages (anthropic.lisp) and OpenAI Responses
+;;;; (openai-responses.lisp), also usable by compatible third-party endpoints.
+;;;; Both are registered at load time; an extension registers its own the
 ;;;; same way, through the public EVO surface (evo:register-api) — the
 ;;;; protocol is an extension point, not a kernel privilege.  Either way a
 ;;;; MODEL names its API by the :api keyword (registry.lisp).

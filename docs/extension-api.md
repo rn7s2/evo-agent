@@ -306,7 +306,9 @@ an extension's provider API, say).
 ```
 
 `:api` names a registered provider API — `:anthropic-messages` ships bundled
-and is the default, and you can add your own (below). Tools,
+and is the default; `:openai-responses` also ships bundled, with `:responses-options`
+for protocol-specific controls (see [Responses](responses.md)). You can add your
+own API (below). Tools,
 commands, and hooks may be registered from init files too.
 
 An extension that brings a provider should fill in only what the user has

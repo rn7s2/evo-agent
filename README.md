@@ -110,13 +110,16 @@ curl -sN -H "Authorization: Bearer $TOKEN" 'localhost:8421/stream?topics=session
 
 ### Provider layer
 
-One unified message model, one bundled wire-protocol adapter, one extension
+One unified message model, two bundled wire-protocol adapters, one extension
 point.
 
-- **Adapter**: the Anthropic Messages API — stateless replay (full history per
+- **Messages adapter**: the Anthropic Messages API — stateless replay (full history per
   request) with prompt-cache breakpoints. It drives Anthropic's own models
   (Sonnet 5, Opus 5, Fable 5) and every Messages-compatible third-party
   endpoint (Kimi Code, DeepSeek, proxies) alike.
+- **Responses adapter**: native OpenAI Responses for GPT-5.6 and GPT-6, with
+  streaming, reasoning replay, tools, multimodal input and structured outputs.
+  See [Responses configuration and support](docs/responses.md).
 - **Provider APIs are a protocol, not a kernel privilege.** A wire protocol is
   a CLOS class implementing `endpoint-path`, `auth-headers`, `build-request`,
   `parse-stream`, and `perform-request`. The bundled protocol lives in
@@ -559,7 +562,8 @@ later call.
 (evo:register-provider :anthropic :base-url "http://127.0.0.1:8787" :api-key "sk-...")
 ```
 
-One dialect ships bundled (`:anthropic-messages`, the default `:api`); models
+Two dialects ship bundled: `:anthropic-messages` (the default `:api`) and
+`:openai-responses` (`:openai` is seeded from `OPENAI_API_KEY`). Models
 and providers are yours, and so is the protocol — subclass `evo:provider-api`,
 implement the generics, `evo:register-api` it, and a model can name it via
 `:api`. Config runs in userspace with the full extension API, so
@@ -703,6 +707,7 @@ src/provider/            EVO.PROVIDER
   registry.lisp          model + provider registries (populated from init.lisp)
   core.lisp              shared provider core: handoff, SSE transport, retries
   anthropic.lisp         Anthropic Messages API
+  openai-responses.lisp  OpenAI Responses API
 
 src/kernel/              EVO.KERNEL — the core loop and nothing else
   tools.lisp             tool registry, sexpr schema -> JSON Schema

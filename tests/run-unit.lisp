@@ -18,4 +18,5 @@
                               (merge-pathnames "evo-unit-home/"
                                                (uiop:temporary-directory)))))
 (load (merge-pathnames "tests/unit.lisp" (uiop:getcwd)))
+(load (merge-pathnames "tests/responses.lisp" (uiop:getcwd)))
 (evo.port:exit-lisp (evo.tests:run-all))
