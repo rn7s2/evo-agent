@@ -1320,6 +1320,86 @@ def restart_check(server):
           (hello, ops))
 
 
+def extension_compile_check(work):
+    """Overlapping offline reads must not delete one another's compiled providers."""
+    import select
+    scope = os.path.join(work, "extension-compile")
+    home = os.path.join(scope, "home")
+    extensions = os.path.join(home, ".evo", "extensions")
+    project = os.path.join(scope, "project")
+    os.makedirs(extensions)
+    os.makedirs(project)
+    with open(os.path.join(home, ".evo", "init.lisp"), "w") as out:
+        out.write('''
+          (evo:set-setting :model "same-model")
+          (evo:set-setting :model-provider :openai-oauth)
+          (evo:set-setting :thinking :high)
+          ;; This isolated child pauses at the compile/load boundary; no timing race.
+          (sb-ext:unlock-package :cl)
+          (let ((original (symbol-function 'cl:compile-file)))
+            (setf (symbol-function 'cl:compile-file)
+                  (lambda (path &rest args)
+                    (flet ((gate ()
+                             (write-line "compiler-gate")
+                             (finish-output)
+                             (read-line *standard-input*)))
+                      (when (equal (uiop:getenv "TEST_COMPILE_PHASE") "before") (gate))
+                      (multiple-value-prog1 (apply original path args)
+                        (when (equal (uiop:getenv "TEST_COMPILE_PHASE") "after") (gate)))))))
+        ''')
+    with open(os.path.join(extensions, "020-providers.lisp"), "w") as out:
+        out.write('''
+          (let ((base (getf (evo:provider-registration :anthropic) :base-url)))
+            (evo:register-provider :anthropic-oauth :base-url base :api-key "isolated-test")
+            (evo:register-provider :openai-oauth :base-url base :api-key "isolated-test"))
+          (evo:register-model "same-model" :provider :anthropic-oauth
+            :api :anthropic-messages :context-window 200000 :max-output 64000
+            :effort '(:low :medium :high))
+          (evo:register-model "same-model" :provider :openai-oauth
+            :api :anthropic-messages :context-window 200000 :max-output 64000
+            :effort '(:low :high :max))
+        ''')
+    children = []
+    def start(binary, phase):
+        env = clean(HOME=home, EVO_HOME=os.path.join(home, ".evo"),
+                    EVO_NO_SUPERVISOR="1", TEST_COMPILE_PHASE=phase)
+        child = subprocess.Popen([binary, "catalog", "--json"], cwd=project,
+                                 env=env, stdin=subprocess.PIPE,
+                                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        children.append(child)
+        assert select.select([child.stdout], [], [], 30)[0], "compiler gate timed out"
+        assert child.stdout.readline().strip() == "compiler-gate", "missing compiler gate"
+        return child
+    try:
+        first = start(EVO, "after")
+        second = start(SWARM, "before")
+        for name, child in (("agent", first), ("swarm", second)):
+            stdout, stderr = child.communicate(input="release\n", timeout=30)
+            body = json.loads(stdout)
+            check(f"{name}: overlapping catalog keeps both OAuth registrations",
+                  child.returncode == 0 and
+                  {(m["id"], m["provider"]) for m in body["models"]} ==
+                  {("same-model", "anthropic-oauth"), ("same-model", "openai-oauth")},
+                  (body["models"], stderr))
+            check(f"{name}: overlapping catalog resolves the default provider and effort",
+                  body["default_model"] == {"id": "same-model", "provider": "openai-oauth"}
+                  and body["default_thinking"] == "high", body["default_model"])
+        check("extension compilation leaves no temporary output",
+              not any(name.startswith(".evo-extension-") for name in os.listdir(extensions)))
+        env = clean(HOME=home, EVO_HOME=os.path.join(home, ".evo"), EVO_NO_SUPERVISOR="1")
+        result = subprocess.run([SWARM, "check", "--json"], cwd=project, env=env,
+                                capture_output=True, text=True, timeout=30)
+        body = json.loads(result.stdout)
+        check("swarm check keeps the OAuth default and effort",
+              result.returncode == 0 and body["model"]["provider"] == "openai-oauth"
+              and body["thinking"] == "high", body)
+    finally:
+        for child in children:
+            if child.poll() is None:
+                # EOF releases the test's own compiler gate; no process-name killing.
+                child.communicate(timeout=30)
+
+
 def model_provider_check(work):
     """A model selection names a registration, for agent and swarm alike."""
     for name, binary in (("agent", EVO), ("swarm", SWARM)):
@@ -1413,6 +1493,7 @@ def main():
         eval_gate_check(server)
         swarm_catalog_check(work, stub_port)
         model_provider_check(work)
+        extension_compile_check(work)
         prompt_note_check(work)
     except BaseException as e:
         failed += 1

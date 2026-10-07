@@ -92,34 +92,32 @@ disposer may free something a running task is still reading."
       (remove-hooks-if (lambda (entry) (stale-p (hook-entry-owner entry))))))
   t)
 
-(defun extension-fasl-path (source-path)
-  "Return the expected fasl path for SOURCE-PATH (same dir, .fasl extension)."
-  (make-pathname :type "fasl" :defaults source-path))
-
 (defun load-extension* (path &key (reason "loaded") journal (record t))
   "Compile + load PATH into userspace; journal a :load entry.
 CL redefinition semantics: new definitions apply from the next call.
-Stale fasl files are deleted before compilation so a changed source is
-always recompiled (ECL may skip if the fasl is newer than the source)."
+Each load compiles to a private temporary file in the source directory,
+so concurrent catalog/check/session boots cannot delete each other's output."
   (let* ((path (truename path))
          (journal (or journal *current-journal*)))
-    ;; Delete any stale fasl to force recompilation.
-    (let ((fasl (extension-fasl-path path)))
-      (when (probe-file fasl)
-        (delete-file fasl)))
     (let ((*package* (find-package :evo.user))
           ;; Everything this file registers belongs to this owner, so a later
           ;; generation can withdraw exactly what this load installed.
           (*extension-owner* (%make-extension-owner
                               :path (namestring path)
                               :generation *extension-generation*)))
-      (handler-bind ((warning #'muffle-warning))
-        (multiple-value-bind (fasl warnings-p failure-p)
-            (compile-file path :verbose nil :print nil)
-          (declare (ignore warnings-p))
-          (when failure-p
-            (error "Extension ~a failed to compile" path))
-          (load fasl))))
+      (uiop:with-temporary-file (:pathname output
+                                 :directory (uiop:pathname-directory-pathname path)
+                                 :prefix ".evo-extension-"
+                                 :type (pathname-type (compile-file-pathname path)))
+        ;; The empty reservation must not look newer than the source to ECL.
+        (delete-file output)
+        (handler-bind ((warning #'muffle-warning))
+          (multiple-value-bind (fasl warnings-p failure-p)
+              (compile-file path :output-file output :verbose nil :print nil)
+            (declare (ignore warnings-p))
+            (when failure-p
+              (error "Extension ~a failed to compile" path))
+            (load fasl)))))
     (pushnew (namestring path) *loaded-extension-paths* :test #'equal)
     (when (and record journal)
       (append-entry journal (list :type :load
