@@ -39,8 +39,12 @@
       (let ((view (view-topic-view topic)))
         (setf (view-topic-listener topic)
               (lambda (journal entry)
-                (declare (ignore journal))
-                (evo.view:view-on-append view entry)))
+                (evo.view:view-on-append view entry)
+                ;; A normal append advances the leaf and has already updated the
+                ;; live view above.  Remember it here so a later host refresh does
+                ;; not mistake that append for an out-of-band rewind and rebuild
+                ;; away an assistant message that is still streaming.
+                (setf (view-topic-leaf topic) (journal-leaf-id journal))))
         (add-journal-listener journal (view-topic-listener topic))))
     (setf (view-topic-journal topic) journal
           (view-topic-leaf topic) (journal-leaf-id journal))
@@ -58,8 +62,20 @@ client is told to re-read the topic."
        (follow-journal topic)
        (evo.view:view-reset (view-topic-view topic) :session-switched))
       ((not (equal (journal-leaf-id journal) (view-topic-leaf topic)))
-       (setf (view-topic-leaf topic) (journal-leaf-id journal))
-       (evo.view:view-reset (view-topic-view topic) :leaf-moved))
+       (let ((current (journal-leaf-id journal))
+             (seen (view-topic-leaf topic)))
+         (if (or (null seen)
+                 (find seen (entry-path journal current)
+                       :key (lambda (entry) (pget entry :id)) :test #'equal))
+             ;; The journal publishes its new leaf before notifying listeners.
+             ;; A refresh can race that notification; this is still an append,
+             ;; not a rewind, and rebuilding would delete the streaming item.
+             (progn
+               (setf (view-topic-leaf topic) current)
+               (evo.view:view-refresh (view-topic-view topic)))
+             (progn
+               (setf (view-topic-leaf topic) current)
+               (evo.view:view-reset (view-topic-view topic) :leaf-moved)))))
       ;; Anything else the fold changed (a setting, a model, the provider
       ;; registry) leaves the items alone but can move the state: re-derive it.
       (t (evo.view:view-refresh (view-topic-view topic)))))
