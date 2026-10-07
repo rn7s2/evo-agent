@@ -22,7 +22,7 @@
 ;;;; The wire body starts with the delegate's public Responses request, then
 ;;;; adopts the Codex Responses Lite layout: instructions and namespaced tools
 ;;;; are developer input items, parallel calls are disabled, max_output_tokens is
-;;;; omitted, reasoning uses all-turn context without summaries, and
+;;;; omitted, reasoning uses all-turn context with readable summaries, and
 ;;;; "reasoning.encrypted_content" stays in `include` for stateless replay.
 ;;;;
 ;;;; What was measured elsewhere / supplied by the user, not guessed here:
@@ -592,13 +592,7 @@ is evo, and the endpoint is asked to serve it as such."
   ;; The ChatGPT/Codex route uses Responses Lite: instructions and tools are
   ;; developer input items, function tools live in the `functions` namespace,
   ;; parallel calls are off, and public-API output-token controls are omitted.
-  (let* ((options (evo.util:pget model :responses-options))
-         (options (cond ((stringp options) (evo.util:parse-json options))
-                        ((hash-table-p options) options)))
-         (configured-reasoning (and options (gethash "reasoning" options)))
-         (explicit-summary-p (and (hash-table-p configured-reasoning)
-                                  (nth-value 1 (gethash "summary" configured-reasoning))))
-         (request (evo.util:parse-json
+  (let* ((request (evo.util:parse-json
                    (evo:build-request (openai-oauth--delegate-api)
                                       :model model :system nil :messages messages
                                       :tools tools :thinking-level thinking-level)))
@@ -616,7 +610,8 @@ is evo, and the endpoint is asked to serve it as such."
     (remhash "max_output_tokens" request)
     (let ((reasoning (gethash "reasoning" request)))
       (when (hash-table-p reasoning)
-        (unless explicit-summary-p (remhash "summary" reasoning))
+        (unless (nth-value 1 (gethash "summary" reasoning))
+          (setf (gethash "summary" reasoning) "auto"))
         (setf (gethash "context" reasoning) "all_turns")))
     (let ((function-tools nil) (other-tools nil))
       (when (vectorp wire-tools)

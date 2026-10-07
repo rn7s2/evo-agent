@@ -956,6 +956,15 @@ the keys the human typed went to the lanes and the TUI looked hung."
                                (substitute #\_ #\/
                                            (substitute #\- #\+ b64))))))
 
+(defun openai-oauth-sse-parse (events &key on-event)
+  "One offline SSE stream through the OAuth API's parse-stream, which delegates
+to the kernel :openai-responses adapter.  Data lines only, no event: header —
+the SSE protocol allows it, and the Codex route sends it that way."
+  (with-input-from-string
+      (in (with-output-to-string (s)
+            (dolist (event events) (format s "data: ~a~%~%" event))))
+    (parse-stream (find-api :openai-oauth-responses) in :on-event on-event)))
+
 (defun test-openai-oauth-provider ()
   "Registration, the token-file account claim, and the request the adapter
 builds through the OAuth API."
@@ -1059,10 +1068,95 @@ builds through the OAuth API."
                     (and (not (nth-value 1 (gethash "max_output_tokens" request)))
                          (equal "auto" (gethash "tool_choice" request))
                          (null (gethash "parallel_tool_calls" request))))
-             (check "openai-oauth: Responses Lite replays reasoning across all turns without summaries"
+             (check "openai-oauth: Responses Lite replays reasoning across all turns with summaries"
                     (let ((reasoning (gethash "reasoning" request)))
                       (and (equal "all_turns" (gethash "context" reasoning))
-                           (not (nth-value 1 (gethash "summary" reasoning))))))
+                           (equal "auto" (gethash "summary" reasoning)))))
+             ;; The Codex route needs readable summaries, and the kernel adapter
+             ;; only defaults one when the whole reasoning object is absent — so
+             ;; options that configure reasoning without naming a summary must
+             ;; still come out with the route's default.
+             (let* ((with-reasoning
+                      (append model
+                              (list :responses-options
+                                    "{\"reasoning\":{\"effort\":\"high\",\"mode\":\"pro\"}}")))
+                    (request (parse-json
+                              (build-request (find-api :openai-oauth-responses)
+                                             :model with-reasoning :messages messages))))
+               (check "openai-oauth: reasoning options without a summary still default to auto"
+                      (and (equal "auto" (evo.provider::jget request "reasoning" "summary"))
+                           (equal "high" (evo.provider::jget request "reasoning" "effort"))
+                           (equal "pro" (evo.provider::jget request "reasoning" "mode"))
+                           (equal "all_turns" (evo.provider::jget request "reasoning" "context")))))
+             (dolist (value '("detailed" "concise"))
+               (let* ((with-summary
+                        (append model
+                                (list :responses-options
+                                      (format nil "{\"reasoning\":{\"summary\":\"~a\"}}" value))))
+                      (request (parse-json
+                                (build-request (find-api :openai-oauth-responses)
+                                               :model with-summary :messages messages))))
+                 (check (format nil "openai-oauth: an explicit ~a summary is preserved" value)
+                        (and (equal value (evo.provider::jget request "reasoning" "summary"))
+                             (equal "all_turns" (evo.provider::jget request "reasoning" "context"))))))
+             (let* ((with-null (append model
+                                       (list :responses-options
+                                             "{\"reasoning\":{\"effort\":\"high\",\"summary\":null}}")))
+                    (body (build-request (find-api :openai-oauth-responses)
+                                         :model with-null :messages messages))
+                    (reasoning (gethash "reasoning" (parse-json body))))
+               (check "openai-oauth: an explicit null summary stays null, not auto"
+                      ;; JZON reads JSON null as the symbol NULL (the codebase's
+                      ;; own JSON-null value), so `present' plus that value is
+                      ;; what "explicitly no summary" looks like here.
+                      (and (nth-value 1 (gethash "summary" reasoning))
+                           (eq 'null (gethash "summary" reasoning))
+                           (search "\"summary\":null" body)
+                           (equal "high" (gethash "effort" reasoning))
+                           (equal "all_turns" (gethash "context" reasoning)))))
+             ;; The summary the route now asks for arrives as deltas, while the
+             ;; finished reasoning item — the only copy on the Lite route, and
+             ;; the one carrying the encrypted replay payload — arrives in
+             ;; output_item.done.
+             (let* ((events nil)
+                    (result (openai-oauth-sse-parse
+                             (list "{\"type\":\"response.created\",\"response\":{\"id\":\"resp_lite\",\"model\":\"gpt-6-astra\"}}"
+                                   "{\"type\":\"response.reasoning_summary_text.delta\",\"item_id\":\"rs_lite\",\"output_index\":0,\"delta\":\"Plan\"}"
+                                   "{\"type\":\"response.reasoning_summary_text.delta\",\"item_id\":\"rs_lite\",\"output_index\":0,\"delta\":\" the answer\"}"
+                                   "{\"type\":\"response.output_item.done\",\"item\":{\"type\":\"reasoning\",\"id\":\"rs_lite\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"Plan the answer\"}],\"encrypted_content\":\"enc_opaque\"}}"
+                                   "{\"type\":\"response.completed\",\"response\":{\"id\":\"resp_lite\",\"model\":\"gpt-6-astra\",\"usage\":{\"input_tokens\":20,\"output_tokens\":12,\"output_tokens_details\":{\"reasoning_tokens\":8}}}}")
+                             :on-event (lambda (ev) (push ev events))))
+                    (message (list :role :assistant :api :openai-oauth-responses
+                                   :provider :openai-oauth :model "gpt-6-astra"
+                                   :stop-reason :stop :content (pget result :content)))
+                    (block (first (pget result :content)))
+                    (input (gethash "input"
+                                    (parse-json
+                                     (build-request (find-api :openai-oauth-responses)
+                                                    :model model
+                                                    :messages (list message))))))
+               (check "openai-oauth: reasoning summary deltas stream as thinking"
+                      (equal '(:message-start :thinking-delta :thinking-delta)
+                             (mapcar (lambda (ev) (pget ev :type)) (reverse events))))
+               (check "openai-oauth: the deltas spell the summary"
+                      (equal "Plan the answer"
+                             (format nil "~{~a~}"
+                                     (loop for ev in (reverse events)
+                                           when (eq :thinking-delta (pget ev :type))
+                                             collect (or (pget ev :text) "")))))
+               (check "openai-oauth: the done reasoning item is the thinking block with its payload"
+                      (and (eq :thinking (pget block :type))
+                           (equal "Plan the answer" (pget block :thinking))
+                           (search "\"encrypted_content\":\"enc_opaque\""
+                                   (pget block :responses-item-json))))
+               (check "openai-oauth: the encrypted reasoning payload replays verbatim"
+                      (and (equal "rs_lite" (gethash "id" (aref input 0)))
+                           (equal "enc_opaque" (gethash "encrypted_content" (aref input 0)))))
+               (check "openai-oauth: the frontend projects the summary, not the encrypted payload"
+                      (let ((thinking (pget (evo.view:assistant-item "a1" 0 message :openai-oauth)
+                                            :thinking)))
+                        (and (equal "Plan the answer" thinking)
+                             (null (search "enc_opaque" thinking))))))
                     (let* ((body (evo.provider::responses-result
                                   (evo.util:parse-json
                                    "{\"status\":\"completed\",\"output\":[{\"type\":\"reasoning\",\"id\":\"rs_1\",\"summary\":[],\"encrypted_content\":\"opaque\"},{\"type\":\"function_call\",\"id\":\"fc_1\",\"call_id\":\"call_1\",\"name\":\"read\",\"arguments\":\"{}\"}]}")))
