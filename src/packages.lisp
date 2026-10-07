@@ -35,7 +35,7 @@
 (defpackage :evo.util
   (:use :cl)
   (:export #:getenv #:*environment-overlay* #:env-proxy #:with-proxy #:*request-proxy* #:wire-boolean
-           #:ensure-winhttp-proxy #:iso8601-now #:iso8601-utc
+           #:ensure-winhttp-proxy #:ensure-cl+ssl-compat #:iso8601-now #:iso8601-utc
            #:format-local-timestamp #:local-timezone-name
            #:gen-id #:reseed-ids #:pget #:pput #:plist-merge
            #:evo-home #:project-evo-dir #:encode-cwd

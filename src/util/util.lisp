@@ -65,6 +65,26 @@ is stale on top of missing the lowercase Unix convention."
 (defvar *winhttp-proxy-shim* nil
   "True once ENSURE-WINHTTP-PROXY has wrapped WINHTTP:HTTP-OPEN.")
 
+(defun %asn1-string-get0-data (asn1-string)
+  "OpenSSL 1.1+'s replacement for the removed ASN1_STRING_data symbol."
+  (cffi:foreign-funcall "ASN1_STRING_get0_data"
+                        :pointer asn1-string :pointer))
+
+(defun ensure-cl+ssl-compat ()
+  "Repair cl+ssl's deprecated ASN1_STRING_data binding under OpenSSL 4.
+Certificate-chain and hostname verification remain enabled: only the removed
+accessor is redirected to its ABI-compatible replacement.  Re-check on every
+request because reloading cl+ssl reinstalls its original binding."
+  (let* ((package (find-package "CL+SSL"))
+         (accessor (and package (find-symbol "ASN1-STRING-DATA" package))))
+    (when (and accessor
+               (fboundp accessor)
+               (not (eq (symbol-function accessor) #'%asn1-string-get0-data))
+               (null (ignore-errors (cffi:foreign-symbol-pointer "ASN1_STRING_data")))
+               (ignore-errors (cffi:foreign-symbol-pointer "ASN1_STRING_get0_data")))
+      (setf (symbol-function accessor) #'%asn1-string-get0-data))
+    nil))
+
 (defun ensure-winhttp-proxy ()
   "Teach dexador's Windows backend to use a proxy.  Idempotent, and a no-op
 anywhere else.
@@ -110,7 +130,10 @@ a request that must go direct (loopback, NO_PROXY) would take it anyway."
           (*request-proxy* ,var)
           (dex:*default-proxy* ,var))
      (ensure-winhttp-proxy)
+     (ensure-cl+ssl-compat)
      ,@body))
+
+(ensure-cl+ssl-compat)
 
 (defun iso8601-utc (universal-time)
   "UNIVERSAL-TIME as an ISO-8601 UTC string.  Fixed width, so string order

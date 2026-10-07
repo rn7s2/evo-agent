@@ -32,21 +32,30 @@
     (t (error 'provider-error :message
               (format nil "Unsupported Responses input block ~s" (pget block :type))))))
 
+(defun responses-tool-output (content)
+  "Plain text tool results use the compact string wire shape; results carrying
+images or files use structured content items."
+  (if (every (lambda (block) (eq (pget block :type) :text)) content)
+      (with-output-to-string (out)
+        (dolist (block content) (write-string (pget block :text "") out)))
+      (map 'vector #'responses-input-part content)))
+
 (defun responses-input (messages model)
   (let (items)
     (dolist (m (handoff-pass messages (pget model :id) :vision (model-vision-p model)
-                            :api :openai-responses :provider (pget model :provider)))
+                            :api (pget model :api) :provider (pget model :provider)))
       (case (message-role m)
         ((:user :system :developer)
          (push (jobj "role" (string-downcase (symbol-name (message-role m)))
                      "content" (map 'vector #'responses-input-part (message-content m))) items))
         (:tool-result
-         (push (jobj "type" "function_call_output" "call_id" (pget m :tool-call-id)
-                     "output" (map 'vector #'responses-input-part (message-content m))) items))
+         (let ((content (message-content m)))
+           (push (jobj "type" "function_call_output" "call_id" (pget m :tool-call-id)
+                       "output" (responses-tool-output content)) items)))
         (:assistant
          (dolist (block (message-content m))
            (let ((raw (and (equal (pget m :model) (pget model :id))
-                           (eq (pget m :api) :openai-responses)
+                           (equal (pget m :api) (pget model :api))
                            (equal (pget m :provider) (pget model :provider))
                            (pget block :responses-item-json))))
              (cond
@@ -105,6 +114,12 @@
     (when effort
       (setf (gethash "effort" reasoning) (string-downcase (symbol-name effort))))
     (setf (gethash "reasoning" req) reasoning)
+    ;; Stateless reasoning replay needs the opaque payload.  Preserve every
+    ;; explicit include while making the replay token part of the base contract.
+    (let ((include (or (gethash "include" req) #())))
+      (unless (find "reasoning.encrypted_content" include :test #'equal)
+        (setf (gethash "include" req)
+              (concatenate 'vector include #("reasoning.encrypted_content")))))
     (let ((functions
             (map 'vector
                  (lambda (tool)

@@ -573,6 +573,23 @@ the keys the human typed went to the lanes and the TUI looked hung."
       (dolist (pair saved)
         (evo.port:setenv (car pair) (or (cdr pair) ""))))))
 
+(defun test-cl+ssl-openssl4-compat ()
+  "Exercise the certificate hostname path that cl+ssl broke on OpenSSL 4."
+  (let ((cert (cl+ssl::x509-cert-from-pem
+               (evo.util:read-file-string
+                (merge-pathnames "tests/fixtures/openssl4-cn.pem"
+                                 (uiop:getcwd))))))
+    (unwind-protect
+         (check "OpenSSL 4 cl+ssl certificate hostname decoding"
+                (and (or (cffi:foreign-symbol-pointer "ASN1_STRING_data")
+                         (eq (symbol-function 'cl+ssl::asn1-string-data)
+                             #'evo.util::%asn1-string-get0-data))
+                     (equal '("evo-test.example.com")
+                            (cl+ssl:certificate-subject-common-names cert))
+                     (cl+ssl::verify-hostname cert "evo-test.example.com")))
+      (unless (cffi:null-pointer-p cert)
+        (cl+ssl::x509-free cert)))))
+
 (defun test-claude-oauth-proxy-guards ()
   (let* ((env-names '("HTTPS_PROXY" "https_proxy" "HTTP_PROXY" "http_proxy"
                       "NO_PROXY" "no_proxy" "CLAUDE_OAUTH_ACCESS_TOKEN"))
@@ -896,6 +913,491 @@ the keys the human typed went to the lanes and the TUI looked hung."
                       (let ((other (list (list :role :user
                                                :content (list (funcall text "hi"))))))
                         (equal (funcall split other) other))))))
+      (setf evo.provider::*models* saved-models
+            evo.provider::*providers* saved-providers))))
+
+;;; OpenAI OAuth provider — extensions/020-openai-oauth-provider.lisp
+;;;
+;;; The extension is a credential wrapper: it supplies the OAuth headers and
+;;; the token lifecycle to the kernel's own :openai-responses adapter, which
+;;; stays responsible for the wire body.  Every test here is offline — no
+;;; network, no auth, dex:post stubbed — and the token store is an isolated
+;;; EVO_HOME that is deleted afterwards.
+
+(defparameter *openai-oauth-env-names*
+  '("OPENAI_OAUTH_ACCESS_TOKEN" "OPENAI_OAUTH_REFRESH_TOKEN"
+    "OPENAI_OAUTH_ACCOUNT_ID" "OPENAI_OAUTH_CLIENT_ID"))
+
+(defun openai-oauth-extension ()
+  (merge-pathnames "extensions/020-openai-oauth-provider.lisp" (uiop:getcwd)))
+
+(defun openai-oauth-fn (name)
+  "A function the OpenAI OAuth extension defines, looked up by NAME."
+  (or (symbol-function (find-symbol name :evo.user))
+      (error "openai-oauth function ~a is not loaded" name)))
+
+(defun openai-oauth-jwt (json)
+  "A JWT whose payload segment is JSON (the signature is never read)."
+  (let ((b64 (cl-base64:usb8-array-to-base64-string
+              (flexi-streams:string-to-octets json :external-format :utf-8))))
+    (format nil "x.~a.y"
+            (string-right-trim '(#\=)
+                               (substitute #\_ #\/
+                                           (substitute #\- #\+ b64))))))
+
+(defun test-openai-oauth-provider ()
+  "Registration, the token-file account claim, and the request the adapter
+builds through the OAuth API."
+  (let* ((saved-models evo.provider::*models*)
+         (saved-providers (copy-alist evo.provider::*providers*))
+         (saved-home (getenv "EVO_HOME"))
+         (saved-env (mapcar (lambda (n) (cons n (getenv n))) *openai-oauth-env-names*))
+         (home (merge-pathnames (format nil "openai-oauth-home-~a/" (gen-id))
+                                (uiop:temporary-directory))))
+    (unwind-protect
+         (progn
+           (dolist (n *openai-oauth-env-names*) (evo.port:setenv n ""))
+           (evo.port:setenv "EVO_HOME" (namestring home))
+           (load (openai-oauth-extension) :verbose nil :print nil)
+           (check "openai-oauth: api is registered"
+                  (not (null (member :openai-oauth-responses (api-keys)))))
+           (check "openai-oauth: endpoint delegates to :openai-responses"
+                  (equal "/responses" (endpoint-path (find-api :openai-oauth-responses))))
+           (check "openai-oauth: provider base url"
+                  (equal "https://chatgpt.com/backend-api/codex"
+                         (pget (provider-config :openai-oauth) :base-url)))
+           (check "openai-oauth: no models are registered without a credential"
+                  (null (remove-if-not (lambda (m) (eq (pget m :provider) :openai-oauth))
+                                       (all-models))))
+           ;; Models appear as soon as a login stores a credential; no reload is
+           ;; required to select one in the running process.
+           (funcall (openai-oauth-fn "OPENAI-OAUTH--WRITE-TOKENS")
+                    "sk-test-access" "sk-test-refresh" nil nil
+                    (+ (funcall (openai-oauth-fn "OPENAI-OAUTH--NOW-MS")) 100000000)
+                    nil)
+           (funcall (openai-oauth-fn "OPENAI-OAUTH--REGISTER-MODELS"))
+           (let ((ids (mapcar (lambda (m) (pget m :id))
+                              (remove-if-not (lambda (m) (eq (pget m :provider) :openai-oauth))
+                                             (all-models)))))
+             (check "openai-oauth: only the GPT 5.6 / GPT 6 series is registered"
+                    (equal ids '("gpt-5.6-sol" "gpt-5.6-terra" "gpt-5.6-luna"
+                                 "gpt-6-astra" "gpt-6.1-sol" "gpt-6-sol" "gpt-6-luna")))
+             (let ((model (find-model "gpt-6-astra" :openai-oauth)))
+               (check "openai-oauth: model metadata and wire api"
+                      (and model
+                           (= 272000 (model-context-window model))
+                           (= 16384 (model-max-output model))
+                           (model-vision-p model)
+                           (equal '(:low :medium :high :xhigh :max) (model-effort model))
+                           (eq (pget model :api) :openai-oauth-responses)))))
+           (evo.port:setenv "OPENAI_OAUTH_ACCESS_TOKEN" "")
+           ;; A stored token, and the account claim inside its id_token.
+           (funcall (openai-oauth-fn "OPENAI-OAUTH--WRITE-TOKENS")
+                    "stored-access" "stored-refresh"
+                    (openai-oauth-jwt
+                     "{\"https://api.openai.com/auth\":{\"chatgpt_account_id\":\"acct-file\"}}")
+                    "acct-file"
+                    (+ (funcall (openai-oauth-fn "OPENAI-OAUTH--NOW-MS")) 100000000)
+                    nil)
+           (let ((api (find-api :openai-oauth-responses)))
+             (flet ((header (headers name) (cdr (assoc name headers :test #'string-equal))))
+               (evo.port:setenv "OPENAI_OAUTH_ACCOUNT_ID" "acct-env")
+               (let ((headers (auth-headers api '(:base-url "x" :api-key nil))))
+                 (check "openai-oauth: bearer is the stored access token"
+                        (equal "Bearer stored-access" (header headers "Authorization")))
+                 (check "openai-oauth: the environment account id wins"
+                        (equal "acct-env" (header headers "ChatGPT-Account-ID")))
+                 (check "openai-oauth: originator identifies the flow"
+                        (equal "codex_cli_rs" (header headers "originator")))
+                 (check "openai-oauth: Responses Lite is selected for supported models"
+                        (equal "true" (header headers "x-openai-internal-codex-responses-lite")))
+                 (check "openai-oauth: User-Agent is evo, not a Codex version"
+                        (let ((ua (header headers "User-Agent")))
+                          (and (search "openai-oauth" ua)
+                               (null (search "codex" ua))))))
+               (evo.port:setenv "OPENAI_OAUTH_ACCOUNT_ID" "")
+               (let ((headers (auth-headers api '(:base-url "x" :api-key nil))))
+                 (check "openai-oauth: account id falls back to the id_token claim"
+                        (equal "acct-file" (header headers "ChatGPT-Account-ID"))))))
+           ;; The OAuth wrapper selects the Codex Responses Lite shape while the
+           ;; kernel adapter remains the public Responses implementation.
+           (let* ((schema (parse-json "{\"type\":\"object\",\"properties\":{}}"))
+                  (model (list :id "gpt-6-astra" :provider :openai-oauth
+                               :api :openai-oauth-responses
+                               :context-window 272000 :max-output 16384
+                               :effort '(:low :medium :high :xhigh :max) :vision t))
+                  (messages '((:role :user :content ((:type :text :text "hi")))))
+                  (request (parse-json
+                            (build-request (find-api :openai-oauth-responses)
+                                           :model model :system "rules" :messages messages
+                                           :tools (list (list :name "read"
+                                                              :input-schema schema))))))
+             (check "openai-oauth: the request asks for encrypted reasoning replay"
+                    (find "reasoning.encrypted_content" (gethash "include" request)
+                          :test #'equal))
+             (check "openai-oauth: Responses Lite moves instructions and tools into input"
+                    (let ((input (gethash "input" request)))
+                      (and (null (gethash "instructions" request))
+                           (null (gethash "tools" request))
+                           (equal "additional_tools" (gethash "type" (aref input 0)))
+                           (equal "namespace" (gethash "type" (aref (gethash "tools" (aref input 0)) 0)))
+                           (equal "functions" (gethash "name" (aref (gethash "tools" (aref input 0)) 0)))
+                           (equal "developer" (gethash "role" (aref input 1)))
+                           (equal "rules" (gethash "text" (aref (gethash "content" (aref input 1)) 0))))))
+             (check "openai-oauth: Responses Lite omits output cap and parallel calls"
+                    (and (not (nth-value 1 (gethash "max_output_tokens" request)))
+                         (equal "auto" (gethash "tool_choice" request))
+                         (null (gethash "parallel_tool_calls" request))))
+             (check "openai-oauth: Responses Lite replays reasoning across all turns without summaries"
+                    (let ((reasoning (gethash "reasoning" request)))
+                      (and (equal "all_turns" (gethash "context" reasoning))
+                           (not (nth-value 1 (gethash "summary" reasoning))))))
+                    (let* ((body (evo.provider::responses-result
+                                  (evo.util:parse-json
+                                   "{\"status\":\"completed\",\"output\":[{\"type\":\"reasoning\",\"id\":\"rs_1\",\"summary\":[],\"encrypted_content\":\"opaque\"},{\"type\":\"function_call\",\"id\":\"fc_1\",\"call_id\":\"call_1\",\"name\":\"read\",\"arguments\":\"{}\"}]}")))
+                           (history (list (list :role :assistant
+                                                :api :openai-oauth-responses
+                                                :provider :openai-oauth
+                                                :model "gpt-6-astra"
+                                                :content (pget body :content))))
+                           (request (parse-json
+                                     (build-request (find-api :openai-oauth-responses)
+                                                    :model model :messages history)))
+                           (input (gethash "input" request)))
+                      (check "openai-oauth: OAuth-tagged Responses items replay verbatim"
+                             (and (equal "opaque" (gethash "encrypted_content" (aref input 0)))
+                                  (equal "fc_1" (gethash "id" (aref input 1))))))
+             (let* ((with-include
+                      (append model (list :responses-options
+                                          "{\"include\":[\"web_search_call.action.sources\"]}")))
+                    (request (parse-json
+                              (build-request (find-api :openai-oauth-responses)
+                                             :model with-include :messages messages))))
+               (check "openai-oauth: an explicit include is preserved, not clobbered"
+                      (and (find "web_search_call.action.sources"
+                                 (gethash "include" request) :test #'equal)
+                           (find "reasoning.encrypted_content"
+                                 (gethash "include" request) :test #'equal))))
+             (let* ((with-wire-tool
+                      (append model (list :responses-options
+                                          "{\"tools\":[{\"type\":\"web_search\"}]}")))
+                    (request (parse-json
+                              (build-request (find-api :openai-oauth-responses)
+                                             :model with-wire-tool :messages messages
+                                             :tools (list (list :name "read"
+                                                                :input-schema schema)))))
+                    (additional (aref (gethash "input" request) 0))
+                    (lite-tools (gethash "tools" additional))
+                    (namespace (aref lite-tools 0)))
+               (check "openai-oauth: hosted tools stay outside the functions namespace"
+                      (and (equal "functions" (gethash "name" namespace))
+                           (= 1 (length (gethash "tools" namespace)))
+                           (equal "web_search" (gethash "type" (aref lite-tools 1)))))))
+           ;; The token file is private where the platform reports modes.
+           (let ((mode (evo.port:file-mode
+                        (funcall (openai-oauth-fn "OPENAI-OAUTH--TOKEN-FILE")))))
+             (check "openai-oauth: the token file is owner-only (or the platform cannot say)"
+                    (or (null mode) (= mode #o600)))))
+      (dolist (pair saved-env) (evo.port:setenv (car pair) (or (cdr pair) "")))
+      (if saved-home
+          (evo.port:setenv "EVO_HOME" saved-home)
+          (evo.port:unsetenv "EVO_HOME"))
+      (ignore-errors (uiop:delete-directory-tree
+                      (uiop:ensure-directory-pathname home)
+                      :validate t :if-does-not-exist :ignore))
+      (setf evo.provider::*models* saved-models
+            evo.provider::*providers* saved-providers))))
+
+(defun openai-oauth-test-request (port target)
+  "Send one loopback HTTP request to the OAuth callback test server."
+  (let ((socket (usocket:socket-connect "127.0.0.1" port
+                                        :element-type 'character)))
+    (unwind-protect
+         (let ((stream (usocket:socket-stream socket)))
+           (format stream "GET ~a HTTP/1.1~C~CHost: 127.0.0.1~C~C~C~C"
+                   target #\Return #\Newline #\Return #\Newline
+                   #\Return #\Newline)
+           (force-output stream)
+           (read-line stream nil ""))
+      (usocket:socket-close socket))))
+
+(defun test-openai-oauth-callback-server ()
+  "A stray browser request must not consume the real OAuth callback."
+  (let* ((socket (usocket:socket-listen "127.0.0.1" 0 :reuse-address t
+                                        :element-type 'character))
+         (port (usocket:get-local-port socket))
+         (code nil)
+         (callback-error nil)
+         (thread (bt:make-thread
+                  (lambda ()
+                    (multiple-value-setq (code callback-error)
+                      (funcall (openai-oauth-fn "OPENAI-OAUTH--START-CALLBACK-SERVER")
+                               socket "expected"))))))
+    (unwind-protect
+         (progn
+           (check "openai-oauth: stray browser requests get 404"
+                  (search "404 Not Found"
+                          (openai-oauth-test-request port "/favicon.ico")))
+           (check "openai-oauth: the real callback still succeeds after a stray request"
+                  (search "200 OK"
+                          (openai-oauth-test-request
+                           port "/auth/callback?code=real&state=expected")))
+           (bt:join-thread thread)
+           (check "openai-oauth: callback server returns the validated code"
+                  (and (equal "real" code) (null callback-error))))
+      (ignore-errors (usocket:socket-close socket)))))
+
+(defun test-openai-oauth-flow ()
+  "The callback contract and the token-endpoint encodings, offline."
+  (let* ((saved-models evo.provider::*models*)
+         (saved-providers (copy-alist evo.provider::*providers*))
+         (saved-home (getenv "EVO_HOME"))
+         (saved-env (mapcar (lambda (n) (cons n (getenv n))) *openai-oauth-env-names*))
+         (saved-post (symbol-function 'dex:post))
+         (saved-get (symbol-function 'dex:get))
+         (home (merge-pathnames (format nil "openai-oauth-flow-~a/" (gen-id))
+                                (uiop:temporary-directory)))
+         (posts nil))
+    (unwind-protect
+         (progn
+           (dolist (n *openai-oauth-env-names*) (evo.port:setenv n ""))
+           (evo.port:setenv "EVO_HOME" (namestring home))
+           (setf (symbol-function 'dex:get)
+                 (lambda (url &rest args) (declare (ignore url args)) "{}"))
+           (setf (symbol-function 'dex:post)
+                 (lambda (url &rest args)
+                   (push (list url args) posts)
+                   (com.inuoe.jzon:stringify
+                    (let ((json (make-hash-table :test #'equal)))
+                      (setf (gethash "access_token" json) "fresh-access"
+                            (gethash "refresh_token" json) "fresh-refresh"
+                            (gethash "id_token" json)
+                            (openai-oauth-jwt
+                             "{\"https://api.openai.com/auth\":{\"chatgpt_account_id\":\"acct-refreshed\"}}"))
+                      json))))
+           (load (openai-oauth-extension) :verbose nil :print nil)
+           ;; --- the callback: state is validated, values URL-decoded ---
+           (let ((callback (openai-oauth-fn "OPENAI-OAUTH--CALLBACK-RESULT")))
+             (check "openai-oauth: the callback code is URL-decoded"
+                    (equal (funcall callback "/auth/callback?code=a%20b%2Bc&state=s1" "s1")
+                           "a b+c"))
+             (check "openai-oauth: a mismatched state is refused"
+                    (multiple-value-bind (code error)
+                        (funcall callback "/auth/callback?code=x&state=other" "s1")
+                      (and (null code) error (search "state" error))))
+             (check "openai-oauth: an OAuth error is reported, not traded for a code"
+                    (multiple-value-bind (code error)
+                        (funcall callback "/auth/callback?error=access_denied&state=s1" "s1")
+                      (and (null code) error (search "access_denied" error))))
+             (check "openai-oauth: a foreign callback path is refused"
+                    (multiple-value-bind (code error)
+                        (funcall callback "/other?code=x&state=s1" "s1")
+                      (and (null code) error)))
+             (check "openai-oauth: a missing state is refused"
+                    (multiple-value-bind (code error)
+                        (funcall callback "/auth/callback?code=x" "s1")
+                      (and (null code) error)))
+             (check "openai-oauth: an empty authorization code is refused"
+                    (multiple-value-bind (code error)
+                        (funcall callback "/auth/callback?code=&state=s1" "s1")
+                      (and (null code) error (search "authorization code" error))))
+             ;; State is validated BEFORE the OAuth error is read: a callback
+             ;; that is both mis-stated and erroring must fail as a state
+             ;; problem, never be trusted for its error text.
+             (check "openai-oauth: state is checked before the OAuth error"
+                    (multiple-value-bind (code error)
+                        (funcall callback "/auth/callback?error=access_denied&state=wrong" "s1")
+                      (and (null code) error (search "state" error)))))
+           ;; --- the fixed loopback port and the authorize URL ---
+           (check "openai-oauth: the callback port is Codex's registered loopback port"
+                  (= 1455 (funcall (openai-oauth-fn "OPENAI-OAUTH--CHOOSE-PORT"))))
+           (let* ((redirect (funcall (openai-oauth-fn "OPENAI-OAUTH--REDIRECT-URI")
+                                     (funcall (openai-oauth-fn "OPENAI-OAUTH--CHOOSE-PORT"))))
+                  (url (funcall (openai-oauth-fn "OPENAI-OAUTH--AUTHORIZE-URL")
+                                redirect "the-state" "the-challenge")))
+             (check "openai-oauth: the redirect is the loopback callback on 1455"
+                    (and (equal "http://127.0.0.1:1455/auth/callback" redirect)
+                         (search (quri:url-encode redirect) url)))
+             (check "openai-oauth: the authorize URL names the Codex client and PKCE S256"
+                    (and (string-prefix-p "https://auth.openai.com/oauth/authorize?" url)
+                         (search "client_id=app_EMoamEEZ73f0CkXaXp7hrann" url)
+                         (search "code_challenge=the-challenge" url)
+                         (search "code_challenge_method=S256" url)
+                         (search "state=the-state" url)))
+             (check "openai-oauth: the authorize URL carries the Codex flow extras"
+                    (and (search "id_token_add_organizations=true" url)
+                         (search "codex_cli_simplified_flow=true" url)
+                         (search "originator=codex_cli_rs" url))))
+           ;; --- grant encodings ---
+           (check "openai-oauth: the code grant is form encoded"
+                  (let ((body (funcall (openai-oauth-fn "OPENAI-OAUTH--EXCHANGE-BODY")
+                                       "the-code" "the-verifier"
+                                       "http://127.0.0.1:1455/auth/callback")))
+                    (and (search "grant_type=authorization_code" body)
+                         (search "code=the-code" body)
+                         (search "code_verifier=the-verifier" body)
+                         (search "client_id=app_EMoamEEZ73f0CkXaXp7hrann" body))))
+           (check "openai-oauth: the refresh grant is JSON encoded"
+                  (let ((body (parse-json (funcall (openai-oauth-fn "OPENAI-OAUTH--REFRESH-BODY")
+                                                   "the-refresh"))))
+                    (and (equal "refresh_token" (gethash "grant_type" body))
+                         (equal "the-refresh" (gethash "refresh_token" body))
+                         (equal "app_EMoamEEZ73f0CkXaXp7hrann" (gethash "client_id" body)))))
+           (check "openai-oauth: token endpoint errors redact request secrets"
+                  (equal "failure: <redacted>"
+                         (funcall (openai-oauth-fn "OPENAI-OAUTH--REDACT")
+                                  "failure: the-refresh" '("the-refresh"))))
+           ;; --- against a stubbed token endpoint ---
+           (setf posts nil)
+           (let ((tokens (funcall (openai-oauth-fn "OPENAI-OAUTH--EXCHANGE-CODE")
+                                  "the-code" "the-verifier"
+                                  "http://127.0.0.1:1455/auth/callback")))
+             (check "openai-oauth: exchange POSTs a form body to the token endpoint"
+                    (let* ((call (first posts))
+                           (args (second call))
+                           (headers (getf args :headers)))
+                      (and (equal "https://auth.openai.com/oauth/token" (first call))
+                           (equal "application/x-www-form-urlencoded"
+                                  (cdr (assoc "Content-Type" headers :test #'string-equal)))
+                           (search "grant_type=authorization_code" (getf args :content)))))
+             (check "openai-oauth: the exchange reads the account id out of the id_token"
+                    (equal "acct-refreshed" (getf tokens :account-id))))
+           (setf posts nil)
+           (let ((tokens (funcall (openai-oauth-fn "OPENAI-OAUTH--REFRESH-TOKEN")
+                                  "the-refresh" nil)))
+             (check "openai-oauth: refresh POSTs a JSON body"
+                    (let* ((call (first posts))
+                           (args (second call))
+                           (headers (getf args :headers)))
+                      (and (equal "application/json"
+                                  (cdr (assoc "Content-Type" headers :test #'string-equal)))
+                           (equal "refresh_token"
+                                  (gethash "grant_type"
+                                           (parse-json (getf args :content)))))))
+             (check "openai-oauth: the refresh response carries the fresh access token"
+                    (equal "fresh-access" (getf tokens :access-token)))))
+      (setf (symbol-function 'dex:post) saved-post
+            (symbol-function 'dex:get) saved-get)
+      (dolist (pair saved-env) (evo.port:setenv (car pair) (or (cdr pair) "")))
+      (if saved-home
+          (evo.port:setenv "EVO_HOME" saved-home)
+          (evo.port:unsetenv "EVO_HOME"))
+      (ignore-errors (uiop:delete-directory-tree
+                      (uiop:ensure-directory-pathname home)
+                      :validate t :if-does-not-exist :ignore))
+      (setf evo.provider::*models* saved-models
+            evo.provider::*providers* saved-providers))))
+
+(defun test-openai-oauth-auto-refresh ()
+  "The token lifecycle: fresh tokens are left alone, expired ones are refreshed
+through the stored (or environment) refresh token, and readiness never
+refreshes.  dex:post is stubbed; nothing reaches the network."
+  (let* ((saved-models evo.provider::*models*)
+         (saved-providers (copy-alist evo.provider::*providers*))
+         (saved-home (getenv "EVO_HOME"))
+         (saved-env (mapcar (lambda (n) (cons n (getenv n))) *openai-oauth-env-names*))
+         (saved-post (symbol-function 'dex:post))
+         (saved-get (symbol-function 'dex:get))
+         (home (merge-pathnames (format nil "openai-oauth-refresh-~a/" (gen-id))
+                                (uiop:temporary-directory)))
+         (posts nil))
+    (unwind-protect
+         (progn
+           (dolist (n *openai-oauth-env-names*) (evo.port:setenv n ""))
+           (evo.port:setenv "EVO_HOME" (namestring home))
+           (setf (symbol-function 'dex:get)
+                 (lambda (url &rest args) (declare (ignore url args)) "{}"))
+           (setf (symbol-function 'dex:post)
+                 (lambda (url &rest args)
+                   (push (list url args) posts)
+                   "{\"access_token\":\"refreshed-access\",\"refresh_token\":\"refreshed-refresh\",\"expires_in\":3600}"))
+           (load (openai-oauth-extension) :verbose nil :print nil)
+           (flet ((now () (funcall (openai-oauth-fn "OPENAI-OAUTH--NOW-MS")))
+                  (store (&rest args)
+                    (apply (openai-oauth-fn "OPENAI-OAUTH--WRITE-TOKENS") args))
+                  (ensure () (funcall (openai-oauth-fn "OPENAI-OAUTH--ENSURE-VALID-TOKEN"))))
+             ;; 1. A fresh token is returned unchanged, with no request.
+             (store "fresh-access" "fresh-refresh" nil nil
+                    (+ (now) 100000000) nil)
+             (setf posts nil)
+             (check "openai-oauth: a fresh token is not refreshed"
+                    (equal "fresh-access" (ensure)))
+             (check "openai-oauth: a fresh token makes no token request"
+                    (null posts))
+             ;; 2. An expired token is refreshed, and the result is persisted.
+             (store "stale-access" "stale-refresh" nil nil
+                    (- (now) 1000) nil)
+             (setf posts nil)
+             (check "openai-oauth: an expired token is refreshed"
+                    (equal "refreshed-access" (ensure)))
+             (check "openai-oauth: the refresh really went to the token endpoint"
+                    (and posts (= 1 (length posts))
+                         (equal "https://auth.openai.com/oauth/token" (first (first posts)))))
+             (let ((stored (funcall (openai-oauth-fn "OPENAI-OAUTH--READ-TOKENS"))))
+               (check "openai-oauth: the refreshed token is stored"
+                      (equal "refreshed-access" (getf stored :access-token)))
+               (check "openai-oauth: the refreshed refresh token is stored"
+                      (equal "refreshed-refresh" (getf stored :refresh-token))))
+             ;; 3. An environment access token wins and is never refreshed.
+             (evo.port:setenv "OPENAI_OAUTH_ACCESS_TOKEN" "env-access")
+             (store "stale-access" "stale-refresh" nil nil
+                    (- (now) 1000) nil)
+             (setf posts nil)
+             (check "openai-oauth: an env access token short-circuits refresh"
+                    (equal "env-access" (ensure)))
+             (check "openai-oauth: env access token makes no request"
+                    (null posts))
+             (evo.port:setenv "OPENAI_OAUTH_ACCESS_TOKEN" "")
+             ;; 4. Expired, with an env refresh token instead of a stored one.
+             (store "stale-access" nil nil nil
+                    (- (now) 1000) nil)
+             (evo.port:setenv "OPENAI_OAUTH_REFRESH_TOKEN" "env-refresh")
+             (setf posts nil)
+             (check "openai-oauth: an env refresh token is used"
+                    (equal "refreshed-access" (ensure)))
+             (check "openai-oauth: the env refresh token was the grant"
+                    (and posts
+                         (search "\"refresh_token\":\"env-refresh\""
+                                 (getf (second (first posts)) :content))))
+             (evo.port:setenv "OPENAI_OAUTH_REFRESH_TOKEN" "")
+             ;; 5. Expired with nothing to refresh with returns the stale token;
+             ;;    the provider request will surface a normal 401 if it is invalid.
+             (store "stale-access" nil nil nil
+                    (- (now) 1000) nil)
+             (setf posts nil)
+             (check "openai-oauth: a stale token without refresh credentials is returned"
+                    (equal "stale-access" (ensure)))
+             (check "openai-oauth: and it made no token request"
+                    (null posts))
+             ;; 6. Auto-refresh off returns the stale token rather than spending
+             ;;    the single-use refresh token.
+             (setf (symbol-value (find-symbol "*OPENAI-OAUTH-AUTO-REFRESH*" :evo.user)) nil)
+             (store "stale-access" "stale-refresh" nil nil
+                    (- (now) 1000) nil)
+             (setf posts nil)
+             (check "openai-oauth: auto-refresh off returns the stored token"
+                    (equal "stale-access" (ensure)))
+             (check "openai-oauth: auto-refresh off makes no request"
+                    (null posts))
+             (setf (symbol-value (find-symbol "*OPENAI-OAUTH-AUTO-REFRESH*" :evo.user)) t)
+             ;; 7. Readiness reads configuration only: no request, no refresh.
+             (store "stale-access" "stale-refresh" nil nil
+                    (- (now) 1000) nil)
+             (setf posts nil)
+             (check "openai-oauth: readiness does not refresh"
+                    (progn
+                      (api-credentials-available-p (find-api :openai-oauth-responses)
+                                                   (provider-registration :openai-oauth))
+                      (null posts)))))
+      (setf (symbol-function 'dex:post) saved-post
+            (symbol-function 'dex:get) saved-get)
+      (dolist (pair saved-env) (evo.port:setenv (car pair) (or (cdr pair) "")))
+      (if saved-home
+          (evo.port:setenv "EVO_HOME" saved-home)
+          (evo.port:unsetenv "EVO_HOME"))
+      (ignore-errors (uiop:delete-directory-tree
+                      (uiop:ensure-directory-pathname home)
+                      :validate t :if-does-not-exist :ignore))
       (setf evo.provider::*models* saved-models
             evo.provider::*providers* saved-providers))))
 
@@ -10265,10 +10767,15 @@ document, per-entry isolation, and never a key."
     (test-launch-child-piped)
     (test-port-unsetenv)
     (test-env-proxy)
+    (test-cl+ssl-openssl4-compat)
     (test-claude-oauth-proxy-guards)
     (test-claude-oauth-auto-refresh)
     (test-claude-oauth-284-parity)
     (test-claude-oauth-assistant-split)
+    (test-openai-oauth-provider)
+    (test-openai-oauth-callback-server)
+    (test-openai-oauth-flow)
+    (test-openai-oauth-auto-refresh)
     (test-init-files)
     (test-extension-load-order)
     (test-preflight)
