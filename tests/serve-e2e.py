@@ -1381,6 +1381,10 @@ def extension_compile_check(work):
                   {(m["id"], m["provider"]) for m in body["models"]} ==
                   {("same-model", "anthropic-oauth"), ("same-model", "openai-oauth")},
                   (body["models"], stderr))
+            check(f"{name}: overlapping catalog preserves each registration's effort ladder",
+                  {m["provider"]: m["effort_levels"] for m in body["models"]} ==
+                  {"anthropic-oauth": ["low", "medium", "high"],
+                   "openai-oauth": ["low", "high", "max"]}, body["models"])
             check(f"{name}: overlapping catalog resolves the default provider and effort",
                   body["default_model"] == {"id": "same-model", "provider": "openai-oauth"}
                   and body["default_thinking"] == "high", body["default_model"])
