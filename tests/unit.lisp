@@ -4473,6 +4473,23 @@ and the guards around all of it."
      (list :content '((:type :text :text "tiny summary"))
            :stopped-p t :stop-reason :stop
            :usage '(:input 10 :output 2 :cache-read 0 :cache-write 0)))
+    ;; A real summarizer response is a block list: it can start with an empty
+    ;; text block, and the summary may be split across text blocks with
+    ;; thinking/tool blocks between.
+    (:multi-block
+     (list :content '((:type :text :text "")
+                      (:type :thinking :thinking "planning")
+                      (:type :text :text "summary part one ")
+                      (:type :thinking :thinking "more")
+                      (:type :tool-call :id "t9" :name "bash" :arguments (:command "ls"))
+                      (:type :text :text "summary part two"))
+           :stopped-p t :stop-reason :stop
+           :usage '(:input 10 :output 2 :cache-read 0 :cache-write 0)))
+    (:no-text
+     (list :content '((:type :text :text "")
+                      (:type :thinking :thinking "only thinking"))
+           :stopped-p t :stop-reason :stop
+           :usage '(:input 10 :output 2 :cache-read 0 :cache-write 0)))
     (:wait
      (let ((unregister (and abort-cleanup
                             (funcall abort-cleanup
@@ -4685,6 +4702,66 @@ and the guards around all of it."
   (check "overflow not confused with 500"
          (not (overflow-error-p '(:role :assistant :stop-reason :error
                                   :error-message "HTTP 500: boom"))))))
+
+;;; The summarizer's reply is a block list, and the summary can arrive as
+;;; several text blocks with thinking/tool blocks (and an empty placeholder)
+;;; in between.  Reading only the first :text block failed the whole
+;;; compaction on any such session.
+
+(defun test-compaction-summary-blocks ()
+  (let ((previous-mode *compact-fixture-mode*)
+        (previous-keep evo.kernel::*compact-keep-recent-tokens*)
+        (previous-reserve evo.kernel::*compact-reserve-tokens*))
+    (unwind-protect
+         (progn
+           (setf evo.kernel::*compact-keep-recent-tokens* 1
+                 ;; 10000-token fixture window - 2000 reserve: the 8100-token
+                 ;; fixture context is over the threshold, so the checkpoint
+                 ;; must be the thing that brings it back under.
+                 evo.kernel::*compact-reserve-tokens* 2000
+                 *compact-fixture-mode* :multi-block)
+           (setup-compact-fixture-model)
+           (multiple-value-bind (tui agent journal) (make-compact-fixture-tui)
+             (declare (ignore tui))
+             (let* ((state (fold-state journal))
+                    (model (effective-model state agent)))
+               (check "context is over the threshold before compacting"
+                      (compaction-needed-p state model)))
+             (let ((entry (compact-now agent :manual t)))
+               (check "summarize joins every text block, skipping empty/thinking/tool"
+                      (equal "summary part one summary part two" (pget entry :summary)))
+               (check "compaction checkpoints the joined summary"
+                      (let ((messages (evo.journal:compaction-entry->messages entry)))
+                         (search "summary part two"
+                                 (pget (first (message-content (first messages))) :text))))
+               (check "multi-block compaction lowers the token estimate"
+                      (< (pget entry :tokens-after) (pget entry :tokens-before)))
+               (check "multi-block compaction appends the checkpoint"
+                      (find :compaction (entry-path journal)
+                            :key (lambda (e) (pget e :type))))
+               ;; The point of a checkpoint: the next small message must not
+               ;; immediately trip the threshold again.
+               (append-entry journal '(:type :message
+                                       :message (:role :user
+                                                 :content ((:type :text :text "next")))))
+               (let ((state (fold-state journal)))
+                 (check "a small message after compaction does not retrigger"
+                        (not (compaction-needed-p state (effective-model state agent)))))))
+           ;; A reply with no text at all must still fail — and leave no
+           ;; checkpoint behind.
+           (setf *compact-fixture-mode* :no-text)
+           (multiple-value-bind (tui agent journal) (make-compact-fixture-tui)
+             (declare (ignore tui))
+             (check "text-free summary still reports missing text"
+                    (handler-case (progn (compact-now agent :manual t) nil)
+                      (error (e) (search "Summarization returned no text"
+                                         (princ-to-string e)))))
+             (check "text-free summary appends no checkpoint"
+                    (not (find :compaction (entry-path journal)
+                               :key (lambda (e) (pget e :type)))))))
+      (setf *compact-fixture-mode* previous-mode
+            evo.kernel::*compact-keep-recent-tokens* previous-keep
+            evo.kernel::*compact-reserve-tokens* previous-reserve))))
 
 ;;; Lore
 
@@ -10876,6 +10953,7 @@ document, per-entry isolation, and never a key."
     (test-session-index)
     (test-sessions-cli)
     (test-compaction)
+    (test-compaction-summary-blocks)
     (test-lore)
     (test-lore-slash-commands)
     (test-project-memory)

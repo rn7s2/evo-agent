@@ -203,10 +203,14 @@ messages verbatim — they must survive the summary.")
                                 :abort-cleanup abort-cleanup)))
     (when (eq (message-stop-reason result) :error)
       (error "Summarization failed: ~a" (pget result :error-message)))
-    (let ((text (pget (find :text (message-content result)
-                            :key (lambda (b) (pget b :type)))
-                      :text)))
-      (unless (and text (plusp (length text)))
+    ;; Every :text block, in order — a response can carry an empty leading
+    ;; text block (GPT over anthropic-messages does), and the summary may be
+    ;; split across blocks with thinking/tool blocks between.
+    (let ((text (with-output-to-string (out)
+                  (dolist (block (message-content result))
+                    (when (eq (pget block :type) :text)
+                      (write-string (or (pget block :text) "") out))))))
+      (unless (plusp (length text))
         (error "Summarization returned no text"))
       (values text (message-usage result)))))
 
