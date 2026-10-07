@@ -180,7 +180,9 @@ execution use the unified fields, replay uses the original wire object."
          (usage (jget response "usage"))
          (cached (or (jget usage "input_tokens_details" "cached_tokens") 0))
          (output (jget response "output"))
-         (reason (jget response "incomplete_details" "reason")))
+         (reason (jget response "incomplete_details" "reason"))
+         (output-tokens (or (jget usage "output_tokens") 0))
+         (reasoning-tokens (or (jget usage "output_tokens_details" "reasoning_tokens") 0)))
     (unless (member status '("completed" "incomplete" "failed" "cancelled") :test #'equal)
       (error 'provider-error :message (format nil "Unknown Responses terminal status ~s" status)))
     (when (and event-type (not (equal event-type (cat "response." status))))
@@ -202,6 +204,11 @@ execution use the unified fields, replay uses the original wire object."
       ;; Incomplete arguments must never be executed by the agent loop.
       (when (equal status "incomplete")
         (setf content (remove :tool-call content :key (lambda (b) (pget b :type)))))
+      (when (and (equal status "completed")
+                 (> output-tokens reasoning-tokens)
+                 (null content))
+        (error 'provider-error :message
+               "Responses completed with visible output tokens but no assistant output items"))
       (list :content content :model (jget response "model") :stopped-p t
             :stop-reason stop
             :usage (list :input (max 0 (- (or (jget usage "input_tokens") 0) cached))
@@ -210,26 +217,153 @@ execution use the unified fields, replay uses the original wire object."
                          :reasoning (or (jget usage "output_tokens_details" "reasoning_tokens") 0))))))
 
 (defmethod parse-stream ((api openai-responses-api) char-stream &key on-event abort-flag)
-  (let ((result nil))
-    (labels ((emit (type text)
-               (when on-event (funcall on-event (list :type type :text text))))
+  (let ((result nil)
+        ;; Responses Lite may leave the terminal response.output empty.  Its
+        ;; output_item.done events are then the only authoritative copy of
+        ;; messages and function calls, so retain them until the terminal event.
+        (items nil)
+        (text (make-hash-table :test #'equal))
+        (refusals (make-hash-table :test #'equal))
+        (arguments (make-hash-table :test #'equal)))
+    (labels ((emit (type value)
+               (when on-event (funcall on-event (list :type type :text value))))
+             (event-key (obj)
+               (or (jget obj "item_id") (jget obj "call_id")
+                   (let ((item (jget obj "item")))
+                     (and item (or (jget item "id") (jget item "call_id"))))
+                   (jget obj "output_index") 0))
+             (append-fragment (table key fragment)
+               (when fragment
+                 (setf (gethash key table)
+                       (cat (or (gethash key table) "") fragment))))
+             (set-fragment (table key value)
+               (when value (setf (gethash key table) value)))
+             (remember-item (obj)
+               (let ((item (jget obj "item")))
+                 (when item
+                   (setf items (nconc items (list (cons (event-key obj) item)))))))
+             (completed-output (&key include-fragments)
+               (let ((seen (make-hash-table :test #'equal)) output)
+                 (dolist (pair items)
+                   (let* ((key (car pair))
+                          (item (cdr pair))
+                          (type (jget item "type"))
+                          (output-text (gethash key text))
+                          (refusal (gethash key refusals))
+                          (args (gethash key arguments)))
+                     (setf (gethash key seen) t)
+                     (cond
+                       ((and (equal type "function_call") args
+                             (zerop (length (or (jget item "arguments") ""))))
+                        (setf (gethash "arguments" item) args))
+                       ((and (equal type "message")
+                             (let ((content (jget item "content")))
+                               (or (not (vectorp content)) (zerop (length content))))
+                             (or output-text refusal))
+                        (setf (gethash "content" item)
+                              (vector (if output-text
+                                          (jobj "type" "output_text" "text" output-text)
+                                          (jobj "type" "refusal" "refusal" refusal))))))
+                     (push item output)))
+                 (when include-fragments
+                   (let (keys)
+                     (dolist (table (list text refusals))
+                       (maphash (lambda (key value)
+                                  (declare (ignore value))
+                                  (pushnew key keys :test #'equal)) table))
+                     (dolist (key keys)
+                       (unless (gethash key seen)
+                         (let ((output-text (gethash key text))
+                               (refusal (gethash key refusals)))
+                           (when (or output-text refusal)
+                             (push (jobj "type" "message" "role" "assistant"
+                                         "status" "completed"
+                                         "content" (vector
+                                                    (if output-text
+                                                        (jobj "type" "output_text"
+                                                              "text" output-text)
+                                                        (jobj "type" "refusal"
+                                                              "refusal" refusal))))
+                                   output)))))))
+                 (coerce (nreverse output) 'vector)))
+             (item-key (item)
+               (or (jget item "id") (jget item "call_id")))
+             (merge-output (remembered terminal)
+               "Merge Lite's per-item stream with a terminal snapshot.  The
+snapshot wins for an id it repeats; remembered event order is retained."
+               (let ((remaining (coerce terminal 'list)) output)
+                 (loop for item across remembered
+                       for id = (item-key item)
+                       for final = (and id (find id remaining
+                                                 :key #'item-key
+                                                 :test #'equal))
+                       do (push (or final item) output)
+                          (when final (setf remaining (delete final remaining :count 1))))
+                 (coerce (nconc (nreverse output) remaining) 'vector)))
+             (terminal-result (obj type)
+               (let* ((response (jget obj "response"))
+                      (output (and response (jget response "output"))))
+                 (unless (hash-table-p response)
+                   (error 'provider-error :message "Responses terminal event is missing response"))
+                 ;; Responses Lite terminal objects carry completion metadata but
+                 ;; need not repeat the public API's status field.
+                 (unless (jget response "status")
+                   (setf (gethash "status" response)
+                         (cond ((equal type "response.completed") "completed")
+                               ((equal type "response.incomplete") "incomplete")
+                               ((equal type "response.failed") "failed")
+                               ((equal type "response.cancelled") "cancelled"))))
+                 ;; The public API normally repeats output items in the terminal;
+                 ;; Codex's Lite route does not.  Merge both channels, with a
+                 ;; terminal copy winning when it repeats the same item id.
+                 (let ((terminal (if (and (vectorp output) (not (stringp output)))
+                                     output #())))
+                   (let ((remembered (completed-output :include-fragments
+                                                      (zerop (length terminal)))))
+                     (setf (gethash "output" response)
+                           (if (plusp (length remembered))
+                               (merge-output remembered terminal)
+                               terminal))))
+                 (responses-result response type)))
              (dispatch (event data)
                (unless (or (equal data "[DONE]") (equal event "ping"))
                  (let* ((obj (handler-case (evo.util:parse-json data)
                                (error () (error 'provider-error :message "Malformed Responses SSE JSON"))))
-                        (type (or (jget obj "type") event)))
+                        (type (or (jget obj "type") event))
+                        (key (event-key obj)))
                    (cond
                      ((equal type "response.created")
                       (when on-event (funcall on-event (list :type :message-start))))
-                     ((member type '("response.output_text.delta" "response.refusal.delta") :test #'equal)
+                     ((equal type "response.output_text.delta")
+                      (append-fragment text key (jget obj "delta"))
                       (emit :text-delta (or (jget obj "delta") "")))
+                     ((equal type "response.refusal.delta")
+                      (append-fragment refusals key (jget obj "delta"))
+                      (emit :text-delta (or (jget obj "delta") "")))
+                     ((equal type "response.output_text.done")
+                      (set-fragment text key (jget obj "text")))
+                     ((equal type "response.refusal.done")
+                      (set-fragment refusals key (jget obj "refusal")))
+                     ((equal type "response.content_part.done")
+                      (let ((part (jget obj "part")))
+                        (cond ((equal (jget part "type") "output_text")
+                               (set-fragment text key (jget part "text")))
+                              ((equal (jget part "type") "refusal")
+                               (set-fragment refusals key (jget part "refusal"))))))
                      ((equal type "response.reasoning_summary_text.delta")
                       (emit :thinking-delta (or (jget obj "delta") "")))
+                     ((equal type "response.output_item.added") nil)
+                     ((equal type "response.output_item.done")
+                      ;; Only a done item is safe to journal or execute.  An added
+                      ;; function call can still have incomplete arguments.
+                      (remember-item obj))
+                     ((equal type "response.function_call_arguments.delta")
+                      (append-fragment arguments key (jget obj "delta")))
+                     ((equal type "response.function_call_arguments.done")
+                      (set-fragment arguments key (jget obj "arguments")))
                      ((member type '("response.completed" "response.incomplete"
                                      "response.failed" "response.cancelled") :test #'equal)
-                      ;; Terminal output is authoritative: it includes complete
-                      ;; tool arguments, annotations, phases and encrypted state.
-                      (setf result (responses-result (jget obj "response") type))
+                      (setf result (terminal-result obj type))
                       :stop)
                      ((equal type "error")
                       (error 'provider-error :message

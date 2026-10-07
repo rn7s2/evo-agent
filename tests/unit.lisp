@@ -9963,6 +9963,39 @@ in the item stream"
                        (view-durable-items
                         (evo.view:project-journal journal))))))))
 
+(defun test-view-refresh-mid-stream ()
+  "An ordinary append already reaches the live session view.  A following host
+refresh must not reinterpret its new leaf as a rewind and discard the in-flight
+assistant item (or its remaining deltas)."
+  (let* ((journal (view-fixture-journal "evo-view-refresh"))
+         (agent (make-agent :journal journal))
+         (server (evo.serve:make-server :token "t"))
+         (id (gen-id)))
+    (setf (evo.serve:server-agent server) agent)
+    (evo.serve::install-session-topic server agent)
+    (let* ((topic (evo.serve:topic-provider server "session"))
+           (view (evo.serve::view-topic-view topic))
+           (before (evo.serve:server-seq server)))
+      (evo.serve:topic-feed-event topic (list :type :message-start :entry-id id))
+      (evo.serve:topic-feed-event topic (list :type :text-delta :text "half "))
+      ;; A setting command appends before HOST-REFRESH asks the provider to sync.
+      (append-entry journal (list :type :model-change :model "other"))
+      (evo.serve:sync-session-topic server)
+      (evo.serve:topic-feed-event topic (list :type :text-delta :text "answer"))
+      (check "a normal append plus refresh keeps the streaming assistant"
+             (let ((item (evo.view:view-item view id)))
+               (and item
+                    (equal "streaming" (pget item :status))
+                    (equal "half answer" (pget item :text)))))
+      (check "a normal append plus refresh publishes no topic reset"
+             (multiple-value-bind (ops missed future)
+                 (evo.serve::op-log-ops-after (evo.serve::server-oplog server) before)
+               (declare (ignore missed future))
+               (null (find "topic.reset" ops
+                           :key (lambda (row)
+                                  (gethash "op" (evo.util:parse-json (second row))))
+                           :test #'equal)))))))
+
 (defun test-view-retry ()
   "A retried attempt streams its text from the top: what the dead attempt had
 already said is dropped, or the retry reads as the same words twice."
@@ -10805,6 +10838,7 @@ document, per-entry isolation, and never a key."
     (test-view-truncation)
     (test-view-paging)
     (test-view-incremental)
+    (test-view-refresh-mid-stream)
     (test-view-retry)
     (test-view-queue)
     (test-view-origin-context)

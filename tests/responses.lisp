@@ -99,6 +99,66 @@
            (request (parse-json (build-request (find-api :openai-responses) :model other :messages history))))
       (check "responses foreign provider drops opaque state"
              (not (search "opaque" (com.inuoe.jzon:stringify request)))))
+    ;; The Codex Responses Lite route can put completed items only in the
+    ;; output_item.done events and leave the terminal response.output empty.
+    ;; Both the text and tool call must survive finalization: the former keeps
+    ;; the streamed line visible, and the latter keeps the agent loop working.
+    (let* ((result (responses-fixture-parse
+                    (list "{\"type\":\"response.created\"}"
+                          "{\"type\":\"response.output_item.added\",\"item_id\":\"msg_lite\",\"item\":{\"type\":\"message\",\"id\":\"msg_lite\",\"role\":\"assistant\",\"status\":\"in_progress\",\"content\":[]}}"
+                          "{\"type\":\"response.output_text.delta\",\"item_id\":\"msg_lite\",\"delta\":\"Keep going\"}"
+                          "{\"type\":\"response.output_text.done\",\"item_id\":\"msg_lite\",\"text\":\"Keep going\"}"
+                          "{\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"id\":\"msg_lite\",\"role\":\"assistant\",\"status\":\"completed\",\"content\":[{\"type\":\"output_text\",\"text\":\"Keep going\"}],\"phase\":\"commentary\"}}"
+                          "{\"type\":\"response.output_item.added\",\"item_id\":\"fc_lite\",\"item\":{\"type\":\"function_call\",\"id\":\"fc_lite\",\"call_id\":\"call_lite\",\"name\":\"read\",\"arguments\":\"\",\"status\":\"in_progress\"}}"
+                          "{\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc_lite\",\"delta\":\"{\\\"path\\\":\\\"a\\\"}\"}"
+                          "{\"type\":\"response.function_call_arguments.done\",\"item_id\":\"fc_lite\",\"arguments\":\"{\\\"path\\\":\\\"a\\\"}\"}"
+                          "{\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"id\":\"fc_lite\",\"call_id\":\"call_lite\",\"name\":\"read\",\"arguments\":\"{\\\"path\\\":\\\"a\\\"}\",\"status\":\"completed\"}}"
+                          "{\"type\":\"response.completed\",\"response\":{\"id\":\"resp_lite\",\"model\":\"gpt-6-sol\",\"usage\":{\"input_tokens\":10,\"output_tokens\":8}}}")))
+           (content (pget result :content)))
+      (check "responses lite keeps output items when terminal output is empty"
+             (and (eq :tool-use (pget result :stop-reason))
+                  (= 2 (length content))
+                  (equal "Keep going" (pget (first content) :text))
+                  (equal "call_lite" (pget (second content) :id))
+                  (equal "{\"path\":\"a\"}" (pget (second content) :arguments-json)))))
+    (let ((result (responses-fixture-parse
+                   '("{\"type\":\"response.created\"}"
+                     "{\"type\":\"response.output_text.delta\",\"output_index\":0,\"delta\":\"Visible text\"}"
+                     "{\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[]}}"))))
+      (check "responses lite never erases streamed text"
+             (equal "Visible text" (pget (first (pget result :content)) :text))))
+    (let* ((result (responses-fixture-parse
+                    '("{\"type\":\"response.created\"}"
+                      "{\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"id\":\"msg_partial\",\"role\":\"assistant\",\"status\":\"completed\",\"content\":[{\"type\":\"output_text\",\"text\":\"Kept text\"}]}}"
+                      "{\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[{\"type\":\"function_call\",\"id\":\"fc_partial\",\"call_id\":\"call_partial\",\"name\":\"read\",\"arguments\":\"{}\"}]}}")))
+           (content (pget result :content)))
+      (check "responses lite merges item events with a partial terminal output"
+             (and (= 2 (length content))
+                  (equal "Kept text" (pget (first content) :text))
+                  (equal "call_partial" (pget (second content) :id)))))
+    (let* ((result (responses-fixture-parse
+                    (list "{\"type\":\"response.created\"}"
+                          "{\"type\":\"response.output_item.added\",\"item_id\":\"msg_empty\",\"item\":{\"type\":\"message\",\"id\":\"msg_empty\",\"role\":\"assistant\",\"status\":\"in_progress\",\"content\":[]}}"
+                          "{\"type\":\"response.output_text.delta\",\"item_id\":\"msg_empty\",\"delta\":\"Streamed answer\"}"
+                          "{\"type\":\"response.output_item.done\",\"item\":{\"type\":\"message\",\"id\":\"msg_empty\",\"role\":\"assistant\",\"status\":\"completed\",\"content\":[]}}"
+                          "{\"type\":\"response.completed\",\"response\":{\"id\":\"resp_empty\",\"model\":\"gpt-6-sol\",\"usage\":{\"input_tokens\":5,\"output_tokens\":3}}}")))
+           (content (pget result :content)))
+      (check "responses lite fills empty done item from streamed deltas"
+             (and (= 1 (length content))
+                  (equal "Streamed answer" (pget (first content) :text)))))
+    (let* ((result (responses-fixture-parse
+                    (list "{\"type\":\"response.created\"}"
+                          "{\"type\":\"response.output_item.added\",\"item_id\":\"fc_empty\",\"item\":{\"type\":\"function_call\",\"id\":\"fc_empty\",\"call_id\":\"call_empty\",\"name\":\"read\",\"arguments\":\"\",\"status\":\"in_progress\"}}"
+                          "{\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc_empty\",\"delta\":\"{\\\"path\\\":\\\"b\\\"}\"}"
+                          "{\"type\":\"response.function_call_arguments.done\",\"item_id\":\"fc_empty\",\"arguments\":\"{\\\"path\\\":\\\"b\\\"}\"}"
+                          "{\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"id\":\"fc_empty\",\"call_id\":\"call_empty\",\"name\":\"read\",\"arguments\":\"\",\"status\":\"completed\"}}"
+                          "{\"type\":\"response.completed\",\"response\":{\"id\":\"resp_fc\",\"model\":\"gpt-6-sol\",\"usage\":{\"input_tokens\":5,\"output_tokens\":3}}}")))
+           (content (pget result :content)))
+      (check "responses lite fills empty done call from streamed arguments"
+             (and (eq :tool-use (pget result :stop-reason))
+                  (= 1 (length content))
+                  (equal "call_empty" (pget (first content) :id))
+                  (equal "{\"path\":\"b\"}" (pget (first content) :arguments-json)))))
     (let ((request (build-request (find-api :anthropic-messages)
                                   :model (responses-fixture-model) :messages history)))
       (check "responses reasoning does not leak into Messages protocol"
@@ -116,6 +176,9 @@
                  '("{\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"refusal\",\"refusal\":\"Cannot help\"}]}]}}"))))
     (check "responses refusal preserved" (equal "Cannot help" (pget (first (pget result :content)) :text))))
   (check "responses EOF is not success" (null (pget (responses-fixture-parse '("[DONE]")) :stopped-p)))
+  (check-signals "responses visible output cannot silently finalize empty"
+                 (responses-fixture-parse
+                  '("{\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"usage\":{\"output_tokens\":5,\"output_tokens_details\":{\"reasoning_tokens\":0}},\"output\":[]}}")))
   (check "responses cancellation" (pget (responses-fixture-parse '("{}") :abort-flag (constantly t)) :aborted-p))
   (dolist (bad '("{bad" "{\"type\":\"error\",\"message\":\"invalid\"}"
                  "{\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":{\"message\":\"failed\"}}}"
