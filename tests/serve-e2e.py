@@ -1320,6 +1320,55 @@ def restart_check(server):
           (hello, ops))
 
 
+def model_provider_check(work):
+    """A model selection names a registration, for agent and swarm alike."""
+    for name, binary in (("agent", EVO), ("swarm", SWARM)):
+        if not os.access(binary, os.X_OK):
+            check(f"{name}: model provider check has a built binary", False, binary)
+            continue
+        scope = os.path.join(work, f"model-provider-{name}")
+        os.makedirs(os.path.join(scope, "home"))
+        os.makedirs(os.path.join(scope, "proj"))
+        server = Server(scope, binary=binary)
+        try:
+            server.start(args=("--workers", "1") if name == "swarm" else ())
+            _, reply, _ = server.op("eval", {"code": '''
+                (progn
+                  (evo:register-provider :direct :api-key "test")
+                  (evo:register-provider :proxy :api-key "test")
+                  (evo:register-model "same-id" :provider :direct
+                    :api :anthropic-messages :context-window 200000 :max-output 64000)
+                  (evo:register-model "same-id" :provider :proxy
+                    :api :anthropic-messages :context-window 200000 :max-output 64000)
+                  :registered)'''})
+            check(f"{name}: duplicate model registrations exist", reply["ok"], reply)
+            for provider in ("proxy", "direct", "PROXY"):
+                _, reply, _ = server.op("model.set", {"id": "same-id", "provider": provider})
+                expected = {"id": "same-id", "provider": provider.lower()}
+                check(f"{name}: model.set selects {provider}",
+                      reply["ok"] and reply["result"]["model"] == expected, reply)
+                snapshot = server.snapshot()
+                check(f"{name}: session state preserves {provider}",
+                      snapshot["topics"]["session"]["state"]["model"]["provider"] == provider.lower(),
+                      snapshot["topics"]["session"]["state"]["model"])
+            for args in ({"id": "same-id", "provider": "missing"},
+                         {"id": "missing-id", "provider": "proxy"},
+                         {"id": "same-id", "provider": 42}):
+                _, reply, _ = server.op("model.set", args)
+                check(f"{name}: model.set refuses {args}",
+                      not reply["ok"] and reply["error"]["code"] == "invalid_args", reply)
+                check(f"{name}: refused selection leaves provider unchanged",
+                      server.snapshot()["topics"]["session"]["state"]["model"]["provider"] == "proxy")
+            _, reply, _ = server.op("model.set", {"id": "same-id"})
+            check(f"{name}: omitted provider keeps first-registration behavior",
+                  reply["ok"] and reply["result"]["model"] ==
+                  {"id": "same-id", "provider": "direct"}, reply)
+        finally:
+            if hasattr(server, "proc") and server.proc.poll() is None:
+                server.op("server.shutdown")
+                check(f"{name}: model provider server exits cleanly", server.wait_exit() == 0)
+
+
 def main():
     global failed
     if not os.access(EVO, os.X_OK):
@@ -1363,6 +1412,7 @@ def main():
         shutdown_with_stream_check(server, stub_port)
         eval_gate_check(server)
         swarm_catalog_check(work, stub_port)
+        model_provider_check(work)
         prompt_note_check(work)
     except BaseException as e:
         failed += 1
