@@ -62,7 +62,8 @@ the tail after it is estimated."
             1
             (flet ((n (type) (count type blocks :key (lambda (b) (pget b :type)))))
               (+ (n :thinking) (n :tool-call)
-                 (if (eq (pget message :api) :openai-responses)
+                 (if (or (eq (pget message :api) :openai-responses)
+                         (some (lambda (b) (pget b :responses-item-json)) blocks))
                      (n :text)
                      (min 1 (n :text))))))
         1)))

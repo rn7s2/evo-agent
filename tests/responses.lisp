@@ -137,19 +137,27 @@
          (request (parse-json (build-request api :model (responses-fixture-model)
                                              :messages messages)))
          (item (aref (gethash "input" request) 0)))
+    (check "responses text tool output uses the string wire shape"
+           (equal "ok"
+                  (evo.provider::responses-tool-output
+                   '((:type :text :text "ok")))))
     (check "responses multimodal tool output"
            (and (equal "call_image" (gethash "call_id" item))
                 (equal "input_image" (gethash "type" (aref (gethash "output" item) 1)))))
     (let* ((request (parse-json (build-request api :model (pput (responses-fixture-model) :vision nil)
                                               :messages messages)))
-           (parts (gethash "output" (aref (gethash "input" request) 0))))
+           (output (gethash "output" (aref (gethash "input" request) 0))))
       (check "responses blind model degrades tool-result images"
-             (and (equal "input_text" (gethash "type" (aref parts 1)))
-                  (search "no vision" (gethash "text" (aref parts 1))))))
+             (and (stringp output) (search "no vision" output))))
     (check "responses default summary"
            (equal "auto" (evo.provider::jget
                           (parse-json (build-request api :model (responses-fixture-model)))
                           "reasoning" "summary")))
+    (check "responses requests encrypted reasoning for stateless replay"
+           (equal '("reasoning.encrypted_content")
+                  (coerce (gethash "include"
+                                   (parse-json (build-request api :model (responses-fixture-model))))
+                          'list)))
     (check "responses summary can be omitted explicitly"
            (null (evo.provider::jget
                   (parse-json (build-request api :model (responses-fixture-model "{\"reasoning\":{}}")))
@@ -161,7 +169,8 @@
       (check "responses hosted tools and cache controls"
              (and (equal "web_search" (gethash "type" (aref tools 0)))
                   (equal "test" (gethash "prompt_cache_key" request))
-                  (equal "web_search_call.action.sources" (aref (gethash "include" request) 0))))))
+                  (equal '("web_search_call.action.sources" "reasoning.encrypted_content")
+                         (coerce (gethash "include" request) 'list))))))
   (let* ((item (parse-json "{\"type\":\"web_search_call\",\"id\":\"ws_1\",\"status\":\"completed\",\"action\":{\"type\":\"search\",\"query\":\"test\"}}"))
          (block (evo.provider::responses-item-block item)))
     (check "responses hosted calls are not local executable calls"

@@ -190,7 +190,7 @@ switch to a text-only model instead of failing every turn from then on."
                                 (and (eq (pget block :type) :thinking)
                                      (or (not same-model)
                                          (and (pget block :responses-item-json)
-                                              (not (and (eq api :openai-responses)
+                                              (not (and (equal api (pget m :api))
                                                         (equal provider (pget m :provider))))))))
                               (message-content m)))
                     (orphans (loop for block in content
