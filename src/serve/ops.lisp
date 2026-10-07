@@ -352,7 +352,12 @@ goal, and only from the state that move makes sense in."
 ;;; Ops: the session's settings.
 
 (defun op-model-set (server args)
-  (evo.command:set-model server (op-arg args :id :required t))
+  (let ((id (op-arg args :id :required t))
+        (provider (op-arg args :provider)))
+    (evo.command:set-model server
+                           (if provider
+                               (list :id id :provider (intern (string-upcase provider) :keyword))
+                               id)))
   (list :model (let ((model (evo.command::current-model (server-agent server))))
                  (and model (list :id (pget model :id)
                                   :provider (registry-name (pget model :provider)))))))
