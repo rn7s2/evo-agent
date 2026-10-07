@@ -575,20 +575,31 @@ the keys the human typed went to the lanes and the TUI looked hung."
 
 (defun test-cl+ssl-openssl4-compat ()
   "Exercise the certificate hostname path that cl+ssl broke on OpenSSL 4."
-  (let ((cert (cl+ssl::x509-cert-from-pem
-               (evo.util:read-file-string
-                (merge-pathnames "tests/fixtures/openssl4-cn.pem"
-                                 (uiop:getcwd))))))
-    (unwind-protect
-         (check "OpenSSL 4 cl+ssl certificate hostname decoding"
-                (and (or (cffi:foreign-symbol-pointer "ASN1_STRING_data")
-                         (eq (symbol-function 'cl+ssl::asn1-string-data)
-                             #'evo.util::%asn1-string-get0-data))
-                     (equal '("evo-test.example.com")
-                            (cl+ssl:certificate-subject-common-names cert))
-                     (cl+ssl::verify-hostname cert "evo-test.example.com")))
-      (unless (cffi:null-pointer-p cert)
-        (cl+ssl::x509-free cert)))))
+  (let ((package (find-package "CL+SSL")))
+    (if (null package)
+        ;; Windows uses dexador's WinHTTP backend, so cl+ssl is intentionally
+        ;; absent and this OpenSSL-specific compatibility path does not apply.
+        (check "OpenSSL 4 cl+ssl certificate hostname decoding" t)
+        (let* ((from-pem (symbol-function (find-symbol "X509-CERT-FROM-PEM" package)))
+               (common-names (symbol-function
+                              (find-symbol "CERTIFICATE-SUBJECT-COMMON-NAMES" package)))
+               (verify-hostname (symbol-function (find-symbol "VERIFY-HOSTNAME" package)))
+               (free (symbol-function (find-symbol "X509-FREE" package)))
+               (accessor (find-symbol "ASN1-STRING-DATA" package))
+               (cert (funcall from-pem
+                              (evo.util:read-file-string
+                               (merge-pathnames "tests/fixtures/openssl4-cn.pem"
+                                                (uiop:getcwd))))))
+          (unwind-protect
+               (check "OpenSSL 4 cl+ssl certificate hostname decoding"
+                      (and (or (cffi:foreign-symbol-pointer "ASN1_STRING_data")
+                               (eq (symbol-function accessor)
+                                   #'evo.util::%asn1-string-get0-data))
+                           (equal '("evo-test.example.com")
+                                  (funcall common-names cert))
+                           (funcall verify-hostname cert "evo-test.example.com")))
+            (unless (cffi:null-pointer-p cert)
+              (funcall free cert)))))))
 
 (defun test-claude-oauth-proxy-guards ()
   (let* ((env-names '("HTTPS_PROXY" "https_proxy" "HTTP_PROXY" "http_proxy"
