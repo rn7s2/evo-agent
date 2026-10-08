@@ -6454,6 +6454,44 @@ selection journals the provider, and every resolution point honours it."
     (check "media type comes from the bytes, not the extension"
            (equal (evo.media:file-media-type liar) "image/png"))))
 
+(defun test-image-dimensions ()
+  ;; PNG: the 1x1 fixture has width=1, height=1 at IHDR offset 16.
+  (let ((fixture (image-fixture)))
+    (multiple-value-bind (w h) (evo.media::image-file-dimensions fixture)
+      (check "dimensions: png 1x1" (and (= w 1) (= h 1)))))
+  ;; Returns NIL for non-images.
+  (let ((text-file (format nil "~a/evo-dim-~a.txt" (tmp-dir) (gen-id 6))))
+    (write-file-string text-file "not an image")
+    (check "dimensions: non-image returns nil"
+           (null (evo.media::image-file-dimensions text-file))))
+  ;; image-needs-downscale-p: a 1x1 image is well within bounds.
+  (let ((fixture (image-fixture)))
+    (check "needs-downscale: tiny image does not need it"
+           (not (evo.media::image-needs-downscale-p fixture))))
+  ;; When *max-image-dimension* is set below the image size, it triggers.
+  (let ((fixture (image-fixture))
+        (evo.media:*max-image-dimension* 0))
+    (check "needs-downscale: image exceeding max dimension triggers"
+           (evo.media::image-needs-downscale-p fixture))))
+
+(defun test-attach-oversized-dimensions ()
+  ;; When *max-image-dimension* is tiny, even the 1x1 fixture triggers the
+  ;; downscaler.  With a fake downscaler that copies a small file, the attach
+  ;; succeeds — proving the dimension check feeds into shrink-image-file.
+  (let* ((small (image-fixture))
+         (evo.media:*max-image-dimension* 0)  ; everything is "oversized"
+         (evo.media:*max-image-bytes* 10000)   ; bytes are fine
+         (evo.media:*downscalers*
+           (list (list :keep-format (stub-copy-program)
+                       (lambda (in out dim)
+                         (declare (ignore in dim))
+                         (list (namestring small) out))))))
+    (multiple-value-bind (block reason) (evo.media:attach-image-file small)
+      (check "attach: oversized dimensions trigger downscaling, not rejection"
+             (and (null reason)
+                  (evo.media:image-block-p block)
+                  (= (pget block :bytes) 69))))))
+
 (defun test-attach-image ()
   (let ((fixture (image-fixture)))
     (multiple-value-bind (block reason) (evo.media:attach-image-file fixture)
@@ -11071,6 +11109,8 @@ document, per-entry isolation, and never a key."
     (test-serve-complete-op)
     (test-base64)
     (test-image-media-types)
+    (test-image-dimensions)
+    (test-attach-oversized-dimensions)
     (test-attach-image)
     (test-clipboard-image)
     (test-pasted-image-paths)

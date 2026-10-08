@@ -81,6 +81,128 @@ evo can send."
 (defun image-file-p (path)
   (and (probe-file path) (file-media-type path) t))
 
+;;; Pixel dimensions from the file header.
+;;;
+;;; Reading the header is cheap (a few hundred bytes) and tells us whether a
+;;; well-compressed image would blow the API's patch budget even though it is
+;;; tiny in bytes.  PNG, JPEG, GIF and WebP each put width/height in a known
+;;; early offset; we read exactly those bytes rather than shelling out.
+
+(defun read-be16 (stream)
+  "Two bytes from STREAM as a big-endian unsigned 16-bit integer."
+  (let ((b1 (read-byte stream nil nil))
+        (b2 (read-byte stream nil nil)))
+    (when (and b1 b2) (+ (ash b1 8) b2))))
+
+(defun read-be32 (stream)
+  "Four bytes from STREAM as a big-endian unsigned 32-bit integer."
+  (let ((b1 (read-byte stream nil nil))
+        (b2 (read-byte stream nil nil))
+        (b3 (read-byte stream nil nil))
+        (b4 (read-byte stream nil nil)))
+    (when (and b1 b2 b3 b4)
+      (+ (ash b1 24) (ash b2 16) (ash b3 8) b4))))
+
+(defun read-le16 (stream)
+  "Two bytes from STREAM as a little-endian unsigned 16-bit integer."
+  (let ((b1 (read-byte stream nil nil))
+        (b2 (read-byte stream nil nil)))
+    (when (and b1 b2) (+ b1 (ash b2 8)))))
+
+(defun read-le32 (stream)
+  "Four bytes from STREAM as a little-endian unsigned 32-bit integer."
+  (let ((b1 (read-byte stream nil nil))
+        (b2 (read-byte stream nil nil))
+        (b3 (read-byte stream nil nil))
+        (b4 (read-byte stream nil nil)))
+    (when (and b1 b2 b3 b4)
+      (+ b1 (ash b2 8) (ash b3 16) (ash b4 24)))))
+
+(defun png-dimensions (stream)
+  "Width and height from the IHDR chunk.  Layout: 8 bytes signature, then
+4 bytes length, 4 bytes `IHDR`, 4 bytes width, 4 bytes height."
+  (file-position stream 16) ; skip sig(8) + length(4) + IHDR(4)
+  (let ((w (read-be32 stream))
+        (h (read-be32 stream)))
+    (when (and w h (plusp w) (plusp h)) (values w h))))
+
+(defun jpeg-dimensions (stream)
+  "Width and height from a JPEG's first SOFn marker.  SOF0..SOF3 all start
+with FF C0..C3, carry a 5-byte preamble (length(2) + precision(1) +
+height(2)), and then width(2).  We skip non-SOF markers by their length."
+  (file-position stream 2)              ; past SOI (FF D8)
+  (loop repeat 200                      ; safety bound
+        for marker-byte = (loop for b = (read-byte stream nil nil)
+                                when (or (null b) (/= b #xFF)) return b
+                                ;; skip padding FF bytes
+                                )
+        while marker-byte
+        do (if (<= #xC0 marker-byte #xC3)
+               (progn (file-position stream (+ (file-position stream) 3)) ; len(2)+precision(1)
+                      (let ((h (read-be16 stream))
+                            (w (read-be16 stream)))
+                        (when (and w h (plusp w) (plusp h))
+                          (return (values w h)))))
+               ;; Skip this marker segment by its stated length.
+               (let ((len (read-be16 stream)))
+                 (when (null len) (return nil))
+                 (file-position stream (+ (file-position stream) (- len 2)))))))
+
+(defun gif-dimensions (stream)
+  "Width and height from the GIF logical screen descriptor (bytes 6..9)."
+  (file-position stream 6)
+  (let ((w (read-le16 stream))
+        (h (read-le16 stream)))
+    (when (and w h (plusp w) (plusp h)) (values w h))))
+
+(defun webp-dimensions (stream)
+  "Width and height from a WebP file.  Only handles VP8 (lossy) and VP8L
+(lossless), which cover nearly all WebP in the wild."
+  (file-position stream 12)             ; past RIFF(4) + size(4) + WEBP(4)
+  (let ((head (make-array 4 :element-type '(unsigned-byte 8))))
+    (when (= 4 (read-sequence head stream))
+      (cond
+        ;; VP8 lossy: chunk header VP8<sp>, then 10 bytes in: 3 bytes frame
+        ;; tag + 3 bytes sync code, then width(le16) height(le16).
+        ((and (= (aref head 0) #x56) (= (aref head 1) #x50)
+              (= (aref head 2) #x38) (= (aref head 3) #x20))
+         (file-position stream (+ 12 8 10)) ; past chunk-hdr(8) + frame-tag(3)+sync(3)+padding(4)
+         (let ((w (read-le16 stream))
+               (h (read-le16 stream)))
+           (when (and w h)
+             ;; VP8 encodes 14-bit dimensions with 2 scale bits.
+             (values (logand w #x3FFF) (logand h #x3FFF)))))
+        ;; VP8L lossless: chunk header VP8L, skip 4-byte chunk size + 1 byte signature,
+        ;; then a 32-bit LE word packs width(14 bits) and height(14 bits).
+        ((and (= (aref head 0) #x56) (= (aref head 1) #x50)
+              (= (aref head 2) #x38) (= (aref head 3) #x4C))
+         (file-position stream (+ 12 4 4 1)) ; past RIFF-header(12) + chunk-hdr(4) + size(4) + sig(1)
+         (let ((bits (read-le32 stream)))
+           (when bits
+             (values (1+ (logand bits #x3FFF))
+                     (1+ (logand (ash bits -14) #x3FFF))))))))))
+
+(defun image-file-dimensions (path)
+  "Pixel width and height of the image at PATH, read from the file header.
+Returns (values WIDTH HEIGHT) or (values NIL NIL) when the format is
+unrecognized or the header is unreadable."
+  (ignore-errors
+   (let ((media-type (file-media-type path)))
+     (when media-type
+       (with-open-file (in path :direction :input :element-type '(unsigned-byte 8)
+                                :if-does-not-exist nil)
+         (when in
+           (cond ((equal media-type "image/png")  (png-dimensions in))
+                 ((equal media-type "image/jpeg") (jpeg-dimensions in))
+                 ((equal media-type "image/gif")  (gif-dimensions in))
+                 ((equal media-type "image/webp") (webp-dimensions in)))))))))
+
+(defun image-needs-downscale-p (path)
+  "T when the image at PATH has pixel dimensions exceeding *MAX-IMAGE-DIMENSION*
+on either axis."
+  (multiple-value-bind (w h) (image-file-dimensions path)
+    (and w h (or (> w *max-image-dimension*) (> h *max-image-dimension*)))))
+
 ;;; Image content blocks.
 
 (defun make-image-block (&key data media-type name bytes source)
@@ -222,7 +344,9 @@ so a bad path is a message, not a stack unwind."
            (t
             (let* ((size (with-open-file (in file :element-type '(unsigned-byte 8))
                            (file-length in)))
-                   (shrunk (when (> size *max-image-bytes*)
+                   (needs-shrink (or (> size *max-image-bytes*)
+                                     (image-needs-downscale-p file)))
+                   (shrunk (when needs-shrink
                              (shrink-image-file file media-type)))
                    (final (or shrunk file)))
               (unwind-protect
