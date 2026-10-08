@@ -116,6 +116,15 @@ count and a where-you-work sentence).  Lanes get it when next initialized."
                       (lane-worktree lane) (lane-branch lane))
               "You share the working directory with the coordinator and the other lanes, so keep to the files your task names.")))
 
+(defun worker-note-form (lane workers)
+  ;; Growth updates can overtake a lane's initialization or an earlier update.
+  ;; Never let an older count put a stale note back.
+  `(progn
+     (defvar evo.user::*swarm-worker-count* 0)
+     (when (<= evo.user::*swarm-worker-count* ,workers)
+       (setf evo.user::*swarm-worker-count* ,workers)
+       (evo:register-prompt-note "swarm-worker" ,(worker-note lane workers)))))
+
 ;;; Tool limits.
 
 (defvar *coordinator-tools* nil
@@ -404,8 +413,7 @@ queued."
   (let ((limit (lane-tool-limit lane)))
     (append
      (list (report-tool-form)
-           `(evo:register-prompt-note "swarm-worker"
-                                      ,(worker-note lane (swarm-workers swarm))))
+           (worker-note-form lane (swarm-workers swarm)))
      (when limit `((evo:set-active-tools evo:*agent* ',limit)))
      '((when (evo.kernel:steering-pending-p evo:*agent*) (evo:request-run))))))
 

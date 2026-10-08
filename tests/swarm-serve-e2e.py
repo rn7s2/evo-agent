@@ -31,6 +31,18 @@ Covers:
   * a lane killed with SIGKILL comes back: a lane_event item (crashed, then
     restarted), topic.reset lane:N, and the exact session it was on;
   * run.interrupt scope swarm stops the coordinator and every lane;
+  * the runtime lane count, `/lanes N` (POST command.run): a count that is not
+    one is refused `:invalid`; growing the pool while it runs — the new lane's
+    topic, its ready file and its process, all of it inside the one
+    subscription a client already holds, and the re-snapshot that client takes
+    on the reset; a count the pool already has, or one below it, is a no-op
+    that stops nothing; the coordinator's own run guards the resize while a
+    lane being busy does not, and a lane that is working is not restarted by a
+    growth; and every lane's own prompt note — the lane that joined and the
+    lanes already there — carries the new count;
+  * a resumed swarm restores the roster its session recorded — the pool
+    `/lanes N` grew — whether the launch names no `--workers` at all, a lower
+    one (which must not shrink it) or a higher one (which grows it);
   * /ops is idempotent per rid; a bad token is 401; an unknown op is refused
     with a code, never a crash;
   * server.shutdown stops every lane, leaves nothing behind, and exits 0.
@@ -58,6 +70,10 @@ SWARM = os.path.join(BUILD, "evo-swarm")
 EVO = os.path.join(BUILD, "evo-agent")
 SECRET = "swarm-serve-e2e-secret-4c1f"
 LANES = 2
+# The lane count `/lanes N` grows the pool to: bigger than LANES, so the growth
+# is a real change, and bigger than the lower `--workers 1` a resumed swarm is
+# launched with, so that resume proves the roster did not shrink back.
+GROWN = LANES + 1
 # DELAY2 makes the lane wait before it "thinks", then SLOW streams 60 deltas a
 # tenth of a second apart: an ~8 s working window to observe and to watch live.
 TASK = "DELAY2 SLOW e2e lane work"
@@ -182,6 +198,20 @@ class View:
             topic = self.topics.setdefault(name, Topic(name))
         if topic.apply(op) == "reset":
             self.resets.append((name, op.get("reason")))
+        return topic
+
+    def resnapshot(self, name, state, items):
+        """What a client does on `topic.reset NAME` (docs/serve.md §5.3):
+        replace what it held for NAME with a fresh snapshot of that topic, state
+        and items.  The stream does not carry the snapshot — the client asks for
+        it — so this is the only way a topic a client held empty comes to hold a
+        lane whole."""
+        topic = self.topics.setdefault(name, Topic(name))
+        topic.state = dict(state or {})
+        topic.items = []
+        topic.order = {}
+        for item in items or []:
+            topic.add(item, None)
         return topic
 
     def find(self, kind, topic=None, **fields):
@@ -314,8 +344,14 @@ class Swarm:
     def __init__(self, home, proj, env, ready_file, workers=LANES, resume=False,
                  notes=()):
         self.ready_file = ready_file
+        # `--workers` is left off the command line entirely when WORKERS is
+        # None: what a launch with no flag does (the recorded roster, else the
+        # config default) is one of the things a resume has to be read on.
         args = [SWARM, "serve", "--port", "0", "--ready-file", ready_file,
-                "--watch-stdin", "--workers", str(workers), "--evo", EVO]
+                "--watch-stdin"]
+        if workers is not None:
+            args += ["--workers", str(workers)]
+        args += ["--evo", EVO]
         for note in notes:
             args += ["--prompt-note", note]
         if resume:
@@ -515,6 +551,225 @@ def prompt_note_check(swarm, home):
         status, reply = lane.op("eval", question, op_rid=f"note-lane-{n}")
         check(f"--prompt-note: lane {n}'s system prompt carries it",
               status == 200 and (reply.get("result") or {}).get("values") == [":in"], reply)
+
+
+def _notice_texts(reply):
+    """The command's own lines from a command.run reply, as text."""
+    return [n.get("text") or "" for n in ((reply or {}).get("result") or {}).get("notices") or []]
+
+
+def _lane_client(home, n):
+    """A client on lane N's own port, from the ready file the coordinator owns."""
+    ready = lane_ready(home, n) or {}
+    if not ready.get("port"):
+        return None
+    return Client(ready["port"], ready["token"])
+
+
+def _lane_prompt_has(lane, needle):
+    """Whether LANE's own system prompt carries NEEDLE.  A lane's prompt is the
+    only place its own note can be read, so this asks the lane's port."""
+    question = {"code": f'(if (search "{needle}" (evo.kernel:build-system-prompt nil)) :in :absent)'}
+    status, reply = lane.op("eval", question)
+    return status == 200 and (reply.get("result") or {}).get("values") == [":in"]
+
+
+def lane_count_checks(swarm, home, collector):
+    """`/lanes N` at runtime (POST command.run): the pool the swarm runs is
+    read from `/lanes` and changed with `/lanes N`, over the same op a client
+    already uses for any other slash command.
+
+    Covers: a count that is not a lane count refused `:invalid`; growing the
+    pool while it runs — the new lane's topic, ready file and process, all of it
+    reaching a subscription a client was already holding, and the re-snapshot
+    that client takes on the reset; that a count the pool already has, or one
+    below it, is a no-op that stops nothing; that the coordinator's own run is
+    the guard, while a lane being busy is not; that growing restarts none of the
+    lanes already there; and that every lane's own prompt note — the lane that
+    joined and the lanes already there — carries the new count.
+
+    Returns the lane count the pool ended at (GROWN when the growth worked,
+    LANES otherwise), so the caller knows what to expect of the shutdown and of
+    the resume."""
+    client = swarm.client
+    lanes = LANES
+
+    # --- a count that is not a lane count is refused on the wire ------------
+    status, reply = client.op("command.run", {"name": "lanes", "args": "nope"},
+                              op_rid="lanes-invalid")
+    check("/lanes with something that is not a number is refused",
+          status == 200 and reply.get("ok") is False
+          and (reply.get("error") or {}).get("code") == "invalid_args", reply)
+    status, reply = client.op("command.run", {"name": "lanes", "args": "99"},
+                              op_rid="lanes-out-of-range")
+    check("/lanes with a count out of range is refused too",
+          status == 200 and reply.get("ok") is False
+          and (reply.get("error") or {}).get("code") == "invalid_args", reply)
+    check("...and neither of them changed the pool",
+          sorted(swarm_rows(client.topic_state("swarm"))) == list(range(1, lanes + 1)),
+          sorted(swarm_rows(client.topic_state("swarm"))))
+
+    # --- a count the pool already has is a no-op ---------------------------
+    before = {n: _lane_row(client, n).get("pid") for n in range(1, lanes + 1)}
+    was = len(lane_dirs(home))
+    status, reply = client.op("command.run", {"name": "lanes", "args": str(lanes)},
+                              op_rid="lanes-equal")
+    check("/lanes N is accepted for N the pool already has",
+          status == 200 and reply.get("ok"), reply)
+    check("...and the command answers, saying nothing changed",
+          _notice_texts(reply), reply)
+    # Nothing about a no-op is async, but a wrong implementation's effect would
+    # be: give it a moment to show before reading the pool back.
+    time.sleep(1.0)
+    after = {n: _lane_row(client, n).get("pid") for n in range(1, lanes + 1)}
+    check("...and it is a no-op: the same lanes, the same processes",
+          after == before and len(lane_dirs(home)) == was, (before, after))
+
+    # --- a smaller count is a no-op too: /lanes never shrinks a pool --------
+    status, reply = client.op("command.run", {"name": "lanes", "args": str(lanes - 1)},
+                              op_rid="lanes-smaller")
+    check("/lanes N below the count the pool has is accepted",
+          status == 200 and reply.get("ok"), reply)
+    check("...and answers rather than refusing: growth-only, so it says so",
+          _notice_texts(reply), reply)
+    time.sleep(1.0)
+    rows = swarm_rows(client.topic_state("swarm"))
+    check("...and it stops nothing: every lane is still there, same process",
+          sorted(rows) == list(range(1, lanes + 1))
+          and {n: row.get("pid") for n, row in rows.items()} == before, rows)
+    check("...no lane process was stopped", all(alive(p) for p in lane_pids(home)),
+          lane_pids(home))
+    check("...and no lane directory was removed", len(lane_dirs(home)) == lanes,
+          lane_dirs(home))
+
+    # --- growing, with a lane busy: the lane that is working is not touched --
+    # The guard is the *coordinator's* own run, never a lane's: what a resize
+    # changes is what the coordinator waits on, and lanes are busy exactly when
+    # more of them would help.  So the state to grow in is a lane working while
+    # the coordinator has handed the task over and gone quiet — which is what
+    # its run ending and `waiting` on its lanes means.
+    long_task = "DELAY4 SLOW e2e lane work"
+    status, reply = client.op("input.send",
+                              {"text": f'CALL delegate {{"lane":1,"task":"{long_task}"}}'},
+                              op_rid="lanes-delegate")
+    check("a task is delegated to lane 1", reply.get("ok"), reply)
+    quiet = wait_for(lambda: (
+        _lane_row(client, 1).get("state") == "working"
+        and client.topic_state("session").get("status") in ("idle", "waiting")) or None, 60)
+    check("...lane 1 is working while the coordinator is not",
+          quiet is not None,
+          (client.topic_state("session").get("status"), _lane_row(client, 1).get("state")))
+    working_pid = _lane_row(client, 1).get("pid")
+    working_session = (lane_state(client, 1).get("session") or {}).get("id")
+    status, reply = client.op("command.run", {"name": "lanes", "args": str(GROWN)},
+                              op_rid="lanes-grow")
+    check(f"/lanes {GROWN} grows the pool at runtime while a lane works",
+          status == 200 and reply.get("ok"), reply)
+    check("...and a notice names the count it is growing to",
+          any(str(GROWN) in text for text in _notice_texts(reply)),
+          _notice_texts(reply))
+    grown = wait_for(lambda: _roster_ready(client, GROWN), 180)
+    check(f"...to {GROWN} lanes, each a live process with a ready file",
+          grown is not None, client.topic_state("swarm"))
+    state = client.topic_state("swarm")
+    check("...and the swarm topic's workers and its rows say the same count",
+          state.get("workers") == GROWN
+          and sorted(swarm_rows(state)) == list(range(1, GROWN + 1)),
+          (state.get("workers"), sorted(swarm_rows(state))))
+    check("...and the lane that was working kept its process",
+          _lane_row(client, 1).get("pid") == working_pid,
+          (_lane_row(client, 1).get("pid"), working_pid))
+    check("...and its session",
+          (lane_state(client, 1).get("session") or {}).get("id") == working_session,
+          (lane_state(client, 1).get("session"), working_session))
+
+    # --- the new lane, as a topic and a process ----------------------------
+    topics = wait_for(lambda: _snapshot_topics(client, "lane:*")
+                      if f"lane:{GROWN}" in _snapshot_topics(client, "lane:*") else None, 60)
+    check(f"a snapshot taken after the growth carries the new lane {GROWN}",
+          topics is not None, sorted(_snapshot_topics(client, "lane:*")))
+    new = wait_for(lambda: (lane_state(client, GROWN)
+                            if (lane_state(client, GROWN).get("session") or {}).get("id")
+                            else None), 60)
+    check(f"lane {GROWN}'s own topic is whole: a state and a session of its own",
+          new is not None, lane_state(client, GROWN))
+    ready = lane_ready(home, GROWN) or {}
+    check(f"lane {GROWN} published a ready file and its pid is alive",
+          bool(ready.get("pid")) and alive(ready["pid"]), ready)
+    check("...and it is on disk beside the lanes it joined",
+          len(lane_dirs(home)) == GROWN, lane_dirs(home))
+
+    # A client already streaming lane:* — the subscription run_checks opened
+    # before the growth — is told the new lane came up, the protocol's way
+    # (topic.reset lane:N).  The reset carries no state: what makes the held
+    # topic whole is the client's own re-snapshot of it (docs/serve.md §5.3),
+    # so that is what is exercised here — replace what the subscription was
+    # holding for the lane with the snapshot, then read the held topic back.
+    announced = wait_for(lambda: any(t == f"lane:{GROWN}" for t, _ in collector.view.resets),
+                         60)
+    check(f"a client already holding lane:* is told lane {GROWN} came up",
+          announced is not None, collector.view.resets)
+    snap = _snapshot_topics(client, f"lane:{GROWN}", items=200).get(f"lane:{GROWN}") or {}
+    held = collector.view.resnapshot(f"lane:{GROWN}", snap.get("state"), snap.get("items"))
+    check(f"...and the re-snapshot that client takes on the reset holds lane {GROWN} whole",
+          bool(held.state.get("status"))
+          and bool((held.state.get("session") or {}).get("id")),
+          (held.state, sorted(snap)))
+
+    # --- every lane's own prompt note carries the new count -----------------
+    # A lane's note says how many lanes there are ("You are lane N of M in a
+    # swarm.").  The lane that just joined has it from its baseline; the lanes
+    # already there are re-noted asynchronously (swarm/init.lisp's
+    # WORKER-NOTE-FORM, whose count only ever moves up), so this waits.
+    for n in range(1, GROWN + 1):
+        lane = _lane_client(home, n)
+        needle = f"You are lane {n} of {GROWN} in a swarm."
+        told = wait_for(lambda lane=lane, needle=needle:
+                        True if lane and _lane_prompt_has(lane, needle) else None, 120)
+        check(f"lane {n}'s prompt note carries the new count ({GROWN} lanes)",
+              told is not None, needle)
+
+    # --- the coordinator's own run guards the resize ------------------------
+    status, reply = client.op("input.send", {"text": "SLOW coordinator work"},
+                              op_rid="lanes-coordinator")
+    check("the coordinator takes a run of its own", reply.get("ok"), reply)
+    check("...and is running",
+          wait_for(lambda: client.topic_state("session").get("status") == "running",
+                   30) is not None, client.topic_state("session").get("status"))
+    status, reply = client.op("command.run", {"name": "lanes", "args": str(GROWN + 1)},
+                              op_rid="lanes-busy")
+    # The guard is a conflict (`command-refused :conflict`), which the wire
+    # calls `busy`: a resize while the coordinator's own run is in flight.
+    check("/lanes is refused while the coordinator is busy",
+          status == 200 and reply.get("ok") is False
+          and (reply.get("error") or {}).get("code") == "busy", reply)
+    check("...and the pool is left exactly as it was",
+          sorted(swarm_rows(client.topic_state("swarm"))) == list(range(1, GROWN + 1)),
+          sorted(swarm_rows(client.topic_state("swarm"))))
+
+    # --- settle: stop the lane's task and the coordinator's -----------------
+    status, reply = client.op("run.interrupt", {"scope": "swarm"}, op_rid="lanes-stop")
+    check("run.interrupt stops the working lane and the coordinator",
+          status == 200 and reply.get("ok"), reply)
+    check(f"...and every one of the {GROWN} lanes settles",
+          wait_for(lambda: all(_lane_row(client, n).get("state") in ("idle", "down")
+                               for n in range(1, GROWN + 1)), 90) is not None,
+          [_lane_row(client, n) for n in range(1, GROWN + 1)])
+    return GROWN if grown is not None else lanes
+
+
+def _snapshot_topics(client, topics, items=1):
+    """The topics a snapshot of TOPICS carries, by name."""
+    return (client.snapshot(topics=topics, items=items) or {}).get("topics") or {}
+
+
+def _roster_ready(client, count):
+    """The swarm topic's rows once the pool has COUNT lanes, every one of them
+    a process that has published its ready file (a pid), else NIL."""
+    rows = swarm_rows(client.topic_state("swarm"))
+    if len(rows) != count or not all(r.get("pid") for r in rows.values()):
+        return None
+    return rows
 
 
 def run_checks(swarm, stub, home, work, proj, held):
@@ -756,7 +1011,13 @@ def run_checks(swarm, stub, home, work, proj, held):
           [i for i in collector.view.topics["session"].items
            if i.get("kind") == "notice"][-3:])
 
+    # --- the runtime lane count: /lanes N -----------------------------------
+    # Last, so the checks above know the swarm they were written for (LANES):
+    # after this the pool is GROWN lanes and stays that way into the resume.
+    achieved = lane_count_checks(swarm, home, collector)
+
     collector.stop.set()
+    return achieved
 
 
 def _all_idle(client):
@@ -817,24 +1078,29 @@ def main():
         f.write(f"The client renders your output itself: {NOTE_MARKER}.\n")
 
     swarm = Swarm(home, proj, env, os.path.join(work, "ready.json"), notes=[note])
+    swarms = [swarm]
+    achieved = LANES
+    coordinator_session = None
     try:
         if not swarm.wait_ready():
             print("swarm-serve-e2e: `evo-swarm serve` did not come up "
                   f"(exit {swarm.proc.poll()})")
-            failed_early = True
+            failed += 1
         else:
-            failed_early = False
             # Snapshot lane:* *now*, before any lane's process exists: this is
             # the cursor evo-gui holds when it opens a resumed swarm's tab.
             held = hold_lanes_from_the_start(swarm)
-            run_checks(swarm, stub, home, work, proj, held)
+            achieved = run_checks(swarm, stub, home, work, proj, held) or LANES
+            coordinator_session = (swarm.client.topic_state("session").get("session") or {}).get("id")
+            check("the coordinator's session identity is available for resume checks",
+                  bool(coordinator_session), swarm.client.topic_state("session"))
 
         # --- shutdown ---------------------------------------------------------
         dirs = lane_dirs(home)
-        check(f"{LANES} lane directories", len(dirs) == LANES, dirs)
+        check(f"{achieved} lane directories", len(dirs) == achieved, dirs)
         pids = lane_pids(home)
         check("every lane published a ready file of its own, all alive",
-              len(pids) == LANES and all(alive(p) for p in pids), pids)
+              len(pids) == achieved and all(alive(p) for p in pids), pids)
         check("the coordinator owns them: they are not supervised by it",
               all(p != swarm.ready["pid"] for p in pids), pids)
         status, reply = swarm.client.op("server.shutdown", {})
@@ -851,19 +1117,85 @@ def main():
         leaks = _secret_leaks(home)
         check("no provider secret is written to a journal, log or lane file",
               not leaks, leaks)
+
+        # --- resume: the session's roster is the roster, and --workers raises it
+        # Three launches of the same recorded session, each read on what comes
+        # back: no --workers flag at all (the recorded roster, untouched), a
+        # lower one (which must not shrink it), and a higher one (which grows
+        # it -- the same ensure-lane-count the runtime `/lanes N` uses).
+        phases = [("with no --workers flag", None, achieved),
+                  ("with a lower --workers", 1, achieved),
+                  ("with a higher --workers", achieved + 2, achieved + 2)]
+        for index, (how, workers, expect) in enumerate(phases):
+            resumed = Swarm(home, proj, env,
+                            os.path.join(work, f"ready-resume-{index}.json"),
+                            workers=workers, resume=True)
+            swarms.append(resumed)
+            if not resumed.wait_ready():
+                failed += 1
+                print(f"swarm-serve-e2e: the resumed swarm {how} did not come up "
+                      f"(exit {resumed.proc.poll()})")
+                break
+            resumed_checks(resumed, home, expect, coordinator_session, how)
+            status, reply = resumed.client.op("server.shutdown", {})
+            check(f"the resumed swarm {how} shuts down cleanly",
+                  status == 200 and reply.get("ok"), reply)
+            check("...and exits 0", resumed.wait(timeout=30) == 0)
     except BaseException as e:
         failed += 1
         print(f"FAIL aborted: {e!r}")
     finally:
-        swarm.kill()
+        for running in swarms:
+            running.kill()
         stub.proc.kill()
-        swarm.log.close()
+        for running in swarms:
+            running.log.close()
     if failed:
-        print(swarm.log_tail())
+        for running in swarms:
+            print(f"--- {os.path.basename(running.ready_file)} ---")
+            print(running.log_tail())
     else:
         shutil.rmtree(work, ignore_errors=True)
     print(f"\nswarm-serve-e2e: {passed} passed, {failed} failed")
     return 1 if failed else 0
+
+
+def resumed_checks(swarm, home, expected, coordinator_session, how):
+    """A resumed swarm restores the roster its session recorded — the one
+    `/lanes N` grew the pool to — whatever `--workers` it was launched HOW:
+    none at all, a lower one, or a higher one.  Every lane is its own process
+    and its own topic again, and the coordinator is on the session it was on."""
+    client = swarm.client
+    rows = wait_for(lambda: _roster_ready(client, expected), 180)
+    check(f"resumed {how}: the roster is the session's {expected} lanes",
+          rows is not None, sorted(swarm_rows(client.topic_state("swarm"))))
+    state = client.topic_state("swarm")
+    check(f"resumed {how}: ...and the swarm's own count is {expected}",
+          state.get("workers") == expected, (state.get("workers"), expected))
+    check(f"resumed {how}: ...every lane a live process of its own again",
+          all(r.get("pid") and alive(r["pid"]) for r in (rows or {}).values()), rows)
+    check(f"resumed {how}: ...with a ready file of its own each",
+          all(lane_ready(home, n) for n in range(1, expected + 1)),
+          [n for n in range(1, expected + 1) if not lane_ready(home, n)])
+    # A lane's own topic reports its state once the lane's process has come up
+    # and its first snapshot is taken — a moment after the pid the roster above
+    # was read from — so wait for all of them rather than reading once.
+    def _states_ready():
+        missing = [n for n in range(1, expected + 1)
+                   if not lane_state(client, n).get("status")]
+        return True if not missing else None
+
+    states = wait_for(_states_ready, 90)
+    check(f"resumed {how}: ...and a topic with a state of its own each",
+          states is not None,
+          [n for n in range(1, expected + 1)
+           if not lane_state(client, n).get("status")])
+    check(f"resumed {how}: ...on disk beside each other",
+          len(lane_dirs(home)) == expected, lane_dirs(home))
+    check(f"resumed {how}: ...the coordinator on the session it was on",
+          bool(coordinator_session)
+          and (client.topic_state("session").get("session") or {}).get("id") == coordinator_session,
+          (client.topic_state("session"), coordinator_session))
 
 
 def _secret_leaks(home):

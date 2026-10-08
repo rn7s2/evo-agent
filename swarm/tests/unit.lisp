@@ -1087,6 +1087,100 @@ client's case — it has no reset of its own to rely on (CONTRACT §5.3)."
             (symbol-function 'evo.swarm::wait-for-ready) saved-ready
             (symbol-function 'evo.swarm::initialize-lane) saved-init))))
 
+(defun test-bring-up-failure-cleanup ()
+  "A lane whose process never becomes ready must not leave a live process
+behind: the failed BRING-UP closes the pipe that holds it, kills and reaps the
+process it owns, clears its process, pipe, ready and ready file, and marks it
+down with a :failed-to-start event.  The lane stays retryable — nothing holds
+it stopping, and a later bring-up reclaims it."
+  (let* ((events nil)
+         (*swarm* (test-swarm :workers 1))
+         (lane (first (swarm-lanes *swarm*)))
+         (sentinel (list :pid 4242))
+         (stdin (make-string-input-stream ""))
+         (killed nil) (waited nil)
+         (saved-launch (symbol-function 'evo.swarm::launch-lane))
+         (saved-ready (symbol-function 'evo.swarm::wait-for-ready))
+         (saved-init (symbol-function 'evo.swarm::initialize-lane))
+         (saved-kill (symbol-function 'evo.port:process-kill-tree))
+         (saved-wait (symbol-function 'evo.port:process-wait))
+         (saved-event (symbol-function 'evo.swarm::tell-lane-event)))
+    (unwind-protect
+         (progn
+           (ensure-directories-exist (evo.swarm::lane-dir lane))
+           (write-file-string (evo.swarm::ready-file-path lane) "{}\n")
+           ;; What the real LAUNCH-LANE installs, and a wait that times out.
+           (setf (symbol-function 'evo.swarm::launch-lane)
+                 (lambda (lane &key resume)
+                   (declare (ignore resume))
+                   (setf (evo.swarm::lane-process lane) sentinel
+                         (evo.swarm::lane-stdin lane) stdin)
+                   sentinel)
+                 (symbol-function 'evo.swarm::wait-for-ready)
+                 (lambda (lane &key epoch) (declare (ignore lane epoch)) nil)
+                 (symbol-function 'evo.port:process-kill-tree)
+                 (lambda (process) (push process killed) t)
+                 (symbol-function 'evo.port:process-wait)
+                 (lambda (process) (push process waited) t)
+                 ;; The event itself is asserted, not delivered: delivering it
+                 ;; queues coordinator input and asks for a run.
+                 (symbol-function 'evo.swarm::tell-lane-event)
+                 (lambda (lane event &key detail &allow-other-keys)
+                   (push (list (lane-n lane) event detail) events)
+                   nil))
+           (check "bring-up: a lane that never becomes ready does not come up"
+                  (null (bring-up-lane lane)))
+           (check "bring-up: ...it is marked down"
+                  (eq :down (lane-state lane)))
+           (check "bring-up: ...its process, pipe and ready are cleared"
+                  (and (null (evo.swarm::lane-process lane))
+                       (null (evo.swarm::lane-stdin lane))
+                       (null (evo.swarm::lane-ready lane))))
+           (check "bring-up: ...the process it owned is killed and reaped"
+                  (and (equal (list sentinel) killed)
+                       (equal (list sentinel) waited)))
+           (check "bring-up: ...the pipe that holds it is closed"
+                  (not (open-stream-p stdin)))
+           (check "bring-up: ...the stale ready file is gone"
+                  (not (probe-file (evo.swarm::ready-file-path lane))))
+           (check "bring-up: ...the coordinator hears :failed-to-start"
+                  (let ((event (first events)))
+                    (and (eql 1 (length events))
+                         (eql 1 (first event))
+                         (eq :failed-to-start (second event))
+                         (search (namestring (evo.swarm::lane-log-path lane))
+                                 (third event)))))
+           ;; Retryable by design: no rescue, but nothing wedges either.  A
+           ;; later bring-up reclaims the same lane with a process of its own.
+           (check "bring-up: the failed lane is not left stopping"
+                  (not (evo.swarm::lane-stopping lane)))
+           (let ((second (list :pid 5252)))
+             (setf (symbol-function 'evo.swarm::launch-lane)
+                   (lambda (lane &key resume)
+                     (declare (ignore resume))
+                     (setf (evo.swarm::lane-process lane) second)
+                     second)
+                   (symbol-function 'evo.swarm::wait-for-ready)
+                   (lambda (lane &key epoch)
+                     (declare (ignore lane epoch))
+                     (list :epoch "e2" :session (list :path "/tmp/lane-1.sexp")))
+                   (symbol-function 'evo.swarm::initialize-lane)
+                   (lambda (lane) (declare (ignore lane)) nil))
+             (with-lane-snapshot ((list :status "idle" :model (list :id "stub-a" :ready t)))
+               (check "bring-up: a retry after the failure comes up"
+                      (and (bring-up-lane lane)
+                           (eq second (evo.swarm::lane-process lane))
+                           (equal "idle"
+                                  (getf (evo.swarm::mirror-lane-state
+                                         (evo.swarm::lane-mirror lane))
+                                        :status)))))))
+      (setf (symbol-function 'evo.swarm::launch-lane) saved-launch
+            (symbol-function 'evo.swarm::wait-for-ready) saved-ready
+            (symbol-function 'evo.swarm::initialize-lane) saved-init
+            (symbol-function 'evo.port:process-kill-tree) saved-kill
+            (symbol-function 'evo.port:process-wait) saved-wait
+            (symbol-function 'evo.swarm::tell-lane-event) saved-event))))
+
 (defun test-topics ()
   "The swarm is one observable thing (CONTRACT §4.3): its topic carries the
 whole state, and every lane transition publishes it."
@@ -1716,6 +1810,526 @@ changes nothing about the coordinator."
         (check "lane plan: ...its settings"
                (equal settings (capture-settings)))))))
 
+(defun test-offline-resume-workers ()
+  "The lane count the offline answers resolve (swarm/offline.lisp): an explicit
+--workers, else the roster a resumed swarm records, else the :swarm-workers
+setting, else 6.  A resumed swarm keeps its recorded roster, so a smaller
+--workers never shrinks it and an inflated config default never enlarges it —
+and that count is what the lanes' in-lanes code is bound to."
+  (with-registries ()
+    (register-provider* :stub :base-url "http://127.0.0.1:1" :api-key-env "STUB_KEY")
+    (register-model* "m-a" :provider :stub :context-window 1000 :max-output 100)
+    (let ((record2 (list :lanes (vector (list :n 1) (list :n 2))))
+          (record5 (list :lanes (vector (list :n 1) (list :n 2) (list :n 3)
+                                        (list :n 4) (list :n 5)))))
+      ;; No record: evo's own chain, what a fresh swarm resolves.
+      (check "offline workers: with nothing named, six"
+             (eql 6 (evo.swarm::resolved-workers nil)))
+      (check "offline workers: a fresh swarm takes the config default"
+             (progn (set-setting :swarm-workers 4)
+                    (eql 4 (evo.swarm::resolved-workers nil))))
+      (check "offline workers: --workers beats the config default"
+             (eql 7 (evo.swarm::resolved-workers '(:workers 7))))
+      ;; A resumed record is the floor; only an explicit --workers raises it.
+      (check "offline workers: a resumed record is the count"
+             (eql 2 (evo.swarm::resolved-workers nil record2)))
+      (check "offline workers: --workers above the record raises the count"
+             (eql 5 (evo.swarm::resolved-workers '(:workers 5) record2)))
+      (check "offline workers: --workers below the record does not shrink it"
+             (eql 5 (evo.swarm::resolved-workers '(:workers 2) record5)))
+      (check "offline workers: --workers at the record is the record"
+             (eql 5 (evo.swarm::resolved-workers '(:workers 5) record5)))
+      (check "offline workers: an inflated config default does not enlarge a resume"
+             (progn (set-setting :swarm-workers 9)
+                    (and (eql 2 (evo.swarm::resolved-workers nil record2))
+                         (eql 3 (evo.swarm::resolved-workers '(:workers 3) record2)))))
+      (check "offline workers: a record with no roster is no count"
+             (null (evo.swarm::recorded-lane-count '(:lane-model "m-a"))))
+      (check "offline workers: ...and an empty roster is zero"
+             (eql 0 (evo.swarm::recorded-lane-count (list :lanes #()))))
+      ;; CHECK-WORKERS, which is what `check` reports as :workers.
+      (check "check: no flag and a resumed record -> the record"
+             (eql 2 (evo.swarm::check-workers nil record2)))
+      (check "check: ...--workers above it"
+             (eql 5 (evo.swarm::check-workers '(:workers 5) record2)))
+      (check "check: ...--workers below it"
+             (eql 5 (evo.swarm::check-workers '(:workers 2) record5)))
+      (check "check: ...--workers at it, and no problem"
+             (and (eql 5 (evo.swarm::check-workers '(:workers 5) record5))
+                  (null (nth-value 1 (evo.swarm::check-workers '(:workers 5) record5)))))
+      (check "check: a resumed record raises no problem of its own"
+             (null (nth-value 1 (evo.swarm::check-workers nil record2))))
+      (check "check: an invalid --workers is a problem, record or not"
+             (equal "invalid_workers"
+                    (getf (nth-value 1 (evo.swarm::check-workers '(:workers 999) record2))
+                          :code))))
+    ;; LANE-SETUP-FORMS-FOR is the half LANE-PLAN (and `check`) evaluates; its
+    ;; in-lanes bindings are the resumed count, with :swarm-workers still at the
+    ;; 9 from above.
+    (let* ((agent (fresh-agent))
+           (evo:*agent* agent)
+           (evo.swarm::*lane-forms* nil))
+      (evo:set-custom-state "swarm"
+                            (list :lane-model "m-a" :lane-provider :stub
+                                  :lanes (vector (list :n 1) (list :n 2) (list :n 3)))
+                            agent)
+      (evo.swarm:in-lanes (n total)
+        (progn
+          (evo:register-model (format nil "lane-count-~d" total)
+                              :provider :stub :context-window 1000 :max-output 100)
+          (list :lane n :lanes total)))
+      (let ((plan (evo.swarm::lane-plan nil agent t)))
+        (check "lane plan: its sandbox binds in-lanes to the resumed count"
+               (and (find "lane-count-3" (evo.swarm::lane-plan-models plan)
+                          :key (lambda (m) (getf m :id)) :test #'equal)
+                    (not (find "lane-count-9" (evo.swarm::lane-plan-models plan)
+                               :key (lambda (m) (getf m :id)) :test #'equal)))))
+      (let* ((forms (evo.swarm::lane-setup-forms-for nil agent t))
+             (probe (find-if (lambda (form)
+                               (search "list :lane"
+                                       (evo.swarm::forms->code (list form))))
+                             forms)))
+        (check "lane plan: ...and the lane's form itself names the lane and that count"
+               (equal (list :lane 1 :lanes 3) (eval probe)))))))
+
+;;; Runtime lane growth (lanes.lisp, tui.lisp, main.lisp).  The roster can
+;;; grow while the swarm runs — `/lanes N`, and an explicit `--workers` on
+;;; resume — so the order of the journal write, the lane-topic registration and
+;;; the roster publication is what a crash in the middle leaves behind.  A
+;;; count that is not larger is a no-op (growth only), and the default lane
+;;; number on resume is the recorded one, never a growth target.
+;;;
+;;; Nothing here starts a process: LAUNCH-LANE and START-LANES are replaced.
+
+(defun eventually (predicate &key (seconds 5))
+  "True once PREDICATE does, within SECONDS: START-LANES boots its lanes on
+threads of its own, and the replacements here finish at once."
+  (loop repeat (* seconds 100)
+        when (funcall predicate) return t
+        do (sleep 0.01)))
+
+(defun lane-numbers (swarm)
+  "The lane numbers of SWARM's roster, in order."
+  (mapcar #'lane-n (swarm-lanes swarm)))
+
+;;; A thread-safe recorder for LANE-LAUNCH: START-LANES starts one thread per
+;;; lane, so the calls must be collected under a lock (an unsynchronised APPEND
+;;; loses updates) and the threads waited for before LAUNCH-LANE is put back —
+;;; the recorder must not be uninstalled while one is still running.
+;;; Cross-thread order is not meaningful, so callers compare sorted numbers.
+
+(defstruct (launch-recorder (:constructor make-launch-recorder ()))
+  (lock (bt:make-lock "launch-recorder"))
+  entries      ; (LANE-N RESUME) per call, newest first (push order is arbitrary)
+  lanes)       ; the lane objects, for waiting on their threads
+
+(defun recorder-add (recorder entry lane)
+  (bt:with-lock-held ((launch-recorder-lock recorder))
+    (push entry (launch-recorder-entries recorder))
+    (pushnew lane (launch-recorder-lanes recorder))))
+
+(defun recorder-calls (recorder)
+  "RECORDER's calls, one (LANE-N RESUME) each."
+  (bt:with-lock-held ((launch-recorder-lock recorder))
+    (reverse (launch-recorder-entries recorder))))
+
+(defun recorder-lane-numbers (recorder)
+  "The lanes RECORDER saw called for, sorted: the calls come from the swarm's
+own threads, so their collection order proves nothing."
+  (sort (mapcar #'first (recorder-calls recorder)) #'<))
+
+(defun settle-lane-thread (lane)
+  "Wait for the thread START-LANES started for LANE to finish, so a recorder
+can be uninstalled without a launch still running."
+  (let ((thread (evo.swarm::lane-subscriber lane)))
+    (when thread
+      (loop repeat 500 while (bt:thread-alive-p thread) do (sleep 0.01)))))
+
+(defun settle-launch-threads (recorder)
+  (dolist (lane (bt:with-lock-held ((launch-recorder-lock recorder))
+                  (copy-list (launch-recorder-lanes recorder))))
+    (settle-lane-thread lane)))
+
+(defmacro with-lane-recorder ((recorder) &body body)
+  "BODY with LAUNCH-LANE replaced: RECORDER collects the lanes called for, and
+no process is started.  Its threads are waited for and the function put back
+when BODY is done."
+  `(let ((,recorder (make-launch-recorder))
+         (saved (symbol-function 'launch-lane)))
+     (unwind-protect
+          (progn
+            (setf (symbol-function 'launch-lane)
+                  (lambda (lane &key resume)
+                    (recorder-add ,recorder (list (lane-n lane) resume) lane)
+                    nil))
+            ,@body)
+       (settle-launch-threads ,recorder)
+       (setf (symbol-function 'launch-lane) saved))))
+
+(defmacro with-start-lanes-recorder ((calls &key agent) &body body)
+  "BODY with START-LANES replaced: CALLS collects one plist per call — :SWARM,
+:RESUME, :LANES, and, with AGENT, :RECORD, the swarm journal as it read at
+boot time.  Nothing is launched; the caller is START-LANES' own thread, so the
+collection is not shared."
+  `(let ((,calls nil)
+         (saved (symbol-function 'start-lanes)))
+     (unwind-protect
+          (progn
+            (setf (symbol-function 'start-lanes)
+                  (lambda (swarm &key resume (lanes (swarm-lanes swarm)))
+                    (setf ,calls
+                          (append ,calls
+                                  (list (list :swarm swarm :resume resume :lanes lanes
+                                              :record (and ,agent
+                                                           (evo:custom-state "swarm" ,agent))))))
+                    t))
+            ,@body)
+       (setf (symbol-function 'start-lanes) saved))))
+
+(defun test-start-lanes-subset ()
+  "START-LANES takes the lanes to start, not the whole roster: growth starts
+only the lanes it added.  It starts nothing while the swarm is stopping, and
+its lanes come from the swarm it was given rather than whatever *SWARM* is
+when its threads run.  A lane whose process cannot start is marked down and
+the coordinator is told, without taking another lane with it."
+  (let* ((*swarm* (test-swarm :workers 4))
+         (lanes (swarm-lanes *swarm*)))
+    (with-lane-recorder (rec)
+      (check "start-lanes: it launches exactly the lanes it is given"
+             (progn (start-lanes *swarm* :lanes (list (third lanes) (fourth lanes)))
+                    (and (eventually (lambda () (= 2 (length (recorder-calls rec)))))
+                         (equal '(3 4) (recorder-lane-numbers rec))))))
+    (with-lane-recorder (rec)
+      (check "start-lanes: the default is the whole roster, with RESUME"
+             (progn (start-lanes *swarm* :resume t)
+                    (and (eventually (lambda () (= 4 (length (recorder-calls rec)))))
+                         (equal '(1 2 3 4) (recorder-lane-numbers rec))
+                         (every #'second (recorder-calls rec))))))
+    ;; A stopping swarm starts nothing: the check is under the swarm lock,
+    ;; before any thread exists.
+    (let ((*swarm* (test-swarm :workers 2)))
+      (evo.swarm::with-swarm-lock () (setf (evo.swarm::swarm-stopping *swarm*) t))
+      (with-lane-recorder (rec)
+        (check "start-lanes: a stopping swarm starts no lane"
+               (progn (start-lanes *swarm*)
+                      (sleep 0.3)
+                      (null (recorder-calls rec)))))))
+  ;; The threads close over their SWARM argument: *SWARM* is NIL here, so a
+  ;; session switch rebinding it cannot send the lanes to the wrong swarm.
+  (let ((*swarm* nil)
+        (other (test-swarm :workers 2)))
+    (with-lane-recorder (rec)
+      (check "start-lanes: it starts the swarm it was given, not *SWARM*"
+             (progn (start-lanes other :lanes (list (second (swarm-lanes other))))
+                    (and (eventually (lambda () (= 1 (length (recorder-calls rec)))))
+                         (equal '(2) (recorder-lane-numbers rec)))))))
+  ;; A launch that fails: the lane is marked down and said so, and the failure
+  ;; does not escape its own thread.
+  (let* ((view (make-instance 'recording-view))
+         (*swarm* (test-swarm :workers 2 :view view))
+         (lane (first (swarm-lanes *swarm*)))
+         (saved (symbol-function 'launch-lane)))
+    (unwind-protect
+         (progn
+           (setf (symbol-function 'launch-lane)
+                 (lambda (lane &key resume)
+                   (declare (ignore lane resume))
+                   (error "no evo-agent binary")))
+           (start-lanes *swarm* :lanes (list lane))
+           (check "start-lanes: a lane whose process cannot start is marked down"
+                  (eventually (lambda () (eq :down (lane-state lane)))))
+           (settle-lane-thread lane)
+           (check "start-lanes: ...and the coordinator is told"
+                  (some (lambda (said) (search "no evo-agent binary" (first said)))
+                        (said view))))
+      (settle-lane-thread lane)
+      (setf (symbol-function 'launch-lane) saved))))
+
+(defun test-lane-growth ()
+  "ENSURE-LANE-COUNT stages the expanded roster: it writes the journal with
+the new lanes while the LIVE swarm still holds the old one, registers the new
+lane topics, and only then installs the roster — so nothing a client can read
+names a lane it has no topic for, and a crash in the middle leaves the swarm
+on the roster it had.  The new lanes are appended after the old ones, which
+are kept; a count that is not larger is a no-op."
+  (let* ((agent (fresh-agent))
+         (server (evo.serve:make-server :port 0 :token "t"))
+         (*swarm* (test-swarm :agent agent :server server :workers 2))
+         (old (copy-list (swarm-lanes *swarm*)))
+         (published nil)
+         ;; Any lane row a swarm state.patch named while that lane's topic was
+         ;; not registered: growth must publish nothing a client cannot read.
+         (uncovered nil)
+         ;; What the LIVE swarm looked like on each journal write.
+         (live-at-persist nil)
+         (saved-publish (symbol-function 'evo.swarm::publish-op))
+         (saved-set (symbol-function 'evo:set-custom-state)))
+    (unwind-protect
+         (progn
+           (register-swarm-topics server *swarm*)
+           ;; What the topic registry held when the roster went out: no swarm
+           ;; state.patch may name a lane the server has no topic for.
+           (setf (symbol-function 'evo.swarm::publish-op)
+                 (lambda (op)
+                   (setf published (append published (list op)))
+                   (when (and (equal "swarm" (getf op :topic))
+                              (equal "state.patch" (getf op :op)))
+                     (loop for row across (getf (getf op :patch) :lanes)
+                           unless (evo.serve:topic-provider
+                                   server (format nil "lane:~d" (getf row :n)))
+                             do (pushnew (getf row :n) uncovered)))
+                   t))
+           ;; The journal write is instrumented and still goes through: at the
+           ;; moment the new roster is persisted the LIVE swarm must be the old
+           ;; one — the expanded roster is staged, not installed.
+           (setf (symbol-function 'evo:set-custom-state)
+                 (lambda (&rest args)
+                   (push (list :workers (evo.swarm::swarm-workers *swarm*)
+                               :lanes (length (swarm-lanes *swarm*)))
+                         live-at-persist)
+                   (apply saved-set args)))
+           (with-start-lanes-recorder (calls :agent agent)
+             (check "growth: it answers how many lanes it added"
+                    (eql 3 (evo.swarm::ensure-lane-count *swarm* 5)))
+             (check "growth: the roster grew, and the count with it"
+                    (and (eql 5 (evo.swarm::swarm-workers *swarm*))
+                         (equal '(1 2 3 4 5) (lane-numbers *swarm*))))
+             (check "growth: the old lanes are the same objects, not rebuilt"
+                    (and (eq (first (swarm-lanes *swarm*)) (first old))
+                         (eq (second (swarm-lanes *swarm*)) (second old))))
+             (check "growth: a new lane gets a directory of its own under the swarm"
+                    (equal (namestring (merge-pathnames "lane-5/" (swarm-dir *swarm*)))
+                           (namestring (evo.swarm::lane-dir (fifth (swarm-lanes *swarm*))))))
+             (check "growth: a new lane starts in the swarm's directory, with no task, worktree or evals"
+                    (let ((lane (fifth (swarm-lanes *swarm*))))
+                      (and (equal (namestring (evo.swarm::swarm-cwd *swarm*))
+                                  (namestring (lane-cwd lane)))
+                           (null (lane-task lane))
+                           (null (lane-worktree lane))
+                           (null (evo.swarm::lane-extra-forms lane)))))
+             (check "growth: it boots only the lanes it added"
+                    (and (= 1 (length calls))
+                         (equal '(3 4 5) (mapcar #'lane-n (getf (first calls) :lanes)))))
+             (check "growth: ...on the swarm it grew"
+                    (eq *swarm* (getf (first calls) :swarm)))
+             (check "growth: the journal names every lane before anything boots"
+                    (let ((record (getf (first calls) :record)))
+                      (and (eql 5 (getf record :workers))
+                           (= 5 (length (getf record :lanes)))))))
+           ;; The staging, in one place: durable first (written against the
+           ;; live old roster), then the topics, then the install that is news
+           ;; to a client.
+           (check "growth: the journal was written against the live old roster"
+                  (equal '((:workers 2 :lanes 2)) live-at-persist))
+           (check "growth: the live roster is installed only after the journal"
+                  (and (eql 5 (evo.swarm::swarm-workers *swarm*))
+                       (equal '(1 2 3 4 5) (lane-numbers *swarm*))))
+           (check "growth: every state.patch named only lanes with a topic"
+                  (and published (null uncovered)))
+           (check "growth: the new lane topics are registered"
+                  (every (lambda (n) (evo.serve:topic-provider
+                                      server (format nil "lane:~d" n)))
+                         '(3 4 5)))
+           (check "growth: the roster is republished on the swarm topic"
+                  (let ((patch (car (last (remove-if-not
+                                           (lambda (op) (equal "swarm" (getf op :topic)))
+                                           published)))))
+                    (and patch
+                         (eql 5 (getf (getf patch :patch) :workers))
+                         (= 5 (length (getf (getf patch :patch) :lanes))))))
+           ;; Not larger: a no-op, and nothing is booted.
+           (with-start-lanes-recorder (calls)
+             (check "growth: the same count is a no-op"
+                    (and (eql 0 (evo.swarm::ensure-lane-count *swarm* 5))
+                         (null calls)
+                         (equal '(1 2 3 4 5) (lane-numbers *swarm*))))
+             (check "growth: a smaller count is a no-op, never a shrink"
+                    (and (eql 0 (evo.swarm::ensure-lane-count *swarm* 2))
+                         (null calls)
+                         (equal '(1 2 3 4 5) (lane-numbers *swarm*))))))
+      (setf (symbol-function 'evo.swarm::publish-op) saved-publish
+            (symbol-function 'evo:set-custom-state) saved-set))))
+
+;;; A frontend host for the command layer's idle guard: `/lanes N` is a change
+;;; to what the coordinator waits on, so it asks the HOST whether a task is
+;;; running (EVO.COMMAND:REQUIRE-IDLE) — a busy *lane* is exactly when more
+;;; lanes help.
+
+(defclass test-command-host ()
+  ((busy :initform nil :accessor test-host-busy)))
+
+(defmethod evo.command:host-running-p ((host test-command-host))
+  (test-host-busy host))
+
+(defun test-lanes-command ()
+  "`/lanes N` grows the swarm to N lanes: 1..64 total, N at or below the
+current count is a no-op string (never a shrink), an argument that is not a
+count in range is refused :invalid, and growth needs the coordinator idle —
+refused :conflict while the host runs a task.  A busy *lane* is not a reason
+to refuse: that is exactly when more lanes help."
+  (let* ((agent (fresh-agent))
+         (*swarm* (test-swarm :agent agent :workers 2))
+         (fn (progn (register-swarm-commands)
+                    (getf (find-command "lanes") :fn)))
+         (host (make-instance 'test-command-host))
+         (answer (lambda (args) (funcall fn (list :args args :host host))))
+         (refusal (lambda (args)
+                    (handler-case (progn (funcall fn (list :args args :host host)) :none)
+                      (evo.command:command-refused (c) c)))))
+    (check "lanes: the command is registered" (functionp fn))
+    ;; Listing still works with no argument.
+    (check "lanes: bare /lanes still lists the lanes"
+           (let ((text (funcall answer "")))
+             (and (stringp text) (search "lane 1" text) (search "lane 2" text))))
+    (with-start-lanes-recorder (calls :agent agent)
+      (check "lanes: /lanes 5 grows the roster and answers"
+             (and (stringp (funcall answer "5"))
+                  (eql 5 (evo.swarm::swarm-workers *swarm*))
+                  (equal '(1 2 3 4 5) (lane-numbers *swarm*))
+                  (equal '(3 4 5) (mapcar #'lane-n (getf (first calls) :lanes))))))
+    (with-start-lanes-recorder (calls)
+      (check "lanes: the current count is a no-op, not a refusal"
+             (and (stringp (funcall answer "5"))
+                  (null calls)
+                  (equal '(1 2 3 4 5) (lane-numbers *swarm*)))))
+    (with-start-lanes-recorder (calls)
+      (check "lanes: a smaller count is a no-op, never a shrink"
+             (and (stringp (funcall answer "2"))
+                  (null calls)
+                  (equal '(1 2 3 4 5) (lane-numbers *swarm*)))))
+    ;; Out of range or not a number: refused :invalid, and nothing changes.
+    (with-start-lanes-recorder (calls)
+      (dolist (bad '("0" "65" "1000" "-3" "abc" "2.5"))
+        (let ((refusal (funcall refusal bad)))
+          (check (format nil "lanes: /lanes ~s is refused :invalid" bad)
+                 (and (typep refusal 'evo.command:command-refused)
+                      (eq :invalid (evo.command:command-refused-kind refusal))
+                      (null calls)
+                      (eql 5 (evo.swarm::swarm-workers *swarm*))
+                      (equal '(1 2 3 4 5) (lane-numbers *swarm*))))))
+    (let* ((bounded-agent (fresh-agent))
+           (*swarm* (test-swarm :agent bounded-agent :workers 2)))
+      (with-start-lanes-recorder (calls :agent bounded-agent)
+        (check "lanes: 64 is within the bound"
+               (and (stringp (funcall answer "64"))
+                    (eql 64 (evo.swarm::swarm-workers *swarm*))))))
+    ;; The coordinator is the one that may not be mid-run; a busy lane is fine.
+    (let ((*swarm* (test-swarm :agent agent :workers 2)))
+      (setf (test-host-busy host) t)
+      (with-start-lanes-recorder (calls)
+        (let ((refusal (funcall refusal "4")))
+          (check "lanes: a busy coordinator refuses growth :conflict"
+                 (and (typep refusal 'evo.command:command-refused)
+                      (eq :conflict (evo.command:command-refused-kind refusal))
+                      (null calls)
+                      (eql 2 (evo.swarm::swarm-workers *swarm*))))))
+      (setf (test-host-busy host) nil)
+      (evo.swarm::with-swarm-lock ()
+        (setf (lane-state (first (swarm-lanes *swarm*))) :working))
+      (with-start-lanes-recorder (calls :agent agent)
+        (check "lanes: a busy lane does not block growth"
+               (and (stringp (funcall answer "4"))
+                    (eql 4 (evo.swarm::swarm-workers *swarm*))
+                    (equal '(3 4) (mapcar #'lane-n (getf (first calls) :lanes))))))))))
+
+(defun test-resume-workers-minimum ()
+  "A resumed swarm comes back at the count its record names, whatever number
+the launch passed.  An explicit minimum grows it through the same routine; the
+default (no --workers) is not a minimum at all, or every resume of a two-lane
+swarm would grow to six."
+  (let* ((agent (fresh-agent))
+         (*swarm* (test-swarm :agent agent :workers 2)))
+    (record-swarm)
+    (let* ((record (evo:custom-state "swarm" agent))
+           (restored (evo.swarm::make-swarm :agent agent :workers 9 :record record
+                                            :evo-binary "/x/evo")))
+      (check "resume: the record decides the count, not the launch number"
+             (and (eql 2 (evo.swarm::swarm-workers restored))
+                  (equal '(1 2) (lane-numbers restored))))
+      (check "resume: ...and the record names it"
+             (and (eql 2 (getf record :workers))
+                  (= 2 (length (getf record :lanes)))))
+      (let ((old (copy-list (swarm-lanes restored))))
+        (let ((*swarm* restored))
+          (with-start-lanes-recorder (calls :agent agent)
+            (check "resume: an explicit higher minimum grows the swarm"
+                   (eql 2 (evo.swarm::ensure-lane-count restored 4)))
+            (check "resume: ...keeping the recorded lanes"
+                   (and (eq (first (swarm-lanes restored)) (first old))
+                        (equal '(1 2 3 4) (lane-numbers restored))
+                        (equal '(3 4) (mapcar #'lane-n (getf (first calls) :lanes)))))))
+        (let ((*swarm* restored))
+          (with-start-lanes-recorder (calls)
+            (check "resume: a minimum at the count is a no-op"
+                   (and (eql 0 (evo.swarm::ensure-lane-count restored 4))
+                        (null calls)))
+            (check "resume: a minimum below the count never shrinks"
+                   (and (eql 0 (evo.swarm::ensure-lane-count restored 1))
+                        (equal '(1 2 3 4) (lane-numbers restored))))))))))
+
+(defun test-lane-growth-journal-failure ()
+  "Growth journals before it boots anything, so a journal write that fails
+leaves no trace: the live roster is untouched (the expanded one was only
+staged), nothing boots, no lane topic appears and the swarm topic is not
+republished.  The error reaches the caller — growth records with :required,
+where an ordinary shape update tolerates a failed write."
+  (let* ((agent (fresh-agent))
+         (server (evo.serve:make-server :port 0 :token "t"))
+         (*swarm* (test-swarm :agent agent :server server :workers 2))
+         (published nil)
+         (saved-set (symbol-function 'evo:set-custom-state))
+         (saved-publish (symbol-function 'evo.swarm::publish-op)))
+    (unwind-protect
+         (progn
+           (register-swarm-topics server *swarm*)
+           (setf (symbol-function 'evo.swarm::publish-op)
+                 (lambda (op) (setf published (append published (list op))) t)
+                 (symbol-function 'evo:set-custom-state)
+                 (lambda (&rest args) (declare (ignore args)) (error "the journal is down")))
+           (check "record: an ordinary shape update tolerates a failed journal write"
+                  (handler-case (progn (record-swarm) t) (error () nil)))
+           (check "record: growth's record does not"
+                  (handler-case (progn (record-swarm :required t) nil) (error () t)))
+           (with-start-lanes-recorder (calls)
+             (check "growth: a failed journal write fails the growth"
+                    (handler-case (progn (evo.swarm::ensure-lane-count *swarm* 5) nil)
+                      (error () t)))
+             (check "growth: ...the live roster is untouched"
+                    (and (eql 2 (evo.swarm::swarm-workers *swarm*))
+                         (equal '(1 2) (lane-numbers *swarm*))))
+             (check "growth: ...nothing boots"
+                    (null calls)))
+           (check "growth: ...no lane topic is registered"
+                  (null (evo.serve:topic-provider server "lane:3")))
+           (check "growth: ...the swarm topic is not republished"
+                  (null (remove-if-not (lambda (op) (equal "swarm" (getf op :topic)))
+                                       published))))
+      (setf (symbol-function 'evo:set-custom-state) saved-set
+            (symbol-function 'evo.swarm::publish-op) saved-publish))))
+
+(defun test-worker-note-growth ()
+  "A grown swarm's count reaches the lanes' prompt note, and never goes
+backwards: the form a restarted lane evaluates names the new count, and a
+smaller count arriving later — an initialization racing the growth — does not
+put the old note back."
+  (with-registries ()
+    (let ((lane (evo.swarm::%make-lane :n 7)))
+      (labels ((apply-note (workers)
+                 (eval (evo.swarm::worker-note-form lane workers))
+                 (cdr (assoc "swarm-worker" (evo.kernel::prompt-notes-snapshot)
+                             :test #'equal))))
+        (eval '(defvar evo.user::*swarm-worker-count* 0))
+        (setf (symbol-value 'evo.user::*swarm-worker-count*) 0)
+        (let ((six (apply-note 6)))
+          (check "note: growth names the lane's count in its note"
+                 (and (stringp six) (search "7 of 6" six)))
+          (check "note: a later smaller count does not put the old note back"
+                 (equal six (apply-note 4)))
+          (check "note: a later larger count does"
+                 (let ((eight (apply-note 8)))
+                   (and (stringp eight) (search "7 of 8" eight)
+                        (not (equal six eight))))))))))
+
 (defun run-all ()
   (let ((*pass* 0) (*fail* 0))
     (test-baseline)
@@ -1729,6 +2343,7 @@ changes nothing about the coordinator."
     (test-mirror)
     (test-mirror-rebuild)
     (test-bring-up-announces)
+    (test-bring-up-failure-cleanup)
     (test-topics)
     (test-interrupt)
     (test-tools)
@@ -1737,6 +2352,14 @@ changes nothing about the coordinator."
     (test-serve-view)
     (test-record)
     (test-session-switch)
+    ;; Growing the roster while the swarm runs (lanes.lisp, tui.lisp,
+    ;; main.lisp): /lanes N, the resume minimum, and the growth routine.
+    (test-start-lanes-subset)
+    (test-lane-growth)
+    (test-lane-growth-journal-failure)
+    (test-worker-note-growth)
+    (test-lanes-command)
+    (test-resume-workers-minimum)
     (test-launch-environment)
     (test-sessions-dir)
     (test-cli)
@@ -1749,5 +2372,6 @@ changes nothing about the coordinator."
     ;; offline (swarm/offline.lisp, CONTRACT §2).
     (test-swarm-check)
     (test-lane-plan)
+    (test-offline-resume-workers)
     (format t "~%swarm: ~d passed, ~d failed~%" *pass* *fail*)
     (if (zerop *fail*) 0 1)))

@@ -26,13 +26,35 @@
                            (count-if (lambda (s) (member s '(:working :compacting))) states)
                            (length states))))))
 
+(defun lanes-listing ()
+  "The swarm's lanes, one line each — what `/lanes` with no argument prints."
+  (format nil "swarm ~a — ~a~{~%~a~}~%/lane N follows a lane's items; /lane off stops. /lanes N grows to N lanes (1-64)."
+          (swarm-id *swarm*) (namestring (swarm-dir *swarm*))
+          (mapcar #'lane-status-line (swarm-lanes *swarm*))))
+
+(defun lanes-grow-command (host args)
+  "Grow to N lanes, 1..64 total.  Smaller/equal counts are no-ops; invalid
+counts are refused :invalid, and growth needs an idle coordinator."
+  (let* ((n (ignore-errors (parse-integer args)))
+         (current (and *swarm* (swarm-workers *swarm*))))
+    (cond
+      ((or (null n) (< n 1) (> n 64))
+       (evo.command:refuse :invalid "/lanes needs a lane count from 1 to 64"))
+      ((null *swarm*) "no swarm is running")
+      ((<= n current)
+       (format nil "the swarm already has ~d lane~:p (asked for ~d) — /lanes only grows."
+               current n))
+      (t
+       (evo.command:require-idle host "/lanes")
+       (format nil "growing the swarm to ~d lanes: starting ~d new lane~:p now."
+               n (ensure-lane-count *swarm* n))))))
+
 (defun lanes-command (ctx)
-  (declare (ignore ctx))
-  (if *swarm*
-      (format nil "swarm ~a — ~a~{~%~a~}~%/lane N follows a lane's items; /lane off stops."
-              (swarm-id *swarm*) (namestring (swarm-dir *swarm*))
-              (mapcar #'lane-status-line (swarm-lanes *swarm*)))
-      "no swarm is running"))
+  "/lanes — list the swarm's lanes; /lanes N — grow to N lanes, 1..64."
+  (let ((args (string-trim " " (or (getf ctx :args) ""))))
+    (if (zerop (length args))
+        (if *swarm* (lanes-listing) "no swarm is running")
+        (lanes-grow-command (getf ctx :host) args))))
 
 ;;; Following one lane in the scrollback.
 
@@ -135,7 +157,7 @@ item shows once."
 POST /ops {\"op\":\"command.run\",\"args\":{\"name\":\"lanes\"}}.  Separate from
 INSTALL-TUI-OBSERVATION, so a coordinator with no screen still has them."
   (evo:register-command "lanes" #'lanes-command
-                        :description "list the swarm's lanes: state, step clock, task")
+                        :description "list the swarm's lanes (state, step clock, task); /lanes N grows the swarm to N lanes (1-64, growth only, coordinator idle)")
   (evo:register-command "lane" #'lane-view-command
                         :description "follow lane N's items live (read-only); /lane off"))
 

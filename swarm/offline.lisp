@@ -107,24 +107,36 @@ resumed record restored, then the coordinator's (CONTRACT §1, §4.3)."
     (values (string-downcase (symbol-name coordinator))
             (string-downcase (symbol-name lane)))))
 
-(defun check-workers (opts)
-  "How many lanes OPTS asks for, and the problem with that number, if any."
+(defun recorded-lane-count (record)
+  "How many lanes RECORD (a resumed swarm's state) restores, or NIL when it
+records no roster."
+  (when (and record (member :lanes record))
+    (length (getf record :lanes))))
+
+(defun check-workers (opts &optional record)
+  "How many lanes OPTS asks for, and the problem with that number, if any.
+RECORD's restored lanes are the floor: the count is the larger of them and an
+explicit --workers, so a --workers below the roster is no problem."
   (let ((n (getf opts :workers)))
     (cond
-      ((null n) (values (resolved-workers opts) nil))
-      ((and (integerp n) (<= 1 n 64)) (values n nil))
+      ((null n) (values (resolved-workers opts record) nil))
+      ((and (integerp n) (<= 1 n 64))
+       (values (max (or (recorded-lane-count record) 0) n) nil))
       (t (values n
                  (check-problem "invalid_workers"
                                 (format nil "--workers must be a number from 1 to 64, got ~a" n)))))))
 
-(defun resolved-workers (opts)
-  "The lane count a launch from OPTS would run: --workers, else the
-:swarm-workers setting, else 6 — the launch's own rule (RUN-SWARM), for a
-caller that has to compute what a lane would end up with before it knows
-whether the number is even legal."
-  (or (let ((n (getf opts :workers))) (and (integerp n) (<= 1 n 64) n))
-      (let ((setting (setting :swarm-workers))) (and (integerp setting) setting))
-      6))
+(defun resolved-workers (opts &optional record)
+  "The lane count a launch from OPTS would run: --workers, else the roster
+RECORD restores, else the :swarm-workers setting, else 6 (RUN-SWARM's rule).
+A resumed swarm keeps its recorded roster, so --workers only raises that count."
+  (let ((flag (let ((n (getf opts :workers))) (and (integerp n) (<= 1 n 64) n)))
+        (recorded (recorded-lane-count record)))
+    (cond
+      ((and recorded (plusp recorded)) (max recorded (or flag 0)))
+      (flag flag)
+      ((let ((n (setting :swarm-workers))) (and (integerp n) n)))
+      (t 6))))
 
 ;;; What a lane would end up with.
 ;;;
@@ -192,7 +204,7 @@ record restored."
   (let ((record (and resumed-p (ignore-errors (evo:custom-state "swarm" agent)))))
     (lane-setup-forms
      (%make-lane :n 1)
-     (%make-swarm :workers (resolved-workers opts)
+     (%make-swarm :workers (resolved-workers opts record)
                   :lane-model (or (getf opts :lane-model) (getf record :lane-model))
                   :lane-provider (or (getf opts :lane-provider) (getf record :lane-provider))
                   :lane-thinking (or (getf opts :lane-thinking) (getf record :lane-thinking))
@@ -332,6 +344,9 @@ NIL would encode as null — and a client parsing a flag cannot read null."
     ;; level and API set are what its own forms leave it on, not what a chain
     ;; of defaults would guess.
     (let ((problems nil)
+          ;; A resumed swarm's recorded roster: the count is the larger of it
+          ;; and an explicit --workers, not the config default.
+          (record (and resumed-p (ignore-errors (evo:custom-state "swarm" agent))))
           (plan (lane-plan opts agent resumed-p)))
       (multiple-value-bind (model problem) (check-model-entry (getf opts :model) agent)
         (when problem (push problem problems))
@@ -339,7 +354,7 @@ NIL would encode as null — and a client parsing a flag cannot read null."
           (when lane-problem (push lane-problem problems))
           ;; Whatever the lanes' own code could not do, in the order it failed.
           (dolist (p (reverse (lane-plan-problems plan))) (push p problems))
-          (multiple-value-bind (workers workers-problem) (check-workers opts)
+          (multiple-value-bind (workers workers-problem) (check-workers opts record)
             (when workers-problem (push workers-problem problems))
             (multiple-value-bind (thinking lane-thinking)
                 (check-thinking opts agent resumed-p plan)
