@@ -317,7 +317,14 @@ frontend; only the TUI gets a status-line segment."
                 :name :evo-swarm-stop)
         (publish-swarm-state *swarm* t)
         (start-lanes *swarm* :resume (and record t))
-        (unwind-protect (swarm-run agent resumed-p)
+        ;; A resumed swarm keeps its recorded roster: only an explicit
+        ;; --workers raises it, and only after the restored lanes are starting
+        ;; (ENSURE-LANE-COUNT is growth-only, so a smaller flag is a no-op).
+        (unwind-protect
+             (progn
+               (when (and record (getf opts :workers))
+                 (ensure-lane-count *swarm* (getf opts :workers)))
+               (swarm-run agent resumed-p))
           (stop-swarm))))))
 
 (defun main (&optional (argv (evo.port:argv)))

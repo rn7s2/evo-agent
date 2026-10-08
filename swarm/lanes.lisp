@@ -41,25 +41,27 @@ named hooks so a /reload does not double-register them."
 
 ;;; The journal record: what `evo-swarm --resume` restores.
 
-(defun swarm-record ()
+(defun swarm-record (&optional lanes)
+  "Snapshot the live roster, or LANES staged for growth."
   (with-swarm-lock ()
-    (list :id (swarm-id *swarm*)
-          :dir (namestring (swarm-dir *swarm*))
-          :workers (swarm-workers *swarm*)
-          :lane-model (swarm-lane-model *swarm*)
-          :lane-provider (swarm-lane-provider *swarm*)
-          :lane-thinking (swarm-lane-thinking *swarm*)
-          :lanes (coerce
-                  (loop for lane in (swarm-lanes *swarm*)
-                        collect (list :n (lane-n lane)
-                                      :cwd (namestring (lane-cwd lane))
-                                      :worktree (lane-worktree lane)
-                                      :branch (lane-branch lane)
-                                      :task (lane-task lane)
-                                      :extra-forms (coerce (lane-extra-forms lane) 'vector)))
-                  'vector))))
+    (let ((lanes (or lanes (swarm-lanes *swarm*))))
+      (list :id (swarm-id *swarm*)
+            :dir (namestring (swarm-dir *swarm*))
+            :workers (length lanes)
+            :lane-model (swarm-lane-model *swarm*)
+            :lane-provider (swarm-lane-provider *swarm*)
+            :lane-thinking (swarm-lane-thinking *swarm*)
+            :lanes (coerce
+                    (loop for lane in lanes
+                          collect (list :n (lane-n lane)
+                                        :cwd (namestring (lane-cwd lane))
+                                        :worktree (lane-worktree lane)
+                                        :branch (lane-branch lane)
+                                        :task (lane-task lane)
+                                        :extra-forms (coerce (lane-extra-forms lane) 'vector)))
+                    'vector)))))
 
-(defun record-swarm ()
+(defun record-swarm (&key required lanes)
   "Journal the swarm's shape on the coordinator's session (a :custom entry,
 invisible to the model): lanes, their worktrees, the code evaluated into
 them, and the lane model configuration (CONTRACT §1).  Called whenever that
@@ -67,7 +69,9 @@ shape changes.  The session header names the swarm too (CONTRACT §3), so a
 session list can say which swarm a session drove without opening the file."
   (when (and *swarm* (swarm-agent *swarm*))
     (let ((agent (swarm-agent *swarm*)))
-      (ignore-errors (evo:set-custom-state "swarm" (swarm-record) agent))
+      (if required
+          (evo:set-custom-state "swarm" (swarm-record lanes) agent)
+          (ignore-errors (evo:set-custom-state "swarm" (swarm-record lanes) agent)))
       (ignore-errors (evo.journal:set-session-header (evo.kernel:agent-journal agent)
                                                     :program "evo-swarm"
                                                     :swarm-id (swarm-id *swarm*))))))
@@ -215,7 +219,20 @@ quitting, or switched away from by /resume) stops coming up, quietly."
     (cond
       ((lane-stopping-p lane) nil)
       ((null ready)
-       (with-swarm-lock () (setf (lane-state lane) :down))
+       ;; A timed-out child can still be alive.  No mirror will own it, so
+       ;; release it before leaving a retryable :down lane in the roster.
+       (multiple-value-bind (stdin process)
+           (with-swarm-lock () (values (lane-stdin lane) (lane-process lane)))
+         (when stdin (ignore-errors (close stdin)))
+         (when process
+           (ignore-errors (evo.port:process-kill-tree process))
+           (ignore-errors (evo.port:process-wait process))))
+       (with-swarm-lock ()
+         (setf (lane-state lane) :down
+               (lane-process lane) nil
+               (lane-stdin lane) nil
+               (lane-ready lane) nil))
+       (clear-lane-ready lane)
        (swarm-lane-changed)
        (tell-lane-event lane :failed-to-start :severity :error
                         :detail (format nil "see ~a" (namestring (lane-log-path lane))))
@@ -370,7 +387,9 @@ following the same process and restarting it."
 (defun start-lane-thread (lane)
   "Give LANE its one thread, for a lane already brought up (a restart, or the
 swarm's first launch)."
-  (let ((thread (bt:make-thread (lambda () (lane-thread-body lane))
+  (let* ((swarm *swarm*)
+         (thread (bt:make-thread (lambda ()
+                                   (let ((*swarm* swarm)) (lane-thread-body lane)))
                                 :name (format nil "evo-swarm-mirror-~d" (lane-n lane)))))
     (with-swarm-lock () (setf (lane-subscriber lane) thread))
     thread))
@@ -483,21 +502,72 @@ is not journalled."
 ;; spawning anything (see the note in client.lisp).
 (declaim (notinline start-lanes stop-swarm))
 
-(defun start-lanes (swarm &key resume)
-  "Bring every lane up in parallel, each on its own thread; the coordinator
-does not wait for them."
-  (dolist (lane (swarm-lanes swarm))
+(defun start-lanes (swarm &key resume (lanes (swarm-lanes swarm)))
+  "Bring LANES up in parallel; the coordinator does not wait for them."
+  (dolist (lane lanes)
     (let ((lane lane))
-      (bt:make-thread (lambda ()
-                        (handler-case
-                            (when (bring-up-lane lane :resume resume)
-                              (lane-thread-body lane))
-                          (error (e)
-                            (with-swarm-lock () (setf (lane-state lane) :down))
-                            (swarm-lane-changed)
-                            (swarm-say (format nil "lane ~d: ~a" (lane-n lane) e)
-                                       :style :error))))
-                      :name (format nil "evo-swarm-start-~d" (lane-n lane))))))
+      (bt:with-lock-held ((swarm-lock swarm))
+        (unless (swarm-stopping swarm)
+          (setf (lane-subscriber lane)
+                (bt:make-thread
+                 (lambda ()
+                   ;; A journal switch must not move this thread to a new swarm.
+                   (let ((*swarm* swarm))
+                     (handler-case
+                         (when (bring-up-lane lane :resume resume)
+                           (lane-thread-body lane))
+                       (error (e)
+                         (unless (lane-stopping-p lane)
+                           (with-swarm-lock () (setf (lane-state lane) :down))
+                           (swarm-lane-changed)
+                           (swarm-say (format nil "lane ~d: ~a" (lane-n lane) e)
+                                      :style :error))))))
+                 :name (format nil "evo-swarm-start-~d" (lane-n lane)))))))))
+
+(defun refresh-worker-notes (swarm lanes workers)
+  (bt:make-thread
+   (lambda ()
+     (let ((*swarm* swarm))
+       (dolist (lane lanes)
+         (when (with-swarm-lock ()
+                 (and (not (swarm-stopping swarm))
+                      (not (lane-stopping lane)) (lane-ready lane)))
+           (handler-case
+               (lane-op lane "eval"
+                        (list :code (forms->code (list (worker-note-form lane workers)))))
+             (error (e)
+               (unless (lane-stopping-p lane)
+                 (swarm-say (format nil "lane ~d: updating swarm note failed: ~a"
+                                        (lane-n lane) e)
+                            :style :error))))))))
+   :name "evo-swarm-worker-notes"))
+
+(defun ensure-lane-count (swarm workers)
+  "Ensure at least WORKERS lanes, preserving existing workers.  Return the
+number added; their startup is asynchronous, but their roster is durable."
+  (unless (and (integerp workers) (<= 1 workers 64))
+    (error "lane count must be a number from 1 to 64"))
+  (let ((*swarm* swarm) old-lanes added roster)
+    (with-swarm-lock ()
+      (when (swarm-stopping swarm) (error "the swarm is stopping"))
+      (setf old-lanes (swarm-lanes swarm))
+      (when (<= workers (length old-lanes)) (return-from ensure-lane-count 0))
+      (setf added (loop for n from (1+ (length old-lanes)) to workers
+                        collect (make-lane-for swarm n))
+            roster (append old-lanes added)))
+    ;; Keep snapshots and lane-event publications on the old roster until
+    ;; the expanded one is durable and every new topic can be snapshotted.
+    (record-swarm :required t :lanes roster)
+    (when (swarm-server swarm)
+      (dolist (lane added)
+        (evo.serve:register-topic (swarm-server swarm) (lane-topic lane) (lane-mirror lane))))
+    (with-swarm-lock ()
+      (setf (swarm-lanes swarm) roster
+            (swarm-workers swarm) workers))
+    (swarm-lane-changed)
+    (start-lanes swarm :lanes added)
+    (refresh-worker-notes swarm old-lanes workers)
+    (length added)))
 
 (defun adopt-session-swarm (agent)
   "Called when AGENT's coordinator switched journals (/new, /fork, /resume).
@@ -542,6 +612,7 @@ not the client's any more (§7.3)."
     (bt:with-lock-held ((swarm-lock swarm)) (setf (swarm-stopping swarm) t))
     (let ((threads (loop for lane in (swarm-lanes swarm)
                          collect (let ((lane lane))
-                                   (bt:make-thread (lambda () (stop-lane lane))
+                                   (bt:make-thread (lambda ()
+                                                     (let ((*swarm* swarm)) (stop-lane lane)))
                                                    :name "evo-swarm-stop")))))
       (dolist (thread threads) (ignore-errors (bt:join-thread thread))))))
