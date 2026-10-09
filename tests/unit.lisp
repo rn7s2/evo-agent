@@ -205,6 +205,14 @@ line2")))
                    "event: content_block_delta~%data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"comm\"}}~%~%"
                    "event: content_block_delta~%data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"and\\\": \\\"ls\\\"}\"}}~%~%"
                    "event: content_block_stop~%data: {\"type\":\"content_block_stop\",\"index\":1}~%~%"
+                   ;; A translating gateway's private block (traex's extra_info,
+                   ;; a redacted_thinking block) and a text block that never
+                   ;; carried any text: the first is kept as itself, the second
+                   ;; is passed over.
+                   "event: content_block_start~%data: {\"type\":\"content_block_start\",\"index\":2,\"content_block\":{\"type\":\"redacted_thinking\",\"data\":\"evotraex1:opaque\"}}~%~%"
+                   "event: content_block_stop~%data: {\"type\":\"content_block_stop\",\"index\":2}~%~%"
+                   "event: content_block_start~%data: {\"type\":\"content_block_start\",\"index\":3,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}~%~%"
+                   "event: content_block_stop~%data: {\"type\":\"content_block_stop\",\"index\":3}~%~%"
                    "event: message_delta~%data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":42}}~%~%"
                    "event: message_stop~%data: {\"type\":\"message_stop\"}~%~%")))
 
@@ -221,7 +229,17 @@ line2")))
                   (equal (pget (first blocks) :thinking) "hm")
                   (equal (pget (first blocks) :signature) "c2ln")))
       (check "sse tool args across chunks"
-             (equal (pget (pget (second blocks) :arguments) :command) "ls"))))
+             (equal (pget (pget (second blocks) :arguments) :command) "ls"))
+      (check "sse keeps a gateway's opaque reasoning slot"
+             (let ((block (find :redacted-thinking blocks
+                                :key (lambda (b) (pget b :type)))))
+               (and block (equal (pget block :data) "evotraex1:opaque"))))
+      (check "sse passes over a text block that carried no text"
+             (and (= 3 (length blocks))
+                  (notany (lambda (b) (and (eq (pget b :type) :text)
+                                           (evo.provider::blank-text-p
+                                            (pget b :text))))
+                          blocks)))))
   ;; Stream ending without message_stop is detected (retry material).
   (let ((result (with-input-from-string
                     (in (format nil "event: message_start~%data: {\"type\":\"message_start\",\"message\":{}}~%~%"))
@@ -314,6 +332,66 @@ line2")))
                     ("assistant" "tool_use")
                     ("user" "tool_result"))
                   (wire-messages (list assistant result-a assistant result-b))))))
+
+;;; The opaque reasoning slot.
+;;;
+;;; A gateway that translates to an upstream minting an opaque reasoning
+;;; payload (traex's `extra_info`) hands it to the client in the slot its
+;;; protocol already replays verbatim — a redacted_thinking block.  It must
+;;; survive parse -> journal -> wire unchanged, and be dropped the moment the
+;;; request goes somewhere else, where it means nothing.  It must never be
+;;; softened into an empty text block: a strict endpoint answers 400 for one
+;;; of those, and the payload is lost either way.
+
+(defun test-reasoning-slot ()
+  (let ((assistant '(:role :assistant :model "m" :api :anthropic-messages
+                     :provider :traex :stop-reason :tool-use
+                     :usage (:input 1 :output 1 :cache-read 0 :cache-write 0)
+                     :content ((:type :thinking :thinking "th" :signature "")
+                               (:type :tool-call :id "a" :name "bash" :arguments nil)
+                               (:type :redacted-thinking :data "evotraex1:opaque"))))
+        (said '(:role :user :content ((:type :text :text "go")))))
+    (check "the slot goes out on the wire unchanged"
+           (let ((json (evo.provider::content-block->json
+                        '(:type :redacted-thinking :data "evotraex1:opaque"))))
+             (and (equal (gethash "type" json) "redacted_thinking")
+                  (equal (gethash "data" json) "evotraex1:opaque"))))
+    (check "same-route slot is replayed"
+           (find :redacted-thinking
+                 (pget (first (evo.provider::handoff-pass
+                               (list assistant) "m"
+                               :api :anthropic-messages :provider :traex))
+                       :content)
+                 :key (lambda (b) (pget b :type))))
+    (dolist (route '(("other" :anthropic-messages :traex)
+                     ("m" :anthropic-messages :other-provider)
+                     ("m" :openai-responses :traex)))
+      (check (format nil "cross-route slot dropped: ~s" route)
+             (not (find :redacted-thinking
+                        (pget (first (evo.provider::handoff-pass
+                                      (list assistant) (first route)
+                                      :api (second route) :provider (third route)))
+                              :content)
+                        :key (lambda (b) (pget b :type))))))
+    ;; What the strict endpoint sees: no empty text block anywhere, and a turn
+    ;; that had nothing but one is not sent at all.
+    (check "a blank text block is never sent"
+           (equal '(("user" "text") ("assistant" "text"))
+                  (wire-messages
+                   (list said
+                         '(:role :assistant :model "m" :api :anthropic-messages
+                           :provider :traex :stop-reason :stop
+                           :usage (:input 1 :output 1 :cache-read 0 :cache-write 0)
+                           :content ((:type :text :text " ")
+                                     (:type :text :text "said")))))))
+    (check "an assistant turn of nothing but blanks is not sent"
+           (equal '(("user" "text"))
+                  (wire-messages
+                   (list said
+                         '(:role :assistant :model "m" :api :anthropic-messages
+                           :provider :traex :stop-reason :stop
+                           :usage (:input 1 :output 1 :cache-read 0 :cache-write 0)
+                           :content ((:type :text :text "")))))))))
 
 ;;; Kimi Code provider — extensions/020-kimi-provider.lisp
 ;;;
@@ -11011,6 +11089,7 @@ document, per-entry isolation, and never a key."
     (test-sse-transport)
     (test-handoff)
     (test-wire-message-shaping)
+    (test-reasoning-slot)
     (test-anthropic-request)
     (test-anthropic-effort)
     (test-model-effort-registration)

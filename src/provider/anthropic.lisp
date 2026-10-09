@@ -49,12 +49,33 @@ effort parameter."
 
 ;;; Request building.
 
+(defun blank-text-p (text)
+  "Whether TEXT is empty or whitespace only.  A strict Messages endpoint
+refuses such a block outright — \"text content blocks must be non-empty\" —
+so one is never sent and never written to a journal.  A streamed block of a
+type this adapter does not know used to materialize as exactly this block,
+which made every later request to a strict endpoint fail."
+  (or (null text)
+      (string= (string-trim '(#\Space #\Tab #\Newline #\Return) text) "")))
+
+(defun wire-blocks (content)
+  "CONTENT without the blocks the Messages wire refuses."
+  (remove-if (lambda (block)
+               (and (eq (pget block :type) :text)
+                    (blank-text-p (pget block :text))))
+             content))
+
 (defun content-block->json (block)
   (case (pget block :type)
     (:text (jobj "type" "text" "text" (pget block :text)))
     (:thinking (jobj "type" "thinking"
                      "thinking" (pget block :thinking)
                      "signature" (or (pget block :signature) "")))
+    ;; The opaque, model-bound reasoning slot a translating gateway hands the
+    ;; client (traex's `extra_info`, see traex.lisp's "Reasoning continuity").
+    ;; It goes back out exactly as it came in; the handoff pass drops it when
+    ;; the request is not going to the route that minted it.
+    (:redacted-thinking (jobj "type" "redacted_thinking" "data" (pget block :data)))
     (:tool-call (jobj "type" "tool_use"
                       "id" (pget block :id)
                       "name" (pget block :name)
@@ -83,7 +104,7 @@ effort parameter."
   (jobj "type" "tool_result"
         "tool_use_id" (pget m :tool-call-id)
         "is_error" (if (pget m :is-error) t nil)
-        "content" (map 'vector #'content-block->json (message-content m))))
+        "content" (map 'vector #'content-block->json (wire-blocks (message-content m)))))
 
 (defun messages->json (messages)
   "Convert unified messages to Anthropic wire messages.
@@ -119,10 +140,14 @@ answer to a tool call still lands in the message directly after it."
         (ecase (message-role m)
           (:assistant
            (close-user-run)
-           (push (cons "assistant" (map 'list #'content-block->json (message-content m)))
-                 out))
+           ;; A turn whose every block the wire refuses is not sent at all:
+           ;; an assistant message must carry at least one block.
+           (let ((blocks (map 'list #'content-block->json
+                              (wire-blocks (message-content m)))))
+             (when blocks (push (cons "assistant" blocks) out))))
           (:tool-result (push (tool-result->json-block m) results))
-          (:user (dolist (block (map 'list #'content-block->json (message-content m)))
+          (:user (dolist (block (map 'list #'content-block->json
+                                     (wire-blocks (message-content m))))
                    (push block others)))))
       (close-user-run))
     (map 'vector
@@ -183,7 +208,14 @@ apply."
                     "messages" (add-cache-control
                                 (messages->json
                                  (handoff-pass messages model-id
-                                               :vision (model-vision-p model)))))))
+                                               :vision (model-vision-p model)
+                                               ;; The route the model names:
+                                               ;; an OAuth variant registers
+                                               ;; its own api key and delegates
+                                               ;; here, and the blocks it
+                                               ;; tagged must still replay.
+                                               :api (pget model :api)
+                                               :provider (pget model :provider)))))))
     (when system
       (setf (gethash "system" req)
             (vector (let ((b (jobj "type" "text" "text" system)))
@@ -212,7 +244,45 @@ apply."
 ;;; Tool arguments accumulate as partial JSON and are parsed at
 ;;; content_block_stop.
 
-(defstruct sse-block type text thinking signature id name (input-json ""))
+(defstruct sse-block type text thinking signature data id name (input-json ""))
+
+(defun materialize-block (block)
+  "The content blocks BLOCK contributes to a turn: one, or none.
+
+Two kinds of streamed block are passed over rather than recorded.  A text
+block that carried no text says nothing, and a strict endpoint refuses such
+a block outright (\"text content blocks must be non-empty\") — recording one
+used to poison every later request to a strict endpoint.  A type this
+adapter does not know is a gateway's private block or a protocol addition,
+which nobody downstream could replay anyway."
+  (ecase (sse-block-type block)
+    (:text
+     (unless (blank-text-p (sse-block-text block))
+       (list (list :type :text :text (sse-block-text block)))))
+    (:thinking (list (list :type :thinking
+                           :thinking (sse-block-thinking block)
+                           :signature (sse-block-signature block))))
+    (:redacted-thinking (list (list :type :redacted-thinking
+                                    :data (sse-block-data block))))
+    (:tool-call
+     (list (let* ((raw (sse-block-input-json block))
+                  (args (cond ((zerop (length raw)) nil)
+                              (t (handler-case
+                                     (json->sexpr (evo.util:parse-json raw))
+                                   (error () :parse-error))))))
+             (append (list :type :tool-call
+                           :id (sse-block-id block)
+                           :name (sse-block-name block))
+                     (if (eq args :parse-error)
+                         (list :arguments nil :arguments-error
+                               (truncate-string raw 2000))
+                         ;; The plist is the readable form; the raw text is
+                         ;; the exact one (see TOOL-CALL-ARGUMENTS), and
+                         ;; replays byte-for-byte.
+                         (append (list :arguments args)
+                                 (when (plusp (length raw))
+                                   (list :arguments-json raw))))))))
+    (:unknown nil)))
 
 (defun parse-sse-stream (char-stream &key on-event abort-flag)
   "Parse an Anthropic Messages SSE stream into the adapter result plist."
@@ -241,9 +311,11 @@ apply."
                              (block (make-sse-block
                                      :type (cond ((equal cbtype "text") :text)
                                                  ((equal cbtype "thinking") :thinking)
+                                                 ((equal cbtype "redacted_thinking") :redacted-thinking)
                                                  ((equal cbtype "tool_use") :tool-call)
                                                  (t :unknown))
                                      :text "" :thinking ""
+                                     :data (jget cb "data")
                                      :signature (or (jget cb "signature") "")
                                      :id (jget cb "id")
                                      :name (jget cb "name"))))
@@ -307,34 +379,7 @@ apply."
       (let ((content
               (loop for i from 0 to max-index
                     for block = (gethash i blocks)
-                    when block
-                      collect (ecase (sse-block-type block)
-                                (:text (list :type :text :text (sse-block-text block)))
-                                (:thinking (list :type :thinking
-                                                 :thinking (sse-block-thinking block)
-                                                 :signature (sse-block-signature block)))
-                                (:tool-call
-                                 (let* ((raw (sse-block-input-json block))
-                                        (args (cond ((zerop (length raw)) nil)
-                                                    (t (handler-case
-                                                           (json->sexpr (evo.util:parse-json raw))
-                                                         (error () :parse-error))))))
-                                   (append (list :type :tool-call
-                                                 :id (sse-block-id block)
-                                                 :name (sse-block-name block))
-                                           (if (eq args :parse-error)
-                                               (list :arguments nil :arguments-error
-                                                     (truncate-string raw 2000))
-                                               ;; The plist is the readable
-                                               ;; form; the raw text is the
-                                               ;; exact one (see
-                                               ;; TOOL-CALL-ARGUMENTS), and
-                                               ;; replays byte-for-byte.
-                                               (append
-                                                (list :arguments args)
-                                                (when (plusp (length raw))
-                                                  (list :arguments-json raw)))))))
-                                (:unknown (list :type :text :text ""))))))
+                    when block append (materialize-block block))))
         (list :content content
               :model model
               :stopped-p stopped-p
