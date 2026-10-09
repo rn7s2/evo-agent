@@ -162,6 +162,15 @@ never from further back."
             (if (eq (pget block :type) :image) (image-placeholder-block block) block))
           content))
 
+(defun same-route-p (message target-model-id api provider)
+  "Whether MESSAGE was answered by the route (TARGET-MODEL-ID, API,
+PROVIDER) names.  The test an opaque, model-bound reasoning slot must pass
+to be replayed: its payload only means something to the model behind the
+route that minted it."
+  (and (equal (pget message :model) target-model-id)
+       (equal (pget message :api) api)
+       (equal (pget message :provider) provider)))
+
 (defun handoff-pass (messages target-model-id &key (vision t) api provider)
   "Rewrite MESSAGES for a request to TARGET-MODEL-ID.  VISION nil degrades
 image blocks to text, so a session that collected screenshots survives a
@@ -187,11 +196,22 @@ switch to a text-only model instead of failing every turn from then on."
              (let* ((same-model (equal (pget m :model) target-model-id))
                     (content (remove-if
                               (lambda (block)
-                                (and (eq (pget block :type) :thinking)
-                                     (or (not same-model)
-                                         (and (pget block :responses-item-json)
-                                              (not (and (equal api (pget m :api))
-                                                        (equal provider (pget m :provider))))))))
+                                (case (pget block :type)
+                                  (:thinking
+                                   (or (not same-model)
+                                       (and (pget block :responses-item-json)
+                                            (not (and (equal api (pget m :api))
+                                                      (equal provider (pget m :provider)))))))
+                                  ;; An opaque, model-bound reasoning slot a
+                                  ;; translating gateway gave us (traex's
+                                  ;; `extra_info`, carried as a
+                                  ;; redacted_thinking block): it is replayed
+                                  ;; verbatim on the route that minted it and
+                                  ;; dropped everywhere else, where it means
+                                  ;; nothing and may be refused.
+                                  (:redacted-thinking
+                                   (not (same-route-p m target-model-id api provider)))
+                                  (t nil)))
                               (message-content m)))
                     (orphans (loop for block in content
                                    when (and (eq (pget block :type) :tool-call)

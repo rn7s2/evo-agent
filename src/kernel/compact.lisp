@@ -23,6 +23,9 @@
       (case (pget block :type)
         (:text (incf chars (length (or (pget block :text) ""))))
         (:thinking (incf chars (length (or (pget block :thinking) ""))))
+        ;; An opaque reasoning slot is replayed on the wire verbatim, so it
+        ;; costs context like anything else that is sent.
+        (:redacted-thinking (incf chars (length (or (pget block :data) ""))))
         (:tool-call (incf chars (length (format nil "~s" (pget block :arguments)))))
         (:image (incf images))))
     (+ (ceiling chars 4) (* images *image-block-tokens*))))

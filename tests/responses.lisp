@@ -159,8 +159,16 @@
                   (= 1 (length content))
                   (equal "call_empty" (pget (first content) :id))
                   (equal "{\"path\":\"b\"}" (pget (first content) :arguments-json)))))
+    ;; The route a request is built for decides which blocks may go back out,
+    ;; so this builds for the same model and provider the history came from —
+    ;; reached over the Messages protocol.  The Responses reasoning item, and
+    ;; the replay metadata hanging off it, must not come along.
     (let ((request (build-request (find-api :anthropic-messages)
-                                  :model (responses-fixture-model) :messages history)))
+                                  :model (list :id "gpt-6-astra" :provider :openai
+                                               :api :anthropic-messages
+                                               :context-window 100000 :max-output 8192
+                                               :effort '(:low :medium :high :xhigh :max))
+                                  :messages history)))
       (check "responses reasoning does not leak into Messages protocol"
              (not (search "\"signature\"" request))))
     (let* ((journal (with-standard-io-syntax (write-to-string history)))
