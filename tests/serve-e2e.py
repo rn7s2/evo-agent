@@ -977,8 +977,11 @@ def run_all(server, stub_port, work):
             server.snapshot("session")["topics"]["session"]["state"]["status"] != "idle":
         time.sleep(0.1)
     status, ctx = server.get("/debug/context")
-    check("debug/context shows what the model sees",
+    check("debug/context shows the journaled transcript the next request carries",
           status == 200 and isinstance(ctx["messages"], list) and ctx["messages"], list(ctx)[:3])
+    check("debug/context omits the per-turn environment reminder (added at request time, never journaled)",
+          "<evo:reminder kind=\\\"environment\\\"" not in json.dumps(ctx["messages"]),
+          [m for m in ctx["messages"] if "<evo:reminder" in json.dumps(m)][:1])
     status, journal = server.get("/debug/journal")
     check("debug/journal shows the entries on the path",
           status == 200 and journal["entries"] and journal["header"]["id"], list(journal)[:3])
@@ -1017,6 +1020,29 @@ def run_all(server, stub_port, work):
           status == 200 and any(os.path.realpath(s["path"])
                                 == os.path.realpath(server.info["session"]["path"])
                                 for s in sessions["sessions"]), sessions)
+
+    # --- injected context ---------------------------------------------------------------
+    # An injection is stored wrapped in the harness's <evo:reminder …> envelope — the
+    # model reads the envelope.  A client of the view gets the payload.
+    status, reply, _ = server.op("eval", {"code":
+        '(progn (evo:inject-context "SERVE-MARKER-CONTEXT" :key "probe") :injected)'})
+    check("eval injects a context message",
+          status == 200 and reply["ok"] and reply["result"]["values"] == [":injected"], reply)
+    item = None
+    deadline = time.time() + 5
+    while item is None and time.time() < deadline:
+        items = server.snapshot("session")["topics"]["session"]["items"]
+        got = [i for i in items if i["kind"] == "context" and i.get("key") == "probe"]
+        item = got[-1] if got else None
+        if item is None:
+            time.sleep(0.1)
+    check("the injection arrives as a context item", item is not None, item)
+    check("the item carries the payload, not the envelope",
+          item is not None and item.get("text") == "SERVE-MARKER-CONTEXT", item)
+    status, journal = server.get("/debug/journal")
+    wrapped = [e for e in journal["entries"] if "evo:reminder kind=" in json.dumps(e)]
+    check("the journal keeps the envelope the model reads", len(wrapped) == 1,
+          {"hits": len(wrapped), "types": [e.get("type") for e in journal["entries"]][-6:]})
 
     # --- eval gate ----------------------------------------------------------------------
     # What the restart check needs from this process, taken while it is alive.
