@@ -78,6 +78,34 @@ medium thinking. For OpenAI workers, use `"gpt-6.1-sol"` instead. Omit the
 worker model and thinking settings to inherit the coordinator's. The loads
 let workers use your subscription logins.
 
+### MCP servers
+
+evo-agent speaks the [Model Context Protocol](https://modelcontextprotocol.io),
+so any MCP server's tools land as `name__tool` and the model can call them
+directly. Two transports are supported:
+
+- **Streamable HTTP** — for remote servers.
+- **stdio** — for local servers that run as a child process.
+
+Add them in `~/.evo/init.lisp`:
+
+```lisp
+(evo:set-setting :mcp-servers
+  '((:name "notes"
+     :type :streamable-http
+     :url "https://notes.example.com/mcp"
+     :headers (("Authorization" . "Bearer sk-…")))
+    (:name "tools"
+     :type :stdio
+     :command "npx"
+     :args ("-y" "some-mcp-server" "mcp")
+     :env (("SOME_API_KEY" . "sk-…")))))
+```
+
+`:type` is required — `:streamable-http` or `:stdio`. A server spec without it
+is skipped. `/mcp` shows what connected and the tools it registered; `/reload`
+re-reads the config and reconnects.
+
 ## Desktop app
 
 Prefer a GUI? [evo-gui (Evo Desktop)](https://github.com/rn7s2/evo-gui.git) is a

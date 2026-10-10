@@ -3323,7 +3323,7 @@ but it takes DELAY, which is what makes the asynchrony observable."
            ;; --- boot does not wait for the network ---------------------------
            (mcp-install-stub :delay 0.5)
            (evo.util:set-setting :mcp-servers
-                                 '((:name "notes" :url "https://stub.example/mcp")))
+                                 '((:name "notes" :type :streamable-http :url "https://stub.example/mcp")))
            (let ((start (get-internal-real-time))
                  (caller (bt:current-thread)))
              (evo.user::mcp-boot)
@@ -3368,7 +3368,7 @@ but it takes DELAY, which is what makes the asynchrony observable."
            (dolist (task (mcp-live-tasks)) (evo.kernel::stop-extension-task task))
            (mcp-install-stub :delay 30)
            (evo.util:set-setting :mcp-servers
-                                 '((:name "slow" :url "https://slow.example/mcp")))
+                                 '((:name "slow" :type :streamable-http :url "https://slow.example/mcp")))
            (evo.user::mcp-boot)
            (sleep 0.3)
            (let* ((task (first (mcp-live-tasks)))
@@ -3416,7 +3416,7 @@ but it takes DELAY, which is what makes the asynchrony observable."
              (unwind-protect
                   (progn
                     (evo.util:set-setting :mcp-servers
-                                          '((:name "late" :url "https://late.example/mcp")))
+                                          '((:name "late" :type :streamable-http :url "https://late.example/mcp")))
                     (evo.user::mcp-boot)
                     (check "the task reaches registration"
                            (mcp-wait-for (lambda () entered)))
@@ -3435,7 +3435,7 @@ but it takes DELAY, which is what makes the asynchrony observable."
            ;; --- a stop before the handshake is caught by the flag ------------
            (let ((boot (evo.user::make-mcp-boot))
                  (server (evo.user::mcp-server-from-spec
-                          '(:name "early" :url "https://early.example/mcp"))))
+                          '(:name "early" :type :streamable-http :url "https://early.example/mcp"))))
              (evo.user::mcp-boot-cancel boot)
              (evo.user::mcp-boot-run boot server)
              (check "a stop that found no thread to interrupt still stops the task"
@@ -3443,7 +3443,7 @@ but it takes DELAY, which is what makes the asynchrony observable."
                          (null (evo.kernel:find-tool "early__ping")))))
            ;; --- a reconnect with no tools stops listing the old ones --------
            (let ((server (evo.user::mcp-server-from-spec
-                          '(:name "shrunk" :url "https://shrunk.example/mcp"))))
+                          '(:name "shrunk" :type :streamable-http :url "https://shrunk.example/mcp"))))
              (evo.user::mcp-publish-server server :connected
                                            :tools (list (mcp-stub-object "name" "gone")))
              (evo.user::mcp-publish-server server :error :error "down")
@@ -3455,7 +3455,7 @@ but it takes DELAY, which is what makes the asynchrony observable."
            ;; --- a server that fails is recorded, and costs only itself ------
            (mcp-install-stub :fail t)
            (evo.util:set-setting :mcp-servers
-                                 '((:name "broken" :url "https://broken.example/mcp")))
+                                 '((:name "broken" :type :streamable-http :url "https://broken.example/mcp")))
            (evo.user::mcp-boot)
            (check "a failing server lands in :error"
                   (mcp-wait-for (lambda ()
@@ -3469,7 +3469,7 @@ but it takes DELAY, which is what makes the asynchrony observable."
            (check "a failing server is recorded without a warning"
                   (let ((warned nil)
                         (server (evo.user::mcp-server-from-spec
-                                 '(:name "broken" :url "https://broken.example/mcp"))))
+                                 '(:name "broken" :type :streamable-http :url "https://broken.example/mcp"))))
                     (handler-bind ((warning (lambda (w)
                                               (setf warned w)
                                               (muffle-warning w))))
