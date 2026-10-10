@@ -17,7 +17,8 @@
            #:argv #:runtime-pathname #:environ #:setenv #:unsetenv #:getpid
            #:*program-name*
            #:call-with-timeout #:timeout-error
-           #:launch-child #:launch-child-piped #:process-input-stream
+           #:launch-child #:launch-child-piped #:launch-child-stdio
+           #:process-input-stream #:process-output-stream
            #:process-alive-p #:pid-alive-p #:process-kill #:process-kill-tree
            #:reap-pid-tree #:process-wait #:process-pid
            #:program-in-path #:windows-p #:path-separator
