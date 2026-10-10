@@ -39,8 +39,10 @@
 ;;;;
 ;;;; Two transports:
 ;;;;   - :streamable-http — one POST per JSON-RPC message, session id, SSE.
-;;;;   - :stdio — a child process launched with pipes on stdin/stdout; one
-;;;;     JSON-RPC message per line, no session id, stderr inherited.
+;;;;   - :stdio — a child process with pipes on stdin/stdout; one JSON-RPC
+;;;;     message per line, no session id.  Its stderr goes to
+;;;;     <evo-home>/mcp-logs/<name>.log, never the terminal; a call that finds
+;;;;     the process gone starts it again.  :env is laid over our environment.
 ;;;;
 ;;;; Still small:
 ;;;;   - no auth flow, no OAuth, no token refresh.  A server that wants a
@@ -73,6 +75,7 @@
   ;; stdio transport
   command args env               ; launch config
   process stdin stdout           ; live child + pipes
+  (io-lock (bt:make-lock "mcp-stdio")) ; one request on the pipes at a time
   tools instructions (status :connecting) error)
 
 ;;; Two variables, two owners.  *MCP-SERVERS* is read by other threads (/mcp
@@ -308,102 +311,201 @@ HTTP or stdio transport based on SERVER's transport type."
 ;;; Transport: stdio — one JSON-RPC message per line over stdin/stdout.
 ;;; ---------------------------------------------------------------------------
 ;;;
-;;; The child process (e.g. `npx -y rea-agents@6.3.0 mcp`) reads JSON-RPC
-;;; requests as newline-delimited JSON from its stdin and writes responses
-;;; the same way on its stdout.  No HTTP, no SSE, no session id — the
-;;; process IS the session.  stderr is inherited so the server's logs are
-;;; visible in the terminal.
+;;; The server is a child process (e.g. `npx -y some-mcp-server`).  Requests go
+;;; to its stdin and answers come back on its stdout, one JSON object per line.
+;;; There is no session id: the process IS the session, so "the session
+;;; expired" means "the process is gone", and the same recovery applies — start
+;;; it again and repeat the call once (see MCP-CALL-TOOL).
+;;;
+;;;   * One request is on the pipes at a time (the server's IO-LOCK), so a
+;;;     second thread cannot read the first one's answer.  Answers are still
+;;;     matched by id: a server also writes notifications and, rarely, requests
+;;;     of its own, and an answer to a call we gave up on arrives late.
+;;;   * stderr is never inherited: a child that logs to the terminal scribbles
+;;;     over the TUI.  It goes to <evo-home>/mcp-logs/<name>.log, and the tail
+;;;     of that file is what a failure message quotes.
+;;;   * A request that gets no answer within :mcp-timeout stops the server.  We
+;;;     cannot tell how far a half-read line got, and an out-of-step pipe would
+;;;     hand the next caller somebody else's answer; the next call starts a
+;;;     fresh process instead.
+
+(defun mcp-stdio-log-path (server)
+  "Where SERVER's stderr goes."
+  (merge-pathnames (format nil "mcp-logs/~a.log" (mcp-safe-name (mcp-server-name server)))
+                   (evo.util:evo-home)))
+
+(defun mcp-stdio-exit-text (server)
+  "Why the server is not answering, with the tail of its stderr log."
+  (let* ((text (ignore-errors (evo.util:read-file-string (mcp-stdio-log-path server))))
+         (tail (and text
+                    (string-trim '(#\Space #\Tab #\Newline #\Return)
+                                 (subseq text (max 0 (- (length text) 400)))))))
+    (format nil "stdio MCP server ~a is not running~@[: ~a~]"
+            (mcp-server-name server) (mcp-nonempty tail))))
+
+(defun mcp-env-name (entry)
+  (let ((key (car entry)))
+    (if (stringp key) key (princ-to-string key))))
+
+(defun mcp-env-value (entry)
+  (let ((value (if (consp (cdr entry)) (second entry) (cdr entry))))
+    (if (stringp value) value (princ-to-string value))))
 
 (defun mcp-stdio-env (server)
-  "Build the environment for the child: inherit the parent's, overlay
-SERVER's :env if provided.  EVO_PID is set so the child knows its parent."
-  (let ((base (evo.port:environ)))
-    (append (when (mcp-server-env server) (mcp-server-env server))
-            base)))
+  "The child's environment: ours, with SERVER's :env laid over it.  :env is
+((\"NAME\" . \"VALUE\") …) or ((\"NAME\" \"VALUE\") …); the child wants
+\"NAME=VALUE\" strings, and a name we override is dropped from ours rather than
+left for the child's C library to pick between."
+  (let ((entries (mcp-server-env server)))
+    (dolist (e entries)
+      (unless (consp e)
+        (error 'mcp-error :text (format nil "bad :env entry ~s (expected (\"NAME\" . \"VALUE\"))" e))))
+    (let ((names (mapcar #'mcp-env-name entries))
+          (same #+evo-windows #'string-equal #-evo-windows #'string=))
+      (append (loop for e in entries
+                    collect (format nil "~a=~a" (mcp-env-name e) (mcp-env-value e)))
+              (remove-if (lambda (var)
+                           (let ((eq-pos (position #\= var)))
+                             (and eq-pos
+                                  (member (subseq var 0 eq-pos) names :test same))))
+                         (evo.port:environ))))))
+
+(defun mcp-stdio-stop (server)
+  "End the child process and drop its pipes.  Safe to call twice, or on a
+server that never started."
+  (let ((process (mcp-server-process server))
+        (stdin (mcp-server-stdin server))
+        (stdout (mcp-server-stdout server)))
+    (setf (mcp-server-process server) nil
+          (mcp-server-stdin server) nil
+          (mcp-server-stdout server) nil)
+    ;; Closing stdin first is the polite goodbye; the kill is for a server (or
+    ;; the `npx` in front of it) that does not take it.
+    (when stdin (ignore-errors (close stdin :abort t)))
+    (when process
+      (ignore-errors (evo.port:process-kill-tree process))
+      (ignore-errors (evo.port:process-wait process)))
+    (when stdout (ignore-errors (close stdout :abort t)))
+    nil))
 
 (defun mcp-stdio-start (server)
-  "Launch the child process and store the process + pipe streams on SERVER.
-Returns the server if the child started; signals MCP-ERROR otherwise."
-  (let ((command (mcp-server-command server)))
-    (unless (mcp-nonempty command)
+  "Launch SERVER's child process and keep its pipes.  Signals MCP-ERROR if it
+cannot be started."
+  (mcp-stdio-stop server)               ; never two children for one server
+  (let ((command (mcp-nonempty (mcp-server-command server))))
+    (unless command
       (error 'mcp-error :text "no :command in the stdio server spec"))
-    (let* ((program (evo.port:program-in-path command))
-           (args (or (mcp-server-args server) '())))
+    (let ((program (evo.port:program-in-path command))
+          (log (mcp-stdio-log-path server)))
       (unless program
-        (error 'mcp-error :text (format nil "command not found: ~a" command)))
+        (error 'mcp-error :text (format nil "command not found on PATH: ~a" command)))
+      (ensure-directories-exist log)
       (multiple-value-bind (process stdin stdout)
-          (evo.port:launch-child-stdio (namestring program) args
-                                       :environment (mcp-stdio-env server))
+          (evo.port:launch-child-stdio
+           (namestring program)
+           (mapcar (lambda (a) (if (stringp a) a (princ-to-string a)))
+                   (mcp-server-args server))
+           :environment (mcp-stdio-env server)
+           :error-output log)
         (unless (and process stdin stdout)
-          (error 'mcp-error
-                 :text (format nil "failed to start stdio process: ~a" command)))
+          (when process (ignore-errors (evo.port:process-kill-tree process)))
+          (error 'mcp-error :text (format nil "could not start ~a" command)))
         (setf (mcp-server-process server) process
               (mcp-server-stdin server) stdin
               (mcp-server-stdout server) stdout)
         server))))
 
-(defun mcp-stdio-stop (server)
-  "Kill the child process and close its pipe streams."
-  (let ((process (mcp-server-process server)))
-    (when process
-      (when (evo.port:process-alive-p process)
-        (ignore-errors (evo.port:process-kill-tree process))
-        (ignore-errors (evo.port:process-wait process)))
-      (setf (mcp-server-process server) nil)))
-  (ignore-errors (close (mcp-server-stdin server)))
-  (ignore-errors (close (mcp-server-stdout server)))
-  (setf (mcp-server-stdin server) nil
-        (mcp-server-stdout server) nil))
-
-(defun mcp-stdio-send (server message-json)
-  "Write one JSON-RPC message as a line to the child's stdin."
+(defun mcp-stdio-send (server json)
+  "Write one message.  The caller holds the IO-LOCK."
   (let ((stream (mcp-server-stdin server)))
     (unless stream
-      (error 'mcp-error :text "stdio MCP server has no stdin stream"))
-    (write-line message-json stream)
-    (finish-output stream)))
+      (error 'mcp-session-expired :text (mcp-stdio-exit-text server)))
+    (handler-case (progn (write-line json stream)
+                         (finish-output stream))
+      (stream-error ()
+        (error 'mcp-session-expired :text (mcp-stdio-exit-text server))))))
 
-(defun mcp-stdio-recv (server)
-  "Read one line from the child's stdout and parse it as JSON-RPC.
-Signals MCP-ERROR on EOF or parse failure."
+(defun mcp-stdio-read-message (server)
+  "The next JSON object on the child's stdout.  A line that is not one — blank,
+or a banner the server printed to the wrong stream — is skipped, not an error.
+EOF means the child is gone."
   (let ((stream (mcp-server-stdout server)))
     (unless stream
-      (error 'mcp-error :text "stdio MCP server has no stdout stream"))
-    (let ((line (read-line stream nil nil)))
-      (unless line
-        (error 'mcp-error :text "stdio MCP server closed its stdout (process exited)"))
-      (handler-case (evo.util:parse-json line)
-        (error ()
-          (error 'mcp-error
-                 :text (format nil "invalid JSON from stdio: ~a"
-                               (evo.util:truncate-string line 200 "…"))))))))
+      (error 'mcp-session-expired :text (mcp-stdio-exit-text server)))
+    (loop
+      (let ((line (read-line stream nil nil)))
+        (unless line
+          (error 'mcp-session-expired :text (mcp-stdio-exit-text server)))
+        (let ((text (string-trim '(#\Space #\Tab #\Return) line)))
+          (when (and (plusp (length text)) (char= (char text 0) #\{))
+            (let ((message (ignore-errors (evo.util:parse-json text))))
+              (when (hash-table-p message)
+                (return message)))))))))
+
+(defun mcp-same-id-p (a b)
+  (and a b (equal (princ-to-string a) (princ-to-string b))))
+
+(defun mcp-stdio-answer-request (server message)
+  "A request the server made of us.  We declare no capabilities, so the only
+one it may send is `ping`; anything else is told the method does not exist —
+silence would leave the server waiting on us."
+  (let ((id (gethash "id" message)))
+    (mcp-stdio-send
+     server
+     (com.inuoe.jzon:stringify
+      (if (equal (mcp-jget message "method") "ping")
+          (mcp-json "jsonrpc" "2.0" "id" id "result" (mcp-json))
+          (mcp-json "jsonrpc" "2.0" "id" id
+                    "error" (mcp-json "code" -32601 "message" "Method not found")))))))
+
+(defun mcp-stdio-await (server id)
+  "Read until the answer to request ID.  Notifications and stale answers are
+dropped on the way; requests from the server are answered."
+  (loop
+    (let ((message (mcp-stdio-read-message server)))
+      (cond ((mcp-jget message "method")
+             (when (nth-value 1 (gethash "id" message))
+               (mcp-stdio-answer-request server message)))
+            ((mcp-same-id-p (mcp-jget message "id") id)
+             (return message))))))
 
 (defun mcp-stdio-request (server method &key params)
   "One JSON-RPC request/response over stdio.  Returns the result object;
-signals MCP-ERROR on transport or JSON-RPC error."
+signals MCP-ERROR on a transport or JSON-RPC error, MCP-SESSION-EXPIRED when
+the child is gone."
   (let* ((id (mcp-next-request-id))
          (body (com.inuoe.jzon:stringify
                 (mcp-json "jsonrpc" "2.0" "id" id "method" method
-                          "params" (or params (mcp-json))))))
-    (mcp-stdio-send server body)
-    (let ((message (mcp-stdio-recv server)))
-      (unless message
-        (error 'mcp-error :text (format nil "empty response to ~a" method)))
-      ;; A notification reply may be NIL; a request gets a result or error.
-      (let ((err (mcp-jget message "error")))
-        (when err
-          (error 'mcp-error
-                 :text (format nil "~a~@[ (code ~a)~]"
-                               (or (mcp-nonempty (mcp-jget err "message")) "MCP error")
-                               (mcp-jget err "code")))))
-      (or (mcp-jget message "result") (mcp-json)))))
+                          "params" (or params (mcp-json)))))
+         (seconds (mcp-timeout))
+         (message
+           (bt:with-lock-held ((mcp-server-io-lock server))
+             (handler-case
+                 (evo.port:call-with-timeout
+                  seconds
+                  (lambda ()
+                    (mcp-stdio-send server body)
+                    (mcp-stdio-await server id)))
+               (evo.port:timeout-error ()
+                 (mcp-stdio-stop server)
+                 (error 'mcp-error
+                        :text (format nil "no answer to ~a from ~a in ~as; stopped it"
+                                      method (mcp-server-name server) seconds)))))))
+    (let ((err (mcp-jget message "error")))
+      (when err
+        (error 'mcp-error
+               :text (format nil "~a~@[ (code ~a)~]"
+                             (or (mcp-nonempty (mcp-jget err "message")) "MCP error")
+                             (mcp-jget err "code")))))
+    (or (mcp-jget message "result") (mcp-json))))
 
 (defun mcp-stdio-notify (server method &key params)
-  "Fire-and-forget notification over stdio.  The server does not reply."
+  "Fire-and-forget notification; the server does not answer."
   (let ((body (com.inuoe.jzon:stringify
                (mcp-json "jsonrpc" "2.0" "method" method
                          "params" (or params (mcp-json))))))
-    (mcp-stdio-send server body))
+    (bt:with-lock-held ((mcp-server-io-lock server))
+      (mcp-stdio-send server body)))
   t)
 
 ;;; ---------------------------------------------------------------------------
@@ -621,32 +723,22 @@ JSON rather than dropped."
 ;;;     registry.
 
 (defun mcp-server-from-spec (spec)
-  "Build an MCP-SERVER from a config plist.  :type is required: :streamable-http
-or :stdio.  A spec without :type is skipped (returns NIL), so old HTTP-only
-configs continue to work by adding :type :streamable-http."
-  (let ((type (getf spec :type)))
-    (cond
-      ((null type)
-       ;; :type is mandatory — skip silently.
-       nil)
-      ((eq type :streamable-http)
-       (make-mcp-server :name (or (mcp-nonempty (getf spec :name)) "mcp")
-                        :transport :streamable-http
-                        :url (getf spec :url)
-                        :headers (mcp-normalize-headers (getf spec :headers))))
-      ((eq type :stdio)
-       (make-mcp-server :name (or (mcp-nonempty (getf spec :name)) "mcp")
-                        :transport :stdio
-                        :command (getf spec :command)
-                        :args (getf spec :args)
-                        :env (getf spec :env)))
-      (t
-       (make-mcp-server :name (or (mcp-nonempty (getf spec :name)) "mcp")
-                        :transport :streamable-http
-                        :url (getf spec :url)
-                        :headers (mcp-normalize-headers (getf spec :headers))
-                        :error (format nil "unknown :type ~a (expected :streamable-http or :stdio)"
-                                       type))))))
+  "An MCP-SERVER from a config plist, or NIL when the spec names no :type —
+:type is required (:streamable-http or :stdio), and a spec without one is
+ignored.  A :type we do not know is kept as given, so connecting can say so."
+  (let ((type (getf spec :type))
+        (name (or (mcp-nonempty (getf spec :name)) "mcp")))
+    (when type
+      (case type
+        (:stdio
+         (make-mcp-server :name name :transport :stdio
+                          :command (getf spec :command)
+                          :args (getf spec :args)
+                          :env (getf spec :env)))
+        (t
+         (make-mcp-server :name name :transport type
+                          :url (getf spec :url)
+                          :headers (mcp-normalize-headers (getf spec :headers))))))))
 
 (defun mcp-publish-server (server status &key error (tools nil tools-p))
   "Publish what another thread may observe about SERVER: STATUS, ERROR, and
@@ -704,13 +796,16 @@ unwind here costs the request and leaves no shared state half-written."
          (when (mcp-boot-cancelled-p boot)
            (error 'mcp-boot-cancelled))
          ;; Validate the config before connecting: URL for HTTP, command for stdio.
-         (ecase (mcp-server-transport server)
+         (case (mcp-server-transport server)
            (:streamable-http
             (unless (mcp-nonempty (mcp-server-url server))
               (error 'mcp-error :text "no :url in the server spec")))
            (:stdio
             (unless (mcp-nonempty (mcp-server-command server))
-              (error 'mcp-error :text "no :command in the stdio server spec"))))
+              (error 'mcp-error :text "no :command in the server spec")))
+           (t (error 'mcp-error
+                     :text (format nil "unknown :type ~s (expected :streamable-http or :stdio)"
+                                   (mcp-server-transport server)))))
          (mcp-connect server))
     (setf (mcp-boot-interruptible boot) nil)))
 
@@ -787,6 +882,8 @@ outside it, so a long report never holds the lock the boot task needs."
                                        :transport (mcp-server-transport server)
                                        :url (mcp-server-url server)
                                        :command (mcp-server-command server)
+                                       :args (mcp-server-args server)
+                                       :env (mcp-server-env server)
                                        :status (mcp-server-status server)
                                        :error (mcp-server-error server)
                                        :headers (mcp-server-headers server)
@@ -815,32 +912,50 @@ outside it, so a long report never holds the lock the boot task needs."
              "Then /reload.")
         (with-output-to-string (out)
           (dolist (server servers)
-            (let ((transport (evo.util:pget server :transport))
-                  (headers (evo.util:pget server :headers)))
-              (format out "~a  [~a]  ~a~%"
+            (let* ((stdio (eq :stdio (evo.util:pget server :transport)))
+                   ;; Names only, never values: they are the credentials.
+                   (secrets (if stdio
+                                (and (evo.util:pget server :env)
+                                     (format nil "env: ~a"
+                                             (evo.util:string-join
+                                              ", " (mapcar #'mcp-env-name
+                                                           (evo.util:pget server :env)))))
+                                (and (evo.util:pget server :headers)
+                                     (format nil "headers: ~a"
+                                             (evo.util:string-join
+                                              ", " (mapcar #'car
+                                                           (evo.util:pget server :headers))))))))
+              (format out "~a  [~(~a~)]  ~a~%"
                       (evo.util:pget server :name)
-                      (or transport :streamable-http)
-                      (or (evo.util:pget server :url)
-                          (evo.util:pget server :command)
-                          ""))
+                      (evo.util:pget server :transport)
+                      (if stdio
+                          (evo.util:string-join
+                           " " (cons (or (evo.util:pget server :command) "")
+                                     (mapcar (lambda (a) (format nil "~a" a))
+                                             (evo.util:pget server :args))))
+                          (or (evo.util:pget server :url) "")))
               (case (evo.util:pget server :status)
                 (:connected
                  (let ((tools (evo.util:pget server :tools)))
-                   (format out "  connected · ~d tool~:p~@[ · headers: ~a~]~%"
-                           (length tools)
-                           (and headers
-                                (evo.util:string-join ", " (mapcar #'car headers))))
+                   (format out "  connected · ~d tool~:p~@[ · ~a~]~%" (length tools) secrets)
                    (dolist (name tools)
                      (format out "    ~a~%" name))))
                 (:connecting
-                 (format out "  connecting…~@[ · headers: ~a~]~%"
-                         (and headers
-                              (evo.util:string-join ", " (mapcar #'car headers)))))
+                 (format out "  connecting…~@[ · ~a~]~%" secrets))
                 (:cancelled
                  (format out "  not connected: stopped by /reload before it answered~%"))
                 (t (format out "  not connected: ~a~%"
                            (evo.util:pget server :error))))))
           (format out "~%/reload re-reads the config and reconnects.")))))
+
+;; A stdio server is a process we started; it must not outlive the session.
+;; (/reload is covered by MCP-BOOT, which stops the previous generation's.)
+(evo:on :session-end
+        (lambda (payload)
+          (declare (ignore payload))
+          (dolist (server (bt:with-lock-held (*mcp-lock*) (copy-list *mcp-servers*)))
+            (mcp-cleanup-stdio server)))
+        :name :mcp-stdio-cleanup)
 
 (evo:register-command "mcp"
   (lambda (ctx) (declare (ignore ctx)) (mcp-status-report))

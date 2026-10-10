@@ -424,14 +424,17 @@ effort — returns PROGRAM/ARGS unchanged if no mechanism is available."
         (values program args))))
 
 (defun launch-child (program args &key (input t) (output t) (error-output t)
-                                       environment new-session directory)
+                                       environment new-session directory
+                                       external-format)
   "Spawn PROGRAM (an absolute path) with ARGS, without waiting.
 INPUT/OUTPUT/ERROR-OUTPUT: t inherits the parent's fd, a pathname redirects
 to that file (superseding), nil is the null device; ERROR-OUTPUT may also be
 :output to merge stderr into OUTPUT.  ENVIRONMENT nil inherits the parent's
 environment; otherwise a list of \"VAR=VALUE\" strings.  NEW-SESSION detaches
 the child from the controlling terminal (see WRAP-NEW-SESSION).  DIRECTORY,
-when given, is the child's working directory."
+when given, is the child's working directory.  EXTERNAL-FORMAT, when given,
+is the encoding of the streams made by :STREAM — a caller that speaks a text
+protocol over a pipe names it rather than inheriting the locale's."
   (when new-session
     (multiple-value-setq (program args) (wrap-new-session program args)))
   ;; ECL's run-program takes no working directory: a shell changes into it
@@ -448,8 +451,10 @@ when given, is the child's working directory."
          :input input :output output
          :error (if (eq error-output :output) :output error-output)
          :if-output-exists :supersede
+         :if-error-exists :supersede
          (append (when environment (list :environment environment))
-                 (when directory (list :directory (namestring directory)))))
+                 (when directory (list :directory (namestring directory)))
+                 (when external-format (list :external-format external-format))))
   #+ecl
   (multiple-value-bind (stream code process)
       (apply #'ext:run-program program args
@@ -457,7 +462,9 @@ when given, is the child's working directory."
              :input input :output output
              :error (if (eq error-output :output) :output error-output)
              :if-output-exists :supersede
-             (when environment (list :environ environment)))
+             :if-error-exists :supersede
+             (append (when environment (list :environ environment))
+                     (when external-format (list :external-format external-format))))
     (declare (ignore stream code))
     process))
 
@@ -584,53 +591,27 @@ object, which LAUNCH-CHILD returns."
 
 (defun process-output-stream (process)
   "The stream reading PROCESS's standard output, for a process launched
-with :OUTPUT :STREAM.  On SBCL this is SB-EXT:PROCESS-OUTPUT.  On ECL, the
-stdout stream is only available as the first return value of ext:run-program,
-which LAUNCH-CHILD discards — so use LAUNCH-CHILD-STDIO, which returns it
-directly, instead."
+with :OUTPUT :STREAM."
   #+sbcl (sb-ext:process-output process)
-  #+ecl (declare (ignore process))
-  #+ecl nil)
+  #+ecl (ext:external-process-output process))
 
-(defun launch-child-stdio (program args &key environment directory)
-  "Launch PROGRAM with pipes on both stdin and stdout: (values PROCESS INPUT OUTPUT).
-INPUT is the write end of stdin; OUTPUT is the read end of stdout.  stderr is
-inherited (so a stdio MCP server's logs go to the terminal, matching Claude
-Code's behaviour).
+(defun launch-child-stdio (program args &key environment directory error-output)
+  "Launch PROGRAM with a pipe on both its standard input and its standard
+output, for a child that speaks a line protocol over them: (values PROCESS
+INPUT OUTPUT).  INPUT is the write end of its stdin, OUTPUT the read end of
+its stdout; both are UTF-8, whatever the locale says.
 
-On SBCL this is a one-shot: LAUNCH-CHILD with :INPUT :STREAM :OUTPUT :STREAM,
-then SB-EXT:PROCESS-INPUT / SB-EXT:PROCESS-OUTPUT to get both streams.
-
-On ECL, LAUNCH-CHILD discards the stdout stream that ext:run-program returns
-as its first value.  We cannot get it back from the process object, so we
-call ext:run-program directly here and keep both the process and the stream.
-ext:external-process-input gives us the stdin write end on the process."
-  (declare (ignorable directory))
-  #+sbcl
-  (let ((process (apply #'launch-child program args
-                        :input :stream :output :stream
-                        (append (when environment (list :environment environment))
-                                (when directory (list :directory directory))))))
+ERROR-OUTPUT is where its stderr goes: NIL (the default) is the null device,
+a pathname is a file that is superseded.  Never the terminal — a child that
+logs to an inherited stderr scribbles over the TUI."
+  (let ((process (launch-child program args
+                               :input :stream :output :stream
+                               :error-output error-output
+                               :environment environment :directory directory
+                               :external-format :utf-8)))
     (values process
             (ignore-errors (process-input-stream process))
-            (ignore-errors (sb-ext:process-output process))))
-  #+ecl
-  (progn
-    (when directory
-      (setf args (list* "-c" "cd \"$0\" && exec \"$@\""
-                        (namestring directory) program args)
-            program "/bin/sh"
-            directory nil))
-    (multiple-value-bind (stdout-stream code process)
-        (apply #'ext:run-program program args
-               :wait nil
-               :input :stream :output :stream
-               :error t
-               (when environment (list :environ environment)))
-      (declare (ignore code))
-      (values process
-              (ignore-errors (ext:external-process-input process))
-              stdout-stream))))
+            (ignore-errors (process-output-stream process)))))
 
 (defun process-wait (process)
   "Block until PROCESS exits.  Returns (values STATUS CODE): STATUS is

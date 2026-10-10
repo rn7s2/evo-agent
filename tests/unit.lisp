@@ -3343,9 +3343,14 @@ but it takes DELAY, which is what makes the asynchrony observable."
            ;; --- the tool arrives, with no turn in between --------------------
            (check "the tool appears when the server answers"
                   (mcp-wait-for (lambda () (evo.kernel:find-tool "notes__ping"))))
+           ;; Waited for, not read: the status is published AFTER the tools
+           ;; are registered (so the status line never promises tools the agent
+           ;; cannot call), which leaves a window right after the tool appears.
            (check "and the server reports connected"
-                  (equal '(:connected) (mapcar #'evo.user::mcp-server-status
-                                               (mcp-servers))))
+                  (mcp-wait-for (lambda ()
+                                  (equal '(:connected)
+                                         (mapcar #'evo.user::mcp-server-status
+                                                 (mcp-servers))))))
            (check "the tool list a turn resolves now contains it"
                   (member "notes__ping"
                           (mapcar #'evo.kernel:tool-name
@@ -3502,6 +3507,142 @@ but it takes DELAY, which is what makes the asynchrony observable."
           (evo.util:set-setting :mcp-servers saved-servers))
       (bt:with-lock-held (evo.user::*mcp-lock*)
         (setf evo.user::*mcp-servers* nil)))))
+
+;;; The stdio transport, against tests/mcp-stdio-server.py through the real
+;;; process layer.  The stub is awkward on purpose (see its header): banners,
+;;; notifications and stale answers around every reply, a ping the client must
+;;; answer, non-ASCII text, a tool that never answers.
+(defun test-mcp-stdio ()
+  #-evo-windows
+  (let ((python (evo.port:program-in-path "python3"))
+        (script (namestring (merge-pathnames "tests/mcp-stdio-server.py" (uiop:getcwd)))))
+    (if (null python)
+        (format t "skipping stdio MCP tests: python3 not found~%")
+        (let ((saved-servers (evo.util:setting :mcp-servers :unset))
+              (saved-timeout (evo.util:setting :mcp-timeout :unset))
+              (saved-notes evo.kernel::*prompt-notes*)
+              (saved-probe (uiop:getenv "STUB_ENV_PROBE")))
+          (unwind-protect
+               (flet ((call (tool &rest kvs)
+                        ;; EXECUTE-TOOL turns a condition into a "Tool error: …"
+                        ;; string (with is-error as its third value).
+                        (multiple-value-bind (content details is-error)
+                            (evo.kernel:execute-tool
+                             (evo.kernel:find-tool tool)
+                             (apply #'evo.user::mcp-json kvs))
+                          (declare (ignore details))
+                          (cond ((stringp content) content)
+                                (is-error "error")
+                                (t (getf (first content) :text)))))
+                      (the-server ()
+                        (first (mcp-servers))))
+                 (evo.kernel:load-extension* (merge-pathnames "extensions/500-mcp.lisp"
+                                                              (uiop:getcwd))
+                                             :record nil)
+                 ;; The child inherits this; the spec's :env must win over it.
+                 (evo.port:setenv "STUB_ENV_PROBE" "inherited")
+                 (evo.util:set-setting
+                  :mcp-servers
+                  (list (list :name "pipe" :type :stdio :command "python3"
+                              :args (list script)
+                              :env (list (cons "STUB_ENV_PROBE" "overlaid")))
+                        ;; no :type: ignored, not an error
+                        (list :name "untyped" :command "python3" :args (list script))))
+                 (evo.user::mcp-boot)
+                 (check "a spec without :type is ignored"
+                        (equal '("pipe") (mapcar #'evo.user::mcp-server-name (mcp-servers))))
+                 (check "the stdio server connects"
+                        (mcp-wait-for (lambda ()
+                                        (eq :connected (evo.user::mcp-server-status
+                                                        (the-server))))
+                                      :seconds 20))
+                 (check "its tools are registered as <server>__<tool>"
+                        (and (evo.kernel:find-tool "pipe__echo")
+                             (evo.kernel:find-tool "pipe__hang")))
+                 (check "its instructions became a prompt note"
+                        (search "Stdio stub note." (build-system-prompt nil)))
+                 (check "stdio chatter and a server ping are handled, UTF-8 survives both pipes"
+                        (equal "echo:héllo 你好" (call "pipe__echo" "text" "héllo 你好")))
+                 (check "a second call still gets its own answer"
+                        (equal "echo:two" (call "pipe__echo" "text" "two")))
+                 (check ":env is laid over the inherited environment"
+                        (equal "env:overlaid" (call "pipe__env")))
+                 (check "stderr went to the log, not the terminal"
+                        (search "stderr line"
+                                (or (ignore-errors
+                                     (evo.util:read-file-string
+                                      (evo.user::mcp-stdio-log-path (the-server))))
+                                    "")))
+                 (check "/mcp names the transport and the env names, not the values"
+                        (let ((report (evo.user::mcp-status-report)))
+                          (and (search "[stdio]  python3" report)
+                               (search "env: STUB_ENV_PROBE" report)
+                               (not (search "overlaid" report)))))
+                 ;; --- the process dies: the next call starts a new one ---------
+                 (let* ((server (the-server))
+                        (old-process (evo.user::mcp-server-process server))
+                        (pid-before (call "pipe__pid")))
+                   (evo.port:process-kill old-process)
+                   (check "the killed server is dead"
+                          (mcp-wait-for (lambda () (not (evo.port:process-alive-p old-process)))))
+                   (let ((pid-after (call "pipe__pid")))
+                     (check "a call after the server died restarts it"
+                            (and (stringp pid-after) (eql 0 (search "pid:" pid-after))))
+                     (check "and it is a new process"
+                            (not (equal pid-before pid-after)))))
+                 ;; --- a server that never answers is stopped ------------------
+                 (evo.util:set-setting :mcp-timeout 1)
+                 (let ((outcome (call "pipe__hang")))
+                   (check (format nil "a call with no answer times out (got ~s)" outcome)
+                          (and (stringp outcome) (search "no answer" outcome)))
+                   (check "and the unresponsive server is stopped"
+                          (null (evo.user::mcp-server-process (the-server)))))
+                 (evo.util:set-setting :mcp-timeout 10)
+                 (check "the next call starts a fresh server"
+                        (equal "echo:again" (call "pipe__echo" "text" "again")))
+                 ;; --- bad specs say what is wrong -------------------------------
+                 (let ((server (evo.user::mcp-server-from-spec
+                                '(:name "ghost" :type :stdio
+                                  :command "evo-no-such-command-xyz"))))
+                   (evo.user::mcp-boot-run (evo.user::make-mcp-boot) server)
+                   (check "a command that is not on PATH is an error naming it"
+                          (and (eq :error (evo.user::mcp-server-status server))
+                               (search "evo-no-such-command-xyz"
+                                       (evo.user::mcp-server-error server)))))
+                 (let ((server (evo.user::mcp-server-from-spec
+                                '(:name "odd" :type :sse :url "https://x.example/mcp"))))
+                   (evo.user::mcp-boot-run (evo.user::make-mcp-boot) server)
+                   (check "an unknown :type is an error naming it"
+                          (and (eq :error (evo.user::mcp-server-status server))
+                               (search ":SSE" (evo.user::mcp-server-error server)))))
+                 ;; --- the process does not outlive the session ----------------
+                 (let ((process (evo.user::mcp-server-process (the-server))))
+                   (check "the server process is alive before cleanup"
+                          (evo.port:process-alive-p process))
+                   (evo.user::mcp-cleanup-stdio (the-server))
+                   (check "cleanup ends the process"
+                          (not (evo.port:process-alive-p process)))))
+            (dolist (task (mcp-live-tasks))
+              (ignore-errors (evo.kernel::stop-extension-task task)))
+            (dolist (server (mcp-servers))
+              (ignore-errors (evo.user::mcp-stdio-stop server)))
+            (bt:with-lock-held (evo.kernel::*registry-lock*)
+              (dolist (name '("pipe__echo" "pipe__hang" "pipe__pid" "pipe__env"))
+                (remhash name evo.kernel::*tool-registry*)))
+            (setf evo.kernel::*prompt-notes* saved-notes)
+            (evo:remove-status-segment :mcp)
+            (remhash "mcp" evo.kernel::*commands*)
+            (if saved-probe
+                (evo.port:setenv "STUB_ENV_PROBE" saved-probe)
+                (evo.port:unsetenv "STUB_ENV_PROBE"))
+            (if (eq saved-timeout :unset)
+                (remf evo.util:*settings* :mcp-timeout)
+                (evo.util:set-setting :mcp-timeout saved-timeout))
+            (if (eq saved-servers :unset)
+                (remf evo.util:*settings* :mcp-servers)
+                (evo.util:set-setting :mcp-servers saved-servers))
+            (bt:with-lock-held (evo.user::*mcp-lock*)
+              (setf evo.user::*mcp-servers* nil)))))))
 
 ;;; Light/dark theme: semantic colours resolve through the :theme setting.
 
@@ -11280,6 +11421,7 @@ document, per-entry isolation, and never a key."
     (test-bionic)
     (test-baby-evo)
     (test-mcp-async-boot)
+    (test-mcp-stdio)
     (test-theme)
     (test-user-prompt-block)
     (test-input-history)
