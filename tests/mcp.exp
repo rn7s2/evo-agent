@@ -56,11 +56,11 @@ puts $f {(evo:register-model "mcp-test" :provider :none :api :anthropic-messages
 puts $f {(evo:set-setting :model "mcp-test")}
 puts $f {(evo:register-provider :none :base-url "http://127.0.0.1:1/unused" :api-key "unused")}
 puts $f "(evo:set-setting :mcp-servers
-  (list (list :name \"echo\" :url \"http://127.0.0.1:$port/mcp\"
+  (list (list :name \"echo\" :type :streamable-http :url \"http://127.0.0.1:$port/mcp\"
               :headers (list (cons \"Authorization\" \"Bearer test-token\")))
-        (list :name \"kw\" :url \"http://127.0.0.1:$port/mcp\"
+        (list :name \"kw\" :type :streamable-http :url \"http://127.0.0.1:$port/mcp\"
               :headers (list :authorization \"Bearer test-token\"))
-        (list :name \"dead\" :url \"http://127.0.0.1:1/mcp\")))"
+        (list :name \"dead\" :type :streamable-http :url \"http://127.0.0.1:1/mcp\")))"
 close $f
 
 set workdir "$scratch/work"
