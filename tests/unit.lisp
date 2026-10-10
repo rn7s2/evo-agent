@@ -4345,7 +4345,9 @@ just the pack that ships as a core extension, and what the user picked
     (check "and what its hook journals lands immediately before it"
            (equal (mapcar (lambda (m) (pget (first (pget m :content)) :text))
                           (state-messages (fold-state journal)))
-                  '("a goal continuation" "context first" "what the user typed"))))
+                  (list "a goal continuation"
+                        (evo.kernel:reminder-envelope "probe" "context first")
+                        "what the user typed"))))
   ;; provider-registration — what was registered, unresolved (the Kimi and
   ;; OAuth providers used to read EVO.PROVIDER::*PROVIDERS* for it).
   (let ((evo.provider::*providers* (copy-tree evo.provider::*providers*)))
@@ -5241,15 +5243,33 @@ and the guards around all of it."
     (write-file-string (merge-pathnames "CLAUDE.md" dir)
                        "keep {{WORKING_DIRECTORY}} literal")
     (let* ((prompt (build-system-prompt nil :cwd dir :model "some-model-id"))
-           (env (subseq prompt (search "## Environment" prompt))))
+           (env (subseq prompt (search "## Environment" prompt)))
+           (reminder (evo.kernel::environment-reminder
+                      :cwd dir :model "some-model-id")))
       (check "environment reports the working directory"
              (search (namestring dir) env))
-      (check "environment reports today's date"
-             (search (evo.kernel::today-string) env))
-      (check "environment reports the model in play"
-             (search "some-model-id" env))
       (check "environment leaves no placeholder unresolved"
              (not (search "{{" env)))
+      (check "the system prompt keeps the volatile facts out"
+             (and (not (search (evo.kernel::today-string) prompt))
+                  (not (search "some-model-id" prompt))
+                  (not (search "## gitStatus" prompt))))
+      (check "the reminder reports the date and the model in play"
+             (and (search (evo.kernel::today-string) reminder)
+                  (search "some-model-id" reminder)))
+      (check "the reminder says whether the model can see images"
+             (search "Can see images: yes" reminder))
+      (check "the reminder is one tagged block"
+             (and (string-prefix-p "<evo:reminder kind=\"environment\">" reminder)
+                  (search "</evo:reminder>" reminder :from-end t)))
+      (check "the reminder leaves no placeholder unresolved"
+             (not (search "{{" reminder)))
+      (check "the reminder carries no CR"
+             (null (find #\Return reminder)))
+      (check "outside a repository the reminder has no gitStatus block"
+             (not (search "## gitStatus" reminder)))
+      (check "outside a repository the branch reads n/a"
+             (search "Current branch: n/a" reminder))
       (check "user context files are injected, not expanded"
              (search "keep {{WORKING_DIRECTORY}} literal" prompt))
       (check "system prompt directs explicit memory management"
@@ -5257,11 +5277,33 @@ and the guards around all of it."
                   (search "`project_memory`" prompt)
                   (search "`global_memory`" prompt)))
       (check "model falls back rather than leaving a hole"
-             (search "unknown" (build-system-prompt nil :cwd dir)))
+             (search "unknown" (evo.kernel::environment-reminder :cwd dir)))
       (check "language section is absent until configured"
-             (not (search "## Language" prompt)))
-      (check "gitStatus is omitted outside a repository"
-             (not (search "## gitStatus" prompt))))
+             (not (search "## Language" prompt))))
+    ;; The envelope helpers: one shape for every harness injection.
+    (let ((envelope (evo.kernel:reminder-envelope
+                     "probe" (format nil "line one~%line two"))))
+      (check "reminder envelope: tagged, kinded, closed"
+             (and (string-prefix-p "<evo:reminder kind=\"probe\">" envelope)
+                  (search "</evo:reminder>" envelope :from-end t)))
+      (check "reminder envelope: strip round-trips the payload"
+             (equal (format nil "line one~%line two")
+                    (evo.kernel:strip-reminder-envelope envelope)))
+      (check "reminder envelope: strip leaves plain text alone"
+             (equal "plain" (evo.kernel:strip-reminder-envelope "plain"))))
+    ;; Inside a repository the reminder, not the system prompt, carries the
+    ;; git snapshot.  Skipped where git is not installed.
+    (let ((repo (format nil "~a/evo-reminder-repo-~a/" (tmp-dir) (gen-id))))
+      (ensure-directories-exist repo)
+      (when (handler-case
+                (progn (uiop:run-program (list "git" "init" "-q" (namestring repo))
+                                         :output nil :error-output nil)
+                       t)
+              (error () nil))
+        (let ((reminder (evo.kernel::environment-reminder :cwd repo)))
+          (check "inside a repository the reminder carries the git snapshot"
+                 (and (search "## gitStatus" reminder)
+                      (search "Current branch:" reminder))))))
     (let ((previous (setting :language)))
       (unwind-protect
            (progn
@@ -5753,6 +5795,11 @@ the model is where it can be removed."
     (check "injected message lands in the journal under its key"
            (find-if (lambda (m) (equal (pget (pget m :meta) :key) "test-key"))
                     (state-messages (fold-state journal))))
+    (check "the injected text is stored in the reminder envelope"
+           (let ((m (find-if (lambda (m) (equal (pget (pget m :meta) :key) "test-key"))
+                             (state-messages (fold-state journal)))))
+             (equal (evo.kernel:reminder-envelope "test-key" "SOME INSTRUCTIONS")
+                    (pget (first (message-content m)) :text))))
     (let ((messages (list '(:role :user :content ((:type :text :text "hi")))
                           (list :role :user :meta (list :key "test-key")
                                 :content '((:type :text :text "SOME INSTRUCTIONS"))))))
@@ -7315,13 +7362,14 @@ selection journals the provider, and every resolution point honours it."
       (check "read: a text file still reads as numbered lines"
              (let ((out (evo.kernel::tool-read (list :path path))))
                (and (stringp out) (search "alpha" out) (search "2" out)))))
-    ;; And the agent is told which of the two worlds it is in.
+    ;; And the agent is told which of the two worlds it is in, in the
+    ;; per-turn reminder rather than the system prompt.
     (check "prompt: a vision model is told it can see images"
            (search "Can see images: yes"
-                   (build-system-prompt (list (find-tool "read")) :vision t)))
+                   (evo.kernel::environment-reminder :vision t)))
     (check "prompt: a blind model is told it cannot"
            (search "Can see images: no"
-                   (build-system-prompt (list (find-tool "read")) :vision nil)))
+                   (evo.kernel::environment-reminder :vision nil)))
     (check "prompt: the tool list says read takes images"
            (search "image" (build-system-prompt (list (find-tool "read")))))
     (reset-user-registries)
@@ -8408,6 +8456,93 @@ real run put it back — twice, inside ONE task whose own age never moves."
                 (equal (first task-ids) (second task-ids))
                 (eql task-started (second (first task-ids)))))
     (check "the run settled" (not (evo.tui::tui-running tui)))))
+
+;;; A batch reply, end to end: turn one carries TWO tool calls — one that
+;;; runs, one a hook blocks — turn two stops.  Both calls execute, in order,
+;;; one result entry each: the shape the prompt's batching guidance promises.
+;;; And the environment reminder leads the projection without ever reaching
+;;; the journal.
+
+(defclass batch-fixture-api (provider-api) ())
+(defvar *batch-fixture-turns* 0)
+
+(defmethod endpoint-path ((api batch-fixture-api))
+  (declare (ignore api)) "/fixture/batch")
+
+(defmethod auth-headers ((api batch-fixture-api) config)
+  (declare (ignore api config)) nil)
+
+(defmethod build-request ((api batch-fixture-api)
+                          &key model system messages tools thinking-level)
+  (declare (ignore api model system messages tools thinking-level))
+  "{}")
+
+(defmethod perform-request ((api batch-fixture-api) url headers body
+                            &key on-event abort-flag abort-cleanup
+                            &allow-other-keys)
+  (declare (ignore api url headers body on-event abort-flag abort-cleanup))
+  (if (= 1 (incf *batch-fixture-turns*))
+      ;; Turn one: two calls in one reply, so the loop must run both before
+      ;; coming back to the model.
+      (list :content '((:type :tool-call :id "c1" :name "read"
+                        :arguments (:path "/nonexistent-batch-fixture-path"))
+                       (:type :tool-call :id "c2" :name "write"
+                        :arguments (:path "/nonexistent-batch-fixture-path"
+                                          :content "x")))
+            :stopped-p t :stop-reason :tool-use
+            :usage '(:input 10 :output 2 :cache-read 0 :cache-write 0))
+      (list :content '((:type :text :text "done"))
+            :stopped-p t :stop-reason :stop
+            :usage '(:input 12 :output 2 :cache-read 0 :cache-write 0))))
+
+(defun test-tool-batch-end-to-end ()
+  "Two calls in one assistant message: both run, in order, one result entry
+each — and a hook-blocked call mid-batch does not stop the rest."
+  (register-api :batch-fixture (make-instance 'batch-fixture-api))
+  (register-provider* :batch-fixture :base-url "https://fixture.invalid")
+  (register-model* "batch-fixture-model" :provider :batch-fixture
+                   :api :batch-fixture :context-window 100000 :max-output 100)
+  (let* ((dir (uiop:ensure-directory-pathname
+               (format nil "~a/evo-batch-e2e-~a/" (tmp-dir) (gen-id))))
+         (journal (progn (ensure-directories-exist dir) (make-session-journal dir)))
+         (agent (make-agent :journal journal)))
+    (setf *batch-fixture-turns* 0)
+    (append-entry journal '(:type :model-change :model "batch-fixture-model"))
+    (append-entry journal '(:type :message
+                            :message (:role :user
+                                      :content ((:type :text :text "go")))))
+    ;; The projection: reminder first, journal after, reminder not journaled.
+    (let* ((ctx (evo.kernel::prepare-next-turn agent))
+           (lead (first (pget ctx :messages))))
+      (check "the environment reminder leads the projected messages"
+             (let ((text (pget (first (message-content lead)) :text)))
+               (and (eq (message-role lead) :user)
+                    (stringp text)
+                    (string-prefix-p "<evo:reminder kind=\"environment\">" text))))
+      (check "and it is not part of the journal"
+             (notany (lambda (m)
+                       (let ((text (pget (first (message-content m)) :text)))
+                         (and (stringp text)
+                              (string-prefix-p "<evo:reminder kind=\"environment\"" text))))
+                     (state-messages (fold-state journal)))))
+    (with-temp-hooks
+      (evo:on :tool-call
+              (lambda (call)
+                (when (equal (pget call :name) "write")
+                  (list :block t :reason "batch test gate"))))
+      (run agent))
+    (let* ((messages (state-messages (fold-state journal)))
+           (results (remove-if-not (lambda (m) (eq (message-role m) :tool-result))
+                                   messages)))
+      (check "the fixture run really took two turns" (= 2 *batch-fixture-turns*))
+      (check "one reply with two calls runs BOTH, in the order listed"
+             (equal '("c1" "c2")
+                    (mapcar (lambda (m) (pget m :tool-call-id)) results)))
+      (check "the blocked call is an error result, and the batch still finished"
+             (and (= 2 (length results))
+                  (pget (second results) :is-error)
+                  (search "batch test gate"
+                          (pget (first (message-content (second results))) :text)))))))
 
 (defun test-abort-is-a-message ()
   "REQUEST-ABORT must only post a message; the worker latches it and runs the
@@ -11208,6 +11343,7 @@ document, per-entry isolation, and never a key."
     (test-activity-line)
     (test-step-clock)
     (test-step-clock-end-to-end)
+    (test-tool-batch-end-to-end)
     (test-abort-is-a-message)
     (test-session-quiescence)
     (test-tui-task-ownership)

@@ -215,7 +215,11 @@ is left to the ordinary rules (the message is shown as what it says it is)."
       (:context
        (list :id id :kind "context" :ts ts
              :key (pget origin :key)
-             :text (or (pget origin :text) (message-text (pget entry :message)))))
+             ;; The journal stores the reminder envelope the model sees;
+             ;; the item shows the payload.
+             :text (or (pget origin :text)
+                       (strip-reminder-envelope
+                        (message-text (pget entry :message))))))
       (:notice
        (list :id id :kind "notice" :ts ts
              :severity (enum-string (or (pget origin :severity) :info))
@@ -335,7 +339,8 @@ CTX carries what the walk has to remember between entries."
            ((and origin (origin-item entry origin)))
            (t (list :id (pget entry :id) :kind "context" :ts (entry-ms entry)
                     :key key
-                    :text (message-text (pget entry :message)))))))
+                    :text (strip-reminder-envelope
+                           (message-text (pget entry :message))))))))
       (:recover (setf (pctx-recover ctx) entry) nil)
       (:notice
        (list :id (pget entry :id) :kind "notice" :ts (entry-ms entry)

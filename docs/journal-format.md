@@ -37,7 +37,7 @@ form-by-form, not line-by-line.
 | `:branch-summary` | summary of an abandoned branch |
 | `:custom` | `:key`/`:data` extension state, INVISIBLE to the LLM |
 | `:notice` | what was shown to the user: `:severity` (`:info`/`:warn`/`:error`), `:text`, `:source` (`:command`/`:extension`/`:swarm`/`:serve`/`:goal`) and `:data` — INVISIBLE to the LLM, ignored by the fold. The durable half of a frontend's output: goal transitions, a run's internal error, a compaction's result |
-| `:custom-message` | extension-injected content, visible to the LLM (`:key` lets a transform hook remove it later) |
+| `:custom-message` | extension-injected content, visible to the LLM (`:key` lets a transform hook remove it later; the text is stored wrapped in the harness's `<evo:reminder kind="…">` envelope, which views strip for display) |
 | `:label` | bookmark (`:target-id` + `:label`) |
 | `:goal` | goal created/updated: `:goal-id :objective :status :token-budget :tokens-used` (`:token-budget` nil = no limit, the default) |
 | `:load` | userspace source file loaded (`:path` + `:reason`) — replayed on boot |

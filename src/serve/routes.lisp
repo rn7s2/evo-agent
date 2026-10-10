@@ -247,8 +247,10 @@ list (CONTRACT §2)."
                                         (uiop:getcwd))
                                :program (request-query-param request "program")))))
 
-;;; Debug reads: what the model sees, and the raw journal.  For tools and
-;;; tests, never for rendering.
+;;; Debug reads: the transcript the next request will carry, as journaled,
+;;; and the raw journal.  The per-turn environment reminder is added at
+;;; request time, not folded, so it is deliberately not part of either read.
+;;; For tools and tests, never for rendering.
 
 (defun handle-debug-context (server request body stream)
   (declare (ignore request body))

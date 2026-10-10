@@ -548,8 +548,14 @@ immune to summarization.
 
 The prompt is assembled fresh on every save point, from source, in a fixed
 order: base → tool one-liners → guidelines → own-docs paths → lore → project
-context files → skills → environment → language → gitStatus. It is cheap and
-pure enough to rebuild that often, which is what keeps invariant 5 honest.
+context files → skills → environment → language. It is cheap and pure enough
+to rebuild that often, which is what keeps invariant 5 honest. The volatile
+facts are deliberately not here: the branch, the date, the model, image
+support and the git snapshot ride in one user-role
+`<evo:reminder kind="environment">` message the loop conses in front of every
+request (`environment-reminder`), rebuilt per turn and never journaled — a
+fact changing does not move the cached system prefix, and compaction cannot
+summarize the facts away.
 
 Its content is the agent's operating manual, and it states the things the
 architecture cannot enforce: that evo is permissive and pre-authorized to

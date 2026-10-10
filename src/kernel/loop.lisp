@@ -380,6 +380,20 @@ an adapter that no longer knows the word."
                           (warn "transform-context hook failed: ~a" e)
                           messages))))
           (when (listp result) (setf messages result))))
+      ;; The environment reminder is the one message the kernel adds per
+      ;; request rather than the journal: it is rebuilt every turn, so a
+      ;; branch switch, a /model move, or the date rolling over reaches the
+      ;; model without a journal entry and without touching the system
+      ;; prompt's cache prefix.  CONSED on — STATE-MESSAGES returns the list
+      ;; the fold cache shares, and a hook may have rebuilt it already.
+      (setf messages
+            (cons (list :role :user
+                        :content (list (list :type :text
+                                             :text (environment-reminder
+                                                    :model model-id
+                                                    :vision (model-vision-p model)
+                                                    :language (language-request state)))))
+                  messages))
       (list :state state
             :tools tools
             :messages messages
