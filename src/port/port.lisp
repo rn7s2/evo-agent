@@ -582,6 +582,56 @@ object, which LAUNCH-CHILD returns."
   (let ((process (apply #'launch-child program args :input :stream keys)))
     (values process (ignore-errors (process-input-stream process)))))
 
+(defun process-output-stream (process)
+  "The stream reading PROCESS's standard output, for a process launched
+with :OUTPUT :STREAM.  On SBCL this is SB-EXT:PROCESS-OUTPUT.  On ECL, the
+stdout stream is only available as the first return value of ext:run-program,
+which LAUNCH-CHILD discards — so use LAUNCH-CHILD-STDIO, which returns it
+directly, instead."
+  #+sbcl (sb-ext:process-output process)
+  #+ecl (declare (ignore process))
+  #+ecl nil)
+
+(defun launch-child-stdio (program args &key environment directory)
+  "Launch PROGRAM with pipes on both stdin and stdout: (values PROCESS INPUT OUTPUT).
+INPUT is the write end of stdin; OUTPUT is the read end of stdout.  stderr is
+inherited (so a stdio MCP server's logs go to the terminal, matching Claude
+Code's behaviour).
+
+On SBCL this is a one-shot: LAUNCH-CHILD with :INPUT :STREAM :OUTPUT :STREAM,
+then SB-EXT:PROCESS-INPUT / SB-EXT:PROCESS-OUTPUT to get both streams.
+
+On ECL, LAUNCH-CHILD discards the stdout stream that ext:run-program returns
+as its first value.  We cannot get it back from the process object, so we
+call ext:run-program directly here and keep both the process and the stream.
+ext:external-process-input gives us the stdin write end on the process."
+  (declare (ignorable directory))
+  #+sbcl
+  (let ((process (apply #'launch-child program args
+                        :input :stream :output :stream
+                        (append (when environment (list :environment environment))
+                                (when directory (list :directory directory))))))
+    (values process
+            (ignore-errors (process-input-stream process))
+            (ignore-errors (sb-ext:process-output process))))
+  #+ecl
+  (progn
+    (when directory
+      (setf args (list* "-c" "cd \"$0\" && exec \"$@\""
+                        (namestring directory) program args)
+            program "/bin/sh"
+            directory nil))
+    (multiple-value-bind (stdout-stream code process)
+        (apply #'ext:run-program program args
+               :wait nil
+               :input :stream :output :stream
+               :error t
+               (when environment (list :environ environment)))
+      (declare (ignore code))
+      (values process
+              (ignore-errors (ext:external-process-input process))
+              stdout-stream))))
+
 (defun process-wait (process)
   "Block until PROCESS exits.  Returns (values STATUS CODE): STATUS is
 :exited or :signaled; CODE is the exit code or the signal number."
