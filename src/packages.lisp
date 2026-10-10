@@ -126,6 +126,7 @@
            #:heartbeat-touch
            ;; prompt, skills, templates
            #:build-system-prompt #:register-prompt-note
+           #:reminder-envelope #:strip-reminder-envelope
            ;; prompt language packs
            #:register-prompt-language #:find-prompt-language
            #:all-prompt-languages #:prompt-section #:*prompt-sections*

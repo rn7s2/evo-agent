@@ -272,6 +272,12 @@ the seam it wants is worth asking for.
 (evo:inject-context "text" :key "my-key") ; :custom-message — VISIBLE to the LLM
 ```
 
+`evo:inject-context` stores its text wrapped in the harness's reminder
+envelope — `<evo:reminder kind="KIND">…</evo:reminder>`, with KIND the `:key`
+you pass (or the origin's `:key`, else `"context"`) — so every injection
+shares one documented shape. Views strip the envelope and render the payload;
+`evo.kernel:strip-reminder-envelope` does the same for your own display code.
+
 State values must stay inside the journal vocabulary: plists, keywords,
 strings, numbers, `t`/`nil`, vectors. No raw symbols, no objects, no
 closures.
@@ -531,10 +537,16 @@ is not translated and is not part of this.
 ```
 
 - Section keys are `evo.kernel:*prompt-sections*`: `:base :guidelines
-  :own-docs :environment :git-status :respond-in :tools-heading :lore-heading
-  :context-heading`. **Anything you leave out falls back to English**, so a
-  pack can translate as much or as little as it likes and never goes stale
-  into a hole when a new section is added.
+  :own-docs :environment :environment-reminder :git-status :respond-in
+  :tools-heading :lore-heading :context-heading`. **Anything you leave out
+  falls back to English**, so a pack can translate as much or as little as it
+  likes and never goes stale into a hole when a new section is added.
+- Two sections hold the environment: `:environment` is the stable half and
+  rides in the system prompt; `:environment-reminder` is the volatile half
+  (branch, date, model, image support) and is rebuilt every turn into an
+  `<evo:reminder kind="environment">` block ahead of the conversation, so the
+  cached system prefix does not move when a fact does. `:git-status` rides
+  with the reminder for the same reason.
 - `{{TOKEN}}` placeholders must survive translation — they are where runtime
   facts (working directory, model, git status, `{{CONTEXT_PATH}}`) reach the
   model. An unknown section key is refused at registration.

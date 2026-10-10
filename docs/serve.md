@@ -156,7 +156,7 @@ are epoch **milliseconds**.
 | `GET /media/<id>/<n>?topic=session` | The raw bytes of image N of that item, with its own `Content-Type`. |
 | `GET /catalog` | Everything a client needs to draw its choices (below). |
 | `GET /sessions[?scope=cwd\|all&program=]` | `{sessions:[{id, path, cwd, program, swarm_id, title, created_at, updated_at, entries}]}`, newest first. |
-| `GET /debug/context`, `GET /debug/journal` | What the model sees, and the raw entries on the path. For tools and tests, never for rendering. |
+| `GET /debug/context`, `GET /debug/journal` | The journaled transcript the next request will carry (the per-turn environment reminder is added at request time, so it is not shown here), and the raw entries on the path. For tools and tests, never for rendering. |
 
 Reads never queue behind a run: a snapshot is served from the published view,
 and `/items` pages out of it.

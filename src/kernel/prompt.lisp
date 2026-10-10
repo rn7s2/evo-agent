@@ -3,6 +3,12 @@
 ;;;; Order: base -> tool one-liners -> guidelines -> own-docs paths -> lore
 ;;;; (post-MVP) -> project context files -> environment.  Rebuilt on any
 ;;;; tool-set change (the loop rebuilds it every save point; cheap and pure).
+;;;;
+;;;; The volatile half of the environment — the branch, the date, the model,
+;;;; image support, the git snapshot — is deliberately not here: it rides in
+;;;; ENVIRONMENT-REMINDER, which the loop carries in front of every request,
+;;;; so this text (the anchor of the cached prefix) does not move when a fact
+;;;; does.
 
 (in-package :evo.kernel)
 
@@ -24,7 +30,8 @@
   "Code of the pack every other pack falls back to, section by section.")
 
 (defparameter *prompt-sections*
-  '(:base :guidelines :own-docs :environment :git-status :respond-in
+  '(:base :guidelines :own-docs :environment :environment-reminder
+    :git-status :respond-in
     :tools-heading :lore-heading :context-heading)
   "The sections a pack may supply.  A pack that omits one gets the default
 language's text for it, so a partial or outdated translation still yields a
@@ -482,6 +489,55 @@ the agent losing one extension's guidance beats the agent losing its prompt."
             nil))
         value)))
 
+;;; The reminder envelope.  Everything the harness adds to the conversation
+;;; for the model — memory, IDE context, the per-turn environment — rides in
+;;; one delimited block, so the model can tell harness speech from a person's
+;;; and a view can strip the protocol back out.  The guidelines section of
+;;; every pack documents the tag (lang-en, "## Your context").
+
+(defun reminder-envelope (kind text)
+  "TEXT wrapped in the harness's <EVO:REMINDER KIND=\"KIND\"> envelope."
+  (format nil "<evo:reminder kind=\"~a\">~%~a~%</evo:reminder>"
+          kind (string-trim '(#\Newline #\Return) text)))
+
+(defun strip-reminder-envelope (text)
+  "TEXT without its reminder envelope, for display — TEXT unchanged when it
+carries none.  Views render the payload, not the protocol."
+  (if (not (and (stringp text) (string-prefix-p "<evo:reminder " text)))
+      text
+      (let ((open-end (position #\> text))
+            (close (search "</evo:reminder>" text :from-end t)))
+        (if (and open-end close (< open-end close))
+            (string-trim '(#\Newline #\Return)
+                         (subseq text (1+ open-end) close))
+            text))))
+
+;;; The environment reminder: the volatile half of the environment facts, in
+;;; front of every request instead of inside the system prompt, so the cached
+;;; prompt prefix does not move when the branch switches, /model changes, or
+;;; the date rolls over.  Session-deterministic by construction — the git
+;;; snapshot is taken once per process (*GIT-STATUS-CACHE*) and TODAY-STRING
+;;; carries no clock — so while nothing changes, the reminder's bytes are
+;;; stable and the prefix it rides in stays cached.
+
+(defun environment-reminder (&key (cwd (uiop:getcwd)) model (vision t)
+                                  (language (language-request)))
+  "The per-turn environment reminder, envelope included: the pack's
+:environment-reminder section, plus the :git-status section when CWD is in a
+repository."
+  (multiple-value-bind (pack response-language) (resolve-language language)
+    (declare (ignore response-language))
+    (let ((bindings (prompt-bindings :cwd cwd :model model :vision vision)))
+      (flet ((section (key)
+               (render-template (prompt-section key pack) bindings)))
+        (normalize-newlines
+         (reminder-envelope
+          "environment"
+          (with-output-to-string (out)
+            (write-string (section :environment-reminder) out)
+            (when (git-status-snapshot cwd)
+              (format out "~%~a" (section :git-status))))))))))
+
 (defun build-system-prompt (tools &key (cwd (uiop:getcwd)) lore model
                                        (vision t)
                                        (language (language-request)))
@@ -543,6 +599,4 @@ the agent losing one extension's guidance beats the agent losing its prompt."
                (format out "</available_skills>~%")))
            (format out "~%~a~%" (section :environment))
            (when response-language
-             (format out "~%~a~%" (section :respond-in)))
-           (when (git-status-snapshot cwd)
-             (format out "~%~a~%" (section :git-status)))))))))
+             (format out "~%~a~%" (section :respond-in)))))))))

@@ -572,13 +572,21 @@ beside the message and never shown to the model."
 (defun inject-context (text &key key origin (agent *agent*))
   "Append a :custom-message entry — content visible to the LLM.  With KEY, a
 :transform-context hook can filter it back out later (mode discipline).
-ORIGIN is the same `(:kind ...)` marker a steered message carries; a context
-injection gets `(:kind :context :key KEY)` when it has a key of its own."
+ORIGIN is the same `(:kind ...)` marker a steered message carries, recorded
+beside the message and never shown to the model.
+The text is wrapped in the harness's reminder envelope — the kind is KEY,
+the origin's :key, or \"context\" — so every injection shares one shape the
+prompt's guidelines document and STRIP-REMINDER-ENVELOPE can undo for
+display."
   (evo.journal:append-entry
    (evo.kernel:agent-journal agent)
    (append (list :type :custom-message
                  :message (list :role :user
-                                :content (list (list :type :text :text text))))
+                                :content (list (list :type :text
+                                                     :text (evo.kernel:reminder-envelope
+                                                            (or key (getf origin :key)
+                                                                "context")
+                                                            text)))))
            (when key (list :key key))
            (when origin (list :origin origin)))))
 

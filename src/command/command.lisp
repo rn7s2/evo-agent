@@ -728,8 +728,9 @@ the transcript; base64 inline would not be readable."
       (dolist (m (state-messages state))
         (case (message-role m)
           (:user (format out "## user~2%~a~2%"
-                         (or (pget (find :text (message-content m)
-                                         :key (lambda (b) (pget b :type))) :text) ""))
+                         (strip-reminder-envelope
+                          (or (pget (find :text (message-content m)
+                                          :key (lambda (b) (pget b :type))) :text) "")))
                  (dolist (b (message-content m))
                    (when (evo.media:image-block-p b)
                      (let ((file (ignore-errors
