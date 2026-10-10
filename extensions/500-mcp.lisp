@@ -746,8 +746,9 @@ not cost the session the others, nor its startup."
       (mcp-publish-server server :error :error (format nil "~a" e)))))
 
 (defun mcp-cleanup-stdio (server)
-  "Stop the stdio child process if any.  Safe to call on HTTP servers (no-op)."
-  (when (eq (mcp-server-transport server) :stdio)
+  "Stop the stdio child process if any.  Safe to call on HTTP servers (no-op)
+or on NIL (a spec that was skipped)."
+  (when (and server (eq (mcp-server-transport server) :stdio))
     (ignore-errors (mcp-stdio-stop server))))
 
 (defun mcp-boot ()
