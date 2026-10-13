@@ -331,7 +331,23 @@ line2")))
                     ("user" "tool_result")
                     ("assistant" "tool_use")
                     ("user" "tool_result"))
-                  (wire-messages (list assistant result-a assistant result-b))))))
+                  (wire-messages (list assistant result-a assistant result-b))))
+    ;; A tool output with no content (reading an empty file) must still answer
+    ;; the tool_use: blank text blocks are stripped, and a tool_result with no
+    ;; content left is dropped by strict endpoints (Bedrock 400: tool_use ids
+    ;; found without tool_result blocks immediately after).
+    (let ((empty-result '(:role :tool-result :tool-call-id "a" :tool-name "read"
+                          :is-error nil :content ((:type :text :text "")))))
+      (check "an empty tool result still answers its tool call"
+             (let* ((json (evo.provider::messages->json
+                           (list assistant empty-result)))
+                    (block (aref (gethash "content" (aref json 1)) 0))
+                    (inner (gethash "content" block)))
+               (and (equal (gethash "type" block) "tool_result")
+                    (equal (gethash "tool_use_id" block) "a")
+                    (plusp (length inner))
+                    (not (evo.provider::blank-text-p
+                          (gethash "text" (aref inner 0))))))))))
 
 ;;; The opaque reasoning slot.
 ;;;

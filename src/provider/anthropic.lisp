@@ -101,10 +101,18 @@ which made every later request to a strict endpoint fail."
     (t (error 'provider-error :message (format nil "Unknown content block type ~s" (pget block :type))))))
 
 (defun tool-result->json-block (m)
-  (jobj "type" "tool_result"
-        "tool_use_id" (pget m :tool-call-id)
-        "is_error" (if (pget m :is-error) t nil)
-        "content" (map 'vector #'content-block->json (wire-blocks (message-content m)))))
+  ;; A strict endpoint (and Bedrock via gateways) drops or refuses a
+  ;; tool_result whose content blocks are all blank, which then leaves the
+  ;; tool_use unanswered and 400s every later request in the conversation.
+  ;; An empty tool output — e.g. reading an empty file — must still answer.
+  (let ((blocks (map 'list #'content-block->json
+                     (wire-blocks (message-content m)))))
+    (jobj "type" "tool_result"
+          "tool_use_id" (pget m :tool-call-id)
+          "is_error" (if (pget m :is-error) t nil)
+          "content" (coerce (or blocks
+                                (list (jobj "type" "text" "text" "(empty result)")))
+                            'vector))))
 
 (defun messages->json (messages)
   "Convert unified messages to Anthropic wire messages.
