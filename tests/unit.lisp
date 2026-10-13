@@ -8239,6 +8239,93 @@ session file from one that was simply slow.  The fold ignores the entry."
       (check "retry: invisible to the transcript"
              (null (state-messages (fold-state journal)))))))
 
+;;; Transient failures delivered inside an HTTP 200 stream (the OpenAI/Codex
+;;; route emits "Our servers are currently overloaded" as an SSE error event,
+;;; never as a 5xx status): the adapter marks its provider-error retryable and
+;;; it must ride the same ladder as a retryable HTTP status.
+
+(defclass stream-error-fixture-api (provider-api) ())
+(defvar *stream-error-fixture-attempts* 0)
+(defvar *stream-error-fixture-retryable* t)
+
+(defmethod endpoint-path ((api stream-error-fixture-api)) "/fixture/stream-error")
+(defmethod auth-headers ((api stream-error-fixture-api) config)
+  (declare (ignore config)) nil)
+(defmethod build-request ((api stream-error-fixture-api) &key model system messages
+                                                           tools thinking-level)
+  (declare (ignore model system messages tools thinking-level))
+  "{}")
+(defmethod perform-request ((api stream-error-fixture-api) url headers body
+                            &key on-event abort-flag abort-cleanup
+                            &allow-other-keys)
+  (declare (ignore url headers body on-event abort-flag abort-cleanup))
+  (incf *stream-error-fixture-attempts*)
+  (if (< *stream-error-fixture-attempts* 3)
+      (error 'provider-error
+             :message "Responses error: Our servers are currently overloaded. Please try again later."
+             :retryable *stream-error-fixture-retryable*)
+      (list :content '((:type :text :text "ok")) :stopped-p t :stop-reason :stop
+            :usage '(:input 1 :output 1 :cache-read 0 :cache-write 0))))
+
+(defun test-stream-error-retries ()
+  (let ((saved-models evo.provider::*models*)
+        (saved-providers (copy-alist evo.provider::*providers*))
+        (events nil))
+    (unwind-protect
+         (progn
+           (register-api :stream-error-fixture (make-instance 'stream-error-fixture-api))
+           (register-provider* :stream-error-fixture :base-url "https://fixture.invalid")
+           (register-model* "stream-error-fixture-model" :provider :stream-error-fixture
+                            :api :stream-error-fixture :context-window 10000
+                            :max-output 100)
+           (setf *stream-error-fixture-attempts* 0)
+           (let* ((evo.provider::*max-attempts* 4)
+                  (message (call-provider :model "stream-error-fixture-model"
+                                          :system "sys" :messages nil :tools nil
+                                          :on-event (lambda (ev) (push ev events)))))
+             (setf events (nreverse events))
+             (check "stream error: an in-200 overload is retried until success"
+                    (and (= 3 *stream-error-fixture-attempts*)
+                         (eq (pget message :stop-reason) :stop)
+                         (equal "ok" (pget (first (pget message :content)) :text))))
+             (let ((retry-events
+                     (loop for e in events
+                           when (eq (pget e :type) :provider-retry)
+                             collect e)))
+               (check "stream error: every failed attempt is announced"
+                      (= 2 (length retry-events)))
+               (check "stream error: the event carries the overload text"
+                      (search "overloaded"
+                              (or (pget (first retry-events) :reason) ""))))))
+      (setf evo.provider::*models* saved-models
+            evo.provider::*providers* saved-providers))))
+
+(defun test-stream-error-nonretryable ()
+  "A provider-error the adapter did not mark stays a one-shot failure: the
+HTTP ladder never silently retries a permanent condition four times."
+  (let ((saved-models evo.provider::*models*)
+        (saved-providers (copy-alist evo.provider::*providers*)))
+    (unwind-protect
+         (progn
+           (register-api :stream-error-fixture (make-instance 'stream-error-fixture-api))
+           (register-provider* :stream-error-fixture :base-url "https://fixture.invalid")
+           (register-model* "stream-error-fixture-model" :provider :stream-error-fixture
+                            :api :stream-error-fixture :context-window 10000
+                            :max-output 100)
+           (setf *stream-error-fixture-attempts* 0
+                 *stream-error-fixture-retryable* nil)
+           (let ((message (call-provider :model "stream-error-fixture-model"
+                                         :system "sys" :messages nil :tools nil)))
+             (check "stream error: a permanent in-200 error is not retried"
+                    (and (= 1 *stream-error-fixture-attempts*)
+                         (eq (pget message :stop-reason) :error)
+                         (not (pget message :retryable))
+                         (search "overloaded" (or (pget message :error-message) "")))))
+           (setf *stream-error-fixture-retryable* t))
+      (setf *stream-error-fixture-retryable* t
+            evo.provider::*models* saved-models
+            evo.provider::*providers* saved-providers))))
+
 (defun test-activity-line ()
   "The activity line is the only thing a waiting user has to read.  A spinner
 says the loop is alive; the clock and the retry notice say what is happening."
@@ -11601,6 +11688,8 @@ document, per-entry isolation, and never a key."
     (test-request-stall-watchdog)
     (test-stall-clocks)
     (test-retry-is-visible)
+    (test-stream-error-retries)
+    (test-stream-error-nonretryable)
     (test-retry-is-journaled)
     (test-activity-line)
     (test-step-clock)

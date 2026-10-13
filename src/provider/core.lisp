@@ -640,7 +640,14 @@ breakpoints on Anthropic Messages)."
                           (list :retry text (parse-retry-after (dexador.error:response-headers e)))
                           (list :done (error-message text nil)))))
                   (provider-error (e)
-                    (list :done (error-message (provider-error-message e) nil)))
+                    ;; An adapter that parsed a transient server condition out
+                    ;; of the body (an SSE error event on an HTTP 200) marks
+                    ;; its condition retryable; it then rides the same ladder
+                    ;; as a retryable HTTP status.
+                    (if (provider-error-retryable-p e)
+                        (list :retry (provider-error-message e)
+                              (provider-error-retry-after e))
+                        (list :done (error-message (provider-error-message e) nil))))
                   (error (e)
                     (list :retry (format nil "~a: ~a" (type-of e) e) nil)))))
           (ecase (first outcome)
