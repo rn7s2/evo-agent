@@ -96,6 +96,7 @@ plugs in here.")
   thinking-override
   (retry-count 0)
   (compact-retried nil)   ; overflow-recovery guard: compact + retry ONCE
+  (compact-futile-noted nil) ; told the user once that compaction cannot help
   (abort-cleanups nil)    ; worker-owned fns, run when it consumes :ABORT
   ;; A frontend sends immutable queue/control messages while the run worker
   ;; drains them.  LOCK protects only those handoff queues; execution state
@@ -527,6 +528,24 @@ fold ignores the entry, so it costs the transcript nothing."
                         :reason (truncate-string (or (pget event :reason) "") 500))))
   (apply #'emit-event agent event))
 
+(defun note-compaction-futile (agent state model)
+  "Say once per agent that the fixed prompt (system + tools) alone nearly
+fills MODEL's window, so threshold compaction is skipped rather than looped."
+  (unless (agent-compact-futile-noted agent)
+    (setf (agent-compact-futile-noted agent) t)
+    (let* ((overhead (estimate-fixed-overhead (evo.journal:state-messages state)))
+           (text (format nil "Auto-compaction skipped: the system prompt and tool definitions alone take ~:d of ~a's ~:d-token window, so compacting the conversation cannot get under the ~:d threshold. Disable unused MCP servers or tools, or use a model with a larger window; the session will compact once if the provider rejects the request as too long."
+                         overhead (pget model :id) (model-context-window model)
+                         (token-threshold model)))
+           (entry-id (gen-id)))
+      (append-entry (agent-journal agent)
+                    (list :type :notice :severity :warn :text text
+                          :source :compaction)
+                    :id entry-id)
+      (emit-event agent :type :notice :style :notice :severity :warn
+                        :source :compaction :durable t :entry-id entry-id
+                        :text text))))
+
 (defun run (agent)
   "One run: turns until the model stops with no pending steering.
 Returns :stop :length :error :aborted."
@@ -538,15 +557,18 @@ Returns :stop :length :error :aborted."
             (drain-steering agent)
             (emit-event agent :type :turn-start)
             ;; Threshold compaction check at the save point.
-            (let ((state (fold-state (agent-journal agent))))
-              (when (compaction-needed-p state (effective-model state agent))
-                (emit-event agent :type :compaction-start)
-                (unwind-protect
-                     (handler-case (compact-now agent)
-                       (error (e) (warn "Compaction failed, continuing uncompacted: ~a" e)))
-                  (emit-event agent :type :compaction-end))
-                (when (agent-abort-flag agent)
-                  (return :aborted))))
+            (let* ((state (fold-state (agent-journal agent)))
+                   (model (effective-model state agent)))
+              (case (compaction-check state model)
+                (:needed
+                 (emit-event agent :type :compaction-start)
+                 (unwind-protect
+                      (handler-case (compact-now agent)
+                        (error (e) (warn "Compaction failed, continuing uncompacted: ~a" e)))
+                   (emit-event agent :type :compaction-end))
+                 (when (agent-abort-flag agent)
+                   (return :aborted)))
+                (:futile (note-compaction-futile agent state model))))
             (let* ((ctx (prepare-next-turn agent))
                    (entry-id nil)
                    (assistant

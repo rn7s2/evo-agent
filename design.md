@@ -452,6 +452,13 @@ messages remain — then polls follow-ups.
     retry once), or manually via `/compact`.
   - Token accounting is anchored on the last valid provider-reported usage;
     only the tail is estimated (chars/4, images flat ~4800).
+  - The fixed prefix every request carries (system prompt, tool definitions)
+    is measured, not estimated: provider usage minus the estimate of the
+    messages it covered. The checkpoint records it and its summary anchors
+    on it, so the context after a compaction is the size the provider will
+    see. When that overhead plus the kept tail would still cross the
+    threshold, threshold compaction is skipped (one `:notice` says why)
+    instead of re-firing every turn; overflow recovery still compacts once.
   - Cut points are never at a tool result. A single turn exceeding the keep
     budget gets split-turn handling.
   - The summary prompt is structured — Goal, Constraints, Progress, Key

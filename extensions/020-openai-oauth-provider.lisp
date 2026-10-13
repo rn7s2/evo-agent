@@ -17,13 +17,16 @@
 ;;;;   provider :openai-oauth — https://chatgpt.com/backend-api/codex
 ;;;;   models   gpt-5.6-{sol,terra,luna} · gpt-6-{astra,sol,luna} · gpt-6.1-sol
 ;;;;            — registered statically, and only once a credential exists:
-;;;;            272000 context, 16384 output, full effort ladder, vision.
+;;;;            272000 context (setting :openai-oauth-context-window overrides;
+;;;;            the route accepts up to 872000), 16384 output, full effort
+;;;;            ladder, vision.
 ;;;;
 ;;;; The wire body starts with the delegate's public Responses request, then
 ;;;; adopts the Codex Responses Lite layout: instructions and namespaced tools
 ;;;; are developer input items, parallel calls are disabled, max_output_tokens is
-;;;; omitted, reasoning uses all-turn context with readable summaries, and
-;;;; "reasoning.encrypted_content" stays in `include` for stateless replay.
+;;;; omitted, reasoning uses all-turn context with readable summaries,
+;;;; "reasoning.encrypted_content" stays in `include` for stateless replay, and
+;;;; prompt_cache_key is the session id, as Codex sends its conversation id.
 ;;;;
 ;;;; What was measured elsewhere / supplied by the user, not guessed here:
 ;;;;   authorize  https://auth.openai.com/oauth/authorize
@@ -66,7 +69,10 @@
     "gpt-6-astra" "gpt-6.1-sol" "gpt-6-sol" "gpt-6-luna")
   "The OpenAI OAuth models evo supports — the GPT 5.6 and GPT 6 series only.")
 
-(defparameter *openai-oauth-context-window* 272000)
+(defparameter *openai-oauth-context-window* 272000
+  "Codex's default window for these models.  The route accepts input up to
+their max_context_window (872000), so a session that needs more sets
+(evo:set-setting :openai-oauth-context-window N) in init.lisp.")
 (defparameter *openai-oauth-max-output* 16384)
 
 ;;; ---------------------------------------------------------------------------
@@ -586,6 +592,15 @@ is evo, and the endpoint is asked to serve it as such."
          ("x-openai-internal-codex-responses-lite" . "true")
          ("User-Agent" . ,(openai-oauth--user-agent)))))))
 
+(defun openai-oauth--session-id ()
+  "The live session's id, or NIL when no session is running (a bare provider
+call outside an agent)."
+  (let ((agent evo:*agent*))
+    (when agent
+      (let ((journal (evo.kernel:agent-journal agent)))
+        (when journal
+          (evo.util:pget (evo.journal:journal-header journal) :id))))))
+
 (defmethod evo:build-request ((api openai-oauth-responses-api)
                               &key model system messages tools thinking-level)
   (declare (ignore api))
@@ -639,6 +654,13 @@ is evo, and the endpoint is asked to serve it as such."
             (concatenate 'vector prefix (gethash "input" request))))
     (setf (gethash "tool_choice" request) "auto"
           (gethash "parallel_tool_calls" request) nil)
+    ;; Without a cache key the route spreads a session's requests over
+    ;; backends and most of them miss the prompt cache, re-billing the whole
+    ;; prefix as fresh input.  Codex keys on its conversation id; the session
+    ;; id is evo's.  An explicit responses-options key wins.
+    (let ((session (openai-oauth--session-id)))
+      (when (and session (not (gethash "prompt_cache_key" request)))
+        (setf (gethash "prompt_cache_key" request) session)))
     (com.inuoe.jzon:stringify request)))
 
 (defmethod evo:parse-stream ((api openai-oauth-responses-api) char-stream
@@ -693,6 +715,14 @@ unconditional call would silently undo a base URL the user wrote themselves."
   (evo:api-credentials-available-p (evo:find-api :openai-oauth-responses)
                                    (evo:provider-registration :openai-oauth)))
 
+(defun openai-oauth--context-window ()
+  "The window the models are registered with: the :openai-oauth-context-window
+setting when it is a positive integer, else Codex's default."
+  (let ((value (evo:setting :openai-oauth-context-window nil)))
+    (if (and (integerp value) (plusp value))
+        value
+        *openai-oauth-context-window*)))
+
 (defun openai-oauth--register-models ()
   "Register the bundled models once a credential is available."
   (when (openai-oauth--has-key-p)
@@ -700,7 +730,7 @@ unconditional call would silently undo a base URL the user wrote themselves."
       (evo:register-model id
                           :provider :openai-oauth
                           :api :openai-oauth-responses
-                          :context-window *openai-oauth-context-window*
+                          :context-window (openai-oauth--context-window)
                           :max-output *openai-oauth-max-output*
                           :effort t :vision t))))
 
