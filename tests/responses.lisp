@@ -192,6 +192,36 @@
                  "{\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":{\"message\":\"failed\"}}}"
                  "{\"type\":\"response.completed\",\"response\":{\"status\":\"queued\",\"output\":[]}}"))
     (check-signals "responses malformed or failed stream" (responses-fixture-parse (list bad))))
+  ;; A transient server condition arrives as an SSE error event on an HTTP
+  ;; 200 — or as a terminal response.failed — and must ride the retry ladder.
+  (dolist (event '("{\"type\":\"error\",\"message\":\"Our servers are currently overloaded. Please try again later.\"}"
+                   "{\"type\":\"error\",\"code\":503,\"message\":\"busy\"}"
+                   "{\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"overloaded\"}}"))
+    (let ((retryable nil))
+      (handler-case (responses-fixture-parse (list event))
+        (provider-error (e) (setf retryable (evo.provider::provider-error-retryable-p e))))
+      (check (format nil "responses in-stream error retries: ~a" event) retryable)))
+  (let ((retryable 'missing))
+    (handler-case (responses-fixture-parse
+                   '("{\"type\":\"error\",\"message\":\"invalid api key\"}"))
+      (provider-error (e) (setf retryable (evo.provider::provider-error-retryable-p e))))
+    (check "responses a 4xx-style stream error is not retried" (null retryable)))
+  (let ((retryable nil))
+    (handler-case (evo.provider::responses-result
+                   (parse-json "{\"status\":\"failed\",\"output\":[],\"error\":{\"code\":500,\"message\":\"Our servers are currently overloaded. Please try again later.\"}}"))
+      (provider-error (e) (setf retryable (evo.provider::provider-error-retryable-p e))))
+    (check "responses terminal failed with a 5xx error retries" retryable))
+  (let ((retryable t))
+    (handler-case (evo.provider::responses-result
+                   (parse-json "{\"status\":\"failed\",\"output\":[],\"error\":{\"message\":\"content policy violation\"}}"))
+      (provider-error (e) (setf retryable (evo.provider::provider-error-retryable-p e))))
+    (check "responses a terminal failed with a permanent error is not retried"
+           (null retryable)))
+  (let ((retryable t))
+    (handler-case (evo.provider::responses-result
+                   (parse-json "{\"status\":\"cancelled\",\"output\":[],\"error\":{\"message\":\"cancelled\"}}"))
+      (provider-error (e) (setf retryable (evo.provider::provider-error-retryable-p e))))
+    (check "responses a cancelled response is not retried" (null retryable)))
   (let ((block (evo.provider::responses-item-block
                 (parse-json "{\"type\":\"function_call\",\"call_id\":\"call_1\",\"name\":\"read\",\"arguments\":\"{broken\"}"))))
     (check "responses malformed tool args handled by tool error path" (pget block :arguments-error)))

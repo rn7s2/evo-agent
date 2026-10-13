@@ -86,6 +86,20 @@ images or files use structured content items."
     (unless (hash-table-p obj) (error "Responses options must be a JSON object"))
     obj))
 
+(defun responses-error-retryable-p (obj)
+  "Whether a server error delivered inside a 200 stream is transient. The
+OpenAI/Codex route sends overloads as an SSE `error` event (or a terminal
+response.failed) on an HTTP 200, so the HTTP status ladder never classifies
+them. The numeric code/status uses the same set as an HTTP status, and the
+known overload phrasing covers the event that carries none."
+  (let ((code (or (jget obj "code") (jget obj "error" "code")
+                  (jget obj "status") (jget obj "error" "status")))
+        (message (or (jget obj "message") (jget obj "error" "message") ""))
+        (type (or (jget obj "type") (jget obj "error" "type") "")))
+    (or (and (integerp code) (retryable-status-p code))
+        (equal type "overloaded_error")
+        (search "overloaded" message :test #'char-equal))))
+
 (defmethod build-request ((api openai-responses-api)
                           &key model system messages tools thinking-level)
   (let* ((options (responses-options-json (pget model :responses-options)))
@@ -188,9 +202,13 @@ execution use the unified fields, replay uses the original wire object."
     (when (and event-type (not (equal event-type (cat "response." status))))
       (error 'provider-error :message "Responses terminal event/status mismatch"))
     (when (member status '("failed" "cancelled") :test #'equal)
-      (error 'provider-error :message
-             (format nil "Responses ~a: ~a" status
-                     (or (jget response "error" "message") "no error details"))))
+      (error 'provider-error
+             :message (format nil "Responses ~a: ~a" status
+                              (or (jget response "error" "message") "no error details"))
+             ;; A failed response can carry a 5xx/overload inside the 200
+             ;; stream; cancelled never does.
+             :retryable (and (equal status "failed")
+                             (responses-error-retryable-p response))))
     (unless (and (vectorp output) (not (stringp output)))
       (error 'provider-error :message "Responses terminal output is missing"))
     (let* ((content (map 'list #'responses-item-block output))
@@ -366,10 +384,12 @@ snapshot wins for an id it repeats; remembered event order is retained."
                       (setf result (terminal-result obj type))
                       :stop)
                      ((equal type "error")
-                      (error 'provider-error :message
-                             (format nil "Responses error: ~a" (or (jget obj "message")
-                                                                  (jget obj "error" "message")
-                                                                  "unknown error")))))))))
+                      (error 'provider-error
+                             :message (format nil "Responses error: ~a"
+                                              (or (jget obj "message")
+                                                  (jget obj "error" "message")
+                                                  "unknown error"))
+                             :retryable (responses-error-retryable-p obj))))))))
       (if (eq (map-sse-events char-stream #'dispatch :abort-flag abort-flag) :aborted)
           (list :aborted-p t :stop-reason :aborted :content nil)
           (or result (list :stopped-p nil :content nil :stop-reason :error))))))
