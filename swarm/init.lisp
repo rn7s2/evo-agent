@@ -224,8 +224,11 @@ API."
   (let ((apis (mapcar (lambda (model) (cons (getf model :id) (getf model :api)))
                       (all-models))))
     `(when (and (evo:setting :model)
-                (not (ignore-errors (evo.provider:find-model (evo:setting :model)
-                                                             (evo:setting :model-provider)))))
+                (not (ignore-errors
+                       (evo.provider:find-model
+                        (evo:setting :model)
+                        (evo.kernel:effective-model-provider
+                         (evo.journal:empty-state) (evo:setting :model))))))
        (error "lane ~d cannot use its model ~a~@[: its API ~s is not in the lane — an extension defines it, so load that extension in the lanes with (evo.swarm:in-lanes ...) in swarm.lisp~]"
               ,(lane-n lane) (evo:setting :model)
               ;; The model's API, when that is what the lane lacks.  No

@@ -317,6 +317,10 @@ did not register it; a lane whose default model is missing says why."
         (set-setting :model "m-a")
         (check "model check: a default model the lane has passes"
                (handler-case (progn (eval check-form) t) (error () nil)))
+        (set-setting :model-provider :unrelated)
+        (check "model check: a stale provider does not reject a runnable model"
+               (handler-case (progn (eval check-form) t) (error () nil)))
+        (set-setting :model-provider nil)
         (set-setting :model "m-ext")
         (let ((message (handler-case (progn (eval check-form) nil)
                          (error (e) (princ-to-string e)))))
@@ -1714,6 +1718,29 @@ changes nothing about the coordinator."
                     (not (search "LITERAL-SECRET"
                                  (evo.swarm::forms->code
                                   (evo.swarm::lane-setup-forms-for nil session-agent nil)))))))
+      ;; A coordinator selected through ID@PROVIDER journals its provider.
+      ;; Changing only the lane's model must not pin it to that provider.
+      (let* ((coordinator (fresh-agent))
+             (evo:*agent* coordinator)
+             (evo.swarm::*lane-forms* nil))
+        (set-session-model coordinator "outer-model" :outer)
+        (evo.swarm:in-lanes () (evo:set-setting :model "m-b"))
+        (dolist (opts '(nil (:lane-model "m-a")))
+          (let ((plan (evo.swarm::lane-plan opts coordinator)))
+            (check "lane plan: a different lane model resolves its own provider"
+                   (and (eq :stub (evo.swarm::lane-plan-provider plan))
+                        (getf (evo.swarm::lane-plan-status plan) :ok)))
+            (check "lane plan: a stale inherited provider is not a configuration failure"
+                   (null (evo.swarm::lane-plan-problems plan)))))
+        (let ((forms (read-all (evo.swarm::forms->code
+                               (evo.swarm::lane-setup-forms-for nil coordinator nil)))))
+          (check "lane setup: serialized forms accept a cross-provider model override"
+                 (evo.swarm::call-with-lane-sandbox
+                  (lambda ()
+                    (mapc #'eval forms)
+                    (let ((model (effective-model (empty-state) (fresh-agent))))
+                      (and (equal "m-b" (getf model :id))
+                           (eq :stub (getf model :provider)))))))))
       ;; The flags beat the lane's own config, as they do everywhere else in
       ;; evo — over the in-lanes settings, and over what a resumed record
       ;; restored (which a flag wrote there in the first place).
