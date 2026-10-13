@@ -157,6 +157,9 @@
 ;; (evo:set-setting :compact-reserve 16000)
 ;; (evo:set-setting :compact-keep-recent 20000)
 ;; (evo:set-setting :compact-input-item-reserve 64) ; models with :max-input-items
+;; The OpenAI OAuth models register with Codex's 272000 window; the route
+;; accepts up to 872000.  Read when the extension registers them.
+;; (evo:set-setting :openai-oauth-context-window 872000)
 ;; Language of the system prompt and of replies.  A registered pack code
 ;; ("en", or one an extension adds with evo:register-prompt-language) switches
 ;; the prompt itself into that language; any other string ("Korean") is just a

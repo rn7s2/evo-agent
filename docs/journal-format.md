@@ -33,10 +33,10 @@ form-by-form, not line-by-line.
 | `:model-change` | `:model` id, and `:provider` when the id is registered under more than one (state fold) |
 | `:thinking-change` | `:thinking` level (state fold) |
 | `:tools-change` | `:tools` vector of active tool names (state fold) |
-| `:compaction` | `:summary` + `:retained-tail` — self-contained checkpoint; context rebuild = [summary, …tail, …entries-after]. Also `:tokens-before`, `:tokens-after` (what the context was and is) and `:manual` (`t` when a person asked: `/compact`, `context.compact`) |
+| `:compaction` | `:summary` + `:retained-tail` — self-contained checkpoint; context rebuild = [summary, …tail, …entries-after]. Also `:tokens-before`, `:tokens-after` (what the context was and is), `:overhead-tokens` (the measured system-prompt + tool prefix the summary's usage anchors on; absent on older entries, read as 0) and `:manual` (`t` when a person asked: `/compact`, `context.compact`) |
 | `:branch-summary` | summary of an abandoned branch |
 | `:custom` | `:key`/`:data` extension state, INVISIBLE to the LLM |
-| `:notice` | what was shown to the user: `:severity` (`:info`/`:warn`/`:error`), `:text`, `:source` (`:command`/`:extension`/`:swarm`/`:serve`/`:goal`) and `:data` — INVISIBLE to the LLM, ignored by the fold. The durable half of a frontend's output: goal transitions, a run's internal error, a compaction's result |
+| `:notice` | what was shown to the user: `:severity` (`:info`/`:warn`/`:error`), `:text`, `:source` (`:command`/`:extension`/`:swarm`/`:serve`/`:goal`/`:compaction`) and `:data` — INVISIBLE to the LLM, ignored by the fold. The durable half of a frontend's output: goal transitions, a run's internal error, a compaction's result |
 | `:custom-message` | extension-injected content, visible to the LLM (`:key` lets a transform hook remove it later; the text is stored wrapped in the harness's `<evo:reminder kind="…">` envelope, which views strip for display) |
 | `:label` | bookmark (`:target-id` + `:label`) |
 | `:goal` | goal created/updated: `:goal-id :objective :status :token-budget :tokens-used` (`:token-budget` nil = no limit, the default) |

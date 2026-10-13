@@ -10,11 +10,23 @@
 ;;;; self-contained checkpoint: context rebuild is
 ;;;; [summary, ...retained-tail, ...entries-after], O(1), no walk past it.
 ;;;; Summaries reach the model as ordinary user messages in <summary> tags.
+;;;;
+;;;; Every request also carries a fixed prefix no compaction can shrink: the
+;;;; system prompt and the tool definitions (a few MCP servers can make that
+;;;; most of a window).  Provider usage measures it; the chars/4 estimate of
+;;;; the messages does not, so the difference is the overhead.  The
+;;;; checkpoint records it, and its summary anchors on it, so the context
+;;;; size after a compaction is the real one.  A compaction that could not
+;;;; bring the context under the threshold is not attempted: it would fire
+;;;; again on the very next turn, forever.  The window then fills until the
+;;;; provider refuses, and overflow recovery compacts once.
 
 (in-package :evo.kernel)
 
 (defparameter *compact-reserve-tokens* 16000)
 (defparameter *compact-keep-recent-tokens* 20000)
+(defparameter *compact-summary-allowance-tokens* 4000
+  "What a summary is expected to cost when predicting a compaction's result.")
 
 (defun estimate-message-tokens (message)
   "chars/4; an image flat at *IMAGE-BLOCK-TOKENS*."
@@ -45,6 +57,27 @@ the tail after it is estimated."
              for i from 0
              when (or (null anchor-index) (> i anchor-index))
                sum (estimate-message-tokens m)))))
+
+;;; Fixed overhead: provider-measured tokens the messages do not account for.
+
+(defun estimate-fixed-overhead (messages)
+  "Tokens a request carries beyond MESSAGES themselves — system prompt and
+tool definitions — as the last provider-reported usage measured them: that
+usage minus the estimate of every message up to and including its own.  0
+when nothing has been measured yet."
+  (let ((anchor-index nil) (anchor-tokens 0))
+    (loop for m in messages
+          for i from 0
+          when (and (message-usage m)
+                    (plusp (usage-total-tokens (message-usage m))))
+            do (setf anchor-index i
+                     anchor-tokens (usage-total-tokens (message-usage m))))
+    (if anchor-index
+        (max 0 (- anchor-tokens
+                  (loop for m in messages
+                        for i from 0 to anchor-index
+                        sum (estimate-message-tokens m))))
+        0)))
 
 ;;; Input items.  Some endpoints cap the number of input items per request
 ;;; (Ark behind aiden: 1000, whatever the token count), and a long session
@@ -89,17 +122,39 @@ reserve never eats more than half the cap."
   (let ((cap (model-max-input-items model)))
     (and cap (max 1 (floor cap 3)))))
 
+(defun token-threshold (model)
+  (- (model-context-window model)
+     (setting :compact-reserve *compact-reserve-tokens*)))
+
+(defun compaction-check (state model)
+  "NIL when the context fits, :NEEDED when a threshold compaction should run,
+:FUTILE when the token threshold is crossed but the fixed overhead plus the
+tail a compaction keeps would still cross it — compacting then buys nothing
+and re-fires on the next turn."
+  (let* ((messages (evo.journal:state-messages state))
+         (item-threshold (input-item-threshold model))
+         (threshold (token-threshold model))
+         (over-tokens (and messages
+                           (> (estimate-context-tokens messages) threshold)))
+         (over-items (and messages item-threshold
+                          (> (count-input-items messages) item-threshold))))
+    (when (or over-tokens over-items)
+      (let ((cut (select-cut messages :max-items (tail-item-cap model))))
+        (cond
+          ;; A compaction that would drop nothing is not a compaction.
+          ((not (plusp cut)) nil)
+          ;; The item cap is relieved by dropping items whatever the tokens.
+          (over-items :needed)
+          ((>= (+ (estimate-fixed-overhead messages)
+                  (loop for m in (nthcdr cut messages)
+                        sum (estimate-message-tokens m))
+                  *compact-summary-allowance-tokens*)
+               threshold)
+           :futile)
+          (t :needed))))))
+
 (defun compaction-needed-p (state model)
-  (let ((messages (evo.journal:state-messages state))
-        (item-threshold (input-item-threshold model)))
-    (and messages
-         (or (> (estimate-context-tokens messages)
-                (- (model-context-window model)
-                   (setting :compact-reserve *compact-reserve-tokens*)))
-             (and item-threshold
-                  (> (count-input-items messages) item-threshold)))
-         ;; A compaction that would drop nothing is not a compaction.
-         (plusp (select-cut messages :max-items (tail-item-cap model))))))
+  (eq (compaction-check state model) :needed))
 
 ;;; Cut-point selection: retain a recent tail worth ~keep-recent tokens,
 ;;; then extend backwards so the tail never starts at a tool result.  With
@@ -230,6 +285,7 @@ it with the context size it came from and went to.  Returns the entry."
          (state (fold-state journal))
          (messages (evo.journal:state-messages state))
          (tokens-before (estimate-context-tokens messages))
+         (overhead (estimate-fixed-overhead messages))
          (model (effective-model state agent))
          (cut (select-cut messages :max-items (tail-item-cap model)))
          (dropped (subseq messages 0 cut))
@@ -266,6 +322,7 @@ it with the context size it came from and went to.  Returns the entry."
                         (list :type :compaction
                               :summary summary
                               :summary-tokens summary-tokens
+                              :overhead-tokens overhead
                               :retained-tail retained
                               :files-read (coerce all-read 'vector)
                               :files-modified (coerce all-modified 'vector)
@@ -277,6 +334,7 @@ it with the context size it came from and went to.  Returns the entry."
                                              (evo.journal:compaction-entry->messages
                                               (list :summary summary
                                                     :summary-tokens summary-tokens
+                                                    :overhead-tokens overhead
                                                     :retained-tail retained)))
                               :manual (and manual t))))))))
 

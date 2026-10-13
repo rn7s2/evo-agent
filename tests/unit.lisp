@@ -1088,6 +1088,23 @@ builds through the OAuth API."
                            (model-vision-p model)
                            (equal '(:low :medium :high :xhigh :max) (model-effort model))
                            (eq (pget model :api) :openai-oauth-responses)))))
+           ;; The window is Codex's default unless the user widens it; the
+           ;; route accepts input up to the models' 872000 max.
+           (let ((saved (evo:setting :openai-oauth-context-window)))
+             (unwind-protect
+                  (progn
+                    (evo:set-setting :openai-oauth-context-window 872000)
+                    (funcall (openai-oauth-fn "OPENAI-OAUTH--REGISTER-MODELS"))
+                    (check "openai-oauth: the context-window setting is honoured"
+                           (= 872000 (model-context-window
+                                      (find-model "gpt-6.1-sol" :openai-oauth))))
+                    (evo:set-setting :openai-oauth-context-window "huge")
+                    (funcall (openai-oauth-fn "OPENAI-OAUTH--REGISTER-MODELS"))
+                    (check "openai-oauth: a malformed window setting falls back to the default"
+                           (= 272000 (model-context-window
+                                      (find-model "gpt-6.1-sol" :openai-oauth)))))
+               (evo:set-setting :openai-oauth-context-window saved)
+               (funcall (openai-oauth-fn "OPENAI-OAUTH--REGISTER-MODELS"))))
            (evo.port:setenv "OPENAI_OAUTH_ACCESS_TOKEN" "")
            ;; A stored token, and the account claim inside its id_token.
            (funcall (openai-oauth-fn "OPENAI-OAUTH--WRITE-TOKENS")
@@ -1146,6 +1163,30 @@ builds through the OAuth API."
                     (and (not (nth-value 1 (gethash "max_output_tokens" request)))
                          (equal "auto" (gethash "tool_choice" request))
                          (null (gethash "parallel_tool_calls" request))))
+             ;; Prompt caching on this route is keyed per conversation: without
+             ;; a key most requests land on a cold backend and the whole prefix
+             ;; is billed as fresh input.  The session id is the key.
+             (check "openai-oauth: no session, no prompt cache key"
+                    (not (nth-value 1 (gethash "prompt_cache_key" request))))
+             (let* ((dir (uiop:ensure-directory-pathname
+                          (format nil "~a/evo-oauth-cache-~a/" (tmp-dir) (gen-id))))
+                    (journal (progn (ensure-directories-exist dir)
+                                    (make-session-journal dir)))
+                    (session (pget (evo.journal:journal-header journal) :id)))
+               (let ((evo:*agent* (make-agent :journal journal)))
+                 (let ((keyed (parse-json
+                               (build-request (find-api :openai-oauth-responses)
+                                              :model model :messages messages))))
+                   (check "openai-oauth: the session id is the prompt cache key"
+                          (and session (equal session (gethash "prompt_cache_key" keyed)))))
+                 (let ((explicit (parse-json
+                                  (build-request (find-api :openai-oauth-responses)
+                                                 :model (append model
+                                                                (list :responses-options
+                                                                      "{\"prompt_cache_key\":\"mine\"}"))
+                                                 :messages messages))))
+                   (check "openai-oauth: an explicit prompt cache key wins"
+                          (equal "mine" (gethash "prompt_cache_key" explicit))))))
              (check "openai-oauth: Responses Lite replays reasoning across all turns with summaries"
                     (let ((reasoning (gethash "reasoning" request)))
                       (and (equal "all_turns" (gethash "context" reasoning))
@@ -4825,7 +4866,10 @@ and the guards around all of it."
   (register-model* "compact-fixture-model" :provider :compact-fixture
                    :api :compact-fixture :context-window 10000 :max-output 100))
 
-(defun make-compact-fixture-tui (&key (old-chars 4000))
+;;; OLD-CHARS is sized so the messages account for the fixture's reported
+;;; usage (32000 chars ~ 8000 tokens of the 8100): the fixed overhead the
+;;; checkpoint infers stays small, as in a session with a lean tool set.
+(defun make-compact-fixture-tui (&key (old-chars 32000))
   (let* ((dir (uiop:ensure-directory-pathname
                (format nil "~a/evo-compact-tui-~a/" (tmp-dir) (gen-id))))
          (journal (progn (ensure-directories-exist dir) (make-session-journal dir)))
@@ -5022,6 +5066,81 @@ and the guards around all of it."
 ;;; several text blocks with thinking/tool blocks (and an empty placeholder)
 ;;; in between.  Reading only the first :text block failed the whole
 ;;; compaction on any such session.
+
+;;; Fixed overhead.  The system prompt and tool definitions ride on every
+;;; request, the provider's usage counts them and the chars/4 message estimate
+;;; does not.  A session whose tools nearly fill the window used to compact on
+;;; every turn: each checkpoint "dropped" the context to its message estimate,
+;;; and the next response reported the overhead right back.
+
+(defun overhead-fixture-messages (&key (old-chars 40000) (reported 290000))
+  "A user message of OLD-CHARS, then a reply whose provider usage reports
+REPORTED tokens — the rest of which is overhead — then a short tail."
+  (list `(:role :user :content ((:type :text :text ,(make-string old-chars :initial-element #\x))))
+        `(:role :assistant :stop-reason :stop :model "m"
+          :content ((:type :text :text "ok"))
+          :usage (:input ,reported :output 0 :cache-read 0 :cache-write 0))
+        '(:role :user :content ((:type :text :text "tail")))))
+
+(defun test-compaction-fixed-overhead ()
+  (let ((model '(:id "w272" :context-window 272000 :max-output 1000))
+        (previous-keep evo.kernel::*compact-keep-recent-tokens*))
+    (unwind-protect
+         (progn
+           (setf evo.kernel::*compact-keep-recent-tokens* 1)
+           (let ((messages (overhead-fixture-messages)))
+             (check "overhead: usage minus the estimate of what it covered"
+                    (= (- 290000 10001) (evo.kernel::estimate-fixed-overhead messages)))
+             (check "overhead: nothing measured yet is zero"
+                    (zerop (evo.kernel::estimate-fixed-overhead
+                            (list (first messages) (third messages)))))
+             (let ((state (evo.journal::make-state :messages-rev (reverse messages))))
+               (check "overhead past the threshold makes compaction futile"
+                      (eq :futile (evo.kernel::compaction-check state model)))
+               (check "a futile compaction is not needed"
+                      (not (compaction-needed-p state model)))))
+           ;; Same reported size, but the messages are most of it: compaction
+           ;; frees the window and still runs.
+           (let* ((messages (overhead-fixture-messages :old-chars 1000000 :reported 260000))
+                  (state (evo.journal::make-state :messages-rev (reverse messages))))
+             (check "droppable history still compacts"
+                    (eq :needed (evo.kernel::compaction-check state model))))
+           ;; The checkpoint records the overhead and the summary anchors on it,
+           ;; so the context after a compaction is the size the provider will
+           ;; see, not the summary alone.
+           (let* ((entry '(:type :compaction :summary "s" :summary-tokens 3000
+                           :overhead-tokens 250000
+                           :retained-tail #((:role :user :content ((:type :text :text "tail"))))))
+                  (messages (evo.journal:compaction-entry->messages entry)))
+             (check "checkpoint anchors on overhead plus summary"
+                    (<= 253000 (estimate-context-tokens messages) 253100)))
+           (let ((messages (evo.journal:compaction-entry->messages
+                            '(:type :compaction :summary "s" :summary-tokens 3000
+                              :retained-tail #()))))
+             (check "an older checkpoint without overhead anchors on the summary"
+                    (= 3000 (estimate-context-tokens messages)))))
+      (setf evo.kernel::*compact-keep-recent-tokens* previous-keep)))
+  ;; End to end through COMPACT-NOW: tokens-after carries the overhead.
+  (let ((previous-mode *compact-fixture-mode*)
+        (previous-keep evo.kernel::*compact-keep-recent-tokens*))
+    (unwind-protect
+         (progn
+           (setf *compact-fixture-mode* :success
+                 evo.kernel::*compact-keep-recent-tokens* 1)
+           (setup-compact-fixture-model)
+           (multiple-value-bind (tui agent journal) (make-compact-fixture-tui :old-chars 4000)
+             (declare (ignore tui))
+             (let ((entry (compact-now agent :manual t)))
+               (check "compact-now records the measured overhead"
+                      (= (- 8100 (+ 1000 1 1)) (pget entry :overhead-tokens)))
+               (check "tokens-after includes the overhead"
+                      (>= (pget entry :tokens-after) (pget entry :overhead-tokens)))
+               (check "the folded context starts from the overhead"
+                      (>= (estimate-context-tokens
+                           (evo.journal:state-messages (fold-state journal)))
+                          (pget entry :overhead-tokens))))))
+      (setf *compact-fixture-mode* previous-mode
+            evo.kernel::*compact-keep-recent-tokens* previous-keep))))
 
 (defun test-compaction-summary-blocks ()
   (let ((previous-mode *compact-fixture-mode*)
@@ -11442,6 +11561,7 @@ document, per-entry isolation, and never a key."
     (test-sessions-cli)
     (test-compaction)
     (test-compaction-summary-blocks)
+    (test-compaction-fixed-overhead)
     (test-lore)
     (test-lore-slash-commands)
     (test-project-memory)

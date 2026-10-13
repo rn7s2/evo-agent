@@ -332,14 +332,16 @@ provider that reports none contributes nothing."
 
 (defun compaction-entry->messages (entry)
   "Messages a :compaction checkpoint contributes: the summary as an ordinary
-user message in <summary> tags, then the retained tail."
+user message in <summary> tags, then the retained tail.  The summary carries
+the usage anchor the context estimate starts from: the fixed overhead the
+checkpoint measured (system prompt, tools) plus the summary itself."
   (cons (list :role :user
               :content (list (list :type :text
                                    :text (format nil "<summary>~%This session was compacted; the conversation so far is summarized below. Continue seamlessly from it.~2%~a~@[~2%Files read so far: ~{~a~^, ~}~]~@[~%Files modified so far: ~{~a~^, ~}~]~%</summary>"
                                                  (pget entry :summary)
                                                  (coerce (or (pget entry :files-read) #()) 'list)
                                                  (coerce (or (pget entry :files-modified) #()) 'list))))
-              :usage (list :input 0
+              :usage (list :input (or (pget entry :overhead-tokens) 0)
                            :output (or (pget entry :summary-tokens) 0)
                            :cache-read 0 :cache-write 0))
         (coerce (or (pget entry :retained-tail) #()) 'list)))
