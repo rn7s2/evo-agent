@@ -60,10 +60,10 @@ mkdir -p "$EVO_HOME" "$work"
 
 # Config is interpolated (unquoted heredoc): the values come from the env.
 cat > "$EVO_HOME/init.lisp" <<EOF
-(evo:register-model "$EVO_TEST_MODEL"
-  :provider :anthropic :api :anthropic-messages
+(evo:register-model "$EVO_TEST_MODEL" :provider :anthropic
+  :api :anthropic-messages
   :context-window 1000000 :max-output 64000)
-(evo:set-setting :model "$EVO_TEST_MODEL")
+(evo:set-setting :model '("$EVO_TEST_MODEL" :anthropic))
 (evo:set-setting :thinking :xhigh)
 (evo:register-provider :anthropic
   :base-url "$EVO_TEST_BASE_URL"
@@ -74,8 +74,8 @@ EOF
 # without disturbing the model the rest of the suite drives.
 if [ -n "$EVO_TEST_VISION_MODEL" ]; then
     cat >> "$EVO_HOME/init.lisp" <<EOF
-(evo:register-model "$EVO_TEST_VISION_MODEL"
-  :provider :anthropic :api :anthropic-messages
+(evo:register-model "$EVO_TEST_VISION_MODEL" :provider :anthropic
+  :api :anthropic-messages
   :context-window 1000000 :max-output 64000 :vision t)
 EOF
 fi
@@ -197,7 +197,7 @@ if [ -n "$EVO_TEST_VISION_MODEL" ] && command -v xxd >/dev/null 2>&1; then
         | xxd -r -p > "$work_img/red.png"
     (
         cd "$work_img"
-        "$evo" --model "$EVO_TEST_VISION_MODEL" --image "$work_img/red.png" \
+        "$evo" --model "${EVO_TEST_VISION_MODEL}@anthropic" --image "$work_img/red.png" \
             -p "What single colour fills this image? Reply with exactly one line: colour-is-<word>." \
             >"$scratch/t-img.out" 2>"$scratch/t-img.err"
     )
@@ -210,7 +210,7 @@ if [ -n "$EVO_TEST_VISION_MODEL" ] && command -v xxd >/dev/null 2>&1; then
     # is not about them cannot pass.
     (
         cd "$work_img"
-        "$evo" --model "$EVO_TEST_VISION_MODEL" \
+        "$evo" --model "${EVO_TEST_VISION_MODEL}@anthropic" \
             -p "Use the read tool on red.png in this directory and look at it. What single colour fills the image? Reply with exactly one line: colour-is-<word>." \
             >"$scratch/t-img2.out" 2>"$scratch/t-img2.err"
     )
@@ -250,10 +250,10 @@ pids6=""
 for h in a b; do
     mkdir -p "$scratch/home6$h"
     cat > "$scratch/home6$h/init.lisp" <<'EOF'
-(evo:register-model "id-probe"
-  :provider :anthropic :api :anthropic-messages
+(evo:register-model "id-probe" :provider :anthropic
+  :api :anthropic-messages
   :context-window 100000 :max-output 1000)
-(evo:set-setting :model "id-probe")
+(evo:set-setting :model '("id-probe" :anthropic))
 (evo:register-provider :anthropic :base-url "http://127.0.0.1:9" :api-key "sk-x")
 EOF
     (cd "$work6" && EVO_HOME="$scratch/home6$h" "$evo" --goal "id collision probe" \

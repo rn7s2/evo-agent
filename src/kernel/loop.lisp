@@ -326,33 +326,20 @@ thread."
 
 ;;; Save point: the whole context snapshot is rebuilt between turns.
 
-(defun effective-model-id (state agent)
-  "The session's model id: journaled choice, else CLI override, else the
-:model setting.  No kernel default — config must name a model (normally
-guaranteed by the CLI preflight)."
-  (or (evo.journal:state-model state)
-      (agent-model-override agent)
-      (setting :model)
-      (error "No model is configured — set one in init.lisp: (evo:set-setting :model \"...\")")))
+(defun effective-model-ref (state agent)
+  "The complete model identity: journaled choice, launch override, then config."
+  (or (and state (evo.journal:state-model state))
+      (and agent (agent-model-override agent))
+      (model-setting-ref (setting :model))
+      (error "No model is configured — set :model '(\"model\" :provider) in init.lisp")))
 
-(defun effective-model-provider (state id)
-  "Which provider serves model ID this session, when the id is registered
-under more than one.  A journaled /model choice names its provider; failing
-that the :model-provider setting names the config default, but only if it
-actually serves ID — a stale setting must not break an unrelated model.
-NIL means \"first registration wins\"."
-  (or (evo.journal:state-model-provider state)
-      (let ((configured (setting :model-provider)))
-        (and configured
-             (member configured (model-providers id))
-             configured))))
+(defun effective-model-id (state agent)
+  "The bare API model ID, for display; resolution uses EFFECTIVE-MODEL."
+  (nth-value 0 (split-model-ref (effective-model-ref state agent))))
 
 (defun effective-model (state agent)
-  "The model plist this session's next turn runs on: the effective id,
-resolved against the provider that serves it.  Signals when the id is not
-registered — the model gate a frontend checks before starting a run."
-  (let ((id (effective-model-id state agent)))
-    (find-model id (effective-model-provider state id))))
+  "The exact registered model this session will run, or an error."
+  (find-model (effective-model-ref state agent)))
 
 (defun effective-thinking (state &optional override)
   "The thinking level for this turn: the journaled /thinking choice, then
@@ -368,8 +355,8 @@ an adapter that no longer knows the word."
 (defun prepare-next-turn (agent)
   (let* ((state (fold-state (agent-journal agent)))
          (tools (active-tools state))
-         (model-id (effective-model-id state agent))
-         (model (find-model model-id (effective-model-provider state model-id)))
+         (model (effective-model state agent))
+         (model-id (getf model :id))
          (thinking (effective-thinking state (agent-thinking-override agent))))
     ;; Projection pipeline: journal entries -> agent messages ->
     ;; (transform-context) -> provider messages.  Extensions hook the

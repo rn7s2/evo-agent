@@ -46,7 +46,7 @@ tools (on its run thread) and the TUI's status segment all read or write it."
   id dir cwd workers lanes evo-binary agent
   view                  ; where its notices go and how it runs: a VIEW (view.lisp)
   server                ; the coordinator's serve server, or NIL (the TUI)
-  lane-model lane-provider   ; what the lanes run (CONTRACT §1, §4.3), or NIL
+  lane-model            ; qualified model@provider identity, or NIL
   lane-thinking
   prompt-notes           ; --prompt-note paths this launch was given: registered
                          ; on the coordinator, and passed to every lane
@@ -56,6 +56,19 @@ tools (on its run thread) and the TUI's status segment all read or write it."
   published)            ; the swarm topic state last published, for diffing
 
 (defvar *swarm* nil "The running swarm.")
+
+(defun record-lane-model (record)
+  "A resumed swarm RECORD's lane model as a qualified model@provider string.
+Old records carry a bare :lane-model and a separate :lane-provider; today's
+carry one qualified :lane-model.  NIL when the record names no lane model."
+  (let ((model (getf record :lane-model))
+        (provider (getf record :lane-provider)))
+    (cond ((null model) nil)
+          ;; A separate provider marks a legacy record even when the bare model
+          ;; id itself contains @.  New records never write :lane-provider.
+          (provider (format nil "~a@~(~a~)" model provider))
+          ((find #\@ model) model)
+          (t model))))
 
 (defmacro with-swarm-lock (() &body body)
   `(bt:with-lock-held ((swarm-lock *swarm*)) ,@body))

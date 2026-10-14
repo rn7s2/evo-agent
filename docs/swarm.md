@@ -238,7 +238,7 @@ is configured:
 ```lisp
 ;; ~/.evo/swarm.lisp
 ;;; The coordinator: any init.lisp call, for the swarm only
-(evo:set-setting :model "claude-opus-5")
+(evo:set-setting :model '("claude-opus-5" :anthropic-oauth))
 
 ;;; The swarm
 (evo:set-setting :swarm-workers 4)
@@ -247,7 +247,7 @@ is configured:
 (evo.swarm:in-lanes (lane lanes)
   (load "~/.evo/extensions/020-claude-oauth-provider.lisp")
   (when (<= lane 2)
-    (evo:set-setting :model "claude-sonnet-5")))
+    (evo:set-setting :model '("claude-sonnet-5" :anthropic-oauth))))
 ```
 
 A commented sample is [docs/examples/swarm.lisp](examples/swarm.lisp).
@@ -360,14 +360,14 @@ no swarm keep the running lanes.
 ## Command line
 
 ```text
-evo-swarm [--workers N] [--resume [path]] [--model id] [--thinking level]
-          [--lane-model id[@provider]] [--lane-thinking level]
+evo-swarm [--workers N] [--resume [path]] [--model model@provider] [--thinking level]
+          [--lane-model model@provider] [--lane-thinking level]
           [--evo path] [--no-userspace] [--no-supervisor]
 
 evo-swarm serve [--host addr] [--port n] [--ready-file path] [--allow-remote]
                 [--watch-stdin] [--prompt-note path …]
-                [--workers N] [--resume [path]] [--model id] [--thinking level]
-                [--lane-model id[@provider]] [--lane-thinking level]
+                [--workers N] [--resume [path]] [--model model@provider] [--thinking level]
+                [--lane-model model@provider] [--lane-thinking level]
                 [--evo path] [--no-userspace] [--no-supervisor]
 
 evo-swarm catalog --json       what a swarm launched from here could use

@@ -233,8 +233,8 @@ evaluates the lane forms for its offline `catalog`); one that only knows it
 runs lanes passes (LANE-CATALOG warnings), the kernel-API-set answer."
   (let ((warnings nil)
         (state (ignore-errors (fold-state (agent-journal agent)))))
-    (let* ((default-id (or (and state (evo.journal:state-model state))
-                             (setting :model)))
+    (let* ((selection (ignore-errors (evo.kernel:effective-model-ref state agent)))
+           (default-id (and selection (ignore-errors (nth-value 0 (split-model-ref selection)))))
              ;; The effort this session's next turn runs on, DEFAULT-MODEL's
              ;; counterpart: the journaled /thinking choice, the :thinking
              ;; setting, then medium — the chain EFFECTIVE-THINKING applies,
@@ -246,10 +246,9 @@ runs lanes passes (LANE-CATALOG warnings), the kernel-API-set answer."
              ;; not read — leaves the same chain without its journal rung.
              (default-thinking (string-downcase
                                 (symbol-name
-                                 (if state
-                                     (evo.kernel:effective-thinking state)
-                                     (or (normalize-thinking-level (setting :thinking))
-                                         :medium)))))
+                                 (evo.kernel:effective-thinking
+                                  (or state (evo.journal:empty-state))
+                                  (evo.kernel:agent-thinking-override agent)))))
              ;; The provider is the one the *model* is registered under — the
              ;; same answer /catalog gives for the model itself — so a client
              ;; that looks the pair up in MODELS finds it.  A session-level
@@ -262,16 +261,8 @@ runs lanes passes (LANE-CATALOG warnings), the kernel-API-set answer."
                         (push "the lanes half could not be read and was left out"
                               warnings)
                         nil)))
-             (default-provider (and default-id
-                                    (or (ignore-errors
-                                          (pget (find-model
-                                                 default-id
-                                                 (ignore-errors
-                                                  (evo.kernel:effective-model-provider
-                                                   state default-id)))
-                                                :provider))
-                                        (ignore-errors (evo.kernel:effective-model-provider
-                                                        state default-id))))))
+             (default-provider (and selection
+                                    (ignore-errors (nth-value 1 (split-model-ref selection))))))
         (let ((doc (list :models (catalog-entries (all-models)
                                                   (lambda (m) (pget m :id))
                                                   #'catalog-model warnings "model")

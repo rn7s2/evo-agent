@@ -48,13 +48,12 @@ in the new one."
   (index-session journal)
   agent)
 
-(defun set-session-model (agent model-id &optional provider)
-  "Journal a model choice: the session's next turn runs on MODEL-ID, served by
-PROVIDER when the id is registered under more than one (NIL leaves the choice
-to the registry).  Journaled, so it survives a restart and a compaction."
-  (append-entry (agent-journal agent)
-                (list* :type :model-change :model model-id
-                       (and provider (list :provider provider)))))
+(defun set-session-model (agent ref)
+  "Journal one qualified model identity, preserving it across resume and compaction."
+  (multiple-value-bind (id provider) (split-model-ref ref)
+    (append-entry (agent-journal agent)
+                  (list :type :model-change
+                        :model (format nil "~a@~(~a~)" id provider)))))
 
 (defun set-session-thinking (agent level)
   "Journal a thinking LEVEL (one of +EFFORT-LEVELS+) for the session's next

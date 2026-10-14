@@ -174,14 +174,6 @@ NAMES NIL give them every tool again.  The report tool is always kept."
   (format nil "EVO_SWARM_~a_API_KEY"
           (substitute #\_ #\- (string-upcase (symbol-name provider)))))
 
-(defun provider-key-for (name)
-  "The registered provider NAME names, as it was registered — a keyword or a
-string.  NIL when nothing is registered under it."
-  (and name
-       (find name (provider-keys)
-             :key (lambda (key) (string key))
-             :test #'string-equal)))
-
 (defun provider-env-var (provider)
   "The environment variable PROVIDER's key is read from in a lane: its own
 :api-key-env, or the swarm-private one for a literal key; NIL for none."
@@ -212,8 +204,7 @@ has it already (IN-LANES registered it its own way), or lacks its API: an API
 an extension defines exists in a lane only if IN-LANES loaded that extension,
 and a model the lane cannot register is one it cannot use, not an error."
   `(when (and (member ,(getf model :api) (evo:api-keys))
-              (not (ignore-errors (evo.provider:find-model ,(getf model :id)
-                                                           ,(getf model :provider)))))
+              (not (ignore-errors (evo.provider:find-model ,(model-ref model)))))
      ,(model-registration-form model)))
 
 (defun lane-model-check-form (lane)
@@ -221,22 +212,19 @@ and a model the lane cannot register is one it cannot use, not an error."
 one failure a skipped model can cause.  Its error names the missing API and
 what to do about it, so it reaches the coordinator as that, not as an unknown
 API."
-  (let ((apis (mapcar (lambda (model) (cons (getf model :id) (getf model :api)))
+  (let ((apis (mapcar (lambda (model) (cons (model-ref model) (getf model :api)))
                       (all-models))))
     `(when (and (evo:setting :model)
                 (not (ignore-errors
                        (evo.provider:find-model
-                        (evo:setting :model)
-                        (evo.kernel:effective-model-provider
-                         (evo.journal:empty-state) (evo:setting :model))))))
+                        (evo.provider:model-setting-ref (evo:setting :model))))))
        (error "lane ~d cannot use its model ~a~@[: its API ~s is not in the lane — an extension defines it, so load that extension in the lanes with (evo.swarm:in-lanes ...) in swarm.lisp~]"
-              ,(lane-n lane) (evo:setting :model)
-              ;; The model's API, when that is what the lane lacks.  No
-              ;; variables: a symbol built here would be this package's,
-              ;; which a lane has never heard of.
-              (and (not (member (cdr (assoc (evo:setting :model) ',apis :test #'equal))
+              ,(lane-n lane) (evo.provider:model-setting-ref (evo:setting :model))
+              (and (not (member (cdr (assoc (evo.provider:model-setting-ref (evo:setting :model))
+                                           ',apis :test #'equal))
                                 (evo:api-keys)))
-                   (cdr (assoc (evo:setting :model) ',apis :test #'equal)))))))
+                   (cdr (assoc (evo.provider:model-setting-ref (evo:setting :model))
+                               ',apis :test #'equal)))))))
 
 (defun provider-registration-form (key)
   (let ((reg (provider-registration key)))
@@ -305,7 +293,7 @@ path :FORMS forms).")
   (evo.swarm:in-lanes (lane lanes)
     (load \"~/.evo/extensions/020-claude-oauth-provider.lisp\")
     (when (<= lane 2)
-      (evo:set-setting :model \"claude-opus-5\")))
+      (evo:set-setting :model '(\"claude-opus-5\" :anthropic-oauth))))
 
 LANE and LANES, if named, are bound around each form to the lane's number
 (1..LANES) and the lane count; (in-lanes () ...) binds neither.  The forms run
@@ -386,24 +374,17 @@ up with.
   (let* ((agent evo:*agent*)
          (state (and agent (fold-state (agent-journal agent))))
          (configured (swarm-lane-model swarm))
-         (configured-provider (swarm-lane-provider swarm))
          (configured-thinking (swarm-lane-thinking swarm))
-         (model-id (or configured
-                       (and state (ignore-errors (effective-model-id state agent)))))
-         (provider (or (and configured-provider
-                            (provider-key-for configured-provider))
-                       (and model-id (effective-model-provider state model-id))))
+         (selection (or configured
+                        (and state (ignore-errors (effective-model-ref state agent)))))
          (thinking (or configured-thinking
                        (and state (effective-thinking state (agent-thinking-override agent))))))
     (append
      (mapcar #'provider-registration-form (provider-keys))
-     (when model-id `((evo:set-setting :model ,model-id)))
-     (when provider `((evo:set-setting :model-provider ,provider)))
+     (when selection `((evo:set-setting :model ',(model-ref-setting selection))))
      (when thinking `((evo:set-setting :thinking ,thinking)))
      (lane-code-forms lane swarm)
-     (when configured `((evo:set-setting :model ,configured)))
-     (when (and configured-provider (provider-key-for configured-provider))
-       `((evo:set-setting :model-provider ,(provider-key-for configured-provider))))
+     (when configured `((evo:set-setting :model ',(model-ref-setting configured))))
      (when configured-thinking `((evo:set-setting :thinking ,configured-thinking)))
      (mapcar #'model-fill-in-form (all-models))
      (list (lane-model-check-form lane)))))

@@ -53,7 +53,7 @@ clean_session_env
 # its other tools, nor its startup.
 set f [open "$env(EVO_HOME)/init.lisp" w]
 puts $f {(evo:register-model "mcp-test" :provider :none :api :anthropic-messages :context-window 100000 :max-output 4000)}
-puts $f {(evo:set-setting :model "mcp-test")}
+puts $f {(evo:set-setting :model '("mcp-test" :none))}
 puts $f {(evo:register-provider :none :base-url "http://127.0.0.1:1/unused" :api-key "unused")}
 puts $f "(evo:set-setting :mcp-servers
   (list (list :name \"echo\" :type :streamable-http :url \"http://127.0.0.1:$port/mcp\"

@@ -564,6 +564,13 @@ the validated vocabulary, plain prin1 output re-reads exactly."
 (defun set-setting (key value)
   (unless (keywordp key)
     (error "set-setting: key must be a keyword, got ~s" key))
+  (when (eq key :model-provider)
+    (error "set-setting: :model-provider was removed; use :model '(\"model\" :provider)"))
+  (when (and (eq key :model)
+             (not (and (consp value) (consp (cdr value)) (null (cddr value))
+                       (stringp (first value)) (plusp (length (first value)))
+                       (keywordp (second value)))))
+    (error "set-setting: :model requires (\"model\" :provider), got ~s" value))
   (setf (getf *settings* key) value)
   value)
 

@@ -49,7 +49,6 @@ named hooks so a /reload does not double-register them."
             :dir (namestring (swarm-dir *swarm*))
             :workers (length lanes)
             :lane-model (swarm-lane-model *swarm*)
-            :lane-provider (swarm-lane-provider *swarm*)
             :lane-thinking (swarm-lane-thinking *swarm*)
             :lanes (coerce
                     (loop for lane in lanes
@@ -477,8 +476,7 @@ is not journalled."
                              :view view
                              :server server
                              :agent agent
-                             :lane-model (getf record :lane-model)
-                             :lane-provider (getf record :lane-provider)
+                             :lane-model (record-lane-model record)
                              :lane-thinking (getf record :lane-thinking)
                              :prompt-notes prompt-notes)))
     (setf (swarm-lanes swarm)

@@ -17,7 +17,7 @@
   /goal [text]         show, create, or refine the goal; /goal pause|resume
   /todo                toggle the todo panel
   /theme [dark|light]  switch the light/dark theme
-  /model [id]          pick the model from a list, or set it directly
+  /model [model@provider] pick the model from a list, or set it directly
   /thinking [level]    low·medium·high·xhigh·max (changing it mid-session
                        drops the provider prompt cache)
   /lang [code]         pick the language of the system prompt and replies

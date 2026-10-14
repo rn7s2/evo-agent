@@ -190,11 +190,7 @@ while the run thread is appending to it."
          ;; Resolve once: the label, the context window and the run all have
          ;; to agree on WHICH registration is live when an id is served by
          ;; several providers.
-         (model (and model-id
-                     (handler-case
-                         (find-model model-id
-                                     (evo.kernel:effective-model-provider state model-id))
-                       (error () nil)))))
+         (model (ignore-errors (evo.kernel:effective-model state agent))))
     (setf (tui-goal tui) (evo.journal:state-goal state)
           (tui-todos tui) (custom-state state "todo")
           ;; Same id under several providers: name the active one, since the

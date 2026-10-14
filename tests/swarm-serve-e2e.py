@@ -1062,7 +1062,7 @@ def main():
                 f':api-key "{SECRET}")\n'
                 '(evo:register-model "stub-a" :provider :stub :context-window 200000 '
                 ':max-output 8000 :effort t)\n'
-                '(evo:set-setting :model "stub-a")\n')
+                '(evo:set-setting :model \'("stub-a" :stub))\n')
 
     # A lane must not inherit this process's supervision or session: a foreign
     # EVO_SESSIONS_DIR would put the swarm's journals in someone else's home,

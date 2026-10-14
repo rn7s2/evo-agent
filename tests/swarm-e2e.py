@@ -304,13 +304,13 @@ def main():
                 f':api-key "{SECRET}")\n'
                 '(evo:register-model "stub-a" :provider :stub :context-window 200000 '
                 ':max-output 8000 :effort t)\n'
-                '(evo:set-setting :model "stub-a")\n')
+                '(evo:set-setting :model \'("stub-a" :stub))\n')
     # swarm.lisp, read by evo-swarm only, after post-init: the global one sets
     # the coordinator's model for the swarm and gives every lane a tool...
     with open(os.path.join(home, "swarm.lisp"), "w") as f:
         f.write('(evo:register-model "stub-swarm" :provider :stub :context-window 200000 '
                 ':max-output 8000 :effort t)\n'
-                '(evo:set-setting :model "stub-swarm")\n'
+                '(evo:set-setting :model \'("stub-swarm" :stub))\n'
                 # An API only the coordinator has — as an extension the lanes
                 # never load would define — with a model on it.  The lanes
                 # must come up without that model rather than fail.

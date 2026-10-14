@@ -190,7 +190,6 @@ without an append."
   (setf (v-held view) (agent-hold-reason (v-agent view)))
   (let* ((agent (v-agent view))
          (journal (agent-journal agent))
-         (fold (fold-state journal))
          (state (journal-state journal
                                :agent agent
                                :status (view-status view)
@@ -200,10 +199,7 @@ without an append."
                                :live-goal-tokens (v-run-tokens view)
                                :context (v-context view)))
          (old (v-state view)))
-    ;; Resolution of a provider for a message that names only a model id reads
-    ;; the fold, so the walk's copy of it has to move with the journal.
-    (setf (pctx-fold (v-ctx view)) fold
-          (v-state view) state)
+    (setf (v-state view) state)
     (when old
       (emit-state-patch view (loop for (k v) on state by #'cddr
                                    unless (equal v (pget old k)) append (list k v))))
@@ -643,14 +639,13 @@ it: this is what a leaf move, a session switch or a lane restart does, and it
 is why only the append path has to be incremental."
   (bt:with-lock-held ((v-lock view))
     (let* ((agent (v-agent view))
-           (journal (agent-journal agent))
-           (fold (fold-state journal)))
+           (journal (agent-journal agent)))
       (multiple-value-bind (items state) (project-journal journal agent)
         (setf (v-items view) (make-item-vector)
               (v-index view) (make-hash-table :test #'equal)
               (v-wire view) (make-hash-table :test #'equal)
               (v-media view) (make-hash-table :test #'equal)
-              (v-ctx view) (make-pctx :fold fold)
+              (v-ctx view) (make-pctx)
               (v-state view) state
               (v-assistant-item view) nil
               (v-tool-item view) nil)
@@ -676,10 +671,9 @@ still fetch an image after a rebuild."
   "A live view of AGENT's session, topic TOPIC.  Reads work immediately; ops go
 nowhere until VIEW-ATTACH gives them a publisher."
   (let* ((journal (agent-journal agent))
-         (fold (fold-state journal))
          (view (%make-view :agent agent :topic topic
                            :items (make-item-vector)
-                           :ctx (make-pctx :fold fold)
+                           :ctx (make-pctx)
                            :held (agent-hold-reason agent))))
     (multiple-value-bind (items state) (project-journal journal agent)
       (loop for item across items do (store-item view item))

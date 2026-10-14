@@ -539,7 +539,7 @@ field-wise."
   (apply #'evo.provider:register-provider* key args))
 
 (defun set-setting (key value)
-  "Set a setting from init.lisp, e.g. (evo:set-setting :model \"...\")."
+  "Set a setting from init.lisp; :model requires '(\"model\" :provider)."
   (evo.util:set-setting key value))
 
 (defun setting (key &optional default)

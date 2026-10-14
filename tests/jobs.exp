@@ -22,7 +22,7 @@ clean_session_env
 # A model must be registered for the TUI to start; it is never called.
 set f [open "$env(EVO_HOME)/init.lisp" w]
 puts $f {(evo:register-model "jobs-test" :provider :none :api :anthropic-messages :context-window 100000 :max-output 4000)}
-puts $f {(evo:set-setting :model "jobs-test")}
+puts $f {(evo:set-setting :model '("jobs-test" :none))}
 puts $f {(evo:register-provider :none :base-url "http://127.0.0.1:1/unused" :api-key "unused")}
 close $f
 

@@ -30,7 +30,7 @@ form-by-form, not line-by-line.
 | type | meaning |
 |---|---|
 | `:message` | payload `:message` is a message plist (in LLM context) |
-| `:model-change` | `:model` id, and `:provider` when the id is registered under more than one (state fold) |
+| `:model-change` | `:model` — one `id@provider` identity string (older journals carry a bare `:model` id with a separate `:provider`, folded into the qualified form) |
 | `:thinking-change` | `:thinking` level (state fold) |
 | `:tools-change` | `:tools` vector of active tool names (state fold) |
 | `:compaction` | `:summary` + `:retained-tail` — self-contained checkpoint; context rebuild = [summary, …tail, …entries-after]. Also `:tokens-before`, `:tokens-after` (what the context was and is), `:overhead-tokens` (the measured system-prompt + tool prefix the summary's usage anchors on; absent on older entries, read as 0) and `:manual` (`t` when a person asked: `/compact`, `context.compact`) |

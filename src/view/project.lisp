@@ -269,16 +269,7 @@ is left to the ordinary rules (the message is shown as what it says it is)."
   (calls (make-hash-table :test #'equal))  ; tool call id -> (:name :arguments)
   (assistant nil)                          ; id of the assistant item in scope
   (goal nil)                               ; last :goal entry on the path
-  (recover nil)                            ; last :recover entry on the path
-  (fold nil))                              ; the session's fold, for resolution
-
-(defun model-provider-for (fold model-id)
-  "Which provider serves MODEL-ID for this session: the only one registered,
-or the session's journaled choice when the id is registered under several."
-  (let ((providers (ignore-errors (model-providers model-id))))
-    (cond ((null providers) nil)
-          ((null (cdr providers)) (car providers))
-          (t (or (state-model-provider fold) (car providers))))))
+  (recover nil))                           ; last :recover entry on the path
 
 (defun note-tool-calls (ctx message)
   "Remember the arguments of every tool call in MESSAGE, so the tool-result
@@ -309,8 +300,7 @@ CTX carries what the walk has to remember between entries."
             (note-tool-calls ctx message)
             (setf (pctx-assistant ctx) id)
             (assistant-item id (entry-ms entry) message
-                            (model-provider-for (pctx-fold ctx)
-                                                (pget message :model))))
+                            (pget message :provider)))
            (:tool-result
             (let* ((call-id (pget message :tool-call-id))
                    (call (gethash call-id (pctx-calls ctx))))
@@ -365,10 +355,6 @@ CTX carries what the walk has to remember between entries."
       (t nil))))
 
 ;;; State.
-
-(defun fold-model-id (fold)
-  "The model the journal names, without an agent to ask for an override."
-  (or (state-model fold) (setting :model)))
 
 (defun todo-wire (todos)
   "The session's checklist as state wants it: text + a snake_case status."
@@ -451,16 +437,8 @@ already wire strings — a client must not have to know a keyword."
 — what is running, what is queued, what holds it, what a live run has spent —
 come from the caller."
   (let* ((fold (fold-state journal))
-         (model-id (handler-case
-                       (if agent
-                           (or (state-model fold)
-                               (ignore-errors (agent-model-override agent))
-                               (setting :model))
-                           (fold-model-id fold))
-                     (error () nil)))
-         (model (and model-id
-                     (handler-case (find-model model-id (model-provider-for fold model-id))
-                       (error () nil))))
+         (model-id (ignore-errors (effective-model-id fold agent)))
+         (model (ignore-errors (effective-model fold agent)))
          (messages (state-messages fold))
          (state (list :status (or status "idle")
                       :task task
@@ -497,9 +475,9 @@ come from the caller."
                   (equal (pget item :status) "queued"))
           collect (pget item :id)))
 
-(defun project-items (journal &key fold)
+(defun project-items (journal)
   "The items of JOURNAL's current root→leaf path, in order."
-  (let ((ctx (make-pctx :fold fold))
+  (let ((ctx (make-pctx))
         (items nil))
     (dolist (entry (entry-path journal) (values (coerce (nreverse items) 'vector) ctx))
       (let ((item (entry->item entry ctx)))
@@ -512,7 +490,6 @@ AGENT, when given, supplies the facts a journal cannot record on its own — the
 model override the process was launched with, the tokens an in-flight run of
 the session's goal has spent.  Without one this is a pure function of the
 journal."
-  (let* ((fold (fold-state journal))
-         (items (project-items journal :fold fold)))
+  (let ((items (project-items journal)))
     (values items
             (journal-state journal :agent agent :queue (queued-ids items)))))
