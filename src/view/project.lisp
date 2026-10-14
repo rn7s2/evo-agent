@@ -363,14 +363,20 @@ CTX carries what the walk has to remember between entries."
                               :status (enum-string (or (pget entry :status) :pending))))
           'vector))
 
-(defun model-state (model-id model)
-  (list :id model-id
-        :provider (and model (registry-name (pget model :provider)))
-        :ready (wire-boolean model)
-        :reason (unless model
-                  (if model-id
-                      (format nil "model ~a is not registered" model-id)
-                      "no model is configured"))))
+(defun model-state (ref model)
+  "The selected identity and whether its exact registration is available."
+  (multiple-value-bind (id provider)
+      (if ref
+          (handler-case (split-model-ref ref)
+            (error () (values ref nil)))
+          (values nil nil))
+    (list :id id
+          :provider (and provider (registry-name provider))
+          :ready (wire-boolean model)
+          :reason (unless model
+                    (if ref
+                        (format nil "model ~a is not registered" ref)
+                        "no model is configured")))))
 
 (defun goal-state (goal live-tokens)
   "The goal as state wants it, or NIL: a cleared goal is gone (goal.clear), so
@@ -397,7 +403,9 @@ identify the endpoint (the same rule MODEL-LABEL-TEXT applies in the TUI)."
   (let ((id (pget model :id))
         (provider (pget model :provider)))
     (cond ((null id) "(no model)")
-          ((and provider (< 1 (length (ignore-errors (model-providers id)))))
+          ((and provider
+                (or (eq (pget model :ready) :false)
+                    (< 1 (length (ignore-errors (model-providers id))))))
            (format nil "~a (~(~a~))" id provider))
           (t id))))
 
@@ -437,12 +445,12 @@ already wire strings — a client must not have to know a keyword."
 — what is running, what is queued, what holds it, what a live run has spent —
 come from the caller."
   (let* ((fold (fold-state journal))
-         (model-id (ignore-errors (effective-model-id fold agent)))
-         (model (ignore-errors (effective-model fold agent)))
+         (model-ref (ignore-errors (effective-model-ref fold agent)))
+         (model (and model-ref (ignore-errors (find-model model-ref))))
          (messages (state-messages fold))
          (state (list :status (or status "idle")
                       :task task
-                      :model (model-state model-id model)
+                      :model (model-state model-ref model)
                       :thinking (string-downcase
                                  (string (effective-thinking
                                           fold

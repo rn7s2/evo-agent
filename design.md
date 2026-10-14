@@ -140,7 +140,7 @@ Project scope shadows global scope wherever both exist.
 
 ```
 :message              payload is a message plist (in LLM context)
-:model-change         provider + model id           (state fold)
+:model-change         qualified model@provider id  (state fold)
 :thinking-change      thinking level                (state fold)
 :tools-change         active tool names             (state fold)
 :compaction           summary + retained tail — self-contained checkpoint
@@ -620,7 +620,7 @@ something to say.
   the steering just queued, start a compaction, show this line in this style,
   offer these choices, hand this text back for editing — and decides only how
   things look. The TUI turns a choice into a picker; serve returns it as data
-  and takes the choice as the command's argument (`/model <id>`,
+  and takes the choice as the command's argument (`/model <model@provider>`,
   `/resume <n>`, `/tree <id>`). So a command typed in the TUI and the same
   command sent over HTTP cannot differ in effect: there is one copy of it.
 - **One mode.** There is no mode switch and no mode indicator: the agent is

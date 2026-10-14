@@ -87,7 +87,8 @@
 (defpackage :evo.provider
   (:use :cl :evo.util)
   (:export #:find-model #:find-model-ref #:split-model-ref #:all-models
-           #:model-providers #:model-ref #:model-setting-p #:model-setting-ref #:model-ref-setting
+           #:model-providers #:model-ref #:legacy-model-ref
+           #:model-setting-p #:model-setting-ref #:model-ref-setting
            #:model-context-window #:model-max-output #:model-max-input-items
            #:model-effort #:model-thinking-mode #:model-vision-p #:+effort-levels+
            #:normalize-thinking-level

@@ -593,13 +593,26 @@ server's internals."
              (and (equal "lane-model@stub" (getf record :lane-model))
                   (not (member :lane-provider (plist-keys record)))
                   (eq :high (getf record :lane-thinking))))
-      (check "record: legacy model and provider fields become one qualified identity"
-             (and (equal "lane-model@stub"
-                         (evo.swarm::record-lane-model
-                          '(:lane-model "lane-model" :lane-provider :stub)))
-                  (equal "gemini@2024@stub"
-                         (evo.swarm::record-lane-model
-                          '(:lane-model "gemini@2024" :lane-provider :stub)))))
+      (let ((evo.provider::*models* nil))
+        (register-model* "lane-model" :provider :stub :context-window 1000 :max-output 100)
+        (register-model* "gemini@2024" :provider :stub :context-window 1000 :max-output 100)
+        (check "record: legacy model and provider fields become one qualified identity"
+               (and (equal "lane-model@stub"
+                           (evo.swarm::record-lane-model
+                            '(:lane-model "lane-model" :lane-provider :stub)))
+                    (equal "gemini@2024@stub"
+                           (evo.swarm::record-lane-model
+                            '(:lane-model "gemini@2024" :lane-provider :stub)))))
+        (check "record: a legacy bare model keeps first-registration semantics"
+               (and (equal "lane-model@stub"
+                           (evo.swarm::record-lane-model
+                            '(:lane-model "lane-model" :lane-provider nil)))
+                    (equal "gemini@2024@stub"
+                           (evo.swarm::record-lane-model
+                            '(:lane-model "gemini@2024" :lane-provider nil)))))
+        (check "record: a current unavailable qualified identity is never reinterpreted"
+               (equal "gemini@2024"
+                      (evo.swarm::record-lane-model '(:lane-model "gemini@2024")))))
       (let ((restored (evo.swarm::make-swarm :agent agent :workers 9 :record record
                                              :evo-binary "/x/evo")))
         (check "record: a resumed swarm keeps its id, directory and lane count"
@@ -1548,8 +1561,9 @@ why not — the answer a GUI's chooser needs before it spawns anything."
                     (equal "no_api_key" (getf problem :code))))
            (multiple-value-bind (entry problem)
                (evo.swarm::check-model-entry "no-such-model@fixture" agent)
-             (check "check: an unknown model name is reported, not signalled"
-                    (and (equal "no-such-model@fixture" (getf entry :id))
+             (check "check: an unknown qualified model keeps both identity fields"
+                    (and (equal "no-such-model" (getf entry :id))
+                         (equal "fixture" (getf entry :provider))
                          (not (getf entry :ok))))
              (check "check: a model that did not resolve lists no levels — [] , not null"
                     (and (equalp #() (getf entry :effort-levels))
@@ -1561,6 +1575,16 @@ why not — the answer a GUI's chooser needs before it spawns anything."
                                        (evo.swarm::check-entry-wire entry))))))
              (check "check: ...as model_unresolved"
                     (equal "model_unresolved" (getf problem :code))))
+           (let* ((missing-journal (make-session-journal))
+                  (missing-agent (make-agent :journal missing-journal)))
+             (append-entry missing-journal
+                           '(:type :model-change :model "missing-session@fixture"))
+             (multiple-value-bind (entry problem)
+                 (evo.swarm::check-model-entry nil missing-agent)
+               (check "check: an unresolved session selection is not lost"
+                      (and (equal "missing-session" (getf entry :id))
+                           (equal "fixture" (getf entry :provider))
+                           (equal "model_unresolved" (getf problem :code))))))
            (evo.port:setenv "EVO_TEST_FIXTURE_KEY" "sk-1")
            (multiple-value-bind (entry problem)
                (evo.swarm::check-model-entry "fixture-model@fixture" agent)

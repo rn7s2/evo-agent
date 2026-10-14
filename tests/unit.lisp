@@ -7776,6 +7776,12 @@ here must be reachable through the public EVO package with no ::."
                               :context-window (if (eq provider :first) 1000 2000)
                               :max-output 100))
            (evo:register-model "other" :provider :first :context-window 3000 :max-output 100)
+           ;; This bare id collides textually with the unavailable qualified
+           ;; selection other@second below; compatibility must not reinterpret it.
+           (evo:register-model "other@second" :provider :first
+                               :context-window 3500 :max-output 100)
+           (evo:register-model "gemini@2024" :provider :first
+                               :context-window 4000 :max-output 100)
            (check-signals "register-model* still requires a keyword provider"
                           (register-model* "x" :context-window 1000 :max-output 100))
            (check "find-model resolves exactly one qualified pair"
@@ -7832,9 +7838,14 @@ here must be reachable through the public EVO package with no ::."
              (append-entry journal '(:type :model-change :model "other@second"))
              (check-signals "resolution: runtime rejects an explicit unavailable provider"
                             (effective-model (fold-state journal) agent))
-             (check "resolution: snapshot must not mark that same model ready"
-                    (eq :false (getf (getf (evo.view:journal-state journal :agent agent) :model)
-                                     :ready)))
+             (let ((wire (getf (evo.view:journal-state journal :agent agent) :model)))
+               (check "resolution: snapshot preserves an unavailable exact identity"
+                      (and (equal "other" (getf wire :id))
+                           (equal "second" (getf wire :provider))
+                           (eq :false (getf wire :ready))))
+               (check "resolution: an unavailable status label names its provider"
+                      (equal "other (second)"
+                             (evo.view:model-label-text "other@second" nil))))
              ;; An old journal entry (bare id + separate :provider) folds into
              ;; the qualified identity, so resume keeps working.
              (append-entry journal '(:type :model-change :model "shared" :provider :first))
@@ -7843,9 +7854,22 @@ here must be reachable through the public EVO package with no ::."
                          (= 1000 (model-context-window
                                   (effective-model (fold-state journal) agent)))))
              (append-entry journal '(:type :model-change :model "gemini@2024" :provider :first))
-             (check "resolution: a legacy bare id may itself contain @"
+             (check "resolution: a legacy id with a separate provider may itself contain @"
                     (equal "gemini@2024@first"
-                           (evo.journal:state-model (fold-state journal)))))
+                           (evo.journal:state-model (fold-state journal))))
+             (append-entry journal '(:type :model-change :model "shared"))
+             (check "resolution: a legacy entry without a provider keeps first-registration semantics"
+                    (and (equal "shared@first"
+                                (effective-model-ref (fold-state journal) agent))
+                         (= 1000 (model-context-window
+                                  (effective-model (fold-state journal) agent)))))
+             (append-entry journal '(:type :model-change :model "gemini@2024"))
+             (check "resolution: an @ identity without legacy metadata is never reinterpreted"
+                    (and (equal "gemini@2024"
+                                (effective-model-ref (fold-state journal) agent))
+                         (handler-case
+                             (progn (effective-model (fold-state journal) agent) nil)
+                           (error () t)))))
            (check-signals "the CLI rejects a bare --model"
                           (evo.cli::parse-args '("--model" "shared")))
            (let ((opts (evo.cli::parse-args '("--model" "shared@second" "--model" "other@first"))))
@@ -9451,7 +9475,7 @@ became zero after the first reload."
     (evo.kernel::drain-steering agent)
     ;; /model, /thinking, /lang
     (evo.command:set-model host "claude-opus-5@anthropic")
-    (check "cmd: /model <id>@<provider> journals the qualified identity"
+    (check "cmd: /model <model@provider> journals the qualified identity"
            (equal "claude-opus-5@anthropic" (state-model (fold-state (agent-journal agent)))))
     (check "cmd: /model reports (id provider)"
            ;; The provider is the name a client hands back to /model, so the
