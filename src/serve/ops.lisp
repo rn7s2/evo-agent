@@ -352,12 +352,7 @@ goal, and only from the state that move makes sense in."
 ;;; Ops: the session's settings.
 
 (defun op-model-set (server args)
-  (let ((id (op-arg args :id :required t))
-        (provider (op-arg args :provider)))
-    (evo.command:set-model server
-                           (if provider
-                               (list :id id :provider (intern (string-upcase provider) :keyword))
-                               id)))
+  (evo.command:set-model server (op-arg args :model :required t))
   (list :model (let ((model (evo.command::current-model (server-agent server))))
                  (and model (list :id (pget model :id)
                                   :provider (registry-name (pget model :provider)))))))
@@ -549,7 +544,7 @@ rather than as the every-line-is-info it used to be."
                :args nil)
   (register-op "goal.clear" #'op-goal-clear :args nil)
   (register-op "model.set" #'op-model-set
-               :args '(:id (:type "string" :required t) :provider (:type "string")))
+               :args '(:model (:type "string" :required t)))
   (register-op "thinking.set" #'op-thinking-set
                :args '(:level (:type "string" :required t)))
   (register-op "language.set" #'op-language-set

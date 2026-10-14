@@ -368,7 +368,7 @@ otherwise say why, and leave queued input queued."
     (handler-case (progn (effective-model (fold-state (agent-journal agent)) agent) t)
       (error (e)
         (evo.command:host-notice server (format nil "✗ ~a" e) :severity :error)
-        (evo.command:host-notice server "recover with /model <id> (a registered model) or register one: POST /eval (evo:register-model ...)")
+        (evo.command:host-notice server "recover with /model <model@provider> (a registered model) or register one: POST /eval (evo:register-model ...)")
         (when (steering-pending-p agent)
           (evo.command:host-notice server "input stays queued — it runs once the model resolves"))
         nil))))

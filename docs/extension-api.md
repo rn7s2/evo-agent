@@ -307,7 +307,7 @@ an extension's provider API, say).
 (evo:register-provider :deepseek            ; :anthropic is pre-seeded,
   :base-url "https://api.deepseek.com/anthropic"   ; others you register;
   :api-key-env "DEEPSEEK_API_KEY")          ; re-registering merges field-wise
-(evo:set-setting :model "deepseek-v4-pro")  ; required — no default model
+(evo:set-setting :model '("deepseek-v4-pro" :deepseek))  ; required — ("id" :provider)
 (evo:setting :model)                        ; read a setting
 ```
 

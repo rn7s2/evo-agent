@@ -280,7 +280,7 @@ def register_stub_model(server, stub_port):
             "   :api-key \"e2e-secret\")"
             " (evo:register-model \"stub-a\" :provider :stub :context-window 200000"
             "   :max-output 8000 :effort t)"
-            " (evo:set-setting :model \"stub-a\")"
+            " (evo:set-setting :model '(\"stub-a\" :stub))"
             " :registered)")
     return server.op("eval", {"code": form})
 
@@ -459,7 +459,7 @@ def run_all(server, stub_port, work):
         " :this-test :someone-elses)"})
     check("the server's HOME is this test's home, not the caller's",
           (reply.get("result") or {}).get("values") == [":this-test"], reply)
-    status, reply, _ = server.op("model.set", {"id": "stub-a"})
+    status, reply, _ = server.op("model.set", {"model": "stub-a@stub"})
     check("model.set journals the choice", reply["ok"] and reply["result"]["model"]["id"] == "stub-a",
           reply)
 
@@ -1357,8 +1357,7 @@ def extension_compile_check(work):
     os.makedirs(project)
     with open(os.path.join(home, ".evo", "init.lisp"), "w") as out:
         out.write('''
-          (evo:set-setting :model "same-model")
-          (evo:set-setting :model-provider :openai-oauth)
+          (evo:set-setting :model '("same-model" :openai-oauth))
           (evo:set-setting :thinking :high)
           ;; This isolated child pauses at the compile/load boundary; no timing race.
           (sb-ext:unlock-package :cl)
@@ -1453,7 +1452,7 @@ def model_provider_check(work):
                   :registered)'''})
             check(f"{name}: duplicate model registrations exist", reply["ok"], reply)
             for provider in ("proxy", "direct", "PROXY"):
-                _, reply, _ = server.op("model.set", {"id": "same-id", "provider": provider})
+                _, reply, _ = server.op("model.set", {"model": f"same-id@{provider}"})
                 expected = {"id": "same-id", "provider": provider.lower()}
                 check(f"{name}: model.set selects {provider}",
                       reply["ok"] and reply["result"]["model"] == expected, reply)
@@ -1461,18 +1460,12 @@ def model_provider_check(work):
                 check(f"{name}: session state preserves {provider}",
                       snapshot["topics"]["session"]["state"]["model"]["provider"] == provider.lower(),
                       snapshot["topics"]["session"]["state"]["model"])
-            for args in ({"id": "same-id", "provider": "missing"},
-                         {"id": "missing-id", "provider": "proxy"},
-                         {"id": "same-id", "provider": 42}):
-                _, reply, _ = server.op("model.set", args)
-                check(f"{name}: model.set refuses {args}",
+            for model in ("same-id@missing", "missing-id@proxy", "same-id", 42):
+                _, reply, _ = server.op("model.set", {"model": model})
+                check(f"{name}: model.set refuses {model!r}",
                       not reply["ok"] and reply["error"]["code"] == "invalid_args", reply)
                 check(f"{name}: refused selection leaves provider unchanged",
                       server.snapshot()["topics"]["session"]["state"]["model"]["provider"] == "proxy")
-            _, reply, _ = server.op("model.set", {"id": "same-id"})
-            check(f"{name}: omitted provider keeps first-registration behavior",
-                  reply["ok"] and reply["result"]["model"] ==
-                  {"id": "same-id", "provider": "direct"}, reply)
         finally:
             if hasattr(server, "proc") and server.proc.poll() is None:
                 server.op("server.shutdown")

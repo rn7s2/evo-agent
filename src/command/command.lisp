@@ -83,7 +83,7 @@ re-derive whatever the host caches from it.")
 value.  An item is (LABEL VALUE DESCRIPTION) or (LABEL . VALUE); INDEX is the
 preselected one.  An interactive host opens a picker.  The default method
 cannot ask, so it lists the choices instead — the same command then takes the
-choice as its argument (`/model <id>`, `/resume <n>`, `/tree <id>`)."))
+choice as its argument (`/model <model@provider>`, `/resume <n>`, `/tree <id>`)."))
 
 (defgeneric host-set-draft (host text)
   (:documentation "Hand TEXT back to the user for editing — the text of a user
@@ -297,14 +297,10 @@ through a proxy differ only by that word."
        (equal (pget a :provider) (pget b :provider))))
 
 (defun set-model (host model)
-  "Journal MODEL (an id, or a model plist from the picker) as the session's
-model from the next turn."
-  (let ((resolved (handler-case (if (stringp model)
-                                    (find-model model)
-                                    (find-model (pget model :id) (pget model :provider)))
+  "Select MODEL@PROVIDER, or a fully identified picker entry."
+  (let ((resolved (handler-case (find-model (if (stringp model) model (model-ref model)))
                     (error (e) (refuse :invalid "~a" e)))))
-    (set-session-model (host-agent host) (pget resolved :id)
-                       (pget resolved :provider))
+    (set-session-model (host-agent host) (model-ref resolved))
     (host-refresh host)
     (host-notice host (format nil "model → ~a~@[ (~(~a~))~] (next turn)"
                               (pget resolved :id)
@@ -1023,10 +1019,7 @@ Total: a model that does not resolve reads as NIL, never signals."
          (state (fold-state journal))
          (model-id (handler-case (effective-model-id state agent)
                      (error () nil)))
-         (model (and model-id
-                     (handler-case (find-model model-id
-                                               (effective-model-provider state model-id))
-                       (error () nil))))
+         (model (ignore-errors (effective-model state agent)))
          (goal (state-goal state)))
     (list :model model-id
           :provider (and model (registry-name (pget model :provider)))

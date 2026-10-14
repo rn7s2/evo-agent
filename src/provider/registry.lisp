@@ -102,60 +102,60 @@ time, not mid-run."
     id))
 
 (defun model-providers (id)
-  "Providers registered for ID, in registration order.  More than one means
-the bare id is ambiguous — callers disambiguate with FIND-MODEL's PROVIDER."
+  "Providers registered for bare ID, for display and discovery only."
   (mapcar (lambda (m) (pget m :provider))
           (remove-if-not (lambda (m) (string= (pget m :id) id)) *models*)))
 
 (defun all-models () *models*)
 
-(defun find-model (id &optional provider)
-  "Resolve a model id to its registered plist.  Plists pass through
-\(call-provider convenience).  With PROVIDER, match that exact provider —
-how a journaled /model choice names which of several same-id entries it
-meant.  A bare id resolves to the FIRST registration of that id: the same
-id under several providers is legal, so the default has to be a rule, and
-registration order is the one the user wrote.  Session-level selection is
-explicit (the picker journals :provider), so first-wins only ever decides
-the initial default.  No fallback: an unknown id is a config error."
-  (cond ((consp id) id)
-        (provider
-         (or (find-if (lambda (m) (and (string= (pget m :id) id)
-                                       (equal (pget m :provider) provider)))
-                      *models*)
-             (error (cat "Unknown model ~s for provider ~(~a~).~%"
-                         "Registered providers for ~s: ~:[none~;~:*~{~(~a~)~^, ~}~]~%"
-                         "Register it in init.lisp or post-init.lisp:~%  "
-                         "(evo:register-model ~s~%    "
-                         ":provider ~(~s~)~%    "
-                         ":context-window 200000 :max-output 64000)")
-                    id provider id (model-providers id) id provider)))
-        ((find id *models* :key (lambda (m) (pget m :id)) :test #'string=))
-        (t (error (cat "Unknown model ~s: no registered model has that id.~%"
-                       "Registered models: ~:[none — is your init.lisp or post-init.lisp missing?~;~:*~{~a~^, ~}~]~%"
-                       "Register it in init.lisp or post-init.lisp:~%  "
-                       "(evo:register-model ~s~%    "
-                       ":provider :anthropic~%    "
-                       ":context-window 200000 :max-output 64000)")
-                  id (mapcar (lambda (m) (pget m :id)) *models*) id))))
-
 (defun split-model-ref (text)
-  "TEXT — a model reference as it is written on a command line — as
-\(values ID PROVIDER): \"claude-opus-5\" is that id with no provider,
-\"claude-opus-5@anthropic\" is that id served by :ANTHROPIC.  The **last** @
-separates, so an id that contains one (\"gemini@2024\") still names its
-provider when a provider is given.  Signals when the reference names no id."
+  "Require ID@PROVIDER and return its bare ID and provider keyword.
+The last @ separates, so model IDs may themselves contain @."
   (let ((at (and (stringp text) (position #\@ text :from-end t))))
-    (cond ((null at) (values text nil))
-          ((zerop at) (error "~s names a provider but no model id" text))
-          (t (values (subseq text 0 at)
-                     (intern (string-upcase (subseq text (1+ at))) :keyword))))))
+    (unless (and at (plusp at) (< at (1- (length text))))
+      (error "Model identity must be model@provider, got ~s" text))
+    (values (subseq text 0 at)
+            (intern (string-upcase (subseq text (1+ at))) :keyword))))
+
+(defun model-ref (model)
+  "The qualified identity of a registered MODEL plist."
+  (format nil "~a@~(~a~)" (pget model :id) (pget model :provider)))
+
+(defun model-setting-p (value)
+  "True for a :model setting: (\"model\" :provider)."
+  (and (consp value) (consp (cdr value)) (null (cddr value))
+       (stringp (first value)) (plusp (length (first value)))
+       (keywordp (second value))))
+
+(defun model-setting-ref (selection)
+  "A :model setting (\"model\" :provider) as model@provider."
+  (when selection
+    (unless (model-setting-p selection)
+      (error ":model setting must be (\"model\" :provider), got ~s" selection))
+    (format nil "~a@~(~a~)" (first selection) (second selection))))
+
+(defun model-ref-setting (ref)
+  "model@provider as the (\"model\" :provider) list stored in :model."
+  (multiple-value-bind (id provider) (split-model-ref ref)
+    (list id provider)))
+
+(defun find-model (ref)
+  "Resolve exactly ID@PROVIDER. Already resolved model plists pass through."
+  (if (consp ref)
+      ref
+      (multiple-value-bind (id provider) (split-model-ref ref)
+        (or (find-if (lambda (m) (and (string= (pget m :id) id)
+                                     (eq (pget m :provider) provider)))
+                     *models*)
+            (error (cat "Unknown model ~s.~%"
+                        "Registered models: ~:[none~;~:*~{~a~^, ~}~]~%"
+                        "Register it in init.lisp or post-init.lisp:~%  "
+                        "(evo:register-model ~s :provider ~(~s~)~%    "
+                        ":context-window 200000 :max-output 64000)")
+                   ref (mapcar #'model-ref *models*) id provider)))))
 
 (defun find-model-ref (text)
-  "Resolve a command-line model reference — ID, or ID@PROVIDER — to its
-registered plist.  Errors exactly as FIND-MODEL does when nothing matches."
-  (multiple-value-bind (id provider) (split-model-ref text)
-    (find-model id provider)))
+  (find-model text))
 
 (defun model-context-window (model) (pget model :context-window))
 (defun model-max-output (model) (pget model :max-output))

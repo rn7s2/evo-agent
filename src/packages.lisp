@@ -73,7 +73,7 @@
            #:fork-session
            #:compaction-entry->messages
            #:add-journal-listener #:remove-journal-listener #:note-journal-append
-           #:state-messages #:state-model #:state-model-provider #:state-thinking
+           #:state-messages #:state-model #:state-thinking
            #:state-cache-stats
            #:state-tools
            #:state-goal #:state-loads #:state-custom #:custom-state
@@ -87,7 +87,7 @@
 (defpackage :evo.provider
   (:use :cl :evo.util)
   (:export #:find-model #:find-model-ref #:split-model-ref #:all-models
-           #:model-providers
+           #:model-providers #:model-ref #:model-setting-p #:model-setting-ref #:model-ref-setting
            #:model-context-window #:model-max-output #:model-max-input-items
            #:model-effort #:model-thinking-mode #:model-vision-p #:+effort-levels+
            #:normalize-thinking-level
@@ -147,7 +147,7 @@
            #:register-extension-disposer #:register-extension-task
            #:dispose-extension-owners #:*task-stop-seconds*
            #:capture-runtime-catalog #:install-runtime-catalog
-           #:effective-model-id #:effective-model-provider #:effective-model
+           #:effective-model-ref #:effective-model-id #:effective-model
            #:effective-thinking
            ;; session operations — the journal writes a frontend asks for
            #:boot-session #:switch-session

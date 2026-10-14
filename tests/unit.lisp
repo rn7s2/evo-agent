@@ -163,18 +163,17 @@ line2")))
         (check "reopen: leaf preserved" (equal (journal-leaf-id reopened)
                                                (journal-leaf-id journal)))
         (check "reopen: fold equal" (= (length (state-messages state)) 2))))
-    (append-entry journal '(:type :model-change :model "m2"))
+    (append-entry journal '(:type :model-change :model "m2@direct"))
     (append-entry journal '(:type :tools-change :tools #("bash")))
     (let ((state (fold-state journal)))
-      (check "model fold" (equal (state-model state) "m2"))
-      (check "model fold: no provider for a bare-id entry"
-             (null (state-model-provider state)))
+      (check "model fold retains qualified identity" (equal (state-model state) "m2@direct"))
       (check "tools fold" (equal (state-tools state) '("bash"))))
-    (append-entry journal '(:type :model-change :model "m3" :provider :proxy-co))
-    (let ((state (fold-state journal)))
-      (check "model fold: provider-journaled model" (equal (state-model state) "m3"))
-      (check "model fold: provider folds through"
-             (equal (state-model-provider state) :proxy-co)))))
+    (append-entry journal '(:type :model-change :model "m3@proxy-co"))
+    (check "model fold replaces identity atomically"
+           (equal (state-model (fold-state journal)) "m3@proxy-co"))
+    (check "reopen retains the qualified model choice"
+           (equal (state-model (fold-state (open-journal (journal-path journal))))
+                  "m3@proxy-co"))))
 
 ;;; Schema emission
 
@@ -425,8 +424,8 @@ line2")))
                       (equal (pget config :base-url) "https://api.kimi.com/coding"))
                (check "kimi provider key from KIMI_API_KEY"
                       (equal (pget config :api-key) key)))
-             (let ((k3 (find-model "k3" :kimi))
-                   (k3-256k (find-model "k3-256k" :kimi)))
+             (let ((k3 (find-model "k3@kimi"))
+                   (k3-256k (find-model "k3-256k@kimi")))
                (check "kimi models speak the kernel's anthropic adapter"
                       (and (eq (pget k3 :api) :anthropic-messages)
                            (eq (pget k3-256k :api) :anthropic-messages)))
@@ -1080,7 +1079,7 @@ builds through the OAuth API."
              (check "openai-oauth: only the GPT 5.6 / GPT 6 series is registered"
                     (equal ids '("gpt-5.6-sol" "gpt-5.6-terra" "gpt-5.6-luna"
                                  "gpt-6-astra" "gpt-6.1-sol" "gpt-6-sol" "gpt-6-luna")))
-             (let ((model (find-model "gpt-6-astra" :openai-oauth)))
+             (let ((model (find-model "gpt-6-astra@openai-oauth")))
                (check "openai-oauth: model metadata and wire api"
                       (and model
                            (= 272000 (model-context-window model))
@@ -1097,12 +1096,12 @@ builds through the OAuth API."
                     (funcall (openai-oauth-fn "OPENAI-OAUTH--REGISTER-MODELS"))
                     (check "openai-oauth: the context-window setting is honoured"
                            (= 872000 (model-context-window
-                                      (find-model "gpt-6.1-sol" :openai-oauth))))
+                                      (find-model "gpt-6.1-sol@openai-oauth"))))
                     (evo:set-setting :openai-oauth-context-window "huge")
                     (funcall (openai-oauth-fn "OPENAI-OAUTH--REGISTER-MODELS"))
                     (check "openai-oauth: a malformed window setting falls back to the default"
                            (= 272000 (model-context-window
-                                      (find-model "gpt-6.1-sol" :openai-oauth)))))
+                                      (find-model "gpt-6.1-sol@openai-oauth")))))
                (evo:set-setting :openai-oauth-context-window saved)
                (funcall (openai-oauth-fn "OPENAI-OAUTH--REGISTER-MODELS"))))
            (evo.port:setenv "OPENAI_OAUTH_ACCESS_TOKEN" "")
@@ -4325,7 +4324,7 @@ a lint that can go blind without saying so is worse than none."
            (check "cli: a serve restart keeps every --prompt-note"
                   (equal '("--port" "9" "--prompt-note" "/a.md" "--prompt-note" "/b.md")
                          (evo.cli::serve-restart-flags
-                          '("--port" "9" "--prompt-note" "/a.md" "--model" "m"
+                          '("--port" "9" "--prompt-note" "/a.md" "--model" "m@prov"
                             "--prompt-note" "/b.md" "--resume")))))
       (setf evo.kernel::*prompt-notes* saved)
       (ignore-errors (uiop:delete-directory-tree dir :validate t
@@ -4433,17 +4432,22 @@ just the pack that ships as a core extension, and what the user picked
                (format nil "~a/evo-session-ops-~a/" (tmp-dir) (gen-id))))
          (journal (progn (ensure-directories-exist dir) (make-session-journal dir)))
          (agent (make-agent :journal journal)))
-    (set-session-model agent "m-1")
-    (check "a bare model choice (--model) journals no provider"
-           (equal '(:type :model-change :model "m-1") (last-entry-body journal)))
-    (set-session-model agent "m-2" :proxy)
-    (check "a picked model (/model) journals its provider"
-           (equal '(:type :model-change :model "m-2" :provider :proxy)
+    (set-session-model agent "m-1@direct")
+    (check "a model choice journals one qualified identity"
+           (equal '(:type :model-change :model "m-1@direct") (last-entry-body journal)))
+    (set-session-model agent "m-2@proxy")
+    (check "a picked model replaces both id and provider"
+           (equal '(:type :model-change :model "m-2@proxy")
                   (last-entry-body journal)))
-    (let ((state (fold-state journal)))
-      (check "the fold sees the model choice"
-             (and (equal "m-2" (state-model state))
-                  (eq :proxy (state-model-provider state)))))
+    (check "the fold sees the atomic model choice"
+           (equal "m-2@proxy" (state-model (fold-state journal))))
+    (let ((before (length (journal-entries journal))))
+      (dolist (bad '("m-1" "@proxy" "m-1@" ""))
+        (check-signals "invalid model choices never journal"
+                       (set-session-model agent bad)))
+      (check "invalid model choices leave the previous identity intact"
+             (and (= before (length (journal-entries journal)))
+                  (equal "m-2@proxy" (state-model (fold-state journal))))))
     (set-session-thinking agent :high)
     (check "a thinking choice journals the level"
            (equal '(:type :thinking-change :thinking :high)
@@ -4875,7 +4879,7 @@ and the guards around all of it."
          (journal (progn (ensure-directories-exist dir) (make-session-journal dir)))
          (agent (make-agent :journal journal))
          (tui (evo.tui::make-tui :agent agent)))
-    (append-entry journal '(:type :model-change :model "compact-fixture-model"))
+    (append-entry journal '(:type :model-change :model "compact-fixture-model@compact-fixture"))
     (append-entry journal `(:type :message
                             :message (:role :user
                                       :content ((:type :text :text ,(make-string old-chars :initial-element #\x))))))
@@ -6227,7 +6231,7 @@ extensions still keep theirs."
   (check "re-register replaces in place"
          (and (= 2 (length (all-models)))
               (equal "reg-a" (pget (first (all-models)) :id))
-              (= 5000 (pget (find-model "reg-a") :context-window))))
+              (= 5000 (pget (find-model "reg-a@anthropic") :context-window))))
   ;; Same id under a second provider: a distinct, selectable model.
   (register-model* "reg-dupe" :provider :anthropic :api :anthropic-messages
                    :context-window 1000 :max-output 100)
@@ -6236,24 +6240,33 @@ extensions still keep theirs."
   (check "same id, different provider: both registered"
          (equal '(:anthropic :proxy-co) (model-providers "reg-dupe")))
   (check "find-model disambiguates by provider"
-         (and (= 1000 (pget (find-model "reg-dupe" :anthropic) :context-window))
-              (= 2000 (pget (find-model "reg-dupe" :proxy-co) :context-window))))
-  (check "bare id resolves to the first registration"
-         (equal :anthropic (pget (find-model "reg-dupe") :provider)))
+         (and (= 1000 (pget (find-model "reg-dupe@anthropic") :context-window))
+              (= 2000 (pget (find-model "reg-dupe@proxy-co") :context-window))))
+  (check-signals "bare duplicate id never selects the first registration"
+                 (find-model "reg-dupe"))
+  (check-signals "even an unambiguous bare id is rejected"
+                 (find-model "reg-a"))
+  (check "model-ref round trips the exact registered identity"
+         (let ((model (find-model "reg-dupe@proxy-co")))
+           (and (equal "reg-dupe@proxy-co" (model-ref model))
+                (eq model (find-model-ref (model-ref model)))
+                (eq :proxy-co (pget model :provider))
+                (equal "reg-dupe" (pget model :id)))))
   (check "unknown provider for a known id names the registered ones"
-         (handler-case (progn (find-model "reg-dupe" :nope) nil)
+         (handler-case (progn (find-model "reg-dupe@nope") nil)
            (error (e) (let ((s (format nil "~a" e)))
                         (and (search "reg-dupe" s) (search "proxy-co" s))))))
   (register-model* "reg-dupe" :provider :proxy-co :api :anthropic-messages
                    :context-window 3000 :max-output 200)
   (check "re-register same (id, provider) replaces in place"
          (and (= 2 (length (model-providers "reg-dupe")))
-              (= 3000 (pget (find-model "reg-dupe" :proxy-co) :context-window))))
-  (check "find-model passes plists through"
-         (equal "x" (pget (find-model '(:id "x")) :id)))
-  (check-signals "unknown model id signals" (find-model "no-such-model"))
+              (= 3000 (pget (find-model "reg-dupe@proxy-co") :context-window))))
+  (check "find-model passes resolved registry plists through"
+         (let ((model (find-model "reg-a@anthropic")))
+           (eq model (find-model model))))
+  (check-signals "unknown model id signals" (find-model "no-such-model@anthropic"))
   (check "unknown model error names register-model"
-         (handler-case (progn (find-model "no-such-model") nil)
+         (handler-case (progn (find-model "no-such-model@anthropic") nil)
            (error (e) (search "register-model" (format nil "~a" e)))))
   (check-signals "unknown :api signals at registration"
                  (register-model* "bad" :provider :x :api :no-such-api
@@ -6261,9 +6274,9 @@ extensions still keep theirs."
   (register-model* "reg-items" :provider :anthropic :api :anthropic-messages
                    :context-window 1000 :max-output 100 :max-input-items 1000)
   (check ":max-input-items is registered"
-         (= 1000 (model-max-input-items (find-model "reg-items"))))
+         (= 1000 (model-max-input-items (find-model "reg-items@anthropic"))))
   (check "no :max-input-items means no cap"
-         (null (model-max-input-items (find-model "reg-a"))))
+         (null (model-max-input-items (find-model "reg-a@anthropic"))))
   (check-signals "bad :max-input-items signals at registration"
                  (register-model* "bad" :provider :anthropic
                                   :context-window 1 :max-output 1
@@ -6406,7 +6419,7 @@ here must be reachable through the public EVO package with no ::."
                   (progn (register-model* "fixture-model" :provider :fixture-co
                                           :api :bare-fixture
                                           :context-window 100 :max-output 10)
-                         (equal :bare-fixture (pget (find-model "fixture-model") :api))))
+                         (equal :bare-fixture (pget (find-model "fixture-model@fixture-co") :api))))
            ;; The /reload regression: reset-user-registries walks every
            ;; registered API.  Before the default methods existed this died
            ;; on the second boot with no-applicable-method.
@@ -6457,9 +6470,6 @@ here must be reachable through the public EVO package with no ::."
            (equal "anthropic  claude-opus-5" (first labels*)))))
 
 (defun test-same-id-multi-provider ()
-  "The bug: registering one model id under several providers used to keep
-only the last, so only one was selectable.  Identity is (id, provider);
-selection journals the provider, and every resolution point honours it."
   (reset-user-registries)
   (reset-settings)
   (register-provider* :direct :base-url "https://direct.invalid")
@@ -6468,53 +6478,39 @@ selection journals the provider, and every resolution point honours it."
                    :context-window 200000 :max-output 64000)
   (register-model* "shared-id" :provider :proxy :api :anthropic-messages
                    :context-window 500000 :max-output 32000)
-  ;; 1. Both survive registration and both reach the picker.
   (check "picker lists every provider for the id"
-         (equal '(:direct :proxy)
-                (mapcar (lambda (m) (pget m :provider))
-                        (remove-if-not (lambda (m) (equal "shared-id" (pget m :id)))
-                                       (all-models)))))
-  ;; 2. A journaled /model choice routes to that provider's endpoint.
-  (let ((journal (make-session-journal "/tmp")))
-    (append-entry journal '(:type :model-change :model "shared-id" :provider :proxy))
+         (equal '("shared-id@direct" "shared-id@proxy")
+                (mapcar #'model-ref (all-models))))
+  (let* ((journal (make-session-journal (tmp-dir)))
+         (agent (make-agent :journal journal)))
+    (check-signals "no configured identity never chooses the first registration"
+                   (effective-model-ref (fold-state journal) agent))
+    (set-setting :model '("shared-id" :direct))
+    (set-session-model agent "shared-id@proxy")
     (let* ((state (fold-state journal))
-           (agent (make-agent :journal journal))
-           (id (effective-model-id state agent))
-           (model (find-model id (evo.kernel:effective-model-provider state id))))
-      (check "journaled choice resolves to its provider"
-             (equal :proxy (pget model :provider)))
+           (model (effective-model state agent)))
+      (check "journaled choice resolves the exact qualified registry entry"
+             (and (equal "shared-id@proxy" (effective-model-ref state agent))
+                  (equal "shared-id" (effective-model-id state agent))
+                  (eq model (find-model "shared-id@proxy"))))
       (check "journaled choice carries that provider's config"
              (equal 500000 (pget model :context-window)))
       (check "journaled choice hits that provider's endpoint"
              (equal "https://proxy.invalid"
                     (pget (provider-config (pget model :provider)) :base-url)))))
-  ;; 3. No journaled provider: first registration wins, so a bare :model
-  ;; setting still boots instead of erroring on the ambiguity.
-  (let* ((journal (make-session-journal "/tmp"))
-         (state (fold-state journal)))
-    (set-setting :model "shared-id")
-    (let* ((agent (make-agent :journal journal))
-           (id (effective-model-id state agent))
-           (model (find-model id (evo.kernel:effective-model-provider state id))))
-      (check "bare default resolves to the first registration"
-             (equal :direct (pget model :provider))))
-    ;; 4. :model-provider names a different default without touching order.
-    (set-setting :model-provider :proxy)
-    (let* ((agent (make-agent :journal journal))
-           (id (effective-model-id state agent))
-           (model (find-model id (evo.kernel:effective-model-provider state id))))
-      (check ":model-provider setting selects the default provider"
-             (equal :proxy (pget model :provider))))
-    ;; 5. A stale setting naming a provider that doesn't serve this id is
-    ;; ignored rather than breaking an unrelated model.
-    (register-model* "solo-id" :provider :direct :api :anthropic-messages
-                     :context-window 1000 :max-output 100)
-    (set-setting :model "solo-id")
-    (let* ((agent (make-agent :journal journal))
-           (id (effective-model-id state agent)))
-      (check "stale :model-provider is ignored for an id it doesn't serve"
-             (equal :direct (pget (find-model id (evo.kernel:effective-model-provider state id))
-                                  :provider)))))
+  (register-model* "solo-id" :provider :direct :context-window 1000 :max-output 100)
+  (check-signals "known provider cannot borrow another provider's model"
+                 (find-model "solo-id@proxy"))
+  (check-signals "unknown provider cannot fall back to the first registration"
+                 (find-model-ref "shared-id@missing"))
+  (let* ((journal (make-session-journal (tmp-dir)))
+         (agent (make-agent :journal journal)))
+    (set-setting :model '("shared-id" :proxy))
+    (check "configured pair selects the second registration"
+           (eq :proxy (pget (effective-model (fold-state journal) agent) :provider)))
+    (set-setting :model '("solo-id" :proxy))
+    (check-signals "unavailable configured pair never changes provider silently"
+                   (effective-model (fold-state journal) agent)))
   (reset-settings)
   (reset-user-registries))
 
@@ -6699,14 +6695,14 @@ selection journals the provider, and every resolution point honours it."
   (register-model* "eff-none" :provider :anthropic :api :anthropic-messages
                    :context-window 1000 :max-output 100)
   (check "registry: :effort t expands to the full ladder"
-         (equal '(:low :medium :high :xhigh :max) (model-effort (find-model "eff-all"))))
+         (equal '(:low :medium :high :xhigh :max) (model-effort (find-model "eff-all@anthropic"))))
   (check "registry: subset kept in ladder order"
-         (equal '(:low :max) (model-effort (find-model "eff-some"))))
+         (equal '(:low :max) (model-effort (find-model "eff-some@anthropic"))))
   (check "registry: no effort by default"
-         (null (model-effort (find-model "eff-none"))))
+         (null (model-effort (find-model "eff-none@anthropic"))))
   (check "registry: thinking mode recorded, effort-only by default"
-         (and (eq :adaptive (model-thinking-mode (find-model "eff-all")))
-              (eq :effort-only (model-thinking-mode (find-model "eff-none")))))
+         (and (eq :adaptive (model-thinking-mode (find-model "eff-all@anthropic")))
+              (eq :effort-only (model-thinking-mode (find-model "eff-none@anthropic")))))
   (check-signals "registry: bogus effort level rejected"
                  (register-model* "eff-bad" :provider :anthropic
                                   :api :anthropic-messages :context-window 1000
@@ -6715,7 +6711,7 @@ selection journals the provider, and every resolution point honours it."
          (progn (register-model* "eff-only-mode" :provider :anthropic
                                  :api :anthropic-messages :context-window 1000
                                  :max-output 100 :thinking-mode :effort-only)
-                (eq :effort-only (model-thinking-mode (find-model "eff-only-mode")))))
+                (eq :effort-only (model-thinking-mode (find-model "eff-only-mode@anthropic")))))
   (check-signals "registry: bogus thinking mode rejected"
                  (register-model* "eff-bad-mode" :provider :anthropic
                                   :api :anthropic-messages :context-window 1000
@@ -7421,12 +7417,12 @@ selection journals the provider, and every resolution point honours it."
                                         "fixture-sees" :provider :anthropic
                                         :api :anthropic-messages :context-window 1000
                                         :max-output 100)
-                                       (find-model "fixture-sees")))
+                                       (find-model "fixture-sees@anthropic")))
                 (not (model-vision-p (progn (register-model*
                                              "fixture-blind" :provider :anthropic
                                              :api :anthropic-messages :context-window 1000
                                              :max-output 100 :vision nil)
-                                            (find-model "fixture-blind"))))))
+                                            (find-model "fixture-blind@anthropic"))))))
     ;; Compaction accounting knows an image is not free.
     (check "compaction estimates images as a flat cost"
            (> (evo.kernel::estimate-message-tokens (first history)) 4000))
@@ -7562,7 +7558,7 @@ selection journals the provider, and every resolution point honours it."
                  (format nil "~a/evo-imgread-~a/" (tmp-dir) (gen-id))))
            (journal (progn (ensure-directories-exist dir) (make-session-journal dir)))
            (events nil)
-           (agent (make-agent :journal journal :model-override "reads-images"
+           (agent (make-agent :journal journal :model-override "reads-images@anthropic"
                               :events-cb (lambda (ev) (push ev events)))))
       (evo.kernel::run-tool-call agent (list :name "read" :id "call_img"
                                              :arguments (list :path (namestring fixture))))
@@ -7591,12 +7587,12 @@ selection journals the provider, and every resolution point honours it."
                (json (com.inuoe.jzon:stringify
                       (com.inuoe.jzon:parse
                        (build-request (find-api :anthropic-messages)
-                                      :model (find-model "reads-images") :system "sys"
+                                      :model (find-model "reads-images@anthropic") :system "sys"
                                       :messages history :tools nil :thinking-level nil))))
                (blind (com.inuoe.jzon:stringify
                        (com.inuoe.jzon:parse
                         (build-request (find-api :anthropic-messages)
-                                       :model (find-model "reads-nothing") :system "sys"
+                                       :model (find-model "reads-nothing@anthropic") :system "sys"
                                        :messages history :tools nil :thinking-level nil)))))
           (check "anthropic: the tool result carries the image"
                  (and (search "tool_result" json) (search data json)))
@@ -7606,7 +7602,7 @@ selection journals the provider, and every resolution point honours it."
       (let* ((dir (uiop:ensure-directory-pathname
                    (format nil "~a/evo-imgblind-~a/" (tmp-dir) (gen-id))))
              (journal (progn (ensure-directories-exist dir) (make-session-journal dir)))
-             (agent (make-agent :journal journal :model-override "reads-nothing")))
+             (agent (make-agent :journal journal :model-override "reads-nothing@anthropic")))
         (evo.kernel::run-tool-call agent (list :name "read" :id "call_blind"
                                                :arguments (list :path (namestring fixture))))
         (let ((result (find :tool-result (reverse (state-messages (fold-state journal)))
@@ -7660,17 +7656,17 @@ selection journals the provider, and every resolution point honours it."
      global-init
      "(evo:register-model \"init-a\" :provider :anthropic :api :anthropic-messages
    :context-window 1000 :max-output 100)
-(evo:set-setting :model \"init-a\")")
+(evo:set-setting :model '(\"init-a\" :anthropic))")
     (write-file-string
      project-init
      "(evo:register-model \"init-b\" :provider :proxy-co
    :context-window 2000 :max-output 200)
-(evo:set-setting :model \"init-b\")")
+(evo:set-setting :model '(\"init-b\" :proxy-co))")
     (unwind-protect
          (progn
            (evo.kernel:boot-userspace :cwd cwd)
            (check "init: project setting overrides global"
-                  (equal "init-b" (setting :model)))
+                  (equal '("init-b" :proxy-co) (setting :model)))
            (check "init: global-then-project registration order"
                   (equal '("init-a" "init-b")
                          (mapcar (lambda (m) (pget m :id)) (all-models))))
@@ -7681,7 +7677,7 @@ selection journals the provider, and every resolution point honours it."
            (let ((*error-output* (make-broadcast-stream)))
              (evo.kernel:boot-userspace :cwd cwd))
            (check "init: broken project init keeps global config"
-                  (and (equal "init-a" (setting :model))
+                  (and (equal '("init-a" :anthropic) (setting :model))
                        (equal '("init-a")
                               (mapcar (lambda (m) (pget m :id)) (all-models))))))
       (ignore-errors (delete-file global-init))
@@ -7731,6 +7727,117 @@ selection journals the provider, and every resolution point honours it."
              (every #'ranked-extension-name-p
                     (mapcar #'file-namestring vendored))))))
 
+(defun test-model-resolution-consistency ()
+  (let ((saved (capture-runtime-catalog)))
+    (unwind-protect
+         (progn
+           (reset-settings)
+           (reset-user-registries)
+           ;; The :model setting is a two-element list ("model" :provider):
+           ;; keyword provider, nonempty id, no dotted pair, no bare string.
+           (dolist (setter (list #'evo:set-setting #'evo.util:set-setting))
+             (funcall setter :model '("shared" :second))
+             (dolist (bad '("shared" "shared@second" nil :shared
+                            ("shared") ("shared" :second :extra)
+                            ("shared" . :second) ("shared" . "second")
+                            ("" :second) (42 :second) ("shared" "second")))
+               (check-signals "model setting requires (\"model\" :provider)"
+                              (funcall setter :model bad))
+               (check "rejected model setting preserves the previous identity"
+                      (equal '("shared" :second) (setting :model))))
+             (check-signals "the separate model-provider setting is rejected"
+                            (funcall setter :model-provider :first)))
+           ;; A selection reference is mandatory model@provider everywhere.
+           (dolist (bad '("shared" "" "@second" "shared@" "@" nil))
+             (check-signals "split-model-ref requires both identity components"
+                            (split-model-ref bad))
+             (check-signals "find-model-ref has no bare fallback" (find-model-ref bad))
+             (check-signals "find-model requires a qualified reference" (find-model bad)))
+           ;; Registration keeps bare id + keyword :provider.
+           (dolist (provider '(:first :second))
+             (register-provider* provider :base-url "http://127.0.0.1:1/v1")
+             (register-model* "shared" :provider provider
+                              :context-window (if (eq provider :first) 1000 2000)
+                              :max-output 100))
+           (evo:register-model "other" :provider :first :context-window 3000 :max-output 100)
+           (check-signals "register-model* still requires a keyword provider"
+                          (register-model* "x" :context-window 1000 :max-output 100))
+           (check "find-model resolves exactly one qualified pair"
+                  (and (= 2000 (model-context-window (find-model "shared@second")))
+                       (= 1000 (model-context-window (find-model "shared@first")))))
+           (check-signals "find-model has no first-registration fallback"
+                          (find-model "shared"))
+           (check-signals "find-model rejects an unknown provider" (find-model "shared@none"))
+           (set-setting :thinking :low)
+           (let* ((journal (make-session-journal))
+                  (agent (make-agent :journal journal)))
+             (flet ((selection-agrees (ref thinking)
+                      (let* ((fold (fold-state journal))
+                             (runtime (effective-model fold agent))
+                             (catalog (evo.serve:catalog-plist agent))
+                             (snapshot (evo.view:journal-state journal :agent agent))
+                             (id (pget runtime :id))
+                             (provider (registry-name (pget runtime :provider))))
+                        (check (format nil "resolution: ~a is the canonical runtime selection" ref)
+                               (and (equal ref (effective-model-ref fold agent))
+                                    (equal ref (model-ref runtime))
+                                    (eq runtime (find-model ref))
+                                    (equal id (effective-model-id fold agent))))
+                        (dolist (wire (list (getf catalog :default-model)
+                                           (getf snapshot :model)))
+                          (check "resolution: catalog and snapshot agree with runtime identity"
+                                 (and (equal id (getf wire :id))
+                                      (equal provider (getf wire :provider)))))
+                        (check "resolution: snapshot uses the selected provider's context window"
+                               (= (model-context-window runtime)
+                                  (getf (getf snapshot :context) :window)))
+                        (check "resolution: runtime, catalog and snapshot agree on thinking"
+                               (and (equal thinking (string-downcase
+                                                     (string (effective-thinking
+                                                              fold (agent-thinking-override agent)))))
+                                    (equal thinking (getf catalog :default-thinking))
+                                    (equal thinking (getf snapshot :thinking)))))))
+               (selection-agrees "shared@second" "low")
+               (setf (agent-model-override agent) "other@first"
+                     (agent-thinking-override agent) :max)
+               (selection-agrees "other@first" "max")
+               (set-session-model agent "shared@second")
+               (set-session-thinking agent :high)
+               (selection-agrees "shared@second" "high")
+               (set-session-model agent "shared@first")
+               (selection-agrees "shared@first" "high")
+               (check "resolution: journal replaces the identity atomically, no provider side channel"
+                      (equal '(:type :model-change :model "shared@first")
+                             (last-entry-body journal))))
+             (check-signals "set-session-model takes one qualified reference"
+                            (apply (symbol-function 'set-session-model)
+                                   (list agent "shared@second" :second)))
+             ;; A journal whose model disappeared from this provider's registry.
+             (append-entry journal '(:type :model-change :model "other@second"))
+             (check-signals "resolution: runtime rejects an explicit unavailable provider"
+                            (effective-model (fold-state journal) agent))
+             (check "resolution: snapshot must not mark that same model ready"
+                    (eq :false (getf (getf (evo.view:journal-state journal :agent agent) :model)
+                                     :ready)))
+             ;; An old journal entry (bare id + separate :provider) folds into
+             ;; the qualified identity, so resume keeps working.
+             (append-entry journal '(:type :model-change :model "shared" :provider :first))
+             (check "resolution: a legacy model-change entry folds to the qualified ref"
+                    (and (equal "shared@first" (effective-model-ref (fold-state journal) agent))
+                         (= 1000 (model-context-window
+                                  (effective-model (fold-state journal) agent)))))
+             (append-entry journal '(:type :model-change :model "gemini@2024" :provider :first))
+             (check "resolution: a legacy bare id may itself contain @"
+                    (equal "gemini@2024@first"
+                           (evo.journal:state-model (fold-state journal)))))
+           (check-signals "the CLI rejects a bare --model"
+                          (evo.cli::parse-args '("--model" "shared")))
+           (let ((opts (evo.cli::parse-args '("--model" "shared@second" "--model" "other@first"))))
+             (check "resolution: repeated --model replaces the entire identity"
+                    (and (equal "other@first" (getf opts :model))
+                         (not (member :model-provider opts))))))
+      (install-runtime-catalog saved))))
+
 (defun test-preflight ()
   (reset-user-registries)
   (reset-settings)
@@ -7742,10 +7849,10 @@ selection journals the provider, and every resolution point honours it."
            (handler-case (progn (evo.cli::preflight-model agent journal nil) nil)
              (error (e) (search "init.lisp" (format nil "~a" e)))))
     (register-fixture-models)
-    (set-setting :model "claude-sonnet-5")
+    (set-setting :model '("claude-sonnet-5" :anthropic))
     (check "preflight passes with configured model"
            (progn (evo.cli::preflight-model agent journal nil) t))
-    (set-setting :model "gone-model")
+    (set-setting :model '("gone-model" :anthropic))
     (check-signals "preflight: unknown model id"
                    (evo.cli::preflight-model agent journal nil)))
   (reset-settings)
@@ -8201,7 +8308,7 @@ clock, only content restarts the idle clock."
                             :max-output 100)
            (setf *retry-fixture-attempts* 0)
            (let* ((evo.provider::*max-attempts* 2)
-                  (message (call-provider :model "retry-fixture-model"
+                  (message (call-provider :model "retry-fixture-model@retry-fixture"
                                           :system "sys" :messages nil :tools nil
                                           :on-event (lambda (ev) (push ev events)))))
              (setf events (nreverse events))
@@ -8280,7 +8387,7 @@ session file from one that was simply slow.  The fold ignores the entry."
                             :max-output 100)
            (setf *stream-error-fixture-attempts* 0)
            (let* ((evo.provider::*max-attempts* 4)
-                  (message (call-provider :model "stream-error-fixture-model"
+                  (message (call-provider :model "stream-error-fixture-model@stream-error-fixture"
                                           :system "sys" :messages nil :tools nil
                                           :on-event (lambda (ev) (push ev events)))))
              (setf events (nreverse events))
@@ -8314,7 +8421,7 @@ HTTP ladder never silently retries a permanent condition four times."
                             :max-output 100)
            (setf *stream-error-fixture-attempts* 0
                  *stream-error-fixture-retryable* nil)
-           (let ((message (call-provider :model "stream-error-fixture-model"
+           (let ((message (call-provider :model "stream-error-fixture-model@stream-error-fixture"
                                          :system "sys" :messages nil :tools nil)))
              (check "stream error: a permanent in-200 error is not retried"
                     (and (= 1 *stream-error-fixture-attempts*)
@@ -8449,7 +8556,7 @@ one.  Every step boundary the worker announces must restart it."
       (register-provider* :start-fixture :base-url "https://fixture.invalid")
       (register-model* "start-fixture-model" :provider :start-fixture
                        :api :start-fixture :context-window 100000 :max-output 100)
-      (append-entry journal '(:type :model-change :model "start-fixture-model"))
+      (append-entry journal '(:type :model-change :model "start-fixture-model@start-fixture"))
       journal)))
 
 (defun test-entry-identity ()
@@ -8759,7 +8866,7 @@ real run put it back — twice, inside ONE task whose own age never moves."
          (hour-ago (- (get-universal-time) 3600))
          (turn-starts 0) (resets 0) (task-started nil) (ages nil) (task-ids nil))
     (setf *step-fixture-calls* 0)
-    (append-entry journal '(:type :model-change :model "step-fixture-model"))
+    (append-entry journal '(:type :model-change :model "step-fixture-model@step-fixture"))
     (append-entry journal '(:type :message
                             :message (:role :user
                                       :content ((:type :text :text "go")))))
@@ -8854,7 +8961,7 @@ each — and a hook-blocked call mid-batch does not stop the rest."
          (journal (progn (ensure-directories-exist dir) (make-session-journal dir)))
          (agent (make-agent :journal journal)))
     (setf *batch-fixture-turns* 0)
-    (append-entry journal '(:type :model-change :model "batch-fixture-model"))
+    (append-entry journal '(:type :model-change :model "batch-fixture-model@batch-fixture"))
     (append-entry journal '(:type :message
                             :message (:role :user
                                       :content ((:type :text :text "go")))))
@@ -9076,7 +9183,7 @@ Reloading disposes the old generation instead of stacking another copy."
 (defparameter *catalog-good-init*
   "(evo:register-model \"catalog-good\" :provider :anthropic :api :anthropic-messages
    :context-window 1000 :max-output 100)
-(evo:set-setting :model \"catalog-good\")")
+(evo:set-setting :model '(\"catalog-good\" :anthropic))")
 
 (defun test-runtime-catalog-atomicity ()
   "A failed reload must leave the previous runtime intact, not a half-built
@@ -9119,7 +9226,7 @@ path after the probe extension has already loaded."
              (sleep 0.1)
              (let ((generation evo.kernel::*extension-generation*))
                (check "the good generation is installed"
-                      (and (equal "catalog-good" (setting :model))
+                      (and (equal '("catalog-good" :anthropic) (setting :model))
                            (find "catalog-good" (all-models)
                                  :key (lambda (m) (pget m :id)) :test #'equal)))
                (check "its extension's hook and task are live"
@@ -9141,7 +9248,7 @@ path after the probe extension has already loaded."
                       (find "catalog-good" (all-models)
                             :key (lambda (m) (pget m :id)) :test #'equal))
                (check "a failed build restores the previous settings"
-                      (equal "catalog-good" (setting :model)))
+                      (equal '("catalog-good" :anthropic) (setting :model)))
                (check "a failed build does not advance the generation"
                       (= generation evo.kernel::*extension-generation*))
                (check "the failed build's own hooks are swept, not stranded"
@@ -9327,16 +9434,21 @@ became zero after the first reload."
            (eq :conflict (refusal-kind (lambda () (evo.command:goal-command host "resume")))))
     (evo.kernel::drain-steering agent)
     ;; /model, /thinking, /lang
-    (evo.command:set-model host "claude-opus-5")
-    (check "cmd: /model <id> journals the model"
-           (equal "claude-opus-5" (state-model (fold-state (agent-journal agent)))))
+    (evo.command:set-model host "claude-opus-5@anthropic")
+    (check "cmd: /model <id>@<provider> journals the qualified identity"
+           (equal "claude-opus-5@anthropic" (state-model (fold-state (agent-journal agent)))))
     (check "cmd: /model reports (id provider)"
            ;; The provider is the name a client hands back to /model, so the
            ;; host's data says "anthropic" and not the keyword (REGISTRY-NAME).
            (equal '(:id "claude-opus-5" :provider "anthropic")
                   (getf (fake-host-data host) :model)))
-    (check "cmd: /model with an unknown id is invalid"
-           (eq :invalid (refusal-kind (lambda () (evo.command:set-model host "nope-9")))))
+    (dolist (bad '("nope-9@anthropic" "claude-opus-5" "@anthropic"
+                   "claude-opus-5@" "claude-opus-5@missing"))
+      (check "cmd: /model rejects incomplete or unregistered identities"
+             (eq :invalid (refusal-kind (lambda () (evo.command:set-model host bad)))))
+      (check "cmd: invalid /model leaves the current identity intact"
+             (equal "claude-opus-5@anthropic"
+                    (state-model (fold-state (agent-journal agent))))))
     (evo.command:model-select host)
     (destructuring-bind (title items action index) (fake-host-choices host)
       (declare (ignore action))
@@ -9345,8 +9457,8 @@ became zero after the first reload."
                   (= (length items) (length (all-models)))
                   (search "current" (third (nth index items))))))
     (funcall (third (fake-host-choices host)) (first (all-models)))
-    (check "cmd: choosing from the list sets that model"
-           (equal (pget (first (all-models)) :id)
+    (check "cmd: choosing from the list sets that qualified model"
+           (equal (model-ref (first (all-models)))
                   (state-model (fold-state (agent-journal agent)))))
     (evo.command:thinking-command host "high")
     (check "cmd: /thinking journals the level"
@@ -10053,11 +10165,11 @@ the stream."
                                         '("0.0.0.0" "192.168.1.2" "example.com")))
   ;; The CLI: serve flags, and what a supervisor restart keeps.
   (let ((opts (evo.cli::parse-args '("serve" "--port" "0" "--ready-file" "/r"
-                                     "--watch-stdin" "--model" "m"))))
+                                     "--watch-stdin" "--model" "m@prov"))))
     (check "cli: serve parses its flags"
            (and (getf opts :serve) (eql 0 (getf opts :port))
                 (equal "/r" (getf opts :ready-file)) (getf opts :watch-stdin)
-                (equal "m" (getf opts :model)))))
+                (equal "m@prov" (getf opts :model)))))
   (check "cli: serve has a default port"
          (eql 8421 (getf (evo.cli::parse-args '("serve")) :port)))
   (check-signals "cli: --ready-file outside serve is unknown"
@@ -10074,7 +10186,7 @@ the stream."
   (check "cli: a serve restart keeps the server flags, not the session's"
          (equal '("--port" "9" "--ready-file" "/r" "--allow-remote")
                 (evo.cli::serve-restart-flags
-                 '("--port" "9" "--model" "m" "--ready-file" "/r" "--resume" "--allow-remote")))))
+                 '("--port" "9" "--model" "m@prov" "--ready-file" "/r" "--resume" "--allow-remote")))))
 
 ;;; The op log.
 
@@ -10748,7 +10860,7 @@ assistant item (or its remaining deltas)."
       (evo.serve:topic-feed-event topic (list :type :message-start :entry-id id))
       (evo.serve:topic-feed-event topic (list :type :text-delta :text "half "))
       ;; A setting command appends before HOST-REFRESH asks the provider to sync.
-      (append-entry journal (list :type :model-change :model "other"))
+      (append-entry journal (list :type :model-change :model "other@anthropic"))
       (evo.serve:sync-session-topic server)
       (evo.serve:topic-feed-event topic (list :type :text-delta :text "answer"))
       (check "a normal append plus refresh keeps the streaming assistant"
@@ -11150,13 +11262,14 @@ session the child was on rather than the newest one in the folder (E1)."
     (check "cli: serve parses its flags"
            (and (getf opts :serve) (eql 0 (getf opts :port))
                 (equal "/t" (getf opts :ready-file)) (getf opts :watch-stdin)))
-    (check "cli: --model ID@PROVIDER names the provider too"
-           (and (equal "m" (getf opts :model)) (eq :prov (getf opts :model-provider)))))
-  (check "cli: --model without a provider leaves it to the registry"
-         (and (equal "m" (getf (evo.cli::parse-args '("--model" "m")) :model))
-              (null (getf (evo.cli::parse-args '("--model" "m")) :model-provider))))
-  (check-signals "cli: --model @provider names no id"
-                 (evo.cli::parse-args '("--model" "@anthropic")))
+    (check "cli: --model keeps one qualified identity"
+           (and (equal "m@prov" (getf opts :model))
+                (not (member :model-provider opts)))))
+  (dolist (bad '("m" "@anthropic" "m@" ""))
+    (check-signals "cli: --model requires both id and provider"
+                   (evo.cli::parse-args (list "--model" bad)))
+    (check-signals "cli: malformed repeated --model cannot reuse an earlier provider"
+                   (evo.cli::parse-args (list "--model" "m@prov" "--model" bad))))
   (check "split-model-ref: the LAST @ separates"
          (multiple-value-bind (id provider) (evo.provider:split-model-ref "gemini@2024@proxy")
            (and (equal "gemini@2024" id) (eq :proxy provider))))
@@ -11175,7 +11288,7 @@ session the child was on rather than the newest one in the folder (E1)."
   (check "cli: a serve restart keeps the server flags, not the session's"
          (equal '("--port" "9" "--ready-file" "/t" "--allow-remote" "--watch-stdin")
                 (evo.cli:serve-restart-flags
-                 '("--port" "9" "--model" "m" "--ready-file" "/t" "--resume" "--allow-remote"
+                 '("--port" "9" "--model" "m@prov" "--ready-file" "/t" "--resume" "--allow-remote"
                    "--watch-stdin" "--thinking" "high")))))
 
 (defclass fixture-credentialed-api (provider-api)
@@ -11223,7 +11336,7 @@ does not use (CONTRACT §5.6)."
                           :key (lambda (p) (getf p :name)) :test #'equal)))
              (check "credentials: an API that keeps its own token is not judged by the env var"
                     (multiple-value-bind (ready reason code)
-                        (evo.serve:model-readiness (find-model "fixture-oauth-model"))
+                        (evo.serve:model-readiness (find-model "fixture-oauth-model@fixture-oauth"))
                       (and (not ready) (equal "no_api_key" code)
                            (search "EVO_TEST_OAUTH_TOKEN" reason))))
              (check "credentials: ...and its provider has no key either"
@@ -11232,7 +11345,7 @@ does not use (CONTRACT §5.6)."
              (write-file-string token "(:access-token \"sk-ant-oat-fixture\")")
              (check "credentials: the API's own token makes the model ready"
                     (multiple-value-bind (ready reason code)
-                        (evo.serve:model-readiness (find-model "fixture-oauth-model"))
+                        (evo.serve:model-readiness (find-model "fixture-oauth-model@fixture-oauth"))
                       (and ready (null reason) (null code))))
              (check "credentials: ...and the catalog's provider half agrees"
                     (eq t (getf (provider-entry) :has-key)))
@@ -11257,7 +11370,7 @@ does not use (CONTRACT §5.6)."
                             :context-window 200000 :max-output 8000)
            (check "credentials: a provider that declares no key needs none"
                   (multiple-value-bind (ready reason code)
-                      (evo.serve:model-readiness (find-model "fixture-nokey-model"))
+                      (evo.serve:model-readiness (find-model "fixture-nokey-model@fixture-nokey"))
                     (and ready (null reason) (null code)))))
       (setf evo.provider::*models* saved-models
             evo.provider::*providers* saved-providers
@@ -11298,7 +11411,7 @@ which made one catalog disagree with itself."
            (register-model* "kernel-api-model" :provider :baz-qux
                                                :api :anthropic-messages
                             :context-window 200000 :max-output 8000)
-           (set-setting :model "dash-model")
+           (set-setting :model '("dash-model" :foo-bar))
            (check "registry names: the helper keeps the key's own spelling"
                   (and (equal "foo-bar" (evo.provider:registry-name :foo-bar))
                        (equal "anthropic-messages"
@@ -11566,6 +11679,7 @@ document, per-entry isolation, and never a key."
     (test-extension-apis)
     (test-model-picker-labels)
     (test-same-id-multi-provider)
+    (test-model-resolution-consistency)
     (register-fixture-models)
     (test-sse)
     (test-sse-transport)

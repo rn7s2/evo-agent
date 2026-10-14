@@ -38,7 +38,7 @@ close $f
 # is dead on purpose — this test asserts journal state, not model replies).
 set f [open "$env(EVO_HOME)/init.lisp" w]
 puts $f {(evo:register-model "ide-test-model" :provider :anthropic :api :anthropic-messages :context-window 200000 :max-output 4096)}
-puts $f {(evo:set-setting :model "ide-test-model")}
+puts $f {(evo:set-setting :model '("ide-test-model" :anthropic))}
 puts $f {(evo:register-provider :anthropic :base-url "http://127.0.0.1:9/dead" :api-key "none")}
 close $f
 

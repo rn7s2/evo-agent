@@ -33,9 +33,9 @@ Usage:
                                  setting, else 6)
   evo-swarm --resume [path]      resume the coordinator session (default: the
                                  last one here) and restore its lanes
-  evo-swarm --model <id[@provider]>        the coordinator's model
+  evo-swarm --model <model@provider>       the coordinator's model
   evo-swarm --thinking <level>   low|medium|high|xhigh|max
-  evo-swarm --lane-model <id[@provider]>   the lanes' model (default: the
+  evo-swarm --lane-model <model@provider>  the lanes' model (default: the
                                  coordinator's)
   evo-swarm --lane-thinking <l>  the lanes' thinking level
   evo-swarm --evo <path>         the evo-agent binary lanes run (default:
@@ -88,17 +88,18 @@ settings for the swarm, lane count, tool limits, prompt notes, and
                           (pop argv)
                           :latest)))
                ((string= arg "--model")
-                ;; ID[@PROVIDER], split once: the provider picks between
-                ;; several registrations of the same id (CONTRACT §1).
-                (setf opts (evo.cli:set-model-opt
-                            opts
-                            (or (pop argv)
-                                (error 'evo.cli:usage-error
-                                       :text "--model needs an id")))))
+                (handler-case
+                    (setf opts (evo.cli:set-model-opt
+                                opts
+                                (or (pop argv)
+                                    (error 'evo.cli:usage-error
+                                           :text "--model needs model@provider"))))
+                  (evo.cli:usage-error (e) (error e))
+                  (error (e) (error 'evo.cli:usage-error :text (princ-to-string e)))))
                ((string= arg "--lane-model")
                 (setf (getf opts :lane-model)
                       (or (pop argv)
-                          (error 'evo.cli:usage-error :text "--lane-model needs an id"))))
+                          (error 'evo.cli:usage-error :text "--lane-model needs model@provider"))))
                ((string= arg "--lane-thinking")
                 (setf (getf opts :lane-thinking) (check-think-level (pop argv) "--lane-thinking")))
                ((string= arg "--thinking")
@@ -147,11 +148,10 @@ settings for the swarm, lane count, tool limits, prompt notes, and
       (unless (getf opts :port)
         (setf (getf opts :port) evo.cli:*serve-default-port*)))
     (when (getf opts :lane-model)
-      ;; ID[@PROVIDER], split once here: the record keeps both halves, and
-      ;; CONTRACT §4.3's config wants them as an object.
-      (multiple-value-bind (id provider) (split-model-ref (getf opts :lane-model))
-        (setf (getf opts :lane-model) id)
-        (when provider (setf (getf opts :lane-provider) provider))))
+      (multiple-value-bind (id provider)
+          (handler-case (split-model-ref (getf opts :lane-model))
+            (error (e) (error 'evo.cli:usage-error :text (princ-to-string e))))
+        (setf (getf opts :lane-model) (format nil "~a@~(~a~)" id provider))))
     opts))
 
 (defun restart-argv (argv)
@@ -297,8 +297,7 @@ frontend; only the TUI gets a status-line segment."
         ;; The flags override what a resumed record restored, and are
         ;; re-recorded: lane configuration is swarm data, not a user file.
         (when (getf opts :lane-model)
-          (setf (swarm-lane-model *swarm*) (getf opts :lane-model)
-                (swarm-lane-provider *swarm*) (getf opts :lane-provider)))
+          (setf (swarm-lane-model *swarm*) (getf opts :lane-model)))
         (when (getf opts :lane-thinking)
           (setf (swarm-lane-thinking *swarm*) (getf opts :lane-thinking)))
         (ensure-directories-exist (swarm-dir *swarm*))

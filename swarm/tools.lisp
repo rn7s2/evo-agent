@@ -320,7 +320,7 @@ out of prose."
               :description "New instructions to give the lane once it has stopped; omit to only stop it"))
     tool-interrupt-lane)
   (deftool "lane_command"
-    "Run a slash command in a lane, exactly as typed in its TUI: /goal, /model <id>, /compact, /lore ..., /thinking, /tree, /new ..."
+    "Run a slash command in a lane, exactly as typed in its TUI: /goal, /model <model@provider>, /compact, /lore ..., /thinking, /tree, /new ..."
     (:object (:lane :type :integer) (:command :type :string)) tool-lane-command)
   (deftool "lane_eval"
     "Evaluate Lisp in a lane's image (package EVO.USER), as its eval tool would — e.g. to install a tool or an MCP server it asked for and you agreed to. Kept (replayed when the lane restarts) unless keep is false."

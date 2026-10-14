@@ -36,7 +36,7 @@
   (list :code code :message message))
 
 (defun check-model-entry (ref agent)
-  "One half of `check`: REF (ID[@PROVIDER]) when the launch names a model, else
+  "One half of `check`: REF (ID@PROVIDER) when the launch names a model, else
 the session's own.  Returns the entry {:id :provider :ok :reason
 :effort-levels} as its value and the problem it found — a plist, or NIL — as a
 second one.  Two values, not a list the caller pushes onto: PUSH only ever
@@ -205,8 +205,7 @@ record restored."
     (lane-setup-forms
      (%make-lane :n 1)
      (%make-swarm :workers (resolved-workers opts record)
-                  :lane-model (or (getf opts :lane-model) (getf record :lane-model))
-                  :lane-provider (or (getf opts :lane-provider) (getf record :lane-provider))
+                  :lane-model (or (getf opts :lane-model) (record-lane-model record))
                   :lane-thinking (or (getf opts :lane-thinking) (getf record :lane-thinking))
                   :agent agent))))
 
@@ -231,15 +230,14 @@ fail, which is exactly what `check` exists to report."
                       "lane_config_failed"
                       (format nil "the lanes' configuration fails to run: ~a" e))
                      problems))))
-         (let* ((id (setting :model))
+         (let* ((ref (model-setting-ref (setting :model)))
                 ;; A lane has no session of yours: its state folds nothing.
                 (lane-state (evo.journal:empty-state))
-                (provider (and id (ignore-errors (effective-model-provider lane-state id))))
-                (model (and id (ignore-errors (find-model id provider))))
-                (declared (and id (or model
-                                      (find id configured
-                                            :key (lambda (m) (pget m :id))
-                                            :test #'string=))))
+                (id (and ref (nth-value 0 (split-model-ref ref))))
+                (provider (and ref (nth-value 1 (split-model-ref ref))))
+                (model (and ref (ignore-errors (find-model ref))))
+                (declared (and ref (or model
+                                       (find ref configured :key #'model-ref :test #'equal))))
                 (apis (api-keys)))
            (multiple-value-bind (ready reason)
                (if model (evo.serve:model-readiness model) (values nil nil))

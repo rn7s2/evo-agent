@@ -56,11 +56,11 @@ After logging in, save this in `~/.evo/init.lisp` to choose the default model
 and thinking level for `evo-agent` and `evo`:
 
 ```lisp
-(evo:set-setting :model "claude-opus-5-5")
+(evo:set-setting :model '("claude-opus-5-5" :anthropic-oauth))
 (evo:set-setting :thinking :high)
 ```
 
-For OpenAI, use `"gpt-6.1-sol"` instead. Use `/model` to see available models.
+For OpenAI, use `'("gpt-6.1-sol" :openai-oauth)` instead. Use `/model` to see available models.
 
 For `evo` / `evo-swarm`, save this in `~/.evo/swarm.lisp`:
 
@@ -69,7 +69,7 @@ For `evo` / `evo-swarm`, save this in `~/.evo/swarm.lisp`:
 (evo.swarm:in-lanes ()
   (load "~/.evo/extensions/020-claude-oauth-provider.lisp")
   (load "~/.evo/extensions/020-openai-oauth-provider.lisp")
-  (evo:set-setting :model "claude-sonnet-5-5")
+  (evo:set-setting :model '("claude-sonnet-5-5" :anthropic-oauth))
   (evo:set-setting :thinking :medium))
 ```
 

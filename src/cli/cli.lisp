@@ -28,8 +28,7 @@ Usage:
                                          index (~/.evo/sessions/index.jsonl); --all every
                                          directory, --cwd DIR, --program evo-swarm, --rescan
                                          to rebuild it from the journals
-  evo-agent --model <id>[@<provider>]    model id (default: the :model setting from init.lisp);
-                                         @provider picks one of several registrations
+  evo-agent --model <model@provider>     model (default: the :model setting from init.lisp)
   evo-agent --thinking <level>           low|medium|high|xhigh|max (default medium)
   evo-agent --no-userspace               boot without init.lisp, post-init.lisp, or extensions (quarantine mode)
   evo-agent --no-supervisor              run the session in-process, no crash-restart parent
@@ -46,7 +45,7 @@ Usage:
                                          session builds (repeatable; the note is named for
                                          the file, and a path that cannot be read is a
                                          usage error)
-      --resume [path] --model <id> --thinking <level> --no-userspace  as above
+      --resume [path] --model <model@provider> --thinking <level> --no-userspace  as above
   evo-agent catalog --json [--no-userspace]
                                          print what this session can use (models, providers,
                                          tools, commands, skills, languages) and exit
@@ -65,7 +64,7 @@ models registered by extensions.  evo-agent ships no built-in model table, e.g.
     :provider :anthropic
     :context-window 1000000 :max-output 128000
     :effort t :thinking-mode :adaptive)
-  (evo:set-setting :model \"claude-opus-5\")")
+  (evo:set-setting :model '(\"claude-opus-5\" :anthropic))")
 
 (defparameter *serve-default-port* 8421)
 
@@ -118,7 +117,7 @@ flags."
                ((string= arg "--model")
                 ;; SETF: SET-MODEL-OPT may add a key, and GETF's setf
                 ;; prepends a cons our caller would never see.
-                (setf opts (set-model-opt opts (or (pop argv) (error "--model needs an id")))))
+                (setf opts (set-model-opt opts (or (pop argv) (error "--model needs model@provider")))))
                ((string= arg "--thinking")
                 (let ((level (intern (string-upcase
                                       (or (pop argv) (error "--thinking needs a level")))
@@ -183,14 +182,9 @@ flags."
     opts))
 
 (defun set-model-opt (opts text)
-  "OPTS with its model set from TEXT — ID, or ID@PROVIDER.  The provider is
-only there when the id is registered under several (or when the bare id's
-first registration is not the wanted one), so a plain id keeps working
-unchanged.  Returns the plist: the caller must take it back, because adding a
-key prepends a cons the caller's own variable does not see."
+  "Replace the launch's complete model identity, requiring ID@PROVIDER."
   (multiple-value-bind (id provider) (split-model-ref text)
-    (setf (getf opts :model) id)
-    (when provider (setf (getf opts :model-provider) provider))
+    (setf (getf opts :model) (format nil "~a@~(~a~)" id provider))
     opts))
 
 ;;; System-prompt notes from the command line (`--prompt-note`, docs/serve.md).
@@ -406,7 +400,7 @@ repeat across processes."
                    ":provider :anthropic~%    "
                    ":context-window 1000000 :max-output 128000~%    "
                    ":effort t :thinking-mode :adaptive)~%  "
-                   "(evo:set-setting :model \"claude-opus-5\")~%~%"
+                   "(evo:set-setting :model '(\"claude-opus-5\" :anthropic))~%~%"
                    "A commented sample is at docs/examples/init.lisp (installed to~%"
                    "~a by `make install-home`)."
                    "~@[~%~%~a~]")
@@ -423,12 +417,10 @@ choice, so it validates the id the first turn will actually use.  The TUI
 never preflights — it gates at run start instead (CHECK-MODEL-READY),
 where /model and /reload can fix the registry in place."
   (let* ((state (fold-state journal))
-         (id (or (evo.journal:state-model state)
-                 (evo.kernel:agent-model-override agent)
-                 (setting :model))))
-    (unless id
+         (ref (ignore-errors (evo.kernel:effective-model-ref state agent))))
+    (unless ref
       (error 'usage-error :text (no-model-message opts)))
-    (handler-case (find-model id (evo.kernel:effective-model-provider state id))
+    (handler-case (find-model ref)
       (error (e)
         (error 'usage-error
                :text (format nil "~a~@[~%~%~a~]" e
@@ -515,7 +507,7 @@ anything boots so an extension deciding at load time sees it."
     (register-prompt-notes opts)
     ;; Journal explicit model/thinking choices so resume preserves them.
     (when (getf opts :model)
-      (set-session-model agent (getf opts :model) (getf opts :model-provider)))
+      (set-session-model agent (getf opts :model)))
     (when (getf opts :thinking)
       (set-session-thinking agent (getf opts :thinking)))
     (when (getf opts :goal)

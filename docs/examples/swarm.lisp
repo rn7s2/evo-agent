@@ -11,7 +11,7 @@
 ;;; The coordinator.  Any init.lisp call works here and overrides your init
 ;;; files for the swarm only.  Lanes inherit the coordinator's providers,
 ;;; models, model and thinking level.
-;; (evo:set-setting :model "claude-opus-5")
+;; (evo:set-setting :model '("claude-opus-5" :anthropic-oauth))
 ;; (evo:set-setting :thinking :high)
 
 ;;; How many lanes, when --workers is not given (default 6).
@@ -30,7 +30,7 @@
 ;; (evo.swarm:in-lanes (lane lanes)
 ;;   (load "~/.evo/extensions/020-claude-oauth-provider.lisp")
 ;;   (when (<= lane 2)
-;;     (evo:set-setting :model "claude-sonnet-5")))
+;;     (evo:set-setting :model '("claude-sonnet-5" :anthropic-oauth))))
 
 ;;; Tool limits for the lanes: every lane, or the ones named.  The report tool
 ;;; is always kept.

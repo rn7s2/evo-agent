@@ -57,9 +57,15 @@
       (register-model* "gpt-5.6-sol" :provider :openai :api :openai-responses
                        :context-window 100000 :max-output 8192 :effort t
                        :responses-options "{\"text\":{\"verbosity\":\"low\"}}")
-      (check "responses options survive model registration"
-             (equal "{\"text\":{\"verbosity\":\"low\"}}"
-                    (pget (find-model "gpt-5.6-sol") :responses-options)))))
+      (let ((registered (find-model "gpt-5.6-sol@openai")))
+        (check "responses options survive model registration"
+               (equal "{\"text\":{\"verbosity\":\"low\"}}"
+                      (pget registered :responses-options)))
+        (check "responses qualified registry identity keeps a bare wire model id"
+               (and (equal "gpt-5.6-sol@openai" (model-ref registered))
+                    (eq :openai (pget registered :provider))
+                    (equal "gpt-5.6-sol"
+                           (gethash "model" (parse-json (build-request api :model registered)))))))))
   (let* ((events nil)
          (terminal "{\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"model\":\"gpt-6-astra\",\"usage\":{\"input_tokens\":100,\"output_tokens\":30,\"input_tokens_details\":{\"cached_tokens\":80},\"output_tokens_details\":{\"reasoning_tokens\":20}},\"output\":[{\"type\":\"reasoning\",\"id\":\"rs_1\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"Plan\"}],\"encrypted_content\":\"opaque\"},{\"type\":\"message\",\"id\":\"msg_1\",\"role\":\"assistant\",\"status\":\"completed\",\"phase\":\"commentary\",\"content\":[{\"type\":\"output_text\",\"text\":\"Reading\",\"annotations\":[]}]},{\"type\":\"function_call\",\"id\":\"fc_1\",\"call_id\":\"call_1\",\"name\":\"read\",\"arguments\":\"{\\\"FileName\\\":\\\"a\\\"}\"},{\"type\":\"function_call\",\"id\":\"fc_2\",\"call_id\":\"call_2\",\"name\":\"read\",\"arguments\":\"{\\\"FileName\\\":\\\"b\\\"}\"}]}}")
          (result (responses-fixture-parse

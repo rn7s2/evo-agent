@@ -138,7 +138,7 @@ without a lane process."
     (register-provider* :envy :base-url "http://127.0.0.1:2" :api-key-env "ENVY_KEY")
     (register-model* "m-a" :provider :stub :context-window 1000 :max-output 100
                            :effort '(:low :medium))
-    (set-setting :model "m-a")
+    (set-setting :model '("m-a" :stub))
     (let* ((agent (fresh-agent))
            (evo:*agent* agent)
            (*swarm* (test-swarm :agent agent))
@@ -157,8 +157,10 @@ without a lane process."
       (check "baseline: a provider without a literal key adds no variable"
              (notany (lambda (e) (search "ENVY" e)) (evo.swarm::lane-secret-environment)))
       (check "baseline: the coordinator's model is registered and the default"
-             (and (search "(register-model \"m-a\"" code)
-                  (search "(set-setting :model \"m-a\")" code)))
+             (and (search "(register-model \"m-a\" :provider :stub" code)
+                  (member '(evo:set-setting :model '("m-a" :stub))
+                          (read-all code) :test #'equal)
+                  (not (member :model-provider (symbols-in (read-all code))))))
       (check "baseline: the effort ladder is quoted, not evaluated"
              (let ((model (third (first (fill-in-forms (read-all code))))))
                (equal '(quote (:low :medium)) (getf (cddr model) :effort))))
@@ -214,7 +216,7 @@ without a lane process."
   (with-registries ()
     (register-provider* :stub :base-url "http://127.0.0.1:1" :api-key-env "STUB_KEY")
     (register-model* "m-a" :provider :stub :context-window 1000 :max-output 100)
-    (set-setting :model "m-a")
+    (set-setting :model '("m-a" :stub))
     (let* ((project (uiop:ensure-directory-pathname
                      (format nil "~a/evo-swarm-project-~a/" (tmp-dir) (gen-id))))
            (global (merge-pathnames "swarm.lisp" (evo-home)))
@@ -260,7 +262,7 @@ without a lane process."
                (check "in-lanes: after the coordinator's providers and defaults"
                       (and first-code
                            (< (position 'evo:register-provider heads) first-code)
-                           (< (position '(evo:set-setting :model "m-a") forms :test #'equal)
+                           (< (position '(evo:set-setting :model '("m-a" :stub)) forms :test #'equal)
                               first-code)))
                (check "in-lanes: before the coordinator's models (filled in if missing) and the report tool"
                       (let ((last-code (position (car (last code)) forms :test #'equal)))
@@ -309,31 +311,40 @@ did not register it; a lane whose default model is missing says why."
       (let ((evo.provider::*apis* (remove :unit-ext-api evo.provider::*apis* :key #'car)))
         (reset-user-registries)
         (register-provider* :stub :base-url "http://127.0.0.1:1" :api-key-env "STUB_KEY")
+        (register-provider* :other :base-url "http://127.0.0.1:2")
+        (register-model* "m-a" :provider :other :context-window 17 :max-output 5)
         (check "fill-in: a model whose API the lane lacks is skipped, not an error"
                (handler-case (progn (mapc #'eval fills) t) (error () nil)))
         (check "fill-in: ...and the lane has the others"
-               (and (ignore-errors (find-model "m-a" :stub))
-                    (not (ignore-errors (find-model "m-ext" :stub)))))
-        (set-setting :model "m-a")
+               (and (ignore-errors (find-model "m-a@stub"))
+                    (not (ignore-errors (find-model "m-ext@stub")))))
+        (check "fill-in: the same bare ID at another provider neither blocks nor replaces it"
+               (and (eql 1000 (getf (find-model "m-a@stub") :context-window))
+                    (eql 17 (getf (find-model "m-a@other") :context-window))))
+        (set-setting :model '("m-a" :stub))
         (check "model check: a default model the lane has passes"
                (handler-case (progn (eval check-form) t) (error () nil)))
-        (set-setting :model-provider :unrelated)
-        (check "model check: a stale provider does not reject a runnable model"
-               (handler-case (progn (eval check-form) t) (error () nil)))
-        (set-setting :model-provider nil)
-        (set-setting :model "m-ext")
+        (check "model check: a separate provider setting is rejected"
+               (handler-case (progn (set-setting :model-provider :unrelated) nil)
+                 (error () t)))
+        (set-setting :model '("m-a" :unrelated))
+        (let ((message (handler-case (progn (eval check-form) nil)
+                         (error (e) (princ-to-string e)))))
+          (check "model check: an unavailable qualified provider never falls back"
+                 (and message (search "m-a@unrelated" message))))
+        (set-setting :model '("m-ext" :stub))
         (let ((message (handler-case (progn (eval check-form) nil)
                          (error (e) (princ-to-string e)))))
           (check "model check: a default model on a missing API is an error that says why"
                  (and message
-                      (search "lane 1 cannot use its model m-ext" message)
+                      (search "lane 1 cannot use its model m-ext@stub" message)
                       (search ":UNIT-EXT-API" message)
                       (search "in-lanes" message))))
         ;; in-lanes registered m-a its own way: the fill-in leaves it alone.
         (register-model* "m-a" :provider :stub :context-window 5 :max-output 5)
         (mapc #'eval fills)
         (check "fill-in: a model in-lanes registered is kept as it is"
-               (eql 5 (getf (find-model "m-a" :stub) :context-window)))))))
+               (eql 5 (getf (find-model "m-a@stub") :context-window)))))))
 
 (defun test-tool-limits ()
   (let ((evo.swarm::*lane-tools* nil)
@@ -572,17 +583,23 @@ server's internals."
             (evo.swarm::lane-cwd two) #p"/wt/lane-2/"
             (evo.swarm::lane-task two) "the task"
             (evo.swarm::lane-extra-forms two) (list "(defun x ())")))
-    (setf (evo.swarm::swarm-lane-model *swarm*) "lane-model"
-          (evo.swarm::swarm-lane-provider *swarm*) :stub
+    (setf (evo.swarm::swarm-lane-model *swarm*) "lane-model@stub"
           (evo.swarm::swarm-lane-thinking *swarm*) :high)
     (evo.swarm::record-swarm)
     (let ((record (evo:custom-state "swarm" agent)))
       (check "record: the swarm is journaled on the coordinator's session"
              (and record (equal "unit" (getf record :id)) (= 2 (getf record :workers))))
       (check "record: the lanes' configuration is swarm data, not a user file"
-             (and (equal "lane-model" (getf record :lane-model))
-                  (eq :stub (getf record :lane-provider))
+             (and (equal "lane-model@stub" (getf record :lane-model))
+                  (not (member :lane-provider (plist-keys record)))
                   (eq :high (getf record :lane-thinking))))
+      (check "record: legacy model and provider fields become one qualified identity"
+             (and (equal "lane-model@stub"
+                         (evo.swarm::record-lane-model
+                          '(:lane-model "lane-model" :lane-provider :stub)))
+                  (equal "gemini@2024@stub"
+                         (evo.swarm::record-lane-model
+                          '(:lane-model "gemini@2024" :lane-provider :stub)))))
       (let ((restored (evo.swarm::make-swarm :agent agent :workers 9 :record record
                                              :evo-binary "/x/evo")))
         (check "record: a resumed swarm keeps its id, directory and lane count"
@@ -590,8 +607,7 @@ server's internals."
                     (equal (namestring (swarm-dir *swarm*)) (namestring (swarm-dir restored)))
                     (= 2 (length (swarm-lanes restored)))))
         (check "record: ...and the lanes' model configuration"
-               (and (equal "lane-model" (evo.swarm::swarm-lane-model restored))
-                    (eq :stub (evo.swarm::swarm-lane-provider restored))
+               (and (equal "lane-model@stub" (evo.swarm::swarm-lane-model restored))
                     (eq :high (evo.swarm::swarm-lane-thinking restored))))
         (let ((two (second (swarm-lanes restored))))
           (check "record: a lane's worktree, branch, cwd, task and evals come back"
@@ -740,14 +756,25 @@ the strip list, so a name dropped from that list fails here."
   (check "cli: an unknown flag is a usage error"
          (handler-case (progn (evo.swarm::parse-args '("--wat")) nil)
            (evo.cli:usage-error () t)))
-  (check "cli: --lane-model splits id@provider"
-         (let ((opts (evo.swarm::parse-args '("--lane-model" "stub-a@stub"))))
-           (and (equal "stub-a" (getf opts :lane-model))
-                (eq :stub (getf opts :lane-provider)))))
-  (check "cli: a bare --lane-model has no provider"
-         (let ((opts (evo.swarm::parse-args '("--lane-model" "stub-a"))))
-           (and (equal "stub-a" (getf opts :lane-model))
-                (null (getf opts :lane-provider)))))
+  (check "cli: model options preserve qualified identities without provider slots"
+         (let ((opts (evo.swarm::parse-args
+                      '("--model" "coord@outer" "--lane-model" "stub-a@stub"))))
+           (and (equal "coord@outer" (getf opts :model))
+                (equal "stub-a@stub" (getf opts :lane-model))
+                (not (member :model-provider (plist-keys opts)))
+                (not (member :lane-provider (plist-keys opts))))))
+  (dolist (ref '("stub-a" "" "@stub" "stub-a@"))
+    (check (format nil "cli: invalid --model ~s is a usage error" ref)
+           (handler-case
+               (progn (evo.swarm::parse-args (list "--model" ref)) nil)
+             (evo.cli:usage-error () t)))
+    (check (format nil "cli: invalid --lane-model ~s is a usage error" ref)
+           (handler-case
+               (progn (evo.swarm::parse-args (list "--lane-model" ref)) nil)
+             (evo.cli:usage-error () t))))
+  (check "cli: --lane-model requires a value"
+         (handler-case (progn (evo.swarm::parse-args '("--lane-model")) nil)
+           (evo.cli:usage-error () t)))
   (check "cli: --lane-thinking is an effort level"
          (eq :high (getf (evo.swarm::parse-args '("--lane-thinking" "high")) :lane-thinking)))
   (check "cli: a bad --lane-thinking is a usage error"
@@ -755,10 +782,10 @@ the strip list, so a name dropped from that list fails here."
            (evo.cli:usage-error () t)))
   (check "cli: a restart keeps the swarm's flags and the lane configuration"
          (equal '("--workers" "4" "--evo" "/x/evo" "--no-userspace"
-                  "--lane-model" "stub-a" "--lane-thinking" "medium")
-                (evo.swarm::restart-argv '("--workers" "4" "--model" "m" "--evo" "/x/evo"
+                  "--lane-model" "stub-a@stub" "--lane-thinking" "medium")
+                (evo.swarm::restart-argv '("--workers" "4" "--model" "m@stub" "--evo" "/x/evo"
                                           "--thinking" "high" "--no-userspace"
-                                          "--lane-model" "stub-a" "--lane-thinking" "medium"
+                                          "--lane-model" "stub-a@stub" "--lane-thinking" "medium"
                                           "--resume" "/old/path")))))
 
 (defun test-serve-cli ()
@@ -837,7 +864,7 @@ and what a restarted coordinator keeps."
   (check "serve: ...and taken with it"
          (equal "0.0.0.0" (evo.swarm::check-serve-host "0.0.0.0" '(:serve t :allow-remote t))))
   (let ((argv (evo.swarm::restart-argv
-               '("serve" "--workers" "4" "--model" "m" "--evo" "/x/evo"
+               '("serve" "--workers" "4" "--model" "m@stub" "--evo" "/x/evo"
                  "--thinking" "high" "--no-userspace" "--resume" "/old"
                  "--host" "127.0.0.1" "--port" "9000" "--ready-file" "/tmp/ready.json"
                  "--watch-stdin" "--allow-remote"
@@ -1191,10 +1218,9 @@ whole state, and every lane transition publishes it."
   (let* ((agent (fresh-agent))
          (*swarm* (test-swarm :agent agent :workers 2))
          (lane (first (swarm-lanes *swarm*))))
-    (setf (evo.swarm::swarm-lane-model *swarm*) "stub-a"
-          ;; A dashed key, so the published config proves REGISTRY-NAME is
-          ;; what crosses the wire rather than the snake_case an enum gets.
-          (evo.swarm::swarm-lane-provider *swarm*) :stub-relay
+    ;; A dashed key, so the published config proves REGISTRY-NAME is
+    ;; what crosses the wire rather than the snake_case an enum gets.
+    (setf (evo.swarm::swarm-lane-model *swarm*) "stub-a@stub-relay"
           (evo.swarm::swarm-lane-thinking *swarm*) :high)
     (let ((ops (with-published (ops) (evo.swarm::publish-swarm-state *swarm* t))))
       (check "topics: the swarm topic is one state.patch"
@@ -1512,7 +1538,7 @@ why not — the answer a GUI's chooser needs before it spawns anything."
            (setf agent (make-agent :journal journal))
            (evo.port:setenv "EVO_TEST_FIXTURE_KEY" "")
            (multiple-value-bind (entry problem)
-               (evo.swarm::check-model-entry "fixture-model" agent)
+               (evo.swarm::check-model-entry "fixture-model@fixture" agent)
              (check "check: a model with no key is not ok, and says which variable"
                     (and (not (getf entry :ok))
                          (search "EVO_TEST_FIXTURE_KEY" (getf entry :reason))))
@@ -1521,9 +1547,9 @@ why not — the answer a GUI's chooser needs before it spawns anything."
                     ;; a chooser can act on no_api_key and cannot on unready.
                     (equal "no_api_key" (getf problem :code))))
            (multiple-value-bind (entry problem)
-               (evo.swarm::check-model-entry "no-such-model" agent)
+               (evo.swarm::check-model-entry "no-such-model@fixture" agent)
              (check "check: an unknown model name is reported, not signalled"
-                    (and (equal "no-such-model" (getf entry :id))
+                    (and (equal "no-such-model@fixture" (getf entry :id))
                          (not (getf entry :ok))))
              (check "check: a model that did not resolve lists no levels — [] , not null"
                     (and (equalp #() (getf entry :effort-levels))
@@ -1537,18 +1563,18 @@ why not — the answer a GUI's chooser needs before it spawns anything."
                     (equal "model_unresolved" (getf problem :code))))
            (evo.port:setenv "EVO_TEST_FIXTURE_KEY" "sk-1")
            (multiple-value-bind (entry problem)
-               (evo.swarm::check-model-entry "fixture-model" agent)
+               (evo.swarm::check-model-entry "fixture-model@fixture" agent)
              (check "check: with a key present the model is ok"
                     (and (getf entry :ok) (null (getf entry :reason)) (null problem))))
            (multiple-value-bind (entry problem)
-               (evo.swarm::check-model-entry "fixture-model" agent)
+               (evo.swarm::check-model-entry "fixture-model@fixture" agent)
              (declare (ignore problem))
              (check "check: a model names the effort levels it takes, in ladder order"
                     (equalp #("low" "max") (getf entry :effort-levels)))
              (check "check: ...and they are the same list the catalog carries"
                     (equalp (getf entry :effort-levels)
                             (evo.serve:model-effort-levels
-                             (find-model "fixture-model" :fixture)))))
+                             (find-model "fixture-model@fixture")))))
            (check "check: --model ID@PROVIDER resolves that registration"
                   (getf (evo.swarm::check-model-entry "fixture-model@fixture" agent) :ok))
            (check "check: an unresolvable ID@PROVIDER is a problem, not a crash"
@@ -1633,8 +1659,7 @@ why not — the answer a GUI's chooser needs before it spawns anything."
              (check "check: ...and the document encodes it that way"
                     (and (search "\"provider\":\"foo-bar\"" (evo.serve:encode-json wire))
                          (not (search "foo_bar" (evo.serve:encode-json wire))))))
-           (let* ((plan (evo.swarm::lane-plan '(:lane-model "dash-model"
-                                                :lane-provider :foo-bar)
+           (let* ((plan (evo.swarm::lane-plan '(:lane-model "dash-model@foo-bar")
                                               agent))
                   (entry (evo.swarm::check-lane-entry plan)))
              (check "check: the lane's model names its provider the same way"
@@ -1667,17 +1692,20 @@ changes nothing about the coordinator."
     ;; the lanes never load.
     (register-api :lane-plan-outer (make-instance 'lane-plan-fake-api))
     (register-provider* :outer :base-url "http://127.0.0.1:8/v1")
+    (register-model* "m-a" :provider :outer :context-window 2000 :max-output 100
+                     :effort '(:low))
     (register-model* "outer-model" :provider :outer :api :lane-plan-outer
                      :context-window 1000 :max-output 100 :effort '(:high))
-    (set-setting :model "m-a")
+    (register-model* "outer-model" :provider :stub :context-window 1000 :max-output 100
+                     :effort '(:low))
+    (set-setting :model '("m-a" :stub))
     (set-setting :thinking :high)
     (let* ((session-agent (fresh-agent))
            (evo:*agent* session-agent)
            (evo.swarm::*lane-forms* nil)
            (*swarm* (test-swarm :agent session-agent)))
       (evo.swarm:in-lanes ()
-        (evo:set-setting :model "m-b")
-        (evo:set-setting :model-provider :stub)
+        (evo:set-setting :model '("m-b" :stub))
         (evo:set-setting :thinking :low))
       (let ((plan (evo.swarm::lane-plan nil session-agent)))
         (check "lane plan: the lane's own settings name the model"
@@ -1718,33 +1746,42 @@ changes nothing about the coordinator."
                     (not (search "LITERAL-SECRET"
                                  (evo.swarm::forms->code
                                   (evo.swarm::lane-setup-forms-for nil session-agent nil)))))))
-      ;; A coordinator selected through ID@PROVIDER journals its provider.
-      ;; Changing only the lane's model must not pin it to that provider.
+      ;; The lane replaces the coordinator's whole identity, never just its ID.
       (let* ((coordinator (fresh-agent))
              (evo:*agent* coordinator)
              (evo.swarm::*lane-forms* nil))
-        (set-session-model coordinator "outer-model" :outer)
-        (evo.swarm:in-lanes () (evo:set-setting :model "m-b"))
-        (dolist (opts '(nil (:lane-model "m-a")))
+        (set-session-model coordinator "outer-model@outer")
+        (evo.swarm:in-lanes () (evo:set-setting :model '("m-b" :stub)))
+        (dolist (opts '(nil (:lane-model "m-a@stub")))
           (let ((plan (evo.swarm::lane-plan opts coordinator)))
             (check "lane plan: a different lane model resolves its own provider"
                    (and (eq :stub (evo.swarm::lane-plan-provider plan))
                         (getf (evo.swarm::lane-plan-status plan) :ok)))
-            (check "lane plan: a stale inherited provider is not a configuration failure"
-                   (null (evo.swarm::lane-plan-problems plan)))))
+            (check "lane plan: the coordinator provider never leaks into lane selection"
+                   (and (equal (if opts "m-a" "m-b")
+                               (evo.swarm::lane-plan-model-id plan))
+                        (null (evo.swarm::lane-plan-problems plan))))))
         (let ((forms (read-all (evo.swarm::forms->code
                                (evo.swarm::lane-setup-forms-for nil coordinator nil)))))
+          (check "lane setup: a journaled coordinator identity becomes a quoted string pair"
+                 (and (member '(evo:set-setting :model '("outer-model" :outer))
+                              forms :test #'equal)
+                      (not (member :model-provider (symbols-in forms)))))
           (check "lane setup: serialized forms accept a cross-provider model override"
                  (evo.swarm::call-with-lane-sandbox
                   (lambda ()
                     (mapc #'eval forms)
-                    (let ((model (effective-model (empty-state) (fresh-agent))))
-                      (and (equal "m-b" (getf model :id))
+                    (let* ((agent (fresh-agent))
+                           (state (empty-state))
+                           (model (effective-model state agent)))
+                      (and (equal '("m-b" :stub) (setting :model))
+                           (equal "m-b@stub" (effective-model-ref state agent))
+                           (equal "m-b" (getf model :id))
                            (eq :stub (getf model :provider)))))))))
       ;; The flags beat the lane's own config, as they do everywhere else in
       ;; evo — over the in-lanes settings, and over what a resumed record
       ;; restored (which a flag wrote there in the first place).
-      (let ((plan (evo.swarm::lane-plan '(:lane-model "m-a" :lane-provider :stub
+      (let ((plan (evo.swarm::lane-plan '(:lane-model "m-a@stub"
                                           :lane-thinking :xhigh)
                                         session-agent)))
         (check "lane plan: --lane-model beats the in-lanes model"
@@ -1755,11 +1792,52 @@ changes nothing about the coordinator."
                (equalp #("low" "medium" "high" "xhigh" "max")
                        (getf (evo.swarm::lane-plan-status plan) :effort-levels))))
       (evo:set-custom-state "swarm"
-                            (list :lane-model "m-b" :lane-provider :stub)
+                            (list :lane-model "m-b@stub")
                             session-agent)
       (check "lane plan: a resumed record's lane model is re-applied too"
              (equal "m-b" (evo.swarm::lane-plan-model-id
                            (evo.swarm::lane-plan nil session-agent t))))
+      (let ((plan (evo.swarm::lane-plan '(:lane-model "m-a@outer") session-agent t)))
+        (check "lane plan: a resumed flag replaces the recorded model and provider atomically"
+               (and (equal "m-a" (evo.swarm::lane-plan-model-id plan))
+                    (eq :outer (evo.swarm::lane-plan-provider plan))
+                    (getf (evo.swarm::lane-plan-status plan) :ok)
+                    (equalp #("low")
+                            (getf (evo.swarm::lane-plan-status plan) :effort-levels)))))
+      (let ((forms (read-all (evo.swarm::forms->code
+                             (evo.swarm::lane-setup-forms-for
+                              '(:lane-model "m-a@outer") session-agent t)))))
+        (check "lane setup: a resumed qualified override emits a quoted dotted pair"
+               (and (member '(evo:set-setting :model '("m-a" :outer))
+                            forms :test #'equal)
+                    (not (member :model-provider (symbols-in forms)))))
+        (check "lane setup: evaluating a resumed override retains the entire new identity"
+               (evo.swarm::call-with-lane-sandbox
+                (lambda ()
+                  (mapc #'eval forms)
+                  (equal "m-a@outer" (effective-model-ref (empty-state) (fresh-agent)))))))
+      (dolist (ref '("m-a@stub" "m-a@outer"))
+        (multiple-value-bind (id provider) (split-model-ref ref)
+          (let* ((plan (evo.swarm::lane-plan (list :lane-model ref) session-agent))
+                 (entry (evo.swarm::check-lane-entry plan)))
+            (check "lane plan: identical bare IDs resolve the exact qualified registration"
+                   (and (equal id (evo.swarm::lane-plan-model-id plan))
+                        (eq provider (evo.swarm::lane-plan-provider plan))
+                        (getf entry :ok)
+                        (equalp (evo.serve:model-effort-levels (find-model ref))
+                                (getf entry :effort-levels)))))))
+      (let* ((plan (evo.swarm::lane-plan '(:lane-model "m-a@unavailable") session-agent t))
+             (entry (evo.swarm::check-lane-entry plan))
+             (problem (nth-value 1 (evo.swarm::check-lane-entry plan))))
+        (check "lane plan: an explicit unavailable provider never falls back to another registration"
+               (and (equal "m-a" (evo.swarm::lane-plan-model-id plan))
+                    (eq :unavailable (evo.swarm::lane-plan-provider plan))
+                    (not (getf entry :ok))
+                    (equal "unavailable" (getf entry :provider))
+                    (equal "lane_model_unresolved" (getf problem :code))
+                    (stringp (getf entry :reason))
+                    (plusp (length (getf entry :reason)))
+                    (equalp #() (getf entry :effort-levels)))))
       ;; What a lane's code registers on its own: an API an extension
       ;; defines, the provider using it, and the model that runs on it.
       (let ((evo.swarm::*lane-forms* nil))
@@ -1770,8 +1848,7 @@ changes nothing about the coordinator."
           (evo:register-model "fake-model" :provider :lane-plan-fake-provider
                               :api :lane-plan-fake
                               :context-window 1000 :max-output 100)
-          (evo:set-setting :model "fake-model")
-          (evo:set-setting :model-provider :lane-plan-fake-provider))
+          (evo:set-setting :model '("fake-model" :lane-plan-fake-provider)))
         (let* ((plan (evo.swarm::lane-plan nil session-agent))
                (status (evo.swarm::lane-plan-status plan))
                (models (getf (evo.swarm::lane-plan-catalog plan) :models))
@@ -1794,13 +1871,14 @@ changes nothing about the coordinator."
       ;; A model whose API only the coordinator has is not one a lane can
       ;; run, however ready it is here.
       (let ((evo.swarm::*lane-forms* nil))
-        (set-setting :model "outer-model")
-        (set-setting :model-provider :outer)
+        (set-setting :model '("outer-model" :outer))
         (let* ((plan (evo.swarm::lane-plan nil session-agent))
                (entry (evo.swarm::check-lane-entry plan))
                (problem (nth-value 1 (evo.swarm::check-lane-entry plan))))
           (check "lane plan: a model whose API no lane code loaded is not runnable there"
                  (and (not (getf entry :ok))
+                      (equal "outer-model" (getf entry :id))
+                      (equal "outer" (getf entry :provider))
                       (equal "lane_api_missing" (getf problem :code))
                       (search "in-lanes" (getf entry :reason))))
           (check "lane plan: ...and its own reason names the API"
@@ -1811,8 +1889,7 @@ changes nothing about the coordinator."
                  (equalp #("high") (getf entry :effort-levels)))))
       ;; A form that fails is a problem, not a crash — and it does not cost
       ;; the rest of the answer.
-      (set-setting :model "m-a")
-      (set-setting :model-provider nil)
+      (set-setting :model '("m-a" :stub))
       (let ((evo.swarm::*lane-forms* nil))
         (evo.swarm:in-lanes () (error "this swarm.lisp form is broken"))
         (let* ((plan (evo.swarm::lane-plan nil session-agent))
@@ -1871,7 +1948,7 @@ and that count is what the lanes' in-lanes code is bound to."
                     (and (eql 2 (evo.swarm::resolved-workers nil record2))
                          (eql 3 (evo.swarm::resolved-workers '(:workers 3) record2)))))
       (check "offline workers: a record with no roster is no count"
-             (null (evo.swarm::recorded-lane-count '(:lane-model "m-a"))))
+             (null (evo.swarm::recorded-lane-count '(:lane-model "m-a@stub"))))
       (check "offline workers: ...and an empty roster is zero"
              (eql 0 (evo.swarm::recorded-lane-count (list :lanes #()))))
       ;; CHECK-WORKERS, which is what `check` reports as :workers.
@@ -1897,13 +1974,14 @@ and that count is what the lanes' in-lanes code is bound to."
            (evo:*agent* agent)
            (evo.swarm::*lane-forms* nil))
       (evo:set-custom-state "swarm"
-                            (list :lane-model "m-a" :lane-provider :stub
+                            (list :lane-model "m-a@stub"
                                   :lanes (vector (list :n 1) (list :n 2) (list :n 3)))
                             agent)
       (evo.swarm:in-lanes (n total)
         (progn
           (evo:register-model (format nil "lane-count-~d" total)
-                              :provider :stub :context-window 1000 :max-output 100)
+                              :provider :stub
+                              :context-window 1000 :max-output 100)
           (list :lane n :lanes total)))
       (let ((plan (evo.swarm::lane-plan nil agent t)))
         (check "lane plan: its sandbox binds in-lanes to the resumed count"

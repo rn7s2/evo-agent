@@ -145,13 +145,11 @@
 ;; belong to the open platform, a different endpoint and a different account.
 
 ;;; Settings.  :model is required (there is no default); the rest have
-;;; kernel defaults.
+;;; kernel defaults.  :model is one model@provider identity, written as a
+;;; two-element list — the model id and the keyword provider it is registered
+;;; under.  /model overrides it for the session.
 
-(evo:set-setting :model "claude-opus-5")
-;; When that id is registered under several providers, the first
-;; registration wins by default; :model-provider names a different one.
-;; /model overrides both for the session.
-;; (evo:set-setting :model-provider :ark)
+(evo:set-setting :model '("claude-opus-5" :anthropic))
 ;; (evo:set-setting :thinking :medium)        ; low|medium|high|xhigh|max
 ;; (evo:set-setting :goal-token-budget 500000)
 ;; (evo:set-setting :compact-reserve 16000)

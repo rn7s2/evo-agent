@@ -279,8 +279,7 @@ never from the journal."
 (defstruct state
   (messages-rev nil)   ; newest-first; STATE-MESSAGES reverses a copy of it
   (messages-cache nil) ; the chronological list, once somebody asked
-  model
-  model-provider   ; provider keyword disambiguating MODEL, or nil
+  model            ; qualified model@provider identity
   thinking
   tools            ; list of active tool names, nil = default set
   goal             ; current goal plist or nil
@@ -374,8 +373,15 @@ cached state with exactly one entry, so the two can never disagree."
                      (remove key (state-custom state)
                              :key #'car :test #'equal))))))
     (:model-change
-     (setf (state-model state) (pget entry :model)
-           (state-model-provider state) (pget entry :provider)))
+     ;; Old journals carry a bare :model id and a separate :provider; today's
+     ;; carry one qualified "id@provider" string.  Fold either into the
+     ;; qualified form so resume never feeds a bare id to the resolver.
+     (let ((model (pget entry :model))
+           (provider (pget entry :provider)))
+       (setf (state-model state)
+             (if (and model provider)
+                 (format nil "~a@~(~a~)" model provider)
+                 model))))
     (:thinking-change
      (setf (state-thinking state) (pget entry :thinking)))
     (:tools-change

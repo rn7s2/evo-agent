@@ -6,8 +6,8 @@
 # ever selectable.  Identity is now (id, provider).  This drives the whole
 # user-visible path under a pty:
 #   - both registrations show up as separate rows in the /model picker;
-#   - a bare :model setting resolves to the FIRST registration (so config
-#     that names an ambiguous id still boots);
+#   - an explicit :model pair selects the intended provider;
+#   - a bare :model setting is rejected instead of selecting the first row;
 #   - picking a row actually switches the endpoint the run talks to.
 #
 # The routing assertion is the point, so the two providers are told apart by
@@ -37,15 +37,14 @@ if {$base_url eq "" || $api_key eq "" || $model eq ""} {
 }
 # The caller's session must not decide what this test sees (tests/clean_env.tcl).
 clean_session_env
-# Same id, two providers.  :deadend is registered FIRST so it is what a bare
-# :model setting resolves to — that makes the "before" half of the routing
-# check fail loudly instead of silently working.
+# Same id, two providers.  Select :deadend explicitly so the "before" half
+# of the routing check fails loudly instead of silently working.
 set f [open "$env(EVO_HOME)/init.lisp" w]
 puts $f "(evo:register-model \"$model\" :provider :deadend :api :anthropic-messages :context-window 1000000 :max-output 64000)"
 puts $f "(evo:register-model \"$model\" :provider :liveproxy :api :anthropic-messages :context-window 1000000 :max-output 64000)"
 puts $f "(evo:register-provider :deadend :base-url \"http://127.0.0.1:1\" :api-key \"$api_key\")"
 puts $f "(evo:register-provider :liveproxy :base-url \"$base_url\" :api-key \"$api_key\")"
-puts $f "(evo:set-setting :model \"$model\")"
+puts $f "(evo:set-setting :model '(\"$model\" :deadend))"
 puts $f {(evo:set-setting :thinking :low)}
 close $f
 
@@ -68,11 +67,17 @@ proc fail {name} {
 
 spawn "$repo/build/evo-agent"
 
-# 1. An ambiguous bare id must still boot: first registration wins, and the
-# status line names which provider that is.
+# 1. The explicit pair boots with the selected provider on the status line.
 expect {
-    -re "$model \\(deadend\\)" { check "bare id boots, labelled with first provider" }
-    timeout { fail "startup with ambiguous id"; exit 1 }
+    -re "$model \\(deadend\\)" { check "explicit model pair boots with selected provider" }
+    timeout { fail "startup with qualified identity"; exit 1 }
+}
+
+send "/eval (format nil \"bare-model-~a\" (handler-case (progn (evo:set-setting :model \"$model\") \"accepted\") (error () \"rejected\")))\r"
+expect {
+    -re {bare-model-rejected} { check "bare model setting is rejected" }
+    -re {bare-model-accepted} { fail "bare model setting must not select a provider"; exit 1 }
+    timeout { fail "bare model rejection"; exit 1 }
 }
 
 # 2. Talking to the dead endpoint fails — proof the run really is routed by
