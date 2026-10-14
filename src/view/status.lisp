@@ -151,13 +151,18 @@ Rounding is CL's, half to even, applied at each step: 999_499 is 999k,
           (t (multiple-value-bind (h rest) (floor seconds 3600)
                (format nil "~dh~dm" h (floor rest 60)))))))
 
-(defun model-label-text (model-id model)
-  "The status line's name for the session's model: its id, with the provider
-in parentheses when the id alone does not identify the endpoint."
-  (cond ((null model-id) "(no model)")
-        ((and model (cdr (model-providers model-id)))
-         (format nil "~a (~(~a~))" model-id (pget model :provider)))
-        (t model-id)))
+(defun model-label-text (ref model)
+  "The status-line label for qualified REF and its resolved MODEL, if any."
+  (multiple-value-bind (id provider)
+      (if ref
+          (handler-case (split-model-ref ref)
+            (error () (values ref nil)))
+          (values nil nil))
+    (cond ((null id) "(no model)")
+          ((and provider
+                (or (null model) (cdr (model-providers id))))
+           (format nil "~a (~(~a~))" id provider))
+          (t id))))
 
 (defun cache-stats-percent (stats)
   "The share of input tokens the provider read from its prompt cache: cache

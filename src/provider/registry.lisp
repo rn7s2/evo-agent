@@ -121,6 +121,21 @@ The last @ separates, so model IDs may themselves contain @."
   "The qualified identity of a registered MODEL plist."
   (format nil "~a@~(~a~)" (pget model :id) (pget model :provider)))
 
+(defun legacy-model-ref (text &optional provider known-bare-p)
+  "Upgrade a pre-qualified-selection model record to model@provider.
+
+PROVIDER is an old separate provider field.  KNOWN-BARE-P says the record's
+shape proves TEXT predates qualified refs, which matters when a bare id itself
+contains @.  Otherwise any @ means a current qualified selection and is never
+reinterpreted: an unavailable explicit provider must remain an error."
+  (unless (stringp text)
+    (error "Legacy model identity must be a string, got ~s" text))
+  (let ((legacy-provider (and (or known-bare-p (not (find #\@ text)))
+                              (first (model-providers text)))))
+    (cond (provider (format nil "~a@~(~a~)" text provider))
+          (legacy-provider (format nil "~a@~(~a~)" text legacy-provider))
+          (t text))))
+
 (defun model-setting-p (value)
   "True for a :model setting: (\"model\" :provider)."
   (and (consp value) (consp (cdr value)) (null (cddr value))

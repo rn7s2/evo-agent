@@ -185,21 +185,14 @@ while the run thread is appending to it."
          (state (fold-state (agent-journal agent)))
          ;; Defensive: a missing/unregistered model (e.g. /reload removed
          ;; it) must not kill the render thread — /model is the recovery.
-         (model-id (handler-case (evo.kernel:effective-model-id state agent)
-                     (error () nil)))
+         (model-ref (ignore-errors (evo.kernel:effective-model-ref state agent)))
          ;; Resolve once: the label, the context window and the run all have
          ;; to agree on WHICH registration is live when an id is served by
          ;; several providers.
-         (model (ignore-errors (evo.kernel:effective-model state agent))))
+         (model (and model-ref (ignore-errors (find-model model-ref)))))
     (setf (tui-goal tui) (evo.journal:state-goal state)
           (tui-todos tui) (custom-state state "todo")
-          ;; Same id under several providers: name the active one, since the
-          ;; bare id no longer identifies the endpoint on its own.
-          (tui-model-label tui) (cond ((null model-id) "(no model)")
-                                      ((and model (cdr (model-providers model-id)))
-                                       (format nil "~a (~(~a~))" model-id
-                                               (pget model :provider)))
-                                      (t model-id))
+          (tui-model-label tui) (evo.view:model-label-text model-ref model)
           (tui-context-window tui) (and model (model-context-window model))
           (tui-context-tokens tui) (evo.kernel:estimate-context-tokens
                                     (evo.journal:state-messages state))

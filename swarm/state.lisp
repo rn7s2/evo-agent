@@ -59,16 +59,13 @@ tools (on its run thread) and the TUI's status segment all read or write it."
 
 (defun record-lane-model (record)
   "A resumed swarm RECORD's lane model as a qualified model@provider string.
-Old records carry a bare :lane-model and a separate :lane-provider; today's
+Old records carry a bare :lane-model and, when explicitly selected, a separate
+:lane-provider; otherwise they used the first registration.  Today's records
 carry one qualified :lane-model.  NIL when the record names no lane model."
   (let ((model (getf record :lane-model))
-        (provider (getf record :lane-provider)))
-    (cond ((null model) nil)
-          ;; A separate provider marks a legacy record even when the bare model
-          ;; id itself contains @.  New records never write :lane-provider.
-          (provider (format nil "~a@~(~a~)" model provider))
-          ((find #\@ model) model)
-          (t model))))
+        (old-shape-p (loop for tail on record by #'cddr
+                           thereis (eq (first tail) :lane-provider))))
+    (and model (legacy-model-ref model (getf record :lane-provider) old-shape-p))))
 
 (defmacro with-swarm-lock (() &body body)
   `(bt:with-lock-held ((swarm-lock *swarm*)) ,@body))

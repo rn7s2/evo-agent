@@ -328,7 +328,8 @@ thread."
 
 (defun effective-model-ref (state agent)
   "The complete model identity: journaled choice, launch override, then config."
-  (or (and state (evo.journal:state-model state))
+  (or (and state (evo.journal:state-model state)
+           (legacy-model-ref (evo.journal:state-model state)))
       (and agent (agent-model-override agent))
       (model-setting-ref (setting :model))
       (error "No model is configured — set :model '(\"model\" :provider) in init.lisp")))

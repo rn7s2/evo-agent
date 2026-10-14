@@ -24,13 +24,14 @@
 ;;; Where the models come from.
 
 (defun session-model-entry (agent)
-  "The model this session's next turn would run on, as (values model reason)."
+  "The model this session's next turn would run on.
+Returns MODEL, REASON, problem CODE, and the selected model@provider REF."
   (let* ((state (fold-state (agent-journal agent)))
-         (id (handler-case (effective-model-id state agent) (error () nil)))
-         (model (handler-case (effective-model state agent) (error () nil))))
-    (cond (model (values model nil))
-          (id (values nil "the model it names is not a registered model"))
-          (t (values nil "no model is configured")))))
+         (ref (handler-case (effective-model-ref state agent) (error () nil)))
+         (model (and ref (handler-case (find-model ref) (error () nil)))))
+    (cond (model (values model nil nil ref))
+          (ref (values nil "no registered model matches it" "model_unresolved" ref))
+          (t (values nil "no model is configured" "model_unresolved" nil)))))
 
 (defun check-problem (code message)
   (list :code code :message message))
@@ -42,19 +43,25 @@ the session's own.  Returns the entry {:id :provider :ok :reason
 second one.  Two values, not a list the caller pushes onto: PUSH only ever
 grew this function's own binding, so every problem a check found was thrown
 away by the caller that asked for it."
-  (multiple-value-bind (model reason code)
+  (multiple-value-bind (model reason code selected-ref)
       (if ref
-          (handler-case (values (find-model-ref ref) nil nil)
-            (error () (values nil "no registered model matches it" "model_unresolved")))
+          (handler-case (values (find-model-ref ref) nil nil ref)
+            (error () (values nil "no registered model matches it" "model_unresolved" ref)))
           (session-model-entry agent))
     (if (null model)
-        (values (list :id ref :provider nil :ok nil :reason reason
-                      ;; A model that did not resolve has no levels to offer;
-                      ;; an empty list, so the entry's shape never changes.
-                      :effort-levels (evo.serve:model-effort-levels nil))
-                (check-problem (or code "model_unresolved")
-                               (format nil "the model ~@[~a ~]the swarm would run is not usable: ~a"
-                                       ref reason)))
+        (multiple-value-bind (id provider)
+            (if selected-ref
+                (handler-case (split-model-ref selected-ref)
+                  (error () (values selected-ref nil)))
+                (values nil nil))
+          (values (list :id id :provider (and provider (registry-name provider))
+                        :ok nil :reason reason
+                        ;; A model that did not resolve has no levels to offer;
+                        ;; an empty list, so the entry's shape never changes.
+                        :effort-levels (evo.serve:model-effort-levels nil))
+                  (check-problem (or code "model_unresolved")
+                                 (format nil "the model ~@[~a ~]the swarm would run is not usable: ~a"
+                                         selected-ref reason))))
         (multiple-value-bind (ready why why-code) (evo.serve:model-readiness model)
           (values (list :id (getf model :id)
                         :provider (registry-name (getf model :provider))
