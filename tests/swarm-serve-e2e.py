@@ -527,6 +527,54 @@ def check_held_lanes_are_announced(swarm, held):
 
 # --------------------------------------------------------------------------
 
+def lane_settings_check(swarm):
+    """A GUI client can set one lane's model and thinking through the coordinator.
+
+    The client never talks to a lane's own ready-file address: it posts the same
+    model.set / thinking.set ops to the coordinator and names the lane. The
+    coordinator validates the lane, proxies the op to the lane's own server, and
+    the mirrored lane topic reflects the new settings.
+    """
+    client = swarm.client
+    status, reply = client.op("model.set", {"model": "stub-b@stub", "lane": 2},
+                              op_rid="lane-2-model")
+    check("model.set can target lane 2 through the coordinator",
+          status == 200 and reply.get("ok")
+          and ((reply.get("result") or {}).get("model") or {}).get("id") == "stub-b",
+          reply)
+    changed = wait_for(lambda: (_lane_row(client, 2)
+                                if ((_lane_row(client, 2).get("model") or {})
+                                    .get("id") == "stub-b")
+                                else None), 30)
+    check("...and the swarm topic shows lane 2's new model",
+          changed is not None, _lane_row(client, 2).get("model"))
+    lane_topic = wait_for(lambda: (lane_state(client, 2)
+                                   if ((lane_state(client, 2).get("model") or {})
+                                       .get("id") == "stub-b")
+                                   else None), 30)
+    check("...and lane 2's own mirrored topic shows the new model",
+          lane_topic is not None, lane_state(client, 2).get("model"))
+
+    status, reply = client.op("thinking.set", {"level": "high", "lane": 2},
+                              op_rid="lane-2-thinking")
+    check("thinking.set can target lane 2 through the coordinator",
+          status == 200 and reply.get("ok")
+          and (reply.get("result") or {}).get("thinking") == "high",
+          reply)
+    thinking = wait_for(lambda: (lane_state(client, 2)
+                                 if lane_state(client, 2).get("thinking") == "high"
+                                 else None), 30)
+    check("...and lane 2's mirrored topic shows the new effort",
+          thinking is not None, lane_state(client, 2).get("thinking"))
+
+    status, reply = client.op("model.set", {"model": "stub-b@stub", "lane": 99},
+                              op_rid="missing-lane-model")
+    check("model.set refuses a lane the swarm does not have",
+          status == 200 and reply.get("ok") is False
+          and (reply.get("error") or {}).get("code") == "not_found",
+          reply)
+
+
 def prompt_note_check(swarm, home):
     """A client's own system-prompt note, in the coordinator and in every lane.
 
@@ -850,6 +898,9 @@ def run_checks(swarm, stub, home, work, proj, held):
           cat.get("default_thinking") == client.topic_state("session").get("thinking"),
           (cat.get("default_thinking"), client.topic_state("session").get("thinking")))
 
+    # --- lane-scoped settings through the coordinator -----------------------
+    lane_settings_check(swarm)
+
     # --- a lane the client was already holding ------------------------------
     check_held_lanes_are_announced(swarm, held)
 
@@ -1061,6 +1112,8 @@ def main():
         f.write(f'(evo:register-provider :stub :base-url "http://127.0.0.1:{stub.port}" '
                 f':api-key "{SECRET}")\n'
                 '(evo:register-model "stub-a" :provider :stub :context-window 200000 '
+                ':max-output 8000 :effort t)\n'
+                '(evo:register-model "stub-b" :provider :stub :context-window 936000 '
                 ':max-output 8000 :effort t)\n'
                 '(evo:set-setting :model \'("stub-a" :stub))\n')
 

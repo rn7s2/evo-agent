@@ -114,6 +114,10 @@ answered (evo-swarm names itself \"evo-swarm\").")
   ;; (lambda (server scope lane) -> list of topic names) — evo-swarm's swarm
   ;; and lane interrupt scopes; INTERRUPT-SCOPE's default only knows :session.
   interrupt-hook
+  ;; (lambda (server lane op-name args) -> result-plist) — proxy a model.set or
+  ;; thinking.set to the named lane.  Nil on a plain evo-agent server, which runs
+  ;; no lanes; evo-swarm registers its own (SWARM:LANE-OP on :model.set/:thinking.set).
+  lane-op-hook
   ;; (lambda (server)) — run on shutdown, before the session ends (a swarm
   ;; stops its lanes and supervisor here).
   shutdown-hook

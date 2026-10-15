@@ -201,6 +201,24 @@ rather than the failed op this file's own method would raise looking it up."
   (declare (ignore server))
   (and (integerp lane) (find-lane lane) t))
 
+(define-condition lane-proxy-error (evo.serve:lane-transport-error) ())
+
+(defun lane-proxy-error (condition)
+  "Adapt a lane transport failure to serve's generic hook error type."
+  (make-condition 'lane-proxy-error
+                  :code (or (lane-error-code condition) "op_failed")
+                  :text (lane-error-text condition)))
+
+(defun lane-proxy-op (server lane op-name args)
+  "The coordinator's server-lane-op-hook: proxy OP-NAME (model.set or
+thinking.set) to LANE through its own POST /ops and return its result plist.
+The caller (serve) already validated the lane through LANE-EXISTS-P."
+  (declare (ignore server))
+  (handler-case
+      (lane-op (find-lane lane) op-name args)
+    (lane-error (condition)
+      (error (lane-proxy-error condition)))))
+
 (defmethod evo.serve:interrupt-scope ((server evo.serve::server) (scope (eql :lane)) lane)
   "One lane, stopped now; the coordinator is told, queued after its current
 run.  No other lane is touched.  A lane that was not running anything is not

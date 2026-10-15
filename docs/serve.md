@@ -227,7 +227,7 @@ does nothing a second time. A client branches on `error.code` alone.
 | `input.cancel` | `{item_id}` → `{}`. Input that has not been drained leaves the transcript (the view publishes the `item.remove`); one that has been drained is history — `already_sent`. |
 | `run.interrupt` | `{scope:"session"\|"swarm"\|"lane", lane?}` → `{interrupted:["session", …]}` — the topics that were actually stopped, empty when nothing was running. |
 | `goal.set` / `goal.pause` / `goal.resume` / `goal.clear` | `{objective, budget?}` / `{}` / `{}` / `{}` → `{goal}`. Only a person pauses or resumes; a cleared goal reads as `null`. |
-| `model.set` / `thinking.set` / `language.set` | `{model}` / `{level}` / `{code}` → `{model}` / `{thinking}` / `{language}`. `model` is one `id@provider` identity, where `provider` is the name a model is registered under (`super-relay`), as in the catalog. |
+| `model.set` / `thinking.set` / `language.set` | `{model, lane?}` / `{level, lane?}` / `{code}` → `{model}` / `{thinking}` / `{language}`. `model` is one `id@provider` identity, where `provider` is the name a model is registered under (`super-relay`), as in the catalog. In a swarm coordinator, an integer `lane` narrows the setting to that lane (routed through its own `/ops`), and the lane must exist (otherwise `not_found`). |
 | `session.new` / `session.fork` / `session.resume` / `session.rewind` / `session.move` | `{}` / `{}` / `{session_id\|path}` / `{entry_id?}` / `{entry_id}` → `{session, draft?}`. All of them need a quiescent session: no task and nothing queued. |
 | `context.compact` | `{hint?}` → `{task_id}`. Needs an idle session. |
 | `lore.add` / `memory.request` | `{scope:"project"\|"global", text}` / `{text}` |

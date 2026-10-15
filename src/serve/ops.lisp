@@ -14,6 +14,15 @@
 
 (in-package :evo.serve)
 
+;;; Forward shape for evo.swarm's lane transport failure. Serve never loads the
+;;; swarm package, but a hook proxying an op to a lane signals a condition this
+;;; generic dispatcher can turn into the normal op-error reply.
+(define-condition lane-transport-error (error)
+  ((code :initarg :code :initform nil :reader lane-transport-error-code)
+   (text :initarg :text :initform "" :reader lane-transport-error-text))
+  (:report (lambda (c s)
+             (write-string (lane-transport-error-text c) s))))
+
 (defstruct (op (:constructor %make-op))
   name precondition args fn schema)
 
@@ -123,6 +132,10 @@ nothing to report answers `{}`, never `null`: a client should be able to read
                      (ecase (evo.command:command-refused-kind condition)
                        (:conflict "busy") (:invalid "invalid_args") (:not-found "not_found"))
                      (evo.command:command-refused-text condition)))
+    ((typep condition 'lane-transport-error)
+     (op-error-reply server rid
+                     (or (lane-transport-error-code condition) "op_failed")
+                     (lane-transport-error-text condition)))
     (t (op-error-reply server rid "op_failed" (format nil "~a" condition)))))
 
 ;;; The session's identity, as an op reports it.
@@ -352,16 +365,39 @@ goal, and only from the state that move makes sense in."
 ;;; Ops: the session's settings.
 
 (defun op-model-set (server args)
-  (evo.command:set-model server (op-arg args :model :required t))
-  (list :model (let ((model (evo.command::current-model (server-agent server))))
-                 (and model (list :id (pget model :id)
-                                  :provider (registry-name (pget model :provider)))))))
+  (let ((lane (op-arg args :lane :type :number)))
+    (if lane
+        ;; A lane argument: validated here the same way run.interrupt validates
+        ;; its lane — through the program's own LANE-EXISTS-P generic.  A plain
+        ;; server that runs no lanes answers nil, which returns NOT_FOUND.  The
+        ;; program's hook proxies the op to that lane's own POST /ops and
+        ;; returns its exact reply.
+        (progn
+          (unless (lane-exists-p server lane)
+            (op-fail "not_found" "no such lane on this server"))
+          (let ((hook (server-lane-op-hook server)))
+            (funcall hook server lane "model.set"
+                     (list :model (op-arg args :model :required t)))))
+        (progn
+          (evo.command:set-model server (op-arg args :model :required t))
+          (list :model (let ((model (evo.command::current-model (server-agent server))))
+                         (and model (list :id (pget model :id)
+                                          :provider (registry-name (pget model :provider))))))))))
 
 (defun op-thinking-set (server args)
-  (evo.command:thinking-command server (op-arg args :level :required t))
-  (list :thinking (evo.kernel:effective-thinking
-                   (fold-state (agent-journal (server-agent server)))
-                   (agent-thinking-override (server-agent server)))))
+  (let ((lane (op-arg args :lane :type :number)))
+    (if lane
+        (progn
+          (unless (lane-exists-p server lane)
+            (op-fail "not_found" "no such lane on this server"))
+          (let ((hook (server-lane-op-hook server)))
+            (funcall hook server lane "thinking.set"
+                     (list :level (op-arg args :level :required t)))))
+        (progn
+          (evo.command:thinking-command server (op-arg args :level :required t))
+          (list :thinking (evo.kernel:effective-thinking
+                           (fold-state (agent-journal (server-agent server)))
+                           (agent-thinking-override (server-agent server))))))))
 
 (defun op-language-set (server args)
   (evo.command:set-language server (op-arg args :code :required t))
@@ -544,9 +580,11 @@ rather than as the every-line-is-info it used to be."
                :args nil)
   (register-op "goal.clear" #'op-goal-clear :args nil)
   (register-op "model.set" #'op-model-set
-               :args '(:model (:type "string" :required t)))
+               :args '(:model (:type "string" :required t)
+                        :lane (:type "integer")))
   (register-op "thinking.set" #'op-thinking-set
-               :args '(:level (:type "string" :required t)))
+               :args '(:level (:type "string" :required t)
+                        :lane (:type "integer")))
   (register-op "language.set" #'op-language-set
                :args '(:code (:type "string" :required t)))
   (register-op "session.new" #'op-session-new :args nil :precondition :quiescent)
