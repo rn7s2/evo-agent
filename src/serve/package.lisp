@@ -12,7 +12,7 @@
            #:server #:server-agent #:server-token #:server-host #:server-port
            #:server-quit #:server-ready-file #:server-eval-enabled
            #:server-epoch #:server-seq #:server-cursor #:server-oplog
-           #:server-interrupt-hook #:server-shutdown-hook
+           #:server-interrupt-hook #:server-shutdown-hook #:server-lane-op-hook
            #:server-program #:server-version #:server-identity
            #:server-status #:server-task #:task-id #:task-kind
            #:task-started #:task-step-started
@@ -31,7 +31,7 @@
            #:publish-op #:publish-state-patch #:publish-item-add
            #:op-now-ms
            ;; the interrupt scopes the program owns (CONTRACT §5.5)
-           #:interrupt-scope #:lane-exists-p
+           #:interrupt-scope #:lane-exists-p #:lane-transport-error
            ;; the catalog builder (CONTRACT §5.6) and what readiness means
            #:catalog-plist #:catalog-for-server #:sessions-body
            #:model-readiness #:model-status #:lane-model-status #:lane-model-entry

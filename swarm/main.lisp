@@ -240,6 +240,12 @@ the swarm's own headless view — when asked for one (:serve)."
           ;; the key is absent for a server with no lanes, and a swarm always
           ;; has this half.
           (setf evo.serve:*catalog-lanes-hook* #'evo.serve:lane-catalog)
+          ;; A lane argument on model.set / thinking.set reaches the right
+          ;; lane through its own POST /ops (CONTRACT §6): the lane is
+          ;; validated by LANE-EXISTS-P exactly as run.interrupt validates it,
+          ;; and the hook returns the lane's own reply — the shape the client
+          ;; already reads.
+          (setf (evo.serve:server-lane-op-hook server) #'lane-proxy-op)
           (make-instance 'serve-view :server server)))
       (progn
         (unless (evo.port:tty-p)
