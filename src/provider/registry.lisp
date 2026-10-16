@@ -191,12 +191,16 @@ default would silently blind a correctly-configured session."
 ;;; field-wise, so a later init file overrides only the keys it gives.
 
 (defvar *providers* nil
-  "Ordered alist of (provider-key . (:base-url s :api-key s :api-key-env s)).")
+  "Ordered alist of (provider-key . (:base-url s :api-key s :api-key-env s
+:proxy s-or-nil)).")
 
-(defun register-provider* (key &rest kvs &key base-url api-key api-key-env)
+(defun register-provider* (key &rest kvs &key base-url api-key api-key-env proxy)
   (declare (ignore base-url api-key api-key-env))
   (unless (keywordp key)
     (error "register-provider: key must be a keyword, got ~s" key))
+  (unless (or (null proxy) (stringp proxy))
+    (error "register-provider ~s: :proxy must be a proxy URL string, or nil to~%  reach this provider directly, got ~s"
+           key proxy))
   (let ((entry (assoc key *providers*)))
     (if entry
         (setf (cdr entry) (plist-merge (cdr entry) kvs))
@@ -239,7 +243,9 @@ rest); PROVIDER-CONFIG is what a request resolves."
   (copy-list (cdr (assoc key *providers*))))
 
 (defun provider-config (key)
-  "Resolved config for provider KEY: (:base-url ... :api-key ...).
+  "Resolved config for provider KEY: (:base-url ... :api-key ...), plus
+:proxy when the registration carries one — nil meaning reach this provider
+directly, whatever the environment's proxy says (see WITH-PROXY).
 Key resolution: explicit :api-key, else the :api-key-env variable, else
 empty (some proxies need none)."
   (let ((conf (cdr (or (assoc key *providers*)
@@ -251,11 +257,15 @@ empty (some proxies need none)."
       (unless base-url
         (error "Provider ~s has no :base-url — pass one to register-provider in your init.lisp."
                key))
-      (list :base-url base-url
-            :api-key (or (pget conf :api-key)
-                         (let ((env (pget conf :api-key-env)))
-                           (and env (getenv env)))
-                         "")))))
+      (append (list :base-url base-url
+                    :api-key (or (pget conf :api-key)
+                                 (let ((env (pget conf :api-key-env)))
+                                   (and env (getenv env)))
+                                 ""))
+              ;; Only when registered: an absent :proxy means the
+              ;; environment decides, which NIL here would not say.
+              (when (member :proxy conf)
+                (list :proxy (pget conf :proxy)))))))
 
 (defun reset-user-registries ()
   "Clear models; re-seed providers from the registered APIs' defaults.
