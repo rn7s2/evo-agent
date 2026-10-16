@@ -13,7 +13,10 @@ extension state — is a fold over the root→leaf path.
 line (last line per id wins: `id`, `path`, `cwd`, `program`, `swarm_id`,
 `title` — the first user text, one line — `created_at`, `updated_at` (epoch
 ms) and `entries`). It is what `evo-agent sessions --json` prints; it may be
-stale, and `--rescan` rebuilds it from the files.
+stale, and `--rescan` rebuilds it from the files and writes it back — the way
+to list a journal no session indexed (one copied in by hand). Rows for
+journals kept outside `~/.evo/sessions/` (a swarm lane's) are carried over
+while their files exist.
 
 ## Reading rules
 
