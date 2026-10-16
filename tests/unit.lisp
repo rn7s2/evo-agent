@@ -6306,6 +6306,21 @@ extensions still keep theirs."
   (register-provider* :custom :base-url "http://x" :api-key "k")
   (check "custom provider literal api-key"
          (equal "k" (pget (provider-config :custom) :api-key)))
+  ;; A provider's :proxy decides the connection in place of the environment
+  ;; (see WITH-PROXY): nil to reach it directly, a string to force one, and
+  ;; absent — which survives as an absent key, not as nil — to let the
+  ;; environment answer.
+  (check "no :proxy registered leaves the key off the resolved config"
+         (null (member :proxy (provider-config :custom))))
+  (register-provider* :custom :proxy nil)
+  (check "a registered nil :proxy is published as nil, past the environment"
+         (and (member :proxy (provider-config :custom))
+              (null (pget (provider-config :custom) :proxy))))
+  (register-provider* :proxied :base-url "http://y" :proxy "http://127.0.0.1:10808")
+  (check "a registered :proxy publishes the URL"
+         (equal "http://127.0.0.1:10808" (pget (provider-config :proxied) :proxy)))
+  (check-signals "a :proxy that is neither nil nor a URL signals"
+                 (register-provider* :proxied :proxy 8080))
   (check-signals "unregistered provider signals" (provider-config :no-such-provider))
   (check-signals "provider without base-url signals"
                  (progn (register-provider* :keyless :api-key "k")
@@ -7934,6 +7949,24 @@ ENSURE-WINHTTP-PROXY)."
              (with-proxy (proxy "http://127.0.0.1:8787/mcp")
                (check "loopback goes direct past a baked-in proxy too"
                       (and (null proxy) (null dex:*default-proxy*)))))
+           ;; An override decides in place of the environment, for the
+           ;; provider that must be reached directly whatever a machine-wide
+           ;; HTTP proxy says (register-provider :proxy nil).
+           (check "without an override a plain-HTTP endpoint takes the environment's proxy"
+                  (string= (env-proxy "http://192.168.1.5:3425/v1/messages")
+                           "http://127.0.0.1:10808"))
+           (with-proxy (proxy "http://192.168.1.5:3425/v1/messages" nil)
+             (check "an explicit NIL override goes direct past the environment"
+                    (null proxy))
+             (check "and nothing is published for it" (null *request-proxy*))
+             (check "and dexador is told to go direct too"
+                    (null dex:*default-proxy*)))
+           (with-proxy (proxy "https://api.anthropic.com/v1/messages"
+                              "http://127.0.0.1:9999")
+             (check "an explicit override names the proxy to use"
+                    (equal proxy "http://127.0.0.1:9999"))
+             (check "and it publishes that one" (equal *request-proxy*
+                                                       "http://127.0.0.1:9999")))
            (check "outside the form nothing is left behind" (null *request-proxy*))
            (check "the shim is a no-op off Windows"
                   (or (evo.port:windows-p) (progn (ensure-winhttp-proxy) t))))

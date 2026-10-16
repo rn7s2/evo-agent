@@ -115,10 +115,17 @@ disappears when they do."
                              (ignore-errors (funcall original user-agent proxy)))
                         (funcall original user-agent))))))))))
 
-(defmacro with-proxy ((var url) &body body)
+(defmacro with-proxy ((var url &optional (override :env)) &body body)
   "Bind VAR to the proxy for URL — NIL when there is none, or URL bypasses
 it — and make that THE proxy for every dexador call in BODY, whether or not
 the call passes :PROXY.  Every HTTP call evo makes goes through here.
+
+OVERRIDE decides in place of the environment: a proxy URL string to force
+one, NIL to go direct whether or not the environment names a proxy, or
+:ENV — the default — to ask the environment.  A provider registered with
+:proxy nil asks for the second: dexador speaks no absolute-form request
+line, so an HTTP proxy answers evo's own plain-HTTP request with a 400, and
+a plain-HTTP endpoint that must be reached is reached directly.
 
 Three places read it.  :PROXY, when a caller passes it (Unix).  The WinHTTP
 shim, since dexador's Windows backend ignores :PROXY (see
@@ -126,7 +133,7 @@ ENSURE-WINHTTP-PROXY).  And DEX:*DEFAULT-PROXY*, which is what a call that
 omits :PROXY falls back to: dexador fills it from the environment once, when
 it loads — so a binary built behind a proxy carries the builder's proxy, and
 a request that must go direct (loopback, NO_PROXY) would take it anyway."
-  `(let* ((,var (env-proxy ,url))
+  `(let* ((,var (if (eq ,override :env) (env-proxy ,url) ,override))
           (*request-proxy* ,var)
           (dex:*default-proxy* ,var))
      (ensure-winhttp-proxy)

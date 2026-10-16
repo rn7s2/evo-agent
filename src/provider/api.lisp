@@ -57,11 +57,17 @@ running the handoff pass over MESSAGES.  THINKING-LEVEL is a rung of
 described in the file header."))
 
 (defgeneric perform-request (api url headers body &key on-event abort-flag
-                                                 abort-cleanup &allow-other-keys)
+                                                 abort-cleanup proxy
+                                                 &allow-other-keys)
   (:documentation "Execute one request and return the result plist.  The
  default method (core.lisp) streams SSE over dexador and delegates to
  PARSE-STREAM; override for a non-SSE framing.  May signal transport
  errors — the retry loop in call-provider classifies them.
+
+ PROXY decides how the connection is made, in place of the environment's
+ own answer (see WITH-PROXY): a proxy URL string, NIL to go direct, or :ENV
+ — the default — to resolve one from the environment.  CALL-PROVIDER passes
+ the provider's registered :proxy here.
 
  OWNERSHIP: whichever thread opens the connection owns it and is the only one
  allowed to close it.  The default method gives the request its own thread and

@@ -423,7 +423,8 @@ and giving up then would leave the request uncancellable."
     (request-task-cancel-requested-p task)))
 
 (defmethod perform-request ((api provider-api) url headers body
-                            &key on-event abort-flag &allow-other-keys)
+                            &key on-event abort-flag ((:proxy override) :env)
+                            &allow-other-keys)
   (labels ((aborted-result ()
              (list :aborted-p t :content nil :stop-reason :aborted
                    :usage (list :input 0 :output 0
@@ -474,7 +475,7 @@ and giving up then would leave the request uncancellable."
                                       (when (request-task-cancelled-p task)
                                         ;; The unwind cleanup publishes.
                                         (return-from request-body))
-                                      (with-proxy (proxy url)
+                                      (with-proxy (proxy url override)
                                         (setf stream
                                               (apply #'dex:post url
                                                      :headers headers :content body
@@ -576,6 +577,10 @@ breakpoints on Anthropic Messages)."
          (body (build-request api :model model :system system
                               :messages messages :tools tools
                               :thinking-level thinking-level))
+         ;; Where the provider registered a :proxy, it decides — nil meaning
+         ;; this endpoint is reached directly, an HTTP proxy being no use to
+         ;; a plain-HTTP one (see WITH-PROXY).  Absent, the environment does.
+         (proxy (if (member :proxy config) (pget config :proxy) :env))
          (last-error nil))
     (flet ((finish (result)
              (let ((usage (pget result :usage)))
@@ -613,7 +618,8 @@ breakpoints on Anthropic Messages)."
                     (let ((result (perform-request api url headers body
                                                    :on-event on-event
                                                    :abort-flag abort-flag
-                                                   :abort-cleanup abort-cleanup)))
+                                                   :abort-cleanup abort-cleanup
+                                                   :proxy proxy)))
                       (cond
                         ((pget result :aborted-p)
                          (list :done (aborted-message (pget result :usage))))
