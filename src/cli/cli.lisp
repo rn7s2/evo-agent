@@ -286,8 +286,8 @@ one that stands if an extension registered the same name."
 (defun cmd-sessions (opts)
   "`evo-agent sessions --json` (CONTRACT §2): the session index as one JSON
 document, newest first.  Reads ~/.evo/sessions/index.jsonl — scanning the
-journals when it is missing, or when --rescan asks for it.  Never boots a
-session, never opens a listener."
+journals when it is missing; --rescan scans them and writes the index back.
+Never boots a session, never opens a listener."
   (let ((sessions (session-list :rescan (getf opts :rescan)
                                 :cwd (and (getf opts :cwd)
                                           (namestring (uiop:ensure-directory-pathname

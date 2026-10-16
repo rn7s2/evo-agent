@@ -8821,7 +8821,74 @@ one lane at a time")))))
       (check "index: ...and the rebuild writes it back"
              (progn (rebuild-session-index)
                     (equal (list id) (mapcar (lambda (r) (pget r :id))
-                                             (session-list :cwd dir))))))))
+                                             (session-list :cwd dir)))))
+      (test-session-index-rescan dir))))
+
+(defun same-file-p (a b)
+  "Whether paths A and B name one file — by truename while it exists (the temp
+directory may be reached through a symlink), by spelling once it is gone."
+  (flet ((spelled (p) (let ((true (ignore-errors (probe-file p))))
+                        (namestring (or true p)))))
+    (equal (spelled a) (spelled b))))
+
+(defun listed-p (path records)
+  (find-if (lambda (r) (same-file-p path (pget r :path))) records))
+
+(defun indexed-p (path)
+  "Whether the index on disk has a row for the journal at PATH."
+  (listed-p path (read-session-index)))
+
+(defun test-session-index-rescan (dir)
+  "`sessions --rescan` keeps what it finds: a journal the index never heard of
+(copied in by hand) is listed from then on, a lane's journal kept outside
+~/.evo/sessions/ survives it, and a lane journal that is gone does not."
+  (let* ((copied (merge-pathnames "20261015T173306Z_feedfacecafe0001.sexp"
+                                  (sessions-directory dir)))
+         (lane-dir (uiop:ensure-directory-pathname
+                    (format nil "~a/evo-lane-sessions-~a/" (tmp-dir) (gen-id))))
+         (saved (getenv "EVO_SESSIONS_DIR"))
+         (lane (unwind-protect
+                    (progn (evo.port:setenv "EVO_SESSIONS_DIR" (namestring lane-dir))
+                           (make-session-journal dir :program "lane"))
+                 (evo.port:setenv "EVO_SESSIONS_DIR" (or saved "")))))
+    ;; A lane journal lands (and indexes itself) outside the sessions tree.
+    (append-entry lane '(:type :message
+                         :message (:role :user :content ((:type :text :text "lane work")))))
+    (append-entry lane '(:type :message
+                         :message (:role :assistant :stop-reason :stop :model "m"
+                                   :usage (:input 1 :output 2 :cache-read 0 :cache-write 0)
+                                   :content ((:type :text :text "ok")))))
+    ;; A journal copied in by hand: on disk, never indexed.
+    (with-open-file (out copied :direction :output :if-exists :supersede
+                                :external-format :utf-8)
+      (format out "(:type :session :version 1 :id \"feedfacecafe0001\" :cwd ~s :program \"evo-agent\" :swarm-id nil :timestamp \"2026-10-15T17:33:06Z\")~%"
+              (namestring dir)))
+    (check "rescan: a journal copied in by hand is not in the index"
+           (and (indexed-p (journal-path lane)) (not (indexed-p copied))))
+    (let ((listed (session-list :rescan t :all t)))
+      (check "rescan: lists the copied journal"
+             (find "feedfacecafe0001" listed :key (lambda (r) (pget r :id)) :test #'equal))
+      (check "rescan: ...and the lane's, which no scan can find"
+             (listed-p (journal-path lane) listed)))
+    (check "rescan: the index keeps the copied journal"
+           (indexed-p copied))
+    (check "rescan: ...and still has the lane's row"
+           (indexed-p (journal-path lane)))
+    (check "rescan: a plain read lists the copied journal from then on"
+           (find "feedfacecafe0001" (session-list :cwd dir)
+                 :key (lambda (r) (pget r :id)) :test #'equal))
+    (check "rescan: nothing is left beside the index"
+           (null (directory (merge-pathnames "index.jsonl.rescan-*"
+                                             (uiop:pathname-directory-pathname
+                                              (session-index-path))))))
+    (delete-file (journal-path lane))
+    (session-list :rescan t :all t)
+    (check "rescan: a lane row whose journal is gone is dropped"
+           (not (indexed-p (journal-path lane))))
+    (check "rescan: ...and the rest is still there"
+           (indexed-p copied))
+    (ignore-errors (delete-file copied))
+    (ignore-errors (uiop:delete-directory-tree lane-dir :validate t))))
 
 (defun test-sessions-cli ()
   (let* ((dir (uiop:ensure-directory-pathname

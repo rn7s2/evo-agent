@@ -774,27 +774,73 @@ missing — every field comes from the files, so it is always right."
                            when record collect (normalize-index-record record)))
         #'session-record-newer-p))
 
+(defun true-namestring (path)
+  "PATH's truename as a string, or NIL when nothing is there.  Two spellings of
+one file (a symlinked home, macOS's /var and /private/var) compare equal."
+  (let ((true (ignore-errors (probe-file path))))
+    (and true (namestring true))))
+
+(defun index-rows-outside-scan (scanned)
+  "The index's rows a scan cannot reproduce: journals that still exist outside
+~/.evo/sessions/ — a swarm lane keeps its own under EVO_SESSIONS_DIR — and that
+SCANNED does not already name.  A row whose journal is gone is not kept."
+  (let* ((sessions (merge-pathnames "sessions/" (evo-home)))
+         (root (or (true-namestring sessions) (namestring sessions)))
+         (seen (make-hash-table :test #'equal)))
+    (dolist (record scanned)
+      (setf (gethash (or (true-namestring (pget record :path)) (pget record :path)) seen) t))
+    (remove-if-not
+     (lambda (record)
+       (let ((true (true-namestring (pget record :path))))
+         (and true
+              (not (string-prefix-p root true))
+              (not (gethash true seen)))))
+     (ignore-errors (read-session-index)))))
+
 (defun rebuild-session-index ()
-  "Rewrite the index from the journals on disk.  Returns what was written."
-  (let ((records (scan-sessions))
-        (path (session-index-path)))
-    (ensure-directories-exist path)
-    (with-open-file (out path :direction :output :if-exists :supersede
-                              :if-does-not-exist :create
-                              :external-format :utf-8)
-      (dolist (record records)
-        (write-string (json-object record) out)
-        (terpri out)))
+  "Rewrite the index from the journals on disk, and return its sessions newest
+first — the list `session-list` would read back.
+
+Everything under ~/.evo/sessions/ comes from a scan; the rows for journals kept
+elsewhere (a lane's) are carried over while their files exist, since no scan
+can find them.  The file is written beside the index and renamed over it, so a
+reader sees the old index or the new one, never half of one.  A session that
+appends its row while this runs may lose that line, but the scan has already
+read its journal, and the session writes its row again when it switches or
+ends.  Rows go out oldest first: the last line per id wins, so of two journals
+sharing an id the newer one is the row.
+
+A failure to write is a warning: the list is still right, only not kept."
+  (let* ((scanned (scan-sessions))
+         (records (sort (append scanned (index-rows-outside-scan scanned))
+                        #'session-record-newer-p))
+         (path (session-index-path))
+         (temporary (merge-pathnames (format nil "index.jsonl.rescan-~a" (gen-id))
+                                     (uiop:pathname-directory-pathname path))))
+    (handler-case
+        (unwind-protect
+             (progn
+               (ensure-directories-exist path)
+               (with-open-file (out temporary :direction :output :if-exists :error
+                                              :if-does-not-exist :create
+                                              :external-format :utf-8)
+                 (dolist (record (reverse records))
+                   (write-string (json-object record) out)
+                   (terpri out)))
+               (uiop:rename-file-overwriting-target temporary path))
+          (when (probe-file temporary) (ignore-errors (delete-file temporary))))
+      (error (e) (warn "Could not write the session index: ~a" e)))
     records))
 
 (defun session-list (&key rescan cwd program all)
-  "The sessions the index knows, newest first.  Scanned from the journals when
-the index is missing or RESCAN is true.  CWD (default: the working directory)
-restricts the list to one folder unless ALL; PROGRAM restricts it to one
-frontend (\"evo-agent\", \"evo-swarm\", \"lane\")."
-  (let ((records (if (or rescan (not (probe-file (session-index-path))))
-                     (scan-sessions)
-                     (read-session-index))))
+  "The sessions the index knows, newest first.  RESCAN rebuilds the index from
+the journals first (and keeps it); a missing index is scanned without being
+written.  CWD (default: the working directory) restricts the list to one
+folder unless ALL; PROGRAM restricts it to one frontend (\"evo-agent\",
+\"evo-swarm\", \"lane\")."
+  (let ((records (cond (rescan (rebuild-session-index))
+                       ((not (probe-file (session-index-path))) (scan-sessions))
+                       (t (read-session-index)))))
     (remove-if-not
      (lambda (record)
        (and (or all
