@@ -136,6 +136,12 @@ without a lane process."
   (with-registries ()
     (register-provider* :stub :base-url "http://127.0.0.1:1" :api-key "LITERAL-SECRET")
     (register-provider* :envy :base-url "http://127.0.0.1:2" :api-key-env "ENVY_KEY")
+    ;; A provider told to be reached directly, and one told which proxy to use:
+    ;; a lane inherits this process's environment, so both decisions have to
+    ;; travel, or the lane takes the environment's answer instead.
+    (register-provider* :direct :base-url "http://127.0.0.1:3" :api-key "k3" :proxy nil)
+    (register-provider* :via-proxy :base-url "http://127.0.0.1:4" :api-key "k4"
+                                 :proxy "http://127.0.0.1:10808")
     (register-model* "m-a" :provider :stub :context-window 1000 :max-output 100
                            :effort '(:low :medium))
     (set-setting :model '("m-a" :stub))
@@ -156,6 +162,24 @@ without a lane process."
                      (evo.swarm::lane-secret-environment) :test #'equal))
       (check "baseline: a provider without a literal key adds no variable"
              (notany (lambda (e) (search "ENVY" e)) (evo.swarm::lane-secret-environment)))
+      ;; The regression: a lane inherits the coordinator's environment, so a
+      ;; provider the coordinator reaches directly was reached through the
+      ;; environment's proxy in the lane — and a plain-HTTP endpoint behind an
+      ;; HTTP proxy answers evo's own request with a 400, which is the failure
+      ;; the :proxy flag exists to prevent.
+      (check "baseline: a provider reached directly says so in the lane"
+             (member '(evo:register-provider :direct :base-url "http://127.0.0.1:3"
+                                             :api-key-env "EVO_SWARM_DIRECT_API_KEY"
+                                             :proxy nil)
+                     (read-all code) :test #'equal))
+      (check "baseline: a provider with a proxy keeps it in the lane"
+             (member '(evo:register-provider :via-proxy :base-url "http://127.0.0.1:4"
+                                             :api-key-env "EVO_SWARM_VIA_PROXY_API_KEY"
+                                             :proxy "http://127.0.0.1:10808")
+                     (read-all code) :test #'equal))
+      (check "baseline: a provider that never chose still lets the lane's environment decide"
+             (not (member :proxy (getf (cddr (find :stub (read-all code)
+                                                   :key #'second)) :proxy))))
       (check "baseline: the coordinator's model is registered and the default"
              (and (search "(register-model \"m-a\" :provider :stub" code)
                   (member '(evo:set-setting :model '("m-a" :stub))

@@ -227,11 +227,21 @@ API."
                                ',apis :test #'equal)))))))
 
 (defun provider-registration-form (key)
+  "KEY's coordinator registration, as the form a lane evaluates.
+BASE-URL, the credential's variable, and the registration's :PROXY — the last
+one because a lane inherits the coordinator process's environment, so a
+provider the coordinator was told to reach directly (`:proxy nil`) would
+otherwise be reached through whatever proxy that environment names: an HTTP
+proxy answers evo's plain-HTTP request with a 400 (see EVO.UTIL:WITH-PROXY),
+which is the whole reason the flag exists.  Absent stays absent, so a provider
+that never chose still lets the lane's environment decide, as it does here."
   (let ((reg (provider-registration key)))
     `(evo:register-provider ,key
                             ,@(when (getf reg :base-url) (list :base-url (getf reg :base-url)))
                             ,@(let ((env (provider-env-var key)))
-                                (when env (list :api-key-env env))))))
+                                (when env (list :api-key-env env)))
+                            ,@(when (member :proxy reg)
+                                (list :proxy (getf reg :proxy))))))
 
 (defparameter *report-tool-source*
   "(evo:register-tool \"report\"
