@@ -784,41 +784,30 @@ the CSI spelling the parser already reads."
                        (setf got t))))))))
       got)))
 
-#+evo-windows
-(defun untranslated-newlines (external-format)
-  "EXTERNAL-FORMAT with newline translation turned off.
-The console's own encoding is not ours to change (it is UCS-2LE), but what
-the stream does with CR is: the TUI wants the bytes the key sent, not a
-line discipline's opinion of them."
-  (let ((spec (if (listp external-format) (copy-list external-format)
-                  (list external-format))))
-    (loop while (getf (cdr spec) :newline :absent)
-          until (eq (getf (cdr spec) :newline :absent) :absent)
-          do (remf (cdr spec) :newline))
-    (append spec '(:newline :lf))))
-
 (defun make-stdin-stream ()
-  "Where the TUI reads keys from.
+  "Where the TUI reads keys from, and where a served process watches for its
+parent's end of file.
 
-Unix: an unbuffered byte stream on stdin's descriptor.  Windows: SBCL's own
-console stream, because the console is read through a wide API just as it is
-written through one.  A byte stream on the handle there returns UTF-16LE --
-typing abc arrives as 97 0 98 0 99 0, and an arrow key as 27 0 91 0 65 0, so
-the key parser sees a NUL after every byte it understands.  Measured on
-Windows 11, SBCL 2.6.7.  READ-AVAILABLE-INPUT turns the characters back into
-the UTF-8 bytes the parser is written against."
+Unix: an unbuffered byte stream on stdin's descriptor.
+
+Windows: the console input handle itself, when stdin is a console -- the
+console is read through a wide API just as it is written through one, and a
+byte stream on the handle there returns UTF-16LE (typing abc arrives as
+97 0 98 0 99 0, an arrow key as 27 0 91 0 65 0), so the key parser would see a
+NUL after every byte it understands.  Measured on Windows 11, SBCL 2.6.7.
+DRAIN-CONSOLE-INPUT reads that handle's key events, which is also the only
+place Enter survives (see there).
+
+A redirected stdin is not a console: it is the pipe WATCH-STDIN-EOF parks on,
+and it keeps a byte stream -- READ-AVAILABLE-INPUT decodes the pipe's own
+encoding, and the watcher calls READ-BYTE."
   #+evo-windows
-  ;; The console input handle itself, not a stream over it: DRAIN-CONSOLE-INPUT
-  ;; reads key events, which is the only place Enter survives (see there).  A
-  ;; redirected stdin is not a console, so it keeps the stream -- with newline
-  ;; translation off, since a pipe may spell its breaks either way.
   (let ((handle (%std-handle +std-input-handle+)))
     (if (console-mode handle)
         handle
         (sb-sys:make-fd-stream (std-descriptor :stdin)
                                :input t :buffering :none
-                               :external-format (untranslated-newlines
-                                                 (stream-external-format sb-sys:*stdin*)))))
+                               :element-type '(unsigned-byte 8))))
   #-evo-windows
   (let ((where (std-descriptor :stdin)))
     #+sbcl (sb-sys:make-fd-stream where :input t :buffering :none
@@ -846,21 +835,15 @@ the UTF-8 bytes the parser is written against."
 
 (defun read-available-input (source vector)
   "Push every byte currently readable from SOURCE onto VECTOR.  True if any
-arrived.  The platform difference lives here, not in the key parser: bytes
-straight off the descriptor on Unix, characters re-encoded to UTF-8 on
-Windows (see MAKE-STDIN-STREAM)."
+arrived.  SOURCE is the console input handle on Windows (its key events are
+decoded to the UTF-8 the key parser is written against) or a byte stream
+everywhere else, including a redirected stdin on Windows."
   #+evo-windows
   (when (sb-sys:system-area-pointer-p source)
     (return-from read-available-input (drain-console-input source vector)))
   (let ((got nil))
     (loop while (listen source)
-          do #+evo-windows
-             (let ((char (read-char-no-hang source nil nil)))
-               (if char
-                   (progn (push-utf8 char vector) (setf got t))
-                   (loop-finish)))
-             #-evo-windows
-             (let ((byte (read-byte source nil nil)))
+          do (let ((byte (read-byte source nil nil)))
                (if byte
                    (progn (vector-push-extend byte vector) (setf got t))
                    (loop-finish))))

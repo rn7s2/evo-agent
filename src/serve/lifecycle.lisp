@@ -55,13 +55,21 @@ end of file — what --watch-stdin means (see the file header).  Returns the
 thread, or NIL when stdin cannot be watched this way: on Windows a console is
 read through its own API, not as a byte stream, and there is no pipe to lose.
 The thread is a reader parked on the file descriptor; it needs no teardown,
-and closing the stream at EOF releases nothing anybody else holds."
+and closing the stream at EOF releases nothing anybody else holds.
+
+Only end of file calls THUNK.  A read that fails for any other reason leaves
+the thread with nothing to watch and returns without it: this is the signal a
+lane's whole life rests on, and a stream that cannot be read is not a parent
+that went away.  (A character stream here used to signal a type error on every
+read, which the old handler swallowed into a shutdown — every lane died a
+second after it started listening.)"
   (let ((stream (ignore-errors (evo.port:make-stdin-stream))))
     (when (typep stream 'stream)
       (bt:make-thread
        (lambda ()
-         (handler-case (loop until (eq (read-byte stream nil :eof) :eof))
-           (error () nil))
-         (ignore-errors (close stream))
-         (funcall thunk))
+         (let ((eof (handler-case
+                        (progn (loop until (eq (read-byte stream nil :eof) :eof)) t)
+                      (error () nil))))
+           (ignore-errors (close stream))
+           (when eof (funcall thunk))))
        :name name))))
