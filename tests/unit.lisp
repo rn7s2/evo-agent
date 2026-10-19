@@ -560,6 +560,34 @@ line2")))
 
 ;;; Timeouts and proxy env detection
 
+(defun test-stdin-stream-for-watching ()
+  "MAKE-STDIN-STREAM's non-console branch is the stream WATCH-STDIN-EOF parks
+on, and the watcher reads it with READ-BYTE — so it must be a *binary* stream.
+
+On Windows this branch is a redirected stdin: a pipe, which is exactly what
+LAUNCH-CHILD-PIPED hands every `evo-agent serve --watch-stdin` lane.  It used
+to build a character stream instead, so the watcher's READ-BYTE signalled a
+type error on every read; the handler around it swallowed that as if it were
+end of file and shut the lane down about a second after it started listening.
+Every lane of every swarm died that way, and the coordinator reported it as
+`ERROR 12029: Cannot connect` because the lane was gone before it could be
+asked anything.
+
+The element type is the whole assertion, and it is the whole defect: a
+character stream is what READ-BYTE refuses.  Nothing is read here — a test
+process's stdin may be an interactive terminal, and a byte read would wait."
+  (let ((stream (evo.port:make-stdin-stream)))
+    (cond
+      ;; A console (the TUI's case, Windows only): the console input handle
+      ;; itself, which DRAIN-CONSOLE-INPUT reads as key events, not bytes.
+      #+sbcl
+      ((sb-sys:system-area-pointer-p stream)
+       (check "stdin on a console is the console handle" t))
+      ((typep stream 'stream)
+       (check "the stdin stream WATCH-STDIN-EOF parks on is binary, not character"
+              (equal '(unsigned-byte 8) (stream-element-type stream))))
+      (t (check "make-stdin-stream returns a handle or a stream" nil)))))
+
 (defun test-launch-child-piped ()
   "LAUNCH-CHILD-PIPED must give the child a pipe on stdin — never the parent's
 own stdin — and hand the write end back.  ECL used to fall back to inheriting
@@ -11832,6 +11860,7 @@ document, per-entry isolation, and never a key."
     (test-retired-off-level)
     (test-kimi-provider)
     (test-port-timeout)
+    (test-stdin-stream-for-watching)
     (test-launch-child-piped)
     (test-port-unsetenv)
     (test-env-proxy)
