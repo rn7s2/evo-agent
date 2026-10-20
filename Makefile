@@ -55,6 +55,7 @@ install: build install-home
 	  ln -sfn evo-swarm $(PREFIX)/bin/evo; \
 	else \
 	  echo "Need sudo to write to $(PREFIX)/bin"; \
+	  sudo mkdir -p $(PREFIX)/bin; \
 	  sudo install -m 755 build/evo-agent $(PREFIX)/bin/evo-agent; \
 	  sudo install -m 755 build/evo-swarm $(PREFIX)/bin/evo-swarm; \
 	  sudo ln -sfn evo-swarm $(PREFIX)/bin/evo; \
