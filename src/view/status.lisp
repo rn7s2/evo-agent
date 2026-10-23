@@ -194,11 +194,10 @@ selection, say) need: the line drops innermost cells first to fit."
       (format nil "ctx ~a" (fmt-ktokens used))))
 
 (defun goal-label-text (goal live-tokens)
-  (let ((budget (pget goal :token-budget)))
-    (format nil "goal ~a (~(~a~)) ~a~@[/~a~]"
-            (pget goal :goal-id) (pget goal :status)
-            (fmt-ktokens (+ (or (pget goal :tokens-used) 0) (or live-tokens 0)))
-            (and budget (fmt-ktokens budget)))))
+  (format nil "goal ~a (~(~a~)) ~a"
+          (pget goal :goal-id) (pget goal :status)
+          (fmt-ktokens (+ (or (pget goal :tokens-used) 0)
+                          (or live-tokens 0)))))
 
 (defun jobs-label-text (jobs)
   "The ▷ background-jobs cell, or NIL when no job is running.  JOBS is

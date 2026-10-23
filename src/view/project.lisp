@@ -202,7 +202,6 @@ is left to the ordinary rules (the message is shown as what it says it is)."
              :event (enum-string (pget origin :event))
              :goal-id (pget origin :goal-id)
              :objective (pget origin :objective)
-             :budget (pget origin :budget)
              :tokens (pget origin :tokens)))
       (:command-note
        (list :id id :kind "command_note" :ts ts
@@ -232,8 +231,7 @@ is left to the ordinary rules (the message is shown as what it says it is)."
   (blocks-text (content-blocks message)))
 
 ;;; The goal item a :goal ENTRY implies.  The entry is state (it is the fold);
-;;; the item is the transition it made, so a settle that only moved the token
-;;; count adds nothing to the transcript.
+;;; the item is the transition it made.
 
 (defun goal-entry-event (entry previous)
   (let ((status (pget entry :status))
@@ -245,8 +243,6 @@ is left to the ordinary rules (the message is shown as what it says it is)."
           ((and (eq status :complete) (not (eq prev-status :complete))) "complete")
           ((and (eq status :cleared) (not (eq prev-status :cleared))) "cleared")
           ((and (eq status :paused) (not (eq prev-status :paused))) "paused")
-          ((and (eq status :budget-limited)
-                (not (eq prev-status :budget-limited))) "budget_limited")
           ((and (eq prev-status :paused) (eq status :active)) "resumed")
           ((and (pget entry :objective)
                 (not (equal (pget entry :objective) (pget previous :objective))))
@@ -260,7 +256,6 @@ is left to the ordinary rules (the message is shown as what it says it is)."
             :event event
             :goal-id (pget entry :goal-id)
             :objective (pget entry :objective)
-            :budget (pget entry :token-budget)
             :tokens (pget entry :tokens-used)))))
 
 ;;; The walk.
@@ -385,7 +380,6 @@ the state says there is no goal rather than one with a status nobody acts on."
     (list :goal-id (pget goal :goal-id)
           :objective (pget goal :objective)
           :status (enum-string (pget goal :status))
-          :budget (pget goal :token-budget)
           :tokens (+ (or (pget goal :tokens-used) 0) (or live-tokens 0)))))
 
 (defun session-state (journal)
@@ -423,7 +417,6 @@ same keys the TUI fills from its own slots, so both render the same line."
           ;; already carries what a live run has spent.
           :goal (and goal (list :goal-id (pget goal :goal-id)
                                 :status (pget goal :status)
-                                :token-budget (pget goal :budget)
                                 :tokens-used (pget goal :tokens)))
           :goal-run-tokens 0
           :jobs (running-jobs-summary))))
@@ -442,7 +435,7 @@ already wire strings — a client must not have to know a keyword."
 
 (defun journal-state (journal &key agent status task queue jobs live-goal-tokens context)
   "The topic state a journal implies.  The runtime facts a journal cannot know
-— what is running, what is queued, what holds it, what a live run has spent —
+— what is running, what is queued, what holds it, and what a live run has spent —
 come from the caller."
   (let* ((fold (fold-state journal))
          (model-ref (ignore-errors (effective-model-ref fold agent)))

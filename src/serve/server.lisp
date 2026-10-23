@@ -449,7 +449,7 @@ next run if input queued up meanwhile."
                                  :severity :error :durable t
                                  :data (list :source :serve)))
       (let ((goal (current-goal agent)))
-        (when (and goal (member (pget goal :status) '(:complete :budget-limited :paused)))
+        (when (and goal (member (pget goal :status) '(:complete :paused)))
           (evo.command:host-notice server (format nil "◆ goal ~a: ~(~a~)"
                                                   (pget goal :goal-id) (pget goal :status))
                                    :durable t :data (list :source :goal))))

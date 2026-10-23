@@ -2107,7 +2107,7 @@ that is how a human's next keystroke differs from a paste's last chunk."
              (error () t)))))
 
 (defun test-token-labels ()
-  "The ctx and goal cells' token format (FMT-KTOKENS): thousands while that
+  "The context and goal cells' token format (FMT-KTOKENS): thousands while that
 fits, whole millions from a million up, so a 1M context window reads \"1M\" —
 the way the model menus and the design spell it — instead of \"1000k\"."
   (check "tokens: a small count is thousands" (equal "34k" (evo.view:fmt-ktokens 34000)))
@@ -2123,22 +2123,15 @@ the way the model menus and the design spell it — instead of \"1000k\"."
          (equal "12M" (evo.view:fmt-ktokens 12345678)))
   (check "tokens: nothing reads as 0k" (equal "0k" (evo.view:fmt-ktokens 0)))
   (check "tokens: no count at all reads as 0k" (equal "0k" (evo.view:fmt-ktokens nil)))
-  ;; The two labels it feeds, TUI and state.segments both: the ctx cell with
-  ;; and without a window, and the goal cell's budget.
+  ;; The context and goal labels feed both the TUI and state.segments.
   (check "tokens: the ctx cell reads in both units"
          (equal "ctx 12k/1M (1%)" (evo.view:context-label-text 12000 1000000)))
   (check "tokens: ...and with no window it names the count alone"
          (equal "ctx 34k" (evo.view:context-label-text 34000 nil)))
-  (check "tokens: the goal cell spends in millions too"
-         (equal "goal g (active) 12M/1M"
+  (check "tokens: the goal cell shows usage without a limit"
+         (equal "goal g (active) 12M"
                 (evo.view:goal-label-text (list :goal-id "g" :status :active
-                                                :tokens-used 12345678
-                                                :token-budget 1000000)
-                                          0)))
-  (check "tokens: a goal with no budget has no slash"
-         (equal "goal g (active) 500k"
-                (evo.view:goal-label-text (list :goal-id "g" :status :active
-                                                :tokens-used 500000)
+                                                :tokens-used 12345678)
                                           0))))
 
 ;;; TUI region layout + live context accounting
@@ -2321,24 +2314,19 @@ the way the model menus and the design spell it — instead of \"1000k\"."
           (evo.tui::handle-agent-event
            tui '(:type :message-end :usage (:input 1000 :output 200 :cache-read 0 :cache-write 0)))
           (check "message-end re-anchors ctx" (= 1200 (evo.tui::tui-context-tokens tui)))
-          (check "message-end advances goal tokens" (= 1200 (evo.tui::tui-goal-run-tokens tui)))
+          (check "message-end advances goal usage" (= 1200 (evo.tui::tui-goal-run-tokens tui)))
           (evo.tui::handle-agent-event
            tui '(:type :tool-result :name "bash" :id "t" :is-error nil
                  :content-chars 4000 :content "out"))
           (check "tool-result grows ctx" (= 2200 (evo.tui::tui-context-tokens tui))))))
-    ;; Status line stays well-formed with a goal that has no budget.
+    ;; Status line shows goal usage without a limit.
     (let ((tui (evo.tui::make-tui)))
       (setf (evo.tui::tui-model-label tui) "m"
             (evo.tui::tui-thinking-label tui) "medium"
             (evo.tui::tui-goal tui) '(:goal-id "g-1" :status :active
-                                      :tokens-used 5000 :token-budget nil))
-      (let ((line (evo.tui::status-line tui)))
-        (check "goal shown without budget" (search "goal g-1 (active) 5k" line))
-        (check "no budget suffix when nil" (not (search "5k/" line))))
-      (setf (evo.tui::tui-goal tui) '(:goal-id "g-1" :status :active
-                                      :tokens-used 5000 :token-budget 40000))
-      (check "budget suffix when set"
-             (search "5k/40k" (evo.tui::status-line tui))))
+                                      :tokens-used 5000))
+      (check "goal status includes token usage"
+             (search "goal g-1 (active) 5k" (evo.tui::status-line tui))))
     ;; Tab completion of a unique /command.
     (let ((tui (evo.tui::make-tui)))
       (evo.tui::eb-insert-text (evo.tui::tui-editor tui) "/expo")
@@ -4096,7 +4084,7 @@ but it takes DELAY, which is what makes the asynchrony observable."
                    (complete "x" 9))
     (check-signals "text is required" (evo.serve::op-complete nil nil))))
 
-;;; Goal budgets (default: no limit)
+;;; Source portability
 
 (defun string-tree-search (form predicate)
   "Does any string inside FORM satisfy PREDICATE?"
@@ -4443,19 +4431,32 @@ just the pack that ships as a core extension, and what the user picked
       (setf evo.kernel::*prompt-languages* saved
             (setting :language) saved-setting))))
 
-(defun test-goal-budget ()
+(defun test-goal-continuation ()
   (let* ((dir (uiop:ensure-directory-pathname
                (format nil "~a/evo-goal-~a/" (tmp-dir) (gen-id))))
          (journal (progn (ensure-directories-exist dir) (make-session-journal dir)))
          (agent (make-agent :journal journal)))
     (create-goal-entry agent "do the thing")
-    (let ((goal (current-goal agent)))
-      (check "default budget is nil" (null (pget goal :token-budget)))
-      (check "continuation says no limit"
-             (search "no limit" (goal-continuation-message goal 1234)))
-      (check "continuation with budget shows remaining"
-             (search "(800 remaining)"
-                     (goal-continuation-message (pput goal :token-budget 2034) 1234))))))
+    (let* ((goal (current-goal agent))
+           (message (goal-continuation-message goal)))
+      (check "a goal carries identity, objective, status, and usage"
+             (and (= 8 (length goal))
+                  (stringp (pget goal :goal-id))
+                  (equal "do the thing" (pget goal :objective))
+                  (eq :active (pget goal :status))
+                  (zerop (pget goal :tokens-used))))
+      (check "continuation carries no token limit"
+             (not (search "remaining" (string-downcase message))))
+      (let ((evo:*agent* agent))
+        (check "get_goal reports usage without a limit line"
+               (equal (format nil "Current goal ~a [active]: do the thing~%Tokens used: 0"
+                              (pget goal :goal-id))
+                      (evo.kernel::tool-get-goal nil))))
+      (check "create_goal only accepts an objective"
+             (equal '(:object
+                      (:objective :type :string
+                       :description "What done means, in the user's words"))
+                    (tool-schema (find-tool "create_goal")))))))
 
 ;;; Session operations: every journal write a frontend asks for goes through
 ;;; the core (src/kernel/session.lisp, goal.lisp).  These pin the entries they
@@ -4755,7 +4756,7 @@ and the guards around all of it."
       (check "complete-goal: completes the active goal, same id"
              (and done (eq (pget (current-goal agent) :status) :complete)
                   (equal id (pget (current-goal agent) :goal-id))))
-      (check "complete-goal: records the tokens used"
+      (check "complete-goal: records token usage"
              (integerp (pget (current-goal agent) :tokens-used))))
     (let ((before (length (evo.journal::journal-entries (agent-journal agent)))))
       (check "complete-goal: a second completion is a no-op"
@@ -10645,13 +10646,13 @@ have been, and no line could ever be anything but :info."
                                        :content (list (list :type :text
                                                             :text "the previous run")))))
     (append-entry journal (list :type :goal :goal-id "g-1" :objective "ship it"
-                                :status :active :token-budget 1000 :tokens-used 0))
+                                :status :active :tokens-used 0))
     (append-entry journal (list :type :goal :goal-id "g-1" :objective "ship it"
-                                :status :active :token-budget 1000 :tokens-used 40))
+                                :status :active :tokens-used 40))
     (append-entry journal (list :type :goal :goal-id "g-1" :objective "ship it and document it"
-                                :status :active :token-budget 1000 :tokens-used 40))
+                                :status :active :tokens-used 40))
     (append-entry journal (list :type :goal :goal-id "g-1" :objective "ship it and document it"
-                                :status :complete :token-budget 1000 :tokens-used 500))
+                                :status :complete :tokens-used 500))
     (append-entry journal (list :type :compaction :summary "sum" :summary-tokens 10
                                 :retained-tail #() :files-read #() :files-modified #()))
     (append-entry journal
@@ -10719,14 +10720,16 @@ have been, and no line could ever be anything but :info."
                       (equal 2 (pget i :attempt))
                       (equal "oom" (pget i :reason)))))
         (let ((goals (all "goal")))
-          (check "goal items: only the transitions, not the token bookkeeping"
+          (check "goal items: only transitions, not usage bookkeeping"
                  (equal '("created" "objective_updated" "complete")
                         (mapcar (lambda (i) (pget i :event)) goals)))
-          (check "goal item: objective, budget, tokens"
+          (check "goal item: identity, objective, and usage"
                  (let ((i (first goals)))
-                   (and (equal "g-1" (pget i :goal-id))
+                   (and (equal '(:id :kind :ts :event :goal-id :objective :tokens)
+                               (loop for fields on i by #'cddr
+                                     collect (car fields)))
+                        (equal "g-1" (pget i :goal-id))
                         (equal "ship it" (pget i :objective))
-                        (equal 1000 (pget i :budget))
                         (equal 0 (pget i :tokens))))))
         (check "compaction item: the summary and that it is not manual"
                (let ((i (item "compaction")))
@@ -10934,15 +10937,13 @@ plists, so the wiring is under test too."
               view
               (append-entry journal (list :type :goal :goal-id "g-2"
                                           :objective "keep going"
-                                          :status :active :token-budget 100
-                                          :tokens-used 0)))
-             ;; A settle that only moves the token count: state, not history.
+                                          :status :active :tokens-used 0)))
+             ;; Updating usage changes state but adds no history item.
              (evo.view:view-on-append
               view
               (append-entry journal (list :type :goal :goal-id "g-2"
                                           :objective "keep going"
-                                          :status :active :token-budget 100
-                                          :tokens-used 12)))
+                                          :status :active :tokens-used 12)))
              (append-entry journal
                            (list :type :message
                                  :origin (list :kind :lane-report :lane 2
@@ -11766,6 +11767,14 @@ document, per-entry isolation, and never a key."
                       (and op
                            (equal "object" (getf (getf op :args) :type))
                            (stringp (getf op :precondition)))))
+             (check "catalog: goal.set only accepts an objective"
+                    (let* ((op (find "goal.set" (getf catalog :ops)
+                                     :key (lambda (o) (getf o :name)) :test #'equal))
+                           (schema (getf op :args)))
+                      (and op
+                           (equal '(:objective (:type "string"))
+                                  (getf schema :properties))
+                           (equalp #("objective") (getf schema :required)))))
              (check "catalog: the completion op is offered with its schema"
                     ;; A client draws its input box from this: the whole text
                     ;; and the caret, answered with candidates — no eval, and
@@ -11918,7 +11927,7 @@ document, per-entry isolation, and never a key."
     (test-prompt-notes)
     (test-serve-prompt-note)
     (test-prompt-languages)
-    (test-goal-budget)
+    (test-goal-continuation)
     (test-session-operations)
     (test-extension-protocols)
     (test-goal-tools)

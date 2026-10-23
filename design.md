@@ -87,9 +87,8 @@ evo (one binary, built as `evo-agent`; evo-swarm is a second program on top of i
    │    tool registry        register / activate / refresh, prompt rebuild
    │    extension API        register-tool, register-command, event hooks —
    │                         both extension tiers build on this
-   │    goal driver          idle-continuation loop, budgets, audits
+   │    goal driver          idle-continuation loop, audits
    │    compactor            usage-anchored, self-contained checkpoints
-   │    budget guard         per-goal token budget, a hard stop
    │    extension loader     compile, load, journal the load
    │    media                images in: clipboard readers, sniffing,
    │                          size cap + downscale, :image blocks
@@ -148,7 +147,7 @@ Project scope shadows global scope wherever both exist.
 :custom               extension/tool state, INVISIBLE to the LLM
 :custom-message       extension-injected content, visible to the LLM
 :label                bookmark on an entry (target id + label)
-:goal                 goal created/updated: objective, status, budget, usage
+:goal                 goal created/updated: objective, status, usage
 :load                 userspace source file loaded (path + reason)
 :provider-retry       an attempt was re-sent: attempt/max, delay, reason
 :recover              the supervisor's account of the previous run's death
@@ -183,7 +182,7 @@ Three of these carry architectural weight:
  :message (:role :user :content ((:type :text :text "fix the build"))))
 (:type :goal :id "e5f6a7b8" :parent-id "a1b2c3d4" :timestamp "..."
  :goal-id "g-01" :objective "make ./test.sh pass" :status :active
- :token-budget 500000 :tokens-used 0)
+ :tokens-used 0)
 (:type :message :id "c9d0e1f2" :parent-id "e5f6a7b8" :timestamp "..."
  :message (:role :assistant :api :anthropic-messages :provider :anthropic
            :model "claude-fable-5" :stop-reason :tool-use :usage (...)
@@ -480,16 +479,15 @@ messages remain — then polls follow-ups.
 A goal is journal state; the current goal is a fold over `:goal` entries.
 
 ```lisp
-(:goal-id "g-01" :objective "..." :status :active
- :token-budget 500000 :tokens-used 123456)
+(:goal-id "g-01" :objective "..." :status :active :tokens-used 123456)
 ```
 
-Statuses are `:active`, `:paused`, `:budget-limited`, `:complete`. Through
-`update_goal` the model may transition to `:complete` (under the audit rules
-below), resume a paused goal to `:active`, and **refine** the live goal —
-rewrite its `:objective`. There is no `:blocked`: a goal is never given up
-on. Pausing is the user's alone (`/goal pause`, `/goal resume`); a model that
-needs the user says so in its reply and keeps doing what it can. Budget transitions belong to the system.
+Statuses are `:active`, `:paused`, and `:complete`. Through `update_goal` the
+model may transition to `:complete` (under the audit rules below), resume a
+paused goal to `:active`, and **refine** the live goal — rewrite its
+`:objective`. There is no `:blocked`: a goal is never given up on. Pausing is
+the user's alone (`/goal pause`, `/goal resume`); a model that needs the user
+says so in its reply and keeps doing what it can.
 
 ### 9.2 Driver
 
@@ -498,14 +496,14 @@ needs the user says so in its reply and keeps doing what it can. Budget transiti
   steering message.
 - **Idle continuation**: whenever the agent goes idle with an `:active` goal,
   the driver opens a new turn seeded with a continuation steering prompt
-  carrying the objective (as untrusted data), budget numbers,
-  anti-scope-shrinking fidelity rules, a **completion audit** (completion must
-  be proven from current evidence — files, test output, runtime behavior —
-  requirement by requirement, never from memory or intent).
+  carrying the objective (as untrusted data), anti-scope-shrinking fidelity
+  rules, and a **completion audit** (completion must be proven from current
+  evidence — files, test output, runtime behavior — requirement by
+  requirement, never from memory or intent).
 - Doing nothing is not completion. An idle active goal is always re-steered.
-  Termination is explicit: the model calls `update_goal` (complete), a budget
-  trips, or the user pauses the goal.  A swarm lane may close its goal in the
-  report that delivers it (`report` with `goal: "complete"`); that goes
+  Termination is explicit: the model calls `update_goal` (complete), or the
+  user pauses the goal.  A swarm lane may close its goal in the report that
+  delivers it (`report` with `goal: "complete"`); that goes
   through the same commit point, `complete-goal`, so it settles once.
 - **Pause/resume**: `/goal pause` stops the idle-continuation loop — the
   settled hook only re-steers an `:active` goal, so a paused goal settles and
@@ -513,10 +511,8 @@ needs the user says so in its reply and keeps doing what it can. Budget transiti
   on `:active`). `/goal resume` (or the model's `update_goal :active`) picks it
   back up. Headless, a paused goal exits with code 2 (human needed, no
   auto-restart).
-- **Budget accounting** runs every turn over tokens. Exhaustion moves the goal
-  to `:budget-limited`, and the next steering is a wrap-up template —
-  summarize progress, remaining work, next step, start nothing new. This
-  doubles as the runaway-cost brake.
+- Token usage is tracked and displayed for each goal, but is informational: it
+  never changes goal status or stops the idle-continuation loop.
 - A turn error leaves the goal `:active`. Headless, evo exits 1 and the
   supervisor's `--resume` restart picks the goal back up (§15);
   interactively the error is shown and the next message re-steers.
@@ -786,7 +782,7 @@ public API and not disableable.
 
 - Rendering goes into normal terminal scrollback — no alternate screen,
   because scrollback history is part of the UX — plus a managed bottom region
-  (editor, status line, goal and budget indicators) repainted differentially.
+  (editor, status line, and goal indicator) repainted differentially.
 - The **activity line** is one row and always present, settling to idle rather
   than disappearing. While a task runs it carries a clock and, when the
   transport is re-sending, the attempt and the reason — a spinner alone says
@@ -1108,7 +1104,7 @@ the other way round (`tests/evo-only.lisp`). The reference is
 | D4 | **A CLI with an adaptive TUI**, mandatory live console-resize. Not Emacs/Swank-first. | Approachable for newcomers and adapts to the most contexts. The live image stays reachable from inside (`/eval`), not through an editor. |
 | D5 | **A supervisor owns launch, crash detection, restart, and resume.** | Long-running goal pursuit requires surviving self-inflicted death. |
 | D6 | **One adapter ships** (Anthropic Messages) as a CLOS *provider API*; **models and endpoints are user-registered from init.lisp**. A wire protocol is an extension point, not a kernel privilege: `evo:register-api` takes any `provider-api` subclass. One unified message model for all APIs. Anthropic's own models (Sonnet 5, Opus 5, Fable 5) and Messages-compatible third-party endpoints (Kimi Code K3, DeepSeek, proxies) all ride the same adapter; the OpenAI Responses adapter was deleted when it stopped earning its parsing surface. | The API/registry split keeps the bundled protocol curated while models stay configuration, avoiding a 40-provider table. Making the protocol registerable follows D13: if the TUI can be a core extension, a wire protocol can be a user one. |
-| D7 | The goal system follows **codex's design**: persisted goal, idle-continuation steering, explicit audited completion, budgets. | See §9. |
+| D7 | The goal system uses a persisted goal, idle-continuation steering, and explicit audited completion. | See §9. |
 | D8 | The kernel/userspace split is enforced with **package locks** (SBCL native, ECL `si:package-lock`, both behind `evo.port`). | Permissive but not suicidal: touching the kernel requires an explicit, auditable unlock. |
 | D9 | Tool execution is **sequential**. | Parallelism is where the thread-discipline complexity lives, and nothing yet demands it. |
 | D10 | **SBCL and ECL on Unix, SBCL on Windows**, through a single portability layer (`evo.port` — the only package permitted to touch `sb-*`, `ext:`, or `si:` symbols, and now the only one that may branch on the platform). Two axes, not one: implementation *and* platform. Windows branches read on an `:evo-windows` feature the layer pushes itself, so a new implementation is one form, not fifty. | The implementation-specific surface proved small: env/argv/exit, processes, locks, fd streams, signals. Windows added a second small one — console mode instead of stty, no SIGWINCH (poll), `taskkill` instead of `pgrep`+`kill`, PowerShell instead of `/bin/sh`, PATHEXT — and asking the console for VT input/output means the key parser, the escape sequences and the renderer are untouched by it. ECL on Windows stays unsupported: it would need its own copy of that surface with no user waiting for it. |
@@ -1134,7 +1130,7 @@ evo is not designed from scratch, and the borrowings are deliberate:
   transcript is owned by the journal rather than dual-copied, todo lists are
   added, and the runtime loader needs no queued reload.
 - **codex** (`~/Projects/codex`, `codex-rs/ext/goal/`) — the goal system:
-  persisted objective, idle continuation, audited completion, budgets.
+  persisted objective, idle continuation, and audited completion.
 - **codex** again (`codex-rs/tui/src/clipboard_paste.rs`,
   `tui/keyboard_modes.rs`) — the image-paste ladder of §16.1. Taken: ctrl+v
   *and* ctrl+alt+v as two doors to one clipboard read; pasted-path

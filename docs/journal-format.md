@@ -42,7 +42,7 @@ form-by-form, not line-by-line.
 | `:notice` | what was shown to the user: `:severity` (`:info`/`:warn`/`:error`), `:text`, `:source` (`:command`/`:extension`/`:swarm`/`:serve`/`:goal`/`:compaction`) and `:data` — INVISIBLE to the LLM, ignored by the fold. The durable half of a frontend's output: goal transitions, a run's internal error, a compaction's result |
 | `:custom-message` | extension-injected content, visible to the LLM (`:key` lets a transform hook remove it later; the text is stored wrapped in the harness's `<evo:reminder kind="…">` envelope, which views strip for display) |
 | `:label` | bookmark (`:target-id` + `:label`) |
-| `:goal` | goal created/updated: `:goal-id :objective :status :token-budget :tokens-used` (`:token-budget` nil = no limit, the default) |
+| `:goal` | goal created/updated: `:goal-id :objective :status :tokens-used` |
 | `:load` | userspace source file loaded (`:path` + `:reason`) — replayed on boot |
 | `:provider-retry` | a provider request re-sent: `:attempt :max :delay :reason` — for postmortems; the fold ignores it |
 | `:recover` | the supervisor's account of how the previous run ended, appended by the child booting after a restart: `:status` (`:exited`/`:signaled`), `:code` (exit code or signal), `:attempt`, `:duration` (seconds), `:reason` (the supervisor's words, or nil) |
