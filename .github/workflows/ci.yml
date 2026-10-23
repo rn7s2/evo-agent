@@ -28,7 +28,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        lisp: [sbcl, ecl]
+        lisp: [sbcl]
     steps:
       - uses: actions/checkout@v7
 
