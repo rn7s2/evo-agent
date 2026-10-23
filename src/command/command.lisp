@@ -214,11 +214,10 @@ goal is resumed from here too."
       ((zerop (length args))
        (host-notice host
                     (if goal
-                        (format nil "goal ~a [~(~a~)]: ~a~%tokens: ~:d~@[ / ~:d~]"
+                        (format nil "goal ~a [~(~a~)]: ~a~%tokens: ~:d"
                                 (pget goal :goal-id) (pget goal :status)
                                 (pget goal :objective)
-                                (goal-tokens-used agent goal)
-                                (pget goal :token-budget))
+                                (goal-tokens-used agent goal))
                         "no goal — /goal <objective> to set one")))
       ((equal verb "pause")
        (unless (and goal (eq (pget goal :status) :active))

@@ -18,7 +18,7 @@ Usage:
   evo-agent -p \"prompt\"                  run one task in print mode, stream text to stdout
   evo-agent --image <path> -p ...        attach an image to the first prompt (repeatable)
   evo-agent --goal \"objective\" [-p \"first prompt\"]
-                                         create a goal and run until complete or budget
+                                         create a goal and run until complete or paused
   evo-agent --resume [path] [-p ...]     resume a session (default: the one most recently
                                          worked in, for this cwd);
                                          with an active goal and no -p, continues the goal
@@ -53,8 +53,7 @@ Usage:
 
 evo-agent supervises itself: crashes and hangs restart the session with
 --resume, resuming the session it was on; a goal that was active picks itself
-back up.  Exit codes: 0 done, 1 error, 2 goal paused, 3 budget-limited,
-64 usage error.
+back up.  Exit codes: 0 done, 1 error, 2 goal paused, 64 usage error.
 
 Config: ~/.evo/init.lisp, then <cwd>/.evo/init.lisp, then extensions, then
 ~/.evo/post-init.lisp, then <cwd>/.evo/post-init.lisp (Lisp, evaluated in order;
@@ -351,7 +350,7 @@ that path rather than as a brand-new journal (CONTRACT §1, F4)."
 
 (defun main (&optional (argv (evo.port:argv)))
   "Exit codes are supervisor protocol: 0 done, 1 error (restart-eligible),
-2 goal paused, 3 budget-limited, 64 usage error (never restart)."
+2 goal paused, 64 usage error (never restart)."
   (setf evo.port:*program-name* "evo-agent")
   (let ((opts (handler-case (parse-args argv)
                 (error (e)
@@ -605,12 +604,11 @@ prompt without the image the user asked for is worse than not running."
           (format *error-output* "goal ~a: ~a~%"
                   (pget goal :goal-id) (string-downcase (pget goal :status))))
         ;; Exit codes are supervisor protocol: 0 done, 1 error
-        ;; (restart-eligible), 2 paused, 3 budget-limited — 2 and 3 need a
-        ;; human, the supervisor must NOT restart them.  A turn error leaves
-        ;; the goal active and lands on the (t 1) branch, so the
-        ;; supervisor's --resume restart picks the goal back up.
+        ;; (restart-eligible), 2 paused — a paused goal needs a human, so the
+        ;; supervisor must NOT restart it.  A turn error leaves the goal active
+        ;; and lands on the (t 1) branch, so the supervisor's --resume restart
+        ;; picks the goal back up.
         (cond ((and goal (eq (pget goal :status) :complete)) 0)
               ((and goal (eq (pget goal :status) :paused)) 2)
-              ((and goal (eq (pget goal :status) :budget-limited)) 3)
               ((eq outcome :stop) 0)
               (t 1))))))

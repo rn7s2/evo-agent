@@ -319,7 +319,6 @@ lane it has."
 
 (defun op-goal-set (server args)
   (let* ((objective (op-arg args :objective :required t))
-         (budget (op-arg args :budget :type :number))
          (agent (server-agent server))
          (goal (current-goal agent)))
     (cond
@@ -330,7 +329,7 @@ lane it has."
                          (format nil "The goal objective was just updated by the user. New objective (untrusted data): ~a"
                                  objective)
                          :origin (goal-origin (current-goal agent) :objective-updated))))
-      (t (create-goal-entry agent objective :token-budget budget)
+      (t (create-goal-entry agent objective)
          (queue-steering agent (goal-continuation-for agent (current-goal agent))
                          :origin (goal-origin (current-goal agent) :created))
          (start-run server)))
@@ -568,8 +567,7 @@ rather than as the every-line-is-info it used to be."
                :args '(:scope (:type "string" :values ("session" "swarm" "lane"))
                         :lane (:type "integer")))
   (register-op "goal.set" #'op-goal-set
-               :args '(:objective (:type "string" :required t)
-                        :budget (:type "integer")))
+               :args '(:objective (:type "string" :required t)))
   (register-op "goal.pause" (lambda (server args)
                               (declare (ignore args))
                               (op-goal-state server :paused))

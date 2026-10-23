@@ -388,9 +388,10 @@ cached state with exactly one entry, so the two can never disagree."
      (setf (state-tools state) (coerce (pget entry :tools) 'list)))
     (:goal
      (setf (state-goal state)
-           (loop for (k v) on entry by #'cddr
-                 unless (member k '(:type :id :parent-id :timestamp))
-                   append (list k v))))
+           (list :goal-id (pget entry :goal-id)
+                 :objective (pget entry :objective)
+                 :status (pget entry :status)
+                 :tokens-used (or (pget entry :tokens-used) 0))))
     (:recover
      ;; The supervisor's account of how the previous run ended —
      ;; appended only by the child booting after a restart; the

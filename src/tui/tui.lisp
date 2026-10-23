@@ -596,7 +596,7 @@ the activity line has one row."
          (refresh-goal tui)
          (let ((goal (tui-goal tui)))
            (when (and goal (member (pget goal :status)
-                                   '(:complete :budget-limited :paused)))
+                                   '(:complete :paused)))
              ;; A goal transition, journalled with the run that caused it.
              (evo.command:host-notice tui (format nil "◆ goal ~a: ~a"
                                                   (pget goal :goal-id)

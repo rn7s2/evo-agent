@@ -60,7 +60,6 @@ goal.  A lane's goal re-steers it for as long as it is active, so a lane that
 settles with its goal still active is not done: it errored or was stopped."
   (cond ((null status) nil)
         ((equal status "active") "active, but the lane is idle until steered")
-        ((equal status "budget-limited") "budget-limited (out of tokens)")
         (t status)))
 
 (defun lane-goal-status (lane)

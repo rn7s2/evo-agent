@@ -8,9 +8,8 @@
 ;;;; boot failures with --no-userspace.
 ;;;;
 ;;;; Exit-code protocol (child -> parent):
-;;;;   0 done · 1 error (restart-eligible) · 2 goal paused ·
-;;;;   3 budget-limited · 64 usage error — 0/2/3/64 stop, everything else
-;;;;   (including signals) restarts.
+;;;;   0 done · 1 error (restart-eligible) · 2 goal paused · 64 usage error —
+;;;;   0/2/64 stop, everything else (including signals) restarts.
 
 (in-package :evo.cli)
 
@@ -190,9 +189,9 @@ bound — and the restart can name both exactly."
                            heartbeat start hang-timeout)
           (ignore-errors (delete-file heartbeat))
           (let ((outcome (if (eq status :signaled) :crashed code)))
-            ;; Clean exits (0/2/3/64) ran their own terminal teardown; the
+            ;; Clean exits (0/2/64) ran their own terminal teardown; the
             ;; abnormal ones may have died in raw mode.
-            (when (or hung (not (member outcome '(0 2 3 64))))
+            (when (or hung (not (member outcome '(0 2 64))))
               (reset-tty))
             (let ((duration (- (get-universal-time) start)))
               (setf first nil)
@@ -201,9 +200,6 @@ bound — and the restart can name both exactly."
                 (2 (format *error-output* "~&~a: goal paused — human needed~%"
                            evo.port:*program-name*)
                    (return 2))
-                (3 (format *error-output* "~&~a: goal budget-limited — human needed~%"
-                           evo.port:*program-name*)
-                   (return 3))
                 (64 (return 64)))       ; usage error: restarting won't help
               (when hung
                 (format *error-output* "~&~a: child was hung (killed)~%"

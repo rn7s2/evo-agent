@@ -151,7 +151,6 @@
 
 (evo:set-setting :model '("claude-opus-5" :anthropic))
 ;; (evo:set-setting :thinking :medium)        ; low|medium|high|xhigh|max
-;; (evo:set-setting :goal-token-budget 500000)
 ;; (evo:set-setting :compact-reserve 16000)
 ;; (evo:set-setting :compact-keep-recent 20000)
 ;; (evo:set-setting :compact-input-item-reserve 64) ; models with :max-input-items
